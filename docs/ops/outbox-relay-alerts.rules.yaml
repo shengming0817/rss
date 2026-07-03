@@ -7,8 +7,8 @@
 # 校验：promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
 #
 # 注：outbox settle/backlog gauge/counter 均带 `domain`,`contract_id`,`tenant_id` label。
-# 告警按 domain 聚合：depth=sum by(domain)，oldest age=max by(domain)，DLX/requeue=sum by(domain)，
-# 保 annotation 的 {{ $labels.domain }} 可靠呈现来源 domain（否则跨 domain 合并致来源失明）。
+# 告警按 domain 聚合：depth=sum by(domain)，oldest age=max by(domain)，outbox/consumer DLX/requeue=sum by(domain)；
+# saga DLX 保留 contract_id，按 (domain, contract_id) 聚合，保 annotation 可靠呈现来源。
 groups:
   - name: outbox-relay
     rules:
@@ -85,3 +85,23 @@ groups:
         annotations:
           summary: "Consumer release claim 失败（domain={{ $labels.domain }}）"
           description: "近 5min consumer_release_failed_total 增长 {{ $value }}（domain={{ $labels.domain }}）；该路径会 broker Reject，需检查 inbox claim store 和 DLX 写失败根因。"
+
+      # Saga 补偿失败已写入 dead_letter：需要人工介入，不允许静默累积。
+      - alert: SagaDeadLetterGrowth
+        expr: sum by (domain, contract_id) (increase(saga_dead_letters_total{outcome="written"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga compensation 进入 DLX（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）"
+          description: "近 10min saga_dead_letters_total{outcome=\"written\"} 增长 {{ $value }}（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）；补偿失败已写 dead_letter，需人工巡检 saga journal 与 dead_letter 行。"
+
+      # Saga DLX 写失败：journal Failed 行是审计兜底，但 dead_letter 未落库。
+      - alert: SagaDeadLetterWriteError
+        expr: sum by (domain, contract_id) (increase(saga_dead_letters_total{outcome="write_error"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga DLX 写失败（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）"
+          description: "近 5min saga_dead_letters_total{outcome=\"write_error\"} 增长 {{ $value }}（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）；检查 dead_letter 写入、Vault transit 与 saga executor error 日志。"

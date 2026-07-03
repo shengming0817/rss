@@ -16,6 +16,7 @@
 //! ref: oxidecomputer/steno src/saga_action_generic.rs@main（`Action::do_it`/`undo_it`/`name` + 逆序补偿）。
 //! ref: oxidecomputer/steno src/saga_log.rs@main（journal event replay 到 load status）。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,6 +158,81 @@ pub enum SagaActionError {
     /// 子 saga 创建失败。
     #[error("subsaga create failed")]
     SubsagaCreateFailed,
+    /// 动作超过 saga runtime policy 的单 phase 总预算。
+    #[error("action timed out")]
+    ActionTimedOut,
+}
+
+impl SagaActionError {
+    fn as_label(&self) -> &'static str {
+        match self {
+            Self::ActionFailed => "action_failed",
+            Self::SerializeFailed => "serialize_failed",
+            Self::SubsagaCreateFailed => "subsaga_create_failed",
+            Self::ActionTimedOut => "action_timed_out",
+        }
+    }
+}
+
+/// Validated saga runtime policy.
+///
+/// Construction is intentionally funneled through `TryFrom<SagaRuntimePolicySpec>`: contract glue
+/// exposes raw millisecond specs, while the executor only accepts validated runtime states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaPolicy {
+    /// Retry and timeout are disabled (`retryMillis = 0`, `timeoutMillis = 0`).
+    Disabled,
+    /// One step phase has a total timeout budget, and may have fixed-delay retry.
+    Bounded(SagaBoundedPolicy),
+}
+
+/// Sealed bounded saga policy state.
+///
+/// Fields stay private and there is no public raw-`Duration` constructor; the only production
+/// boundary is `TryFrom<vocab::SagaRuntimePolicySpec>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaBoundedPolicy {
+    retry_delay: Option<Duration>,
+    step_timeout: Duration,
+}
+
+impl SagaBoundedPolicy {
+    fn retry_delay(self) -> Option<Duration> {
+        self.retry_delay
+    }
+
+    fn step_timeout(self) -> Duration {
+        self.step_timeout
+    }
+}
+
+/// Invalid generated saga runtime policy spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SagaPolicyError {
+    /// Retry without a timeout budget can run forever.
+    #[error("saga retry policy requires timeout budget")]
+    RetryWithoutTimeout,
+}
+
+impl TryFrom<vocab::SagaRuntimePolicySpec> for SagaPolicy {
+    type Error = SagaPolicyError;
+
+    fn try_from(spec: vocab::SagaRuntimePolicySpec) -> Result<Self, Self::Error> {
+        match (spec.retry_millis(), spec.timeout_millis()) {
+            (0, 0) => Ok(Self::Disabled),
+            (_, 0) => Err(SagaPolicyError::RetryWithoutTimeout),
+            (0, timeout_millis) => Ok(Self::Bounded(SagaBoundedPolicy {
+                retry_delay: None,
+                step_timeout: Duration::from_millis(timeout_millis),
+            })),
+            (retry_millis, timeout_millis) => Ok(Self::Bounded(SagaBoundedPolicy {
+                retry_delay: Some(Duration::from_millis(retry_millis)),
+                step_timeout: Duration::from_millis(timeout_millis),
+            })),
+        }
+    }
 }
 
 // ── 执行器 / 进度跟踪接缝 ──────────────────────────────────────────────────────
@@ -207,10 +283,9 @@ const UNKNOWN_SAGA: &str = "<unknown-saga>";
 /// `Arc<S>`（`run`/`resume` 返回 `'static` future，须 clone 句柄进 future；对齐 diport 注入形态表
 /// spawn/Send-'static 行）。
 ///
-/// **retry/timeout 策略（F11，未实现）**：`kind:saga` 契约声明 `retryMillis`/`timeoutMillis`（saga 策略
-/// 元数据），但 P9 executor 直接 `action.do_it(ctx).await`，**未实现** retry budget / timeout→超时触发补偿
-/// 的 runtime（T009 未要求；属 future scope，见 #1651）。consumer 不应依赖契约声明的 retry/timeout
-/// 在 P9 生效。
+/// `kind:saga` 契约声明的 `retryMillis`/`timeoutMillis` 先经 generated
+/// [`vocab::SagaRuntimePolicySpec`] 暴露，再由组合根转成 [`SagaPolicy`] 注入 executor。执行器仅接受已验证
+/// runtime policy：`do_it` / `undo_it` 都被同一总预算 + 固定退避策略包住。
 pub struct SagaExecutorImpl<J, C, D, S> {
     journal: Arc<J>,
     instance_store: Arc<S>,
@@ -221,6 +296,7 @@ pub struct SagaExecutorImpl<J, C, D, S> {
     contract_id: String,
     holder_id: String,
     lease_ttl: Duration,
+    policy: SagaPolicy,
 }
 
 /// Saga executor durable dependencies.
@@ -256,20 +332,43 @@ pub struct SagaExecutorConfig {
     contract_id: String,
     holder_id: String,
     lease_ttl: Duration,
+    policy: SagaPolicy,
 }
 
 impl SagaExecutorConfig {
-    pub fn new(
+    /// Build executor config from the generated saga contract binding.
+    ///
+    /// The contract id and runtime policy are derived from the same generated `SPEC`, so runtime
+    /// composition cannot hand-author a contract id independently from its policy.
+    pub fn from_contract_spec(
+        owner: CheckpointOwner,
+        holder_id: impl Into<String>,
+        lease_ttl: Duration,
+        spec: vocab::SagaContractBinding,
+    ) -> Result<Self, SagaPolicyError> {
+        let policy = SagaPolicy::try_from(spec.policy())?;
+        Ok(Self::new(
+            owner,
+            spec.contract_id(),
+            holder_id,
+            lease_ttl,
+            policy,
+        ))
+    }
+
+    fn new(
         owner: CheckpointOwner,
         contract_id: impl Into<String>,
         holder_id: impl Into<String>,
         lease_ttl: Duration,
+        policy: SagaPolicy,
     ) -> Self {
         Self {
             owner,
             contract_id: contract_id.into(),
             holder_id: holder_id.into(),
             lease_ttl,
+            policy,
         }
     }
 }
@@ -296,6 +395,7 @@ where
             contract_id: config.contract_id,
             holder_id: config.holder_id,
             lease_ttl: config.lease_ttl,
+            policy: config.policy,
         }
     }
 }
@@ -316,6 +416,7 @@ where
         let contract_id = self.contract_id.clone();
         let holder_id = self.holder_id.clone();
         let lease_ttl = self.lease_ttl;
+        let policy = self.policy;
         let factory = self.factory.clone();
         Box::pin(async move {
             let actions = factory.build();
@@ -355,6 +456,7 @@ where
                 instance,
                 lease,
                 lease_ttl,
+                policy,
                 checkpoint_id: saga_checkpoint_id(instance),
             };
             ctx.run_forward(&actions, 0, Cursor::new()).await
@@ -370,6 +472,7 @@ where
         let contract_id = self.contract_id.clone();
         let holder_id = self.holder_id.clone();
         let lease_ttl = self.lease_ttl;
+        let policy = self.policy;
         let factory = self.factory.clone();
         Box::pin(async move {
             let actions = factory.build();
@@ -395,6 +498,7 @@ where
                 instance,
                 lease,
                 lease_ttl,
+                policy,
                 checkpoint_id: saga_checkpoint_id(instance),
             };
             ctx.resume(&actions).await
@@ -532,7 +636,46 @@ struct ExecCtx<'a, J, C, D, S> {
     instance: SagaInstanceRef,
     lease: SagaLease,
     lease_ttl: Duration,
+    policy: SagaPolicy,
     checkpoint_id: CheckpointId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SagaActionPhase {
+    Forward,
+    Compensation,
+}
+
+impl SagaActionPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Compensation => "compensation",
+        }
+    }
+}
+
+fn is_saga_action_retryable(err: &SagaActionError) -> bool {
+    !matches!(err, SagaActionError::SerializeFailed)
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn lease_renewal_delay(lease_ttl: Duration) -> Duration {
+    let delay = lease_ttl / 2;
+    if delay.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        delay
+    }
+}
+
+#[derive(Debug)]
+enum SagaPhaseError {
+    Action(SagaActionError),
+    Interrupted(SagaInterruption),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -725,6 +868,179 @@ where
         );
     }
 
+    async fn run_forward_action(&self, action: &dyn SagaAction) -> Result<Vec<u8>, SagaPhaseError> {
+        self.run_action_with_policy(action.name(), SagaActionPhase::Forward, || {
+            let ctx = SagaActionCtx::new(self.instance, action.name());
+            action.do_it(ctx)
+        })
+        .await
+    }
+
+    async fn run_compensation_action(&self, action: &dyn SagaAction) -> Result<(), SagaPhaseError> {
+        self.run_action_with_policy(action.name(), SagaActionPhase::Compensation, || {
+            let ctx = SagaActionCtx::new(self.instance, action.name());
+            action.undo_it(ctx)
+        })
+        .await
+    }
+
+    async fn run_action_with_policy<T, Op>(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        mut op: Op,
+    ) -> Result<T, SagaPhaseError>
+    where
+        Op: FnMut() -> BoxFuture<'static, Result<T, SagaActionError>>,
+    {
+        match self.policy {
+            SagaPolicy::Disabled => self
+                .run_action_until_done_or_lease_lost(action_name, phase, op())
+                .await
+                .map_err(SagaPhaseError::Interrupted)?
+                .map_err(SagaPhaseError::Action),
+            SagaPolicy::Bounded(policy) => {
+                self.run_bounded_action(action_name, phase, policy, &mut op)
+                    .await
+            }
+        }
+    }
+
+    async fn run_bounded_action<T, Op>(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        policy: SagaBoundedPolicy,
+        op: &mut Op,
+    ) -> Result<T, SagaPhaseError>
+    where
+        Op: FnMut() -> BoxFuture<'static, Result<T, SagaActionError>>,
+    {
+        let action = self.retry_action(action_name, phase, policy.retry_delay(), op);
+        let result_or_interruption =
+            self.run_action_until_done_or_lease_lost(action_name, phase, action);
+        match tokio::time::timeout(policy.step_timeout(), result_or_interruption).await {
+            Ok(Ok(result)) => result.map_err(SagaPhaseError::Action),
+            Ok(Err(interruption)) => Err(SagaPhaseError::Interrupted(interruption)),
+            Err(_) => {
+                self.warn_action_timeout(action_name, phase, policy);
+                Err(SagaPhaseError::Action(SagaActionError::ActionTimedOut))
+            }
+        }
+    }
+
+    async fn run_action_until_done_or_lease_lost<T, Action>(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        action: Action,
+    ) -> Result<Result<T, SagaActionError>, SagaInterruption>
+    where
+        Action: Future<Output = Result<T, SagaActionError>>,
+    {
+        tokio::pin!(action);
+        let lease_renewal = self.renew_lease_during_action(action_name, phase);
+        tokio::pin!(lease_renewal);
+        tokio::select! {
+            result = &mut action => Ok(result),
+            interruption = &mut lease_renewal => Err(interruption),
+        }
+    }
+
+    async fn renew_lease_during_action(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+    ) -> SagaInterruption {
+        loop {
+            tokio::time::sleep(lease_renewal_delay(self.lease_ttl)).await;
+            if !self.refresh_lease().await {
+                self.warn_action_lease_lost(action_name, phase);
+                return SagaInterruption::LeaseLost;
+            }
+        }
+    }
+
+    async fn retry_action<T, Op>(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        retry_delay: Option<Duration>,
+        op: &mut Op,
+    ) -> Result<T, SagaActionError>
+    where
+        Op: FnMut() -> BoxFuture<'static, Result<T, SagaActionError>>,
+    {
+        let mut attempt = 1_u32;
+        loop {
+            match op().await {
+                Ok(output) => return Ok(output),
+                Err(err) if !is_saga_action_retryable(&err) => return Err(err),
+                Err(err) => {
+                    let Some(delay) = retry_delay else {
+                        return Err(err);
+                    };
+                    self.warn_action_retry(action_name, phase, attempt, delay, err.as_label());
+                    tokio::time::sleep(delay).await;
+                    attempt = attempt.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn warn_action_timeout(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        policy: SagaBoundedPolicy,
+    ) {
+        let step_timeout_ms = duration_millis_u64(policy.step_timeout());
+        let retry_delay_ms = policy.retry_delay().map(duration_millis_u64).unwrap_or(0);
+        tracing::warn!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            contract_id = self.contract_id,
+            step_name = action_name,
+            phase = phase.as_str(),
+            step_timeout_ms,
+            retry_delay_ms,
+            "saga: action timed out"
+        );
+    }
+
+    fn warn_action_lease_lost(&self, action_name: &str, phase: SagaActionPhase) {
+        tracing::warn!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            contract_id = self.contract_id,
+            step_name = action_name,
+            phase = phase.as_str(),
+            "saga: action lease lost"
+        );
+    }
+
+    fn warn_action_retry(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        attempt: u32,
+        retry_delay: Duration,
+        error_kind: &'static str,
+    ) {
+        let retry_delay_ms = duration_millis_u64(retry_delay);
+        tracing::warn!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            contract_id = self.contract_id,
+            step_name = action_name,
+            phase = phase.as_str(),
+            attempt,
+            retry_delay_ms,
+            error_kind,
+            "saga: action failed, retrying"
+        );
+    }
+
     /// 前向执行 `actions[start..]`；失败逆序补偿 `cursor.completed`（含 resume 预填前缀）。
     async fn run_forward(
         &self,
@@ -752,14 +1068,14 @@ where
                 return self.append_failure_outcome(failure, action.name());
             }
             cursor.seq += 1;
-            let ctx = SagaActionCtx::new(self.instance, action.name());
-            let output = match action.do_it(ctx).await {
+            let output = match self.run_forward_action(action).await {
                 Ok(o) => o,
-                Err(err) => {
+                Err(SagaPhaseError::Action(err)) => {
                     return self
                         .compensate(actions, &cursor.completed, cursor.seq, action.name(), err)
                         .await;
                 }
+                Err(SagaPhaseError::Interrupted(reason)) => return Self::interrupted(reason),
             };
             // 副作用已发生：先入已完成栈（含本步），再写 Completed；写失败 ⇒ 补偿含本步在内的栈（F1）。
             cursor.completed.push((i, step.clone()));
@@ -859,15 +1175,15 @@ where
             return Err(self.append_failure_outcome(failure, failed_node));
         }
         let undo_seq = seq + 1;
-        let ctx = SagaActionCtx::new(self.instance, action.name());
-        match action.undo_it(ctx).await {
+        match self.run_compensation_action(action).await {
             Ok(()) => {
                 self.finish_compensation_success(action, step, undo_seq, failed_node)
                     .await
             }
-            Err(undo_err) => Err(self
+            Err(SagaPhaseError::Action(undo_err)) => Err(self
                 .finish_compensation_failure(action, step, undo_seq, failed_node, undo_err)
                 .await),
+            Err(SagaPhaseError::Interrupted(reason)) => Err(Self::interrupted(reason)),
         }
     }
 
@@ -1007,9 +1323,23 @@ where
             WritableDeadLetterSource::Saga,
             EnvelopeMetadata::empty(),
         );
-        if self.dead_letter.write_dead_letter(record).await.is_err() {
-            self.error_dlx_write_failed(comp_step);
+        match self.dead_letter.write_dead_letter(record).await {
+            Ok(()) => self.record_dead_letter("written"),
+            Err(error) => {
+                self.record_dead_letter("write_error");
+                self.error_dlx_write_failed(comp_step, &error);
+            }
         }
+    }
+
+    fn record_dead_letter(&self, outcome: &'static str) {
+        metrics::counter!(
+            "saga_dead_letters_total",
+            "domain" => self.owner.as_str().to_owned(),
+            "contract_id" => self.contract_id.to_owned(),
+            "outcome" => outcome,
+        )
+        .increment(1);
     }
 
     /// 补偿失败结构化 error 日志（saga_id / step_name / failed_forward_step / error_summary，T009.6 / SC-006）。
@@ -1030,11 +1360,14 @@ where
     }
 
     /// DLX 写失败 error 日志（journal `Failed` 行是 durable 审计兜底）。
-    fn error_dlx_write_failed(&self, node_name: &str) {
+    fn error_dlx_write_failed(&self, node_name: &str, error: &diport::DeadLetterStoreError) {
         tracing::error!(
             tenant_id = %self.instance.tenant(),
             saga_id = %self.instance.saga_id().as_uuid(),
             step_name = node_name,
+            domain = self.owner.as_str(),
+            contract_id = self.contract_id,
+            error = %error,
             "saga: dead-letter write failed (journal Failed row is durable audit)"
         );
     }

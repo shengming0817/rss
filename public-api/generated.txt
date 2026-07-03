@@ -3409,6 +3409,11 @@ pub fn generated::saga::billing_v1::BillingCheckoutSagaPayload::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for generated::saga::billing_v1::BillingCheckoutSagaPayload where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> typenum::type_operators::Same for generated::saga::billing_v1::BillingCheckoutSagaPayload
 pub type generated::saga::billing_v1::BillingCheckoutSagaPayload::Output = T
+pub const generated::saga::billing_v1::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::saga::billing_v1::CONTRACT_ID: &str
+pub const generated::saga::billing_v1::POLICY: vocab::contract::binding::SagaRuntimePolicySpec
+pub const generated::saga::billing_v1::SPEC: generated::saga::SagaSpec
+pub type generated::saga::SagaSpec = vocab::contract::binding::SagaContractBinding
 pub enum generated::ProtectionAadDim
 pub generated::ProtectionAadDim::ConfigKey
 pub generated::ProtectionAadDim::Field

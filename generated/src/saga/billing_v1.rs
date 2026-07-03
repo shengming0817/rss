@@ -66,3 +66,21 @@ pub struct BillingCheckoutSagaPayload {
     #[redact(sensitivity = public)]
     pub order_id: ::std::string::String,
 }
+
+/// Saga 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "billing.checkout";
+
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+    "billing",
+    "billing.checkout",
+    "v1",
+    "sha256:2196dede9f6ebd39904f753bc7bae7a79d603768018aa9fc4a50f448d23b0e77",
+);
+
+/// Saga runtime policy spec（来自 `[saga].retryMillis` / `[saga].timeoutMillis`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const POLICY: ::vocab::SagaRuntimePolicySpec =
+    ::vocab::SagaRuntimePolicySpec::from_millis(5000, 30000);
+
+/// Saga contract spec（契约绑定 + runtime policy spec）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY);

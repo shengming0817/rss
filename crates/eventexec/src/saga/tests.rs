@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use super::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaCommand, SagaExecStatus,
-    SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaTailer,
+    SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaPolicy,
+    SagaTailer,
 };
 use consistency::{Lsn, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName};
 use consistency::{
@@ -56,8 +57,23 @@ struct FakeAction {
     name: String,
     do_count: Arc<AtomicU32>,
     undo_count: Arc<AtomicU32>,
-    do_fails: bool,
-    undo_fails: bool,
+    do_behavior: FakeBehavior,
+    undo_behavior: FakeBehavior,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FakeBehavior {
+    Succeed,
+    Fail,
+    SerializeFail,
+    FailTimes(u32),
+    Hang,
+}
+
+impl FakeBehavior {
+    fn from_fails(fails: bool) -> Self {
+        if fails { Self::Fail } else { Self::Succeed }
+    }
 }
 
 impl SagaAction for FakeAction {
@@ -66,26 +82,38 @@ impl SagaAction for FakeAction {
     }
     fn do_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>> {
         let count = self.do_count.clone();
-        let fails = self.do_fails;
+        let behavior = self.do_behavior;
         let name = self.name.clone();
         Box::pin(async move {
-            count.fetch_add(1, Ordering::SeqCst);
-            if fails {
-                Err(SagaActionError::ActionFailed)
-            } else {
-                Ok(format!("{name}-out").into_bytes())
+            let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
+            match behavior {
+                FakeBehavior::Succeed => Ok(format!("{name}-out").into_bytes()),
+                FakeBehavior::Fail => Err(SagaActionError::ActionFailed),
+                FakeBehavior::SerializeFail => Err(SagaActionError::SerializeFailed),
+                FakeBehavior::FailTimes(failures) if attempt <= failures => {
+                    Err(SagaActionError::ActionFailed)
+                }
+                FakeBehavior::FailTimes(_) => Ok(format!("{name}-out").into_bytes()),
+                FakeBehavior::Hang => {
+                    std::future::pending::<Result<Vec<u8>, SagaActionError>>().await
+                }
             }
         })
     }
     fn undo_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>> {
         let count = self.undo_count.clone();
-        let fails = self.undo_fails;
+        let behavior = self.undo_behavior;
         Box::pin(async move {
-            count.fetch_add(1, Ordering::SeqCst);
-            if fails {
-                Err(SagaActionError::ActionFailed)
-            } else {
-                Ok(())
+            let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
+            match behavior {
+                FakeBehavior::Succeed => Ok(()),
+                FakeBehavior::Fail => Err(SagaActionError::ActionFailed),
+                FakeBehavior::SerializeFail => Err(SagaActionError::SerializeFailed),
+                FakeBehavior::FailTimes(failures) if attempt <= failures => {
+                    Err(SagaActionError::ActionFailed)
+                }
+                FakeBehavior::FailTimes(_) => Ok(()),
+                FakeBehavior::Hang => std::future::pending::<Result<(), SagaActionError>>().await,
             }
         })
     }
@@ -111,8 +139,8 @@ impl Counts {
 
 struct StepSpec {
     name: String,
-    do_fails: bool,
-    undo_fails: bool,
+    do_behavior: FakeBehavior,
+    undo_behavior: FakeBehavior,
     counts: Counts,
 }
 
@@ -130,9 +158,23 @@ impl FakeFactory {
     }
 
     fn steps(specs: &[(&str, bool, bool)]) -> (Arc<Self>, Vec<Counts>) {
+        let specs = specs
+            .iter()
+            .map(|(name, do_fails, undo_fails)| {
+                (
+                    *name,
+                    FakeBehavior::from_fails(*do_fails),
+                    FakeBehavior::from_fails(*undo_fails),
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::behaviors(&specs)
+    }
+
+    fn behaviors(specs: &[(&str, FakeBehavior, FakeBehavior)]) -> (Arc<Self>, Vec<Counts>) {
         let mut steps = Vec::new();
         let mut counts = Vec::new();
-        for (name, do_fails, undo_fails) in specs {
+        for (name, do_behavior, undo_behavior) in specs {
             let c = Counts {
                 do_count: Arc::new(AtomicU32::new(0)),
                 undo_count: Arc::new(AtomicU32::new(0)),
@@ -140,8 +182,8 @@ impl FakeFactory {
             counts.push(c.clone());
             steps.push(StepSpec {
                 name: (*name).to_string(),
-                do_fails: *do_fails,
-                undo_fails: *undo_fails,
+                do_behavior: *do_behavior,
+                undo_behavior: *undo_behavior,
                 counts: c,
             });
         }
@@ -158,8 +200,8 @@ impl SagaActionFactory for FakeFactory {
                     name: s.name.clone(),
                     do_count: s.counts.do_count.clone(),
                     undo_count: s.counts.undo_count.clone(),
-                    do_fails: s.do_fails,
-                    undo_fails: s.undo_fails,
+                    do_behavior: s.do_behavior,
+                    undo_behavior: s.undo_behavior,
                 }) as Box<dyn SagaAction>
             })
             .collect()
@@ -334,12 +376,17 @@ type DlxRecord = (String, String, String, String, String, String, String, u32);
 #[derive(Default)]
 struct FakeDeadLetterStore {
     written: Mutex<Vec<DlxRecord>>,
+    fail_writes: AtomicBool,
 }
 
 impl FakeDeadLetterStore {
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
     fn records(&self) -> Vec<DlxRecord> {
         self.written.lock().unwrap().clone()
+    }
+
+    fn fail_writes(&self) {
+        self.fail_writes.store(true, Ordering::SeqCst);
     }
 }
 
@@ -349,6 +396,11 @@ impl DeadLetterStore for FakeDeadLetterStore {
         &self,
         record: DeadLetterRecord,
     ) -> Result<(), DeadLetterStoreError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(DeadLetterStoreError::new(std::io::Error::other(
+                "dlx inject",
+            )));
+        }
         self.written.lock().unwrap().push((
             record.tenant().to_string(),
             record.message_id().to_string(),
@@ -372,12 +424,23 @@ impl DeadLetterStore for FakeDeadLetterStore {
 struct FakeInstanceStore {
     registered: Mutex<HashMap<SagaInstanceRef, SagaInstanceStatus>>,
     lease_lost: std::sync::atomic::AtomicBool,
+    lose_after_extensions: AtomicU32,
+    extensions: AtomicU32,
     releases: AtomicU32,
 }
 
 impl FakeInstanceStore {
     fn lose_lease(&self) {
         self.lease_lost.store(true, Ordering::SeqCst);
+    }
+
+    fn lose_after_extensions(&self, successful_extensions: u32) {
+        self.lose_after_extensions
+            .store(successful_extensions, Ordering::SeqCst);
+    }
+
+    fn extension_count(&self) -> u32 {
+        self.extensions.load(Ordering::SeqCst)
     }
 
     #[allow(clippy::unwrap_used)]
@@ -447,7 +510,9 @@ impl SagaInstanceStore for FakeInstanceStore {
         _lease: &SagaLease,
         _ttl: Duration,
     ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
-        if self.lease_lost.load(Ordering::SeqCst) {
+        let extension = self.extensions.fetch_add(1, Ordering::SeqCst) + 1;
+        let lose_after = self.lose_after_extensions.load(Ordering::SeqCst);
+        if self.lease_lost.load(Ordering::SeqCst) || (lose_after > 0 && extension > lose_after) {
             Ok(SagaLeaseOutcome::Lost)
         } else {
             Ok(SagaLeaseOutcome::Held)
@@ -485,19 +550,101 @@ impl SagaInstanceStore for FakeInstanceStore {
 type Exec =
     SagaExecutorImpl<FakeJournal, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>;
 
-fn executor_config() -> SagaExecutorConfig {
+#[allow(clippy::panic)] // reason: 测试常量策略，失败表示 helper 输入写错
+fn policy_from_millis(retry_millis: u64, timeout_millis: u64) -> SagaPolicy {
+    let spec = vocab::SagaRuntimePolicySpec::from_millis(retry_millis, timeout_millis);
+    match SagaPolicy::try_from(spec) {
+        Ok(policy) => policy,
+        Err(err) => panic!("invalid test saga policy: {err}"),
+    }
+}
+
+fn disabled_policy() -> SagaPolicy {
+    policy_from_millis(0, 0)
+}
+
+fn executor_config_with_policy_and_lease_ttl(
+    policy: SagaPolicy,
+    lease_ttl: Duration,
+) -> SagaExecutorConfig {
     SagaExecutorConfig::new(
         CheckpointOwner::new(OWNER),
         CONTRACT,
         "runner-a",
-        Duration::from_secs(30),
+        lease_ttl,
+        policy,
     )
+}
+
+fn executor_config_with_policy(policy: SagaPolicy) -> SagaExecutorConfig {
+    executor_config_with_policy_and_lease_ttl(policy, Duration::from_secs(30))
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: invalid generated spec is the assertion failure
+fn executor_config_from_contract_spec_derives_contract_and_policy() {
+    const CONTRACT_BINDING: vocab::ContractBinding = vocab::ContractBinding::from_static(
+        OWNER,
+        CONTRACT,
+        "v1",
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    );
+    const POLICY_SPEC: vocab::SagaRuntimePolicySpec =
+        vocab::SagaRuntimePolicySpec::from_millis(5000, 30000);
+    const SPEC: vocab::SagaContractBinding =
+        vocab::SagaContractBinding::from_parts(CONTRACT_BINDING, POLICY_SPEC);
+
+    let config = SagaExecutorConfig::from_contract_spec(
+        CheckpointOwner::new(OWNER),
+        "runner-a",
+        Duration::from_secs(30),
+        SPEC,
+    )
+    .expect("generated test spec is valid");
+
+    assert_eq!(config.contract_id, CONTRACT);
+    assert!(matches!(config.policy, SagaPolicy::Bounded(_)));
 }
 
 fn ready_instance_store() -> Arc<FakeInstanceStore> {
     let store = Arc::new(FakeInstanceStore::default());
     store.seed_status(instance(), SagaInstanceStatus::Ready);
     store
+}
+
+fn executor_with_store_and_policy<J>(
+    journal: Arc<J>,
+    instance_store: Arc<FakeInstanceStore>,
+    cp: Arc<FakeCheckpointStore>,
+    dlx: Arc<FakeDeadLetterStore>,
+    factory: Arc<dyn SagaActionFactory>,
+    policy: SagaPolicy,
+) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
+where
+    J: SagaJournal + Send + Sync + 'static,
+{
+    SagaExecutorImpl::new(
+        SagaExecutorDeps::new(journal, instance_store, cp, dlx, factory),
+        executor_config_with_policy(policy),
+    )
+}
+
+fn executor_with_store_policy_and_lease_ttl<J>(
+    journal: Arc<J>,
+    instance_store: Arc<FakeInstanceStore>,
+    cp: Arc<FakeCheckpointStore>,
+    dlx: Arc<FakeDeadLetterStore>,
+    factory: Arc<dyn SagaActionFactory>,
+    policy: SagaPolicy,
+    lease_ttl: Duration,
+) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
+where
+    J: SagaJournal + Send + Sync + 'static,
+{
+    SagaExecutorImpl::new(
+        SagaExecutorDeps::new(journal, instance_store, cp, dlx, factory),
+        executor_config_with_policy_and_lease_ttl(policy, lease_ttl),
+    )
 }
 
 fn executor_with_store<J>(
@@ -510,10 +657,17 @@ fn executor_with_store<J>(
 where
     J: SagaJournal + Send + Sync + 'static,
 {
-    SagaExecutorImpl::new(
-        SagaExecutorDeps::new(journal, instance_store, cp, dlx, factory),
-        executor_config(),
-    )
+    executor_with_store_and_policy(journal, instance_store, cp, dlx, factory, disabled_policy())
+}
+
+fn executor_with_policy(
+    journal: Arc<FakeJournal>,
+    cp: Arc<FakeCheckpointStore>,
+    dlx: Arc<FakeDeadLetterStore>,
+    factory: Arc<dyn SagaActionFactory>,
+    policy: SagaPolicy,
+) -> Exec {
+    executor_with_store_and_policy(journal, ready_instance_store(), cp, dlx, factory, policy)
 }
 
 fn executor(
@@ -610,6 +764,77 @@ impl SagaJournal for FakeJournalFailing {
     async fn shutdown(&self) -> Result<(), SagaJournalError> {
         Ok(())
     }
+}
+
+#[allow(clippy::unwrap_used)] // reason: tracing capture test harness owns runtime/Mutex setup
+fn capture_tracing_events<F, Fut>(
+    level: tracing::Level,
+    start_paused: bool,
+    f: F,
+) -> Vec<HashMap<String, String>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        level: tracing::Level,
+    }
+
+    struct CapVisit {
+        current: HashMap<String, String>,
+    }
+
+    impl Visit for CapVisit {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.current
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.current
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != self.level {
+                return;
+            }
+            let mut visitor = CapVisit {
+                current: HashMap::new(),
+            };
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.current);
+        }
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+        events: Arc::clone(&events),
+        level,
+    });
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        if start_paused {
+            builder.start_paused(true);
+        }
+        let rt = builder.build().unwrap();
+        rt.block_on(f());
+        tracing::callsite::rebuild_interest_cache();
+    });
+    events.lock().unwrap().clone()
 }
 
 // ── T009.1 #1：3-step 全成 → journal 顺序 ──────────────────────────────────────
@@ -735,6 +960,461 @@ async fn resume_from_step2_checkpoint_skips_step1() {
     assert_eq!(cp.offset(&checkpoint_id_str()), Some(3));
 }
 
+// ── #1651：runtime retry/timeout policy ───────────────────────────────────────
+
+#[test]
+fn saga_policy_rejects_retry_without_timeout() {
+    let spec = vocab::SagaRuntimePolicySpec::from_millis(5, 0);
+    assert!(
+        SagaPolicy::try_from(spec).is_err(),
+        "retryMillis > 0 with timeoutMillis = 0 must be invalid"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn policy_retries_forward_action_until_success_within_budget() {
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) =
+        FakeFactory::behaviors(&[("step1", FakeBehavior::FailTimes(2), FakeBehavior::Succeed)]);
+    let exec = executor_with_policy(
+        journal.clone(),
+        cp.clone(),
+        dlx.clone(),
+        factory,
+        policy_from_millis(5, 50),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 3, "forward action should be retried twice");
+    assert_eq!(counts[0].undos(), 0);
+    assert_eq!(
+        journal.log(),
+        vec![
+            ("step1".to_string(), SagaJournalStatus::Executing),
+            ("step1".to_string(), SagaJournalStatus::Completed),
+        ],
+        "per-attempt retry must not duplicate durable step journal"
+    );
+    assert_eq!(cp.offset(&checkpoint_id_str()), Some(1));
+    assert!(dlx.records().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
+async fn policy_forward_timeout_compensates_completed_prefix() {
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors(&[
+        ("step1", FakeBehavior::Succeed, FakeBehavior::Succeed),
+        ("step2", FakeBehavior::Hang, FakeBehavior::Succeed),
+        ("step3", FakeBehavior::Succeed, FakeBehavior::Succeed),
+    ]);
+    let exec = executor_with_policy(
+        journal.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        policy_from_millis(0, 10),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    match outcome {
+        SagaOutcome::Failed { failed_node, error } => {
+            assert_eq!(failed_node, "step2");
+            assert!(
+                matches!(error, SagaActionError::ActionTimedOut),
+                "expected forward timeout, got {error:?}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(counts[0].dos(), 1);
+    assert_eq!(counts[0].undos(), 1, "completed prefix must be compensated");
+    assert_eq!(counts[1].dos(), 1);
+    assert_eq!(
+        counts[2].dos(),
+        0,
+        "steps after timed-out step must not run"
+    );
+    assert!(
+        dlx.records().is_empty(),
+        "forward timeout alone must not DLX"
+    );
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Compensated)),
+        "step1 compensation completion must be journaled"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
+async fn policy_retry_budget_exhaustion_compensates_completed_prefix() {
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors(&[
+        ("step1", FakeBehavior::Succeed, FakeBehavior::Succeed),
+        ("step2", FakeBehavior::Fail, FakeBehavior::Succeed),
+    ]);
+    let exec = executor_with_policy(journal, cp, dlx.clone(), factory, policy_from_millis(5, 12));
+
+    let outcome = exec.run(instance()).await;
+
+    match outcome {
+        SagaOutcome::Failed { failed_node, error } => {
+            assert_eq!(failed_node, "step2");
+            assert!(
+                matches!(error, SagaActionError::ActionTimedOut),
+                "retry budget exhaustion should surface as timeout, got {error:?}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(
+        counts[1].dos() > 1,
+        "step2 should retry before budget expires"
+    );
+    assert_eq!(counts[0].undos(), 1, "completed prefix must be compensated");
+    assert!(dlx.records().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
+async fn policy_retries_compensation_action_until_success_within_budget() {
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors(&[
+        ("step1", FakeBehavior::Succeed, FakeBehavior::FailTimes(2)),
+        ("step2", FakeBehavior::SerializeFail, FakeBehavior::Succeed),
+    ]);
+    let exec = executor_with_policy(
+        journal.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        policy_from_millis(5, 50),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    match outcome {
+        SagaOutcome::Failed { failed_node, error } => {
+            assert_eq!(failed_node, "step2");
+            assert!(
+                matches!(error, SagaActionError::SerializeFailed),
+                "original non-retryable forward error must be preserved, got {error:?}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        counts[0].undos(),
+        3,
+        "compensation should retry twice then succeed"
+    );
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Compensated)),
+        "successful compensation retry must write Compensated"
+    );
+    assert!(
+        !journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Failed)),
+        "successful compensation retry must not write Failed"
+    );
+    assert!(dlx.records().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::panic)] // reason: 测试断言分支，item-level carve-out
+async fn policy_compensation_timeout_writes_dead_letter() {
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors(&[
+        ("step1", FakeBehavior::Succeed, FakeBehavior::Hang),
+        ("step2", FakeBehavior::SerializeFail, FakeBehavior::Succeed),
+    ]);
+    let exec = executor_with_policy(
+        journal.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        policy_from_millis(0, 10),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    match outcome {
+        SagaOutcome::Failed { failed_node, error } => {
+            assert_eq!(failed_node, "step1");
+            assert!(
+                matches!(error, SagaActionError::ActionTimedOut),
+                "expected compensation timeout, got {error:?}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(counts[0].undos(), 1, "hung compensation is attempted once");
+    assert_eq!(dlx.records().len(), 1, "compensation timeout must DLX");
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Failed)),
+        "compensation timeout must write Failed journal row"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn policy_renews_lease_during_forward_action_and_interrupts_on_loss() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    store.lose_after_extensions(1);
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) =
+        FakeFactory::behaviors(&[("step1", FakeBehavior::Hang, FakeBehavior::Succeed)]);
+    let exec = executor_with_store_policy_and_lease_ttl(
+        journal.clone(),
+        store.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        policy_from_millis(0, 100),
+        Duration::from_millis(10),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::LeaseLost
+            }
+        ),
+        "bounded action must stop when in-phase lease renewal is lost: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 1, "forward action should start once");
+    assert!(
+        store.extension_count() >= 2,
+        "pre-step refresh plus in-phase renewal should be attempted"
+    );
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Executing)),
+        "interrupted in-flight action keeps only the durable Executing edge"
+    );
+    assert!(
+        !journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Completed)),
+        "lease-lost action must not be marked completed"
+    );
+    assert!(dlx.records().is_empty(), "lease interruption must not DLX");
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::expect_used)] // reason: timeout means the lease-loss interrupt regressed
+async fn disabled_policy_renews_lease_during_forward_action_and_interrupts_on_loss() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    store.lose_after_extensions(1);
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) =
+        FakeFactory::behaviors(&[("step1", FakeBehavior::Hang, FakeBehavior::Succeed)]);
+    let exec = executor_with_store_policy_and_lease_ttl(
+        journal.clone(),
+        store.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        disabled_policy(),
+        Duration::from_millis(10),
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
+        .await
+        .expect("disabled policy must stop when in-phase lease renewal is lost");
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::LeaseLost
+            }
+        ),
+        "disabled action must stop on lease loss: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 1, "forward action should start once");
+    assert!(
+        store.extension_count() >= 2,
+        "pre-step refresh plus disabled in-phase renewal should be attempted"
+    );
+    assert!(
+        !journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Completed)),
+        "lease-lost disabled action must not be marked completed"
+    );
+    assert!(dlx.records().is_empty(), "lease interruption must not DLX");
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::expect_used)] // reason: timeout means the lease-loss interrupt regressed
+async fn disabled_policy_renews_lease_during_compensation_action_and_interrupts_on_loss() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    store.lose_after_extensions(3);
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::behaviors(&[
+        ("step1", FakeBehavior::Succeed, FakeBehavior::Hang),
+        ("step2", FakeBehavior::SerializeFail, FakeBehavior::Succeed),
+    ]);
+    let exec = executor_with_store_policy_and_lease_ttl(
+        journal.clone(),
+        store.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        disabled_policy(),
+        Duration::from_millis(10),
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
+        .await
+        .expect("disabled compensation must stop when in-phase lease renewal is lost");
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::LeaseLost
+            }
+        ),
+        "disabled compensation must stop on lease loss: {outcome:?}"
+    );
+    assert_eq!(counts[0].undos(), 1, "compensation should start once");
+    assert!(
+        store.extension_count() >= 4,
+        "forward refreshes, compensation refresh, and in-phase renewal should be attempted"
+    );
+    assert!(
+        !journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Failed)),
+        "lease-lost compensation must not write Failed journal row"
+    );
+    assert!(dlx.records().is_empty(), "lease interruption must not DLX");
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing event is the assertion failure
+fn policy_forward_timeout_logs_structured_warning() {
+    let events = capture_tracing_events(tracing::Level::WARN, true, || async {
+        let journal = Arc::new(FakeJournal::default());
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, _counts) =
+            FakeFactory::behaviors(&[("step1", FakeBehavior::Hang, FakeBehavior::Succeed)]);
+        let exec = executor_with_policy(journal, cp, dlx, factory, policy_from_millis(0, 10));
+
+        let outcome = exec.run(instance()).await;
+        assert!(
+            matches!(
+                outcome,
+                SagaOutcome::Failed {
+                    error: SagaActionError::ActionTimedOut,
+                    ..
+                }
+            ),
+            "test must drive the timeout path: {outcome:?}"
+        );
+    });
+
+    let timeout = events
+        .iter()
+        .find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: action timed out"))
+        })
+        .expect("action timeout warning event must be captured");
+    assert!(
+        timeout
+            .get("tenant_id")
+            .is_some_and(|value| !value.is_empty()),
+        "缺 tenant_id: {timeout:?}"
+    );
+    assert!(
+        timeout
+            .get("saga_id")
+            .is_some_and(|value| !value.is_empty()),
+        "缺 saga_id: {timeout:?}"
+    );
+    assert_eq!(
+        timeout.get("contract_id").map(String::as_str),
+        Some(CONTRACT)
+    );
+    assert_eq!(timeout.get("step_name").map(String::as_str), Some("step1"));
+    assert_eq!(timeout.get("phase").map(String::as_str), Some("forward"));
+    assert_eq!(
+        timeout.get("step_timeout_ms").map(String::as_str),
+        Some("10")
+    );
+    assert_eq!(timeout.get("retry_delay_ms").map(String::as_str), Some("0"));
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing event is the assertion failure
+fn policy_retry_warning_logs_error_kind() {
+    let events = capture_tracing_events(tracing::Level::WARN, true, || async {
+        let journal = Arc::new(FakeJournal::default());
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, _counts) =
+            FakeFactory::behaviors(&[("step1", FakeBehavior::FailTimes(1), FakeBehavior::Succeed)]);
+        let exec = executor_with_policy(journal, cp, dlx, factory, policy_from_millis(1, 20));
+
+        let outcome = exec.run(instance()).await;
+        assert!(
+            matches!(outcome, SagaOutcome::Succeeded { .. }),
+            "test must drive one retry then success: {outcome:?}"
+        );
+    });
+
+    let retry = events
+        .iter()
+        .find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: action failed, retrying"))
+        })
+        .expect("action retry warning event must be captured");
+    assert_eq!(retry.get("phase").map(String::as_str), Some("forward"));
+    assert_eq!(
+        retry.get("error_kind").map(String::as_str),
+        Some("action_failed")
+    );
+}
+
 // ── T009.6：补偿失败 → 写 dead-letter（domain/contract_id 取 saga owner）─────────
 
 #[tokio::test]
@@ -791,6 +1471,122 @@ async fn compensation_failure_writes_dead_letter() {
             .any(|(n, s)| n == "step1" && *s == SagaJournalStatus::Failed),
         "journal 缺 step1 Failed 审计行"
     );
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing metric is the assertion failure
+#[allow(clippy::unwrap_used)] // reason: test runtime construction
+fn compensation_failure_emits_dead_letter_metric() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let journal = Arc::new(FakeJournal::default());
+            let cp = Arc::new(FakeCheckpointStore::default());
+            let dlx = Arc::new(FakeDeadLetterStore::default());
+            let (factory, _counts) =
+                FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
+            let exec = executor(journal, cp, dlx, factory);
+
+            let outcome = exec.run(instance()).await;
+            assert!(
+                matches!(outcome, SagaOutcome::Failed { .. }),
+                "test must drive compensation DLX: {outcome:?}"
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    assert!(
+        rendered.contains("saga_dead_letters_total"),
+        "缺 saga DLX metric: {rendered}"
+    );
+    assert!(rendered.contains("domain=\"billing\""), "{rendered}");
+    assert!(
+        rendered.contains("contract_id=\"billing.checkout\""),
+        "{rendered}"
+    );
+    assert!(rendered.contains("outcome=\"written\""), "{rendered}");
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing event/metric is the assertion failure
+fn compensation_dead_letter_write_error_logs_fields() {
+    let events = capture_tracing_events(tracing::Level::ERROR, false, || async {
+        let journal = Arc::new(FakeJournal::default());
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        dlx.fail_writes();
+        let (factory, _counts) =
+            FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
+        let exec = executor(journal, cp, dlx, factory);
+
+        let outcome = exec.run(instance()).await;
+        assert!(
+            matches!(outcome, SagaOutcome::Failed { .. }),
+            "test must drive compensation DLX write error: {outcome:?}"
+        );
+    });
+
+    let write_error = events
+        .iter()
+        .find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: dead-letter write failed"))
+        })
+        .expect("dlx write failure error event must be captured");
+    assert_eq!(write_error.get("domain").map(String::as_str), Some(OWNER));
+    assert_eq!(
+        write_error.get("contract_id").map(String::as_str),
+        Some(CONTRACT)
+    );
+    assert_eq!(
+        write_error.get("error").map(String::as_str),
+        Some("dead letter write failed")
+    );
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing metric is the assertion failure
+#[allow(clippy::unwrap_used)] // reason: test runtime construction
+fn compensation_dead_letter_write_error_emits_metric() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let journal = Arc::new(FakeJournal::default());
+            let cp = Arc::new(FakeCheckpointStore::default());
+            let dlx = Arc::new(FakeDeadLetterStore::default());
+            dlx.fail_writes();
+            let (factory, _counts) =
+                FakeFactory::steps(&[("step1", false, true), ("step2", true, false)]);
+            let exec = executor(journal, cp, dlx, factory);
+
+            let outcome = exec.run(instance()).await;
+            assert!(
+                matches!(outcome, SagaOutcome::Failed { .. }),
+                "test must drive compensation DLX write error: {outcome:?}"
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    assert!(
+        rendered.contains("saga_dead_letters_total"),
+        "缺 saga DLX metric: {rendered}"
+    );
+    assert!(rendered.contains("outcome=\"write_error\""), "{rendered}");
 }
 
 // ── resume 已注册但空 journal → 从 step0 继续（unknown 只由实例行缺失表达）──────────────

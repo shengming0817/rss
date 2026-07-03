@@ -52,7 +52,7 @@ cargo nextest run -p rss-postgres -p rss-redis -p rss-amqp --features integratio
 - durable 拓扑去掉 broker URL / redis 配置 → 启动 → 期望进程 `Err` 退出，日志明示缺配置；**绝不**以 in-mem 启动。
 
 ### SC-006 saga 逆序补偿（P9）
-- 3-step saga，第 2 步返回失败 → journal 记录逆序 compensate step2、step1 → saga 终态 failed；runtime retry/timeout 策略由 #1651 承接。
+- 3-step saga，第 2 步返回失败 / timeout / 重试预算耗尽 → journal 记录逆序 compensate 已完成前缀 → saga 终态 failed；补偿 timeout / 预算耗尽 → saga dead-letter。
 
 ### SC-007 投影续投（P10）
 - 处理 100 事件、checkpoint=50 → 重启 → 续投 51–100（无重复无遗漏）；从 0 重放结果与增量一致。

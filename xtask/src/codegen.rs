@@ -54,13 +54,14 @@ pub(crate) fn generate(contracts_root: &Path, gen_src: &Path, check: bool) -> Re
 }
 
 /// mod.rs 特化档：event kind 注入 `SubscriptionSpec` POD，command kind 注入 `CommandEmit`/`CommandRegister`
-/// seam，其余无特化。同一 `kind_dir` 内所有契约同 kind，故每 kind_dir 单一 `ModKind`。
+/// seam，saga kind 注入 `SagaSpec` POD，其余无特化。同一 `kind_dir` 内所有契约同 kind，故每 kind_dir
+/// 单一 `ModKind`。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModKind {
-    Plain,
     Http,
     Event,
     Command,
+    Saga,
 }
 
 /// 渲染全部期望文件（相对 `generated/src` 的路径 → 内容），确定性排序。
@@ -96,7 +97,7 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
             ContractKind::Http => ModKind::Http,
             ContractKind::Event => ModKind::Event,
             ContractKind::Command => ModKind::Command,
-            ContractKind::Saga => ModKind::Plain,
+            ContractKind::Saga => ModKind::Saga,
         };
         groups
             .entry((kind_dir.clone(), module.clone()))
@@ -344,8 +345,61 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
         ContractKind::Event => Ok(format!("{}{}", payload, render_event_glue(c, sup)?)),
         ContractKind::Command => Ok(format!("{}{}", payload, render_command_glue(c, sup)?)),
         ContractKind::Http => Ok(format!("{}{}", payload, render_http_glue(c, sup)?)),
-        ContractKind::Saga => Ok(payload),
+        ContractKind::Saga => Ok(format!("{}{}", payload, render_saga_glue(c, sup)?)),
     }
+}
+
+fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
+    let saga = c
+        .manifest
+        .saga
+        .as_ref()
+        .context("saga 契约缺 [saga] block（codegen fail-closed）")?;
+    let domain = &c.manifest.domain;
+    let contract_id = &c.manifest.id;
+    let version = &c.manifest.version;
+    let schema_hash = schema_hash(c)?;
+    for (field, value) in [
+        ("domain", domain.as_str()),
+        ("id", contract_id.as_str()),
+        ("version", version.as_str()),
+    ] {
+        if !is_safe_codegen_ident(value) {
+            bail!(
+                "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
+    }
+    if !is_safe_codegen_string(&schema_hash) {
+        bail!(
+            "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
+            c.manifest.kind.as_dir(),
+            c.manifest.domain,
+            c.manifest.version,
+        );
+    }
+    let retry_millis = saga.retry_millis;
+    let timeout_millis = saga.timeout_millis;
+    Ok(format!(
+        r#"
+/// Saga 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "{contract_id}";
+
+/// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+
+/// Saga runtime policy spec（来自 `[saga].retryMillis` / `[saga].timeoutMillis`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const POLICY: ::vocab::SagaRuntimePolicySpec =
+    ::vocab::SagaRuntimePolicySpec::from_millis({retry_millis}, {timeout_millis});
+
+/// Saga contract spec（契约绑定 + runtime policy spec）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: {sup}SagaSpec = {sup}SagaSpec::from_parts(CONTRACT, POLICY);
+"#
+    ))
 }
 
 fn render_http_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
@@ -1079,6 +1133,11 @@ pub enum HttpHeaderMode {
 }
 "#;
 
+const SAGA_SPEC_DEF: &str = r#"
+/// Saga contract metadata generated from `contract.toml`.
+pub type SagaSpec = ::vocab::SagaContractBinding;
+"#;
+
 /// command kind mod.rs 特化：定义 `CommandEmit` / `CommandRegister` 收口 seam（各 `{domain}_{version}.rs`
 /// 经 `super::` 引用）。generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层），故
 /// per-command wrapper 经这两个泛型 seam 注入——唯一 sanctioned 实现是组合根 bridge / registrar（委托
@@ -1220,7 +1279,7 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
         ModKind::Http => s.push_str(HTTP_SPEC_DEF),
         ModKind::Event => s.push_str(SUBSCRIPTION_SPEC_DEF),
         ModKind::Command => s.push_str(COMMAND_SEAM_DEF),
-        ModKind::Plain => {}
+        ModKind::Saga => s.push_str(SAGA_SPEC_DEF),
     }
     for m in modules {
         s.push_str(&format!("pub mod {m};\n"));
@@ -1537,6 +1596,41 @@ mod tests {
         )?;
         let schema = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"SeedHappenedPayload\",\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"string\"}},\"additionalProperties\":false}";
         std::fs::write(dir.join("payload.schema.json"), schema)?;
+        Ok(())
+    }
+
+    /// 在 `root/contracts/saga/billing/v1` 落一个最小 saga 契约（payload + step output schemas）。
+    fn seed_saga(root: &Path) -> Result<()> {
+        let dir = root.join("contracts/saga/billing/v1");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("contract.toml"),
+            concat!(
+                "id = \"billing.checkout\"\n",
+                "kind = \"saga\"\n",
+                "domain = \"billing\"\n",
+                "version = \"v1\"\n",
+                "owner = \"billing\"\n",
+                "consistencyLevel = \"WorkflowEventual\"\n",
+                "lifecycle = \"draft\"\n",
+                "[schemas]\n",
+                "payload = \"payload.schema.json\"\n",
+                "[saga]\n",
+                "compensationOrder = \"reverse\"\n",
+                "retryMillis = 5000\n",
+                "timeoutMillis = 30000\n",
+                "steps = [\n",
+                "  { name = \"reserve_funds\", outputSchema = \"reserve.schema.json\" },\n",
+                "  { name = \"capture\", outputSchema = \"capture.schema.json\" },\n",
+                "]\n",
+            ),
+        )?;
+        let payload = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"BillingCheckoutPayload\",\"type\":\"object\",\"required\":[\"checkoutId\"],\"properties\":{\"checkoutId\":{\"type\":\"string\"}},\"additionalProperties\":false}";
+        let reserve = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"ReserveFundsOutput\",\"type\":\"object\",\"required\":[\"reserved\"],\"properties\":{\"reserved\":{\"type\":\"boolean\"}},\"additionalProperties\":false}";
+        let capture = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"CaptureOutput\",\"type\":\"object\",\"required\":[\"captured\"],\"properties\":{\"captured\":{\"type\":\"boolean\"}},\"additionalProperties\":false}";
+        std::fs::write(dir.join("payload.schema.json"), payload)?;
+        std::fs::write(dir.join("reserve.schema.json"), reserve)?;
+        std::fs::write(dir.join("capture.schema.json"), capture)?;
         Ok(())
     }
 
@@ -2200,6 +2294,48 @@ mod tests {
         assert!(
             rendered.contains("super::SubscriptionSpec"),
             "子模块应通过 super:: 引用 SubscriptionSpec:\n{rendered}"
+        );
+        Ok(())
+    }
+
+    /// saga glue 测试（#1651）：saga 契约派生 .rs 须含 CONTRACT_ID / CONTRACT / POLICY / SPEC；
+    /// `SagaSpec` 定义在 `saga/mod.rs`，per-saga 模块经 `super::` 引用到 vocab 原子 binding。
+    #[test]
+    fn saga_glue_with_policy_spec_emitted() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_saga");
+        seed_saga(&root)?;
+        let contracts = root.join("contracts");
+        let gen_src = root.join("generated/src");
+        generate(&contracts, &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("saga/billing_v1.rs"))?;
+        let mod_rs = std::fs::read_to_string(gen_src.join("saga/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            rendered.contains(r#"pub const CONTRACT_ID: &str = "billing.checkout";"#),
+            "缺 CONTRACT_ID:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("::vocab::ContractBinding::from_static(")
+                && rendered.contains(r#""billing","#)
+                && rendered.contains(r#""billing.checkout","#)
+                && rendered.contains(r#""v1","#)
+                && rendered.contains(r#""sha256:"#),
+            "缺 CONTRACT binding:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("::vocab::SagaRuntimePolicySpec::from_millis(5000, 30000)"),
+            "缺 saga runtime policy spec:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY);"
+            ),
+            "缺 SagaSpec 常量:\n{rendered}"
+        );
+        assert!(
+            mod_rs.contains("pub type SagaSpec = ::vocab::SagaContractBinding;"),
+            "saga/mod.rs 缺 SagaSpec type alias:\n{mod_rs}"
         );
         Ok(())
     }

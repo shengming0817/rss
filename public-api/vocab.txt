@@ -210,6 +210,96 @@ impl<T> core::clone::CloneToUninit for vocab::contract::binding::ProjectionInput
 pub unsafe fn vocab::contract::binding::ProjectionInputBinding::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::contract::binding::ProjectionInputBinding
 pub fn vocab::contract::binding::ProjectionInputBinding::from(T) -> T
+pub struct vocab::contract::binding::SagaContractBinding
+impl vocab::contract::binding::SagaContractBinding
+pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::SagaContractBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec) -> Self
+pub const fn vocab::contract::binding::SagaContractBinding::policy(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
+pub const fn vocab::contract::binding::SagaContractBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::version(&self) -> &'static str
+impl core::clone::Clone for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::clone(&self) -> vocab::contract::binding::SagaContractBinding
+impl core::cmp::Eq for vocab::contract::binding::SagaContractBinding
+impl core::cmp::PartialEq for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::eq(&self, &vocab::contract::binding::SagaContractBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::SagaContractBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaContractBinding
+impl core::marker::Freeze for vocab::contract::binding::SagaContractBinding
+impl core::marker::Send for vocab::contract::binding::SagaContractBinding
+impl core::marker::Sync for vocab::contract::binding::SagaContractBinding
+impl core::marker::Unpin for vocab::contract::binding::SagaContractBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaContractBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaContractBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaContractBinding
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::From<T>
+pub fn vocab::contract::binding::SagaContractBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::Into<T>
+pub type vocab::contract::binding::SagaContractBinding::Error = core::convert::Infallible
+pub fn vocab::contract::binding::SagaContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::SagaContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::SagaContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
+pub type vocab::contract::binding::SagaContractBinding::Owned = T
+pub fn vocab::contract::binding::SagaContractBinding::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::SagaContractBinding::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::SagaContractBinding where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::SagaContractBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaContractBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaContractBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::SagaContractBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::from(T) -> T
+pub struct vocab::contract::binding::SagaRuntimePolicySpec
+impl vocab::contract::binding::SagaRuntimePolicySpec
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_millis(u64, u64) -> Self
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::retry_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::timeout_millis(&self) -> u64
+impl core::clone::Clone for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
+impl core::cmp::Eq for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::cmp::PartialEq for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::eq(&self, &vocab::contract::binding::SagaRuntimePolicySpec) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Freeze for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Send for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Sync for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Unpin for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::From<T>
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::Into<T>
+pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = core::convert::Infallible
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
+pub type vocab::contract::binding::SagaRuntimePolicySpec::Owned = T
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::SagaRuntimePolicySpec where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::SagaRuntimePolicySpec::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::from(T) -> T
 pub mod vocab::contract::owner
 #[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
 pub vocab::contract::owner::DomainNameError::Empty
@@ -2030,6 +2120,96 @@ impl<T> core::borrow::BorrowMut<T> for vocab::tenant::RowVisibility where T: ?co
 pub fn vocab::tenant::RowVisibility::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for vocab::tenant::RowVisibility
 pub fn vocab::tenant::RowVisibility::from(T) -> T
+pub struct vocab::SagaContractBinding
+impl vocab::contract::binding::SagaContractBinding
+pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::SagaContractBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec) -> Self
+pub const fn vocab::contract::binding::SagaContractBinding::policy(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
+pub const fn vocab::contract::binding::SagaContractBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::version(&self) -> &'static str
+impl core::clone::Clone for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::clone(&self) -> vocab::contract::binding::SagaContractBinding
+impl core::cmp::Eq for vocab::contract::binding::SagaContractBinding
+impl core::cmp::PartialEq for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::eq(&self, &vocab::contract::binding::SagaContractBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::SagaContractBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaContractBinding
+impl core::marker::Freeze for vocab::contract::binding::SagaContractBinding
+impl core::marker::Send for vocab::contract::binding::SagaContractBinding
+impl core::marker::Sync for vocab::contract::binding::SagaContractBinding
+impl core::marker::Unpin for vocab::contract::binding::SagaContractBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaContractBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaContractBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaContractBinding
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::From<T>
+pub fn vocab::contract::binding::SagaContractBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::Into<T>
+pub type vocab::contract::binding::SagaContractBinding::Error = core::convert::Infallible
+pub fn vocab::contract::binding::SagaContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::SagaContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::SagaContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
+pub type vocab::contract::binding::SagaContractBinding::Owned = T
+pub fn vocab::contract::binding::SagaContractBinding::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::SagaContractBinding::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::SagaContractBinding where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::SagaContractBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaContractBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaContractBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::SagaContractBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::SagaContractBinding
+pub fn vocab::contract::binding::SagaContractBinding::from(T) -> T
+pub struct vocab::SagaRuntimePolicySpec
+impl vocab::contract::binding::SagaRuntimePolicySpec
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_millis(u64, u64) -> Self
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::retry_millis(&self) -> u64
+pub const fn vocab::contract::binding::SagaRuntimePolicySpec::timeout_millis(&self) -> u64
+impl core::clone::Clone for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
+impl core::cmp::Eq for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::cmp::PartialEq for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::eq(&self, &vocab::contract::binding::SagaRuntimePolicySpec) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Freeze for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Send for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Sync for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::Unpin for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::From<T>
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::Into<T>
+pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = core::convert::Infallible
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
+pub type vocab::contract::binding::SagaRuntimePolicySpec::Owned = T
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::SagaRuntimePolicySpec where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::SagaRuntimePolicySpec::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::SagaRuntimePolicySpec
+pub fn vocab::contract::binding::SagaRuntimePolicySpec::from(T) -> T
 pub struct vocab::TenantId(_)
 impl vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid

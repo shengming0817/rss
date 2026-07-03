@@ -130,16 +130,16 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 
 ### User Story 7 - Saga 编排与逆序补偿（saga executor / tailer / journal，L3）(Priority: P3)
 
-域 crate 声明 `kind: saga` 契约（非空 saga block、≥1 step、step name 为合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、合法 retry/timeout 元数据）；executor 逐步前向执行并 append journal，任一步返回失败则**逆序**补偿已完成步；tailer 查询执行状态；崩溃后从 journal/checkpoint resume。`retryMillis` / `timeoutMillis` 当前仅作为契约治理元数据校验，runtime retry/timeout 策略由 #1651 承接，本轮调用方不得依赖其执行语义。
+域 crate 声明 `kind: saga` 契约（非空 saga block、≥1 step、step name 为合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、合法 retry/timeout 元数据）；codegen 派生 saga `CONTRACT` + runtime `POLICY` spec，组合根将 spec 转为 `eventexec::saga::SagaPolicy` 注入 executor；executor 逐步前向执行并 append journal，任一步失败 / timeout / 重试预算耗尽则**逆序**补偿已完成步；tailer 查询执行状态；崩溃后从 journal/checkpoint resume。
 
 **Why this priority**: L3 高阶能力，依赖 outbox + ConsumerBase + 持久化 journal。是多步跨聚合一致性的载体，但非地基。
 
-**Independent Test**: 3-step saga 全成→journal 顺序记录；step 2 返回失败→补偿 step 2、step 1（逆序）journal 记录；从 step 2 checkpoint resume→跳过 step 1；kind:saga 契约 governance（xtask）正/负用例；retry/timeout runtime 策略测试随 #1651 落地。
+**Independent Test**: 3-step saga 全成→journal 顺序记录；step 2 返回失败→逆序补偿已完成前缀 step 1 journal 记录；从 step 2 checkpoint resume→跳过 step 1；kind:saga 契约 governance（xtask）正/负用例；forward retry success、forward timeout compensation、retry budget exhaustion、compensation retry success、compensation timeout DLX。
 
 **Acceptance Scenarios**:
 
 1. **Given** 3 步 saga，**When** 全部成功，**Then** journal 按执行序记录 3 条 completed，saga 终态 succeeded。
-2. **Given** 第 2 步返回失败，**When** executor 处理，**Then** 逆序 compensate step2、step1，saga 终态 failed，补偿失败不静默吞（进 saga dead-letter）。
+2. **Given** 第 2 步返回失败，**When** executor 处理，**Then** 逆序 compensate 已完成前缀（step1），saga 终态 failed，补偿失败不静默吞（进 saga dead-letter）。
 3. **Given** 非法 saga 契约（空 step / compensation 非 reverse / 负 timeout），**When** governance 校验，**Then** 报错拒绝。
 
 ---
@@ -217,8 +217,8 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-009**: 消费框架 MUST 经 `HandleResult` 三路（ack/requeue/reject）收口，瞬态退避有预算上限，耗尽或永久失败 MUST 进 DLX 并结构化记录（不静默丢消息）。DLX 写入 MUST 触发 `tracing::error!` 并带 span 定位字段（domain / contract_id / topic / num_attempts / error_summary，均无 PII）。
 - **FR-010**: 订阅注册 MUST 与域 crate `contract.toml` 同源（codegen 派生 glue），active 事件契约 MUST 至少有一个订阅 handler（死事件守卫）。
 - **FR-011**: `LoginService::login`（#1100）MUST 改为写 durable outbox entry 替换直接 publish；audit 消费 MUST 以 EventId 幂等去重；MUST 通过 L2 原子性 + 幂等治理测试与 replay/投影重建测试。
-- **FR-012**: saga executor MUST 逐步前向执行并 append durable journal，action 返回失败 MUST 逆序补偿已完成步；补偿失败 MUST 上报（saga dead-letter）不静默吞；MUST 支持从 journal/checkpoint resume。runtime retry/timeout 策略不在本轮生效，由 #1651 承接。
-- **FR-013**: `kind: saga` 契约 governance MUST 校验：非空 saga block、≥1 step、step name 合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、retry/timeout 合法非负；该校验不代表 runtime 已消费 retry/timeout。
+- **FR-012**: saga executor MUST 逐步前向执行并 append durable journal，action 返回失败、timeout 或重试预算耗尽 MUST 逆序补偿已完成步；补偿失败、timeout 或预算耗尽 MUST 上报（saga dead-letter）不静默吞；MUST 支持从 journal/checkpoint resume。
+- **FR-013**: `kind: saga` 契约 governance MUST 校验：非空 saga block、≥1 step、step name 合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、retry/timeout 合法非负；codegen MUST 派生 saga `CONTRACT_ID` / `CONTRACT` / `POLICY` / `SPEC`；runtime conversion MUST 拒绝 `retryMillis > 0 && timeoutMillis = 0`，并将 `0/0` 解释为禁用策略。
 - **FR-014**: 投影器 MUST 从 checkpoint(Lsn) 断点续投，崩溃重启 MUST 从 checkpoint 继续（不重做不遗漏）；从 offset 0 重放结果 MUST 与增量更新一致；`projection_events` MUST append-only（DML DELETE/TRUNCATE 被守卫拒）。
 - **FR-015**: reconcile Loop MUST 仅经 `Builder`（必填 sealed Tenancy + Trigger）构造，缺 Tenancy MUST 编译错；level-triggered 触发、`Request::default()`=resync 全量、瞬态错误 per-entity 指数退避。
 - **FR-016**: 多副本 reconcile MUST 仅 leader dispatch，丢 lease MUST cancel 在途 reconcile；跨副本正确性 MUST 靠单调 epoch FencedWriter（CAS，旧 epoch 写拒）+ 消费幂等，不靠 lease 本身。旧 epoch 写被 FencedWriter 拒绝时 MUST 产生可观测日志（`tracing::warn!`，带 key / epoch_attempted / current_epoch），便于运维发现脑裂。

@@ -220,6 +220,23 @@ label 闭值集纪律：
 - `consumer_release_failed_total` emit site = `eventexec::consumer::emit_release_failed`；这是 DLX 写失败叠加
   release 失败的正确性告警面，label 仅含低基数 `domain`。
 
+### Saga DLX Metrics
+
+saga executor 写补偿失败 dead-letter 时发射：
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `saga_dead_letters_total` | Counter | `domain`,`contract_id`,`outcome` | saga 补偿失败进入 dead-letter 的写入结果（outcome=written/write_error） |
+
+label 闭值集纪律：
+
+- `domain` / `contract_id` 来自 `eventexec::SagaExecutorConfig` 的 owner / contract_id，均为组合根或 generated
+  bridge 在注册期绑定的低基数值；禁止从 saga_id、step、tenant、payload 或错误文本派生 label。
+- `outcome` 闭合于 `eventexec::saga` emit site 的模块内 literal：`written` / `write_error`。`write_error`
+  仍会发结构化 `tracing::error!`，字段包含 domain、contract_id 与 `DeadLetterStoreError` 安全 Display。
+- 告警面见 `docs/ops/outbox-relay-alerts.rules.yaml`：任意 `written` 增长代表需要人工介入的 saga DLX，
+  任意 `write_error` 增长代表死信未落库。
+
 adapter、webhook、MQTT 等 metrics 也遵守同一 label 闭值集规则。
 
 ## Cross-domain Transport（#1007）

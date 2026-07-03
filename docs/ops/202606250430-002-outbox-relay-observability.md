@@ -24,6 +24,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；consumer broker `Reject`，避免 Requeue 后被 Duplicate→Ack 吞掉 |
+| `saga_dead_letters_total` | Counter | `domain`,`contract_id`,`outcome` | saga compensation DLX path | saga 补偿失败 dead-letter 写入结果；outcome=`written`/`write_error` |
 
 ### Label 闭值集
 
@@ -53,6 +54,9 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   仍看 `outbox_publish_total` / `outbox_dlx_total`。
 - `consumer_dlx_write_total.outcome`：闭合于 `eventexec::consumer_worker` 的 DLX wrapper，值 `ok`/`error`；
   禁止携带 handler error、tenant、message id 或 payload 派生值。
+- `saga_dead_letters_total.outcome`：闭合于 `eventexec::saga` emit site 的模块内 literal，值
+  `written`/`write_error`；`domain`/`contract_id` 来自 `SagaExecutorConfig`，禁止携带 saga_id、step、
+  tenant、payload 或 store error 派生值。
 
 ## SLO 与告警
 
@@ -65,6 +69,8 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | relay tick P95 耗时 | > 5s 持续 5min | warning | `OutboxRelayTickSlow` |
 | consumer DLX 写失败 | 5min 内 `outcome="error"` 增长 > 0 | critical | `ConsumerDlxWriteError` |
 | consumer release 失败 | 5min 内增长 > 0 | critical | `ConsumerReleaseFailed` |
+| saga DLX 增长 | 10min 内 `outcome="written"` 增长 > 0 | critical | `SagaDeadLetterGrowth` |
+| saga DLX 写失败 | 5min 内 `outcome="write_error"` 增长 > 0 | critical | `SagaDeadLetterWriteError` |
 
 outbox 告警在 PromQL 层按 domain 聚合：depth 用 `sum by (domain)`，oldest age 用 `max by (domain)`，
 DLX/requeue 用 `sum by (domain)`，tick 用 `by (phase)`。scoped backlog gauges 对 adapter 返回或进程内已观测的
@@ -75,6 +81,8 @@ DLX/requeue 用 `sum by (domain)`，tick 用 `by (phase)`。scoped backlog gauge
 `consumer_dlx_skip_total` 不配置告警：它解释 app DLX 未写入的 fail-closed 分支。`consumer_dlx_write_total{outcome="error"}`
 是告警面：DLX 未落库时 consumer 会 release inbox claim；release 成功则 broker Requeue，release 失败则
 `consumer_release_failed_total{domain}` 增长并 broker Reject，必须由 degraded health + metric 共同暴露。
+`saga_dead_letters_total{outcome="written"}` 是人工介入面：补偿失败已进入统一 dead_letter 表；
+`outcome="write_error"` 是正确性告警面：journal Failed 行是 durable 审计兜底，但 dead_letter 未落库。
 `outbox_relay_envelope_validation_failure_total` 不单独配置告警：对应行会按 permanent failure 进入 outbox
 DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历史行缺 schema header、schemaVersion
 格式错误、schemaHash 格式错误等本地 envelope 问题；对应 dead_letter metadata 会带 `relayFailureReason`。
@@ -87,7 +95,8 @@ DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历
 2. **积压深度**：`sum by (domain) (outbox_pending_depth)` 折线 / 堆叠。
 3. **投递速率与处置分布**：`sum by (domain, status) (rate(outbox_publish_total[5m]))`（ack/requeue/reject 堆叠）。
 4. **DLX 速率**：`sum by (domain) (rate(outbox_dlx_total[5m]))`。
-5. **relay tick 耗时**：`histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))`（classic histogram 须 `sum by (..., le)` 包住 `rate(..._bucket)` 再 `histogram_quantile`）。
+5. **Saga DLX 速率**：`sum by (domain, contract_id, outcome) (rate(saga_dead_letters_total[5m]))`。
+6. **relay tick 耗时**：`histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))`（classic histogram 须 `sum by (..., le)` 包住 `rate(..._bucket)` 再 `histogram_quantile`）。
 
 ## 已知差距 / 范围说明
 

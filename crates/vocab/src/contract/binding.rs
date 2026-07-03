@@ -159,9 +159,97 @@ impl ProjectionInputBinding {
     }
 }
 
+/// Saga runtime policy spec generated from `[saga].retryMillis` / `[saga].timeoutMillis`.
+///
+/// This is the contract-facing representation only: raw millisecond values stay in `vocab` so
+/// generated contract glue can expose them without depending on runtime crates. Runtime validation
+/// and interpretation live at the `eventexec::saga::SagaPolicy` conversion boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaRuntimePolicySpec {
+    retry_millis: u64,
+    timeout_millis: u64,
+}
+
+impl SagaRuntimePolicySpec {
+    /// Construct a generated saga runtime policy spec from static manifest literals.
+    #[must_use]
+    pub const fn from_millis(retry_millis: u64, timeout_millis: u64) -> Self {
+        Self {
+            retry_millis,
+            timeout_millis,
+        }
+    }
+
+    /// Fixed retry delay in milliseconds. `0` means retry is disabled.
+    #[must_use]
+    pub const fn retry_millis(&self) -> u64 {
+        self.retry_millis
+    }
+
+    /// Total timeout budget for one saga step phase in milliseconds. `0` means timeout is disabled.
+    #[must_use]
+    pub const fn timeout_millis(&self) -> u64 {
+        self.timeout_millis
+    }
+}
+
+/// Saga contract binding generated from a saga `contract.toml`.
+///
+/// `contract` and `policy` are carried as one atom so runtime composition does not hand-author a
+/// contract id separately from the policy spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaContractBinding {
+    contract: ContractBinding,
+    policy: SagaRuntimePolicySpec,
+}
+
+impl SagaContractBinding {
+    /// Construct a generated saga binding from static manifest-derived parts.
+    #[must_use]
+    pub const fn from_parts(contract: ContractBinding, policy: SagaRuntimePolicySpec) -> Self {
+        Self { contract, policy }
+    }
+
+    /// Contract metadata binding.
+    #[must_use]
+    pub const fn contract(&self) -> ContractBinding {
+        self.contract
+    }
+
+    /// Runtime policy spec.
+    #[must_use]
+    pub const fn policy(&self) -> SagaRuntimePolicySpec {
+        self.policy
+    }
+
+    /// Saga contract id.
+    #[must_use]
+    pub const fn contract_id(&self) -> &'static str {
+        self.contract.contract_id()
+    }
+
+    /// Saga domain.
+    #[must_use]
+    pub const fn domain(&self) -> &'static str {
+        self.contract.domain()
+    }
+
+    /// Saga contract version.
+    #[must_use]
+    pub const fn version(&self) -> &'static str {
+        self.contract.version()
+    }
+
+    /// Saga schema bundle hash.
+    #[must_use]
+    pub const fn schema_hash(&self) -> &'static str {
+        self.contract.schema_hash()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ContractBinding;
+    use super::{ContractBinding, SagaContractBinding, SagaRuntimePolicySpec};
 
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -212,6 +300,32 @@ mod tests {
         const C: ContractBinding =
             ContractBinding::from_static("identity", "identity.session-created", "v1", HASH);
         assert_eq!(C.domain(), "identity");
+    }
+
+    #[test]
+    fn saga_runtime_policy_spec_exposes_millis_verbatim() {
+        let disabled = SagaRuntimePolicySpec::from_millis(0, 0);
+        assert_eq!(disabled.retry_millis(), 0);
+        assert_eq!(disabled.timeout_millis(), 0);
+
+        const BOUNDED: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_millis(5000, 30000);
+        assert_eq!(BOUNDED.retry_millis(), 5000);
+        assert_eq!(BOUNDED.timeout_millis(), 30000);
+    }
+
+    #[test]
+    fn saga_contract_binding_keeps_contract_and_policy_atomic() {
+        const CONTRACT: ContractBinding =
+            ContractBinding::from_static("billing", "billing.checkout", "v1", HASH);
+        const POLICY: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_millis(5000, 30000);
+        const BINDING: SagaContractBinding = SagaContractBinding::from_parts(CONTRACT, POLICY);
+
+        assert_eq!(BINDING.domain(), "billing");
+        assert_eq!(BINDING.contract_id(), "billing.checkout");
+        assert_eq!(BINDING.version(), "v1");
+        assert_eq!(BINDING.schema_hash(), HASH);
+        assert_eq!(BINDING.contract(), CONTRACT);
+        assert_eq!(BINDING.policy(), POLICY);
     }
 
     #[test]
