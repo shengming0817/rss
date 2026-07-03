@@ -2,7 +2,8 @@
 //!
 //! 对标 saga `advance_checkpoint`：apply + checkpoint CAS 分开两次 await，
 //! 靠 `Projector::apply` 幂等（同 lsn no-op）+ checkpoint CAS 保证 effectively-once。
-//! 源不注入（待投影事件批由 caller/durable wiring 经 `PgProjectionEvents::read_from` 拉取后入参，本 PR 外）。
+//! `projection_runner_once` / `projection_runner_loop` 把 durable `ProjectionEventSource` 接到 harness，
+//! worker 重启只依赖持久 checkpoint，不保存内存游标。
 //!
 //! ref: oxidecomputer/steno（saga 进度 checkpoint）+ docs/rules/eventbus.md §Projection。
 //!
@@ -13,23 +14,28 @@
 //!
 //! - **apply 失败**：fail-closed 停批；checkpoint 仅到失败前 high-water。
 //! - **Transient** 错误：建议 caller 限速重试，下轮从 checkpoint 续投（幂等重投 no-op）。
-//! - **Permanent / Invariant** 错误：写入统一 DLQ 后停在 poison lsn；不自动 skip，须人工介入。
+//! - **Permanent / Invariant** 错误：写入统一 DLQ 后停在 poison lsn；默认不自动 skip，须人工介入。
+//! - **SkipPermanentAfterDlx**：显式 policy 仅可在 `Permanent` DLQ 写成功后把 checkpoint 推过该 poison。
 //! - **OutOfOrder**：写入统一 DLQ 后停批，不把 checkpoint 推过乱序 poison lsn。
 //! - **checkpoint 读失败**：fail-closed（[`ProjectionStop::CheckpointUnread`]）——**不** apply 任何事件、
 //!   **不**降级为空 baseline 盲目重放；checkpoint 是恢复坐标，读失败让 caller 退避 / 报警 / 重试。
 //! - **checkpoint 写失败**：apply 已生效（[`ProjectionStop::CheckpointUnsaved`]），幂等可重跑、不丢数据。
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use consistency::{
-    EngineErrorKind, Lsn, ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata,
-    Projector, SerialInOrderGuarantor,
+    EngineErrorKind, Lsn, ProjectionBatchLimit, ProjectionDeadLetterReason, ProjectionEvent,
+    ProjectionEventMetadata, ProjectionEventSource, Projector, SerialInOrderGuarantor,
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, EnvelopeMetadata, MetadataError, OwnerCheckpointStore, SaveOutcome,
-    WritableDeadLetterSource,
+    DeadLetterSummary, EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY,
+    KEY_TENANT_ID, ManagedResource, OwnerCheckpointStore, SaveOutcome, WritableDeadLetterSource,
 };
+use tokio_util::sync::CancellationToken;
+
+use crate::relay::WorkerHealth;
 
 const SUMMARY_PROJECTION_APPLY_PERMANENT: DeadLetterSummary =
     DeadLetterSummary::new("projection apply permanent");
@@ -39,6 +45,91 @@ const SUMMARY_PROJECTION_OUT_OF_ORDER: DeadLetterSummary =
     DeadLetterSummary::new("projection out of order");
 const SUMMARY_PROJECTION_POISON: DeadLetterSummary = DeadLetterSummary::new("projection poison");
 
+/// readyz probe 名：projection worker（无 `_ready` 后缀，对齐其它后台 worker probe 命名）。
+pub const PROJECTION_WORKER_PROBE: &str = "projection_worker";
+
+const PROJECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const MIN_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_PROJECTION_POLL_INTERVAL: Duration = Duration::from_secs(300);
+
+// ── Runner 配置 ──────────────────────────────────────────────────────────────
+
+/// Projection poison 处理策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionPoisonPolicy {
+    /// 默认隔离：poison 写 DLQ 后停止当前 projection，不推进 checkpoint 越过 poison。
+    Isolate,
+    /// 仅对 `Permanent` apply error：DLQ 写成功后把 checkpoint 推进到 poison LSN。
+    SkipPermanentAfterDlx,
+}
+
+/// Projection runner 配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionRunnerConfig {
+    batch_limit: ProjectionBatchLimit,
+    poll_interval: Duration,
+    poison_policy: ProjectionPoisonPolicy,
+}
+
+impl ProjectionRunnerConfig {
+    /// 构造 projection runner 配置。`poll_interval` 在构造点拒绝 0 / 过大配置。
+    pub fn new(
+        batch_limit: ProjectionBatchLimit,
+        poll_interval: Duration,
+        poison_policy: ProjectionPoisonPolicy,
+    ) -> Result<Self, ProjectionRunnerConfigError> {
+        if poll_interval < MIN_PROJECTION_POLL_INTERVAL
+            || poll_interval > MAX_PROJECTION_POLL_INTERVAL
+        {
+            return Err(ProjectionRunnerConfigError::PollIntervalOutOfRange {
+                got: poll_interval,
+                min: MIN_PROJECTION_POLL_INTERVAL,
+                max: MAX_PROJECTION_POLL_INTERVAL,
+            });
+        }
+        Ok(Self {
+            batch_limit,
+            poll_interval,
+            poison_policy,
+        })
+    }
+
+    pub fn batch_limit(self) -> ProjectionBatchLimit {
+        self.batch_limit
+    }
+
+    pub fn poll_interval(self) -> Duration {
+        self.poll_interval
+    }
+
+    pub fn poison_policy(self) -> ProjectionPoisonPolicy {
+        self.poison_policy
+    }
+}
+
+impl Default for ProjectionRunnerConfig {
+    fn default() -> Self {
+        Self {
+            batch_limit: ProjectionBatchLimit::MAX,
+            poll_interval: Duration::from_secs(1),
+            poison_policy: ProjectionPoisonPolicy::Isolate,
+        }
+    }
+}
+
+/// Projection runner 配置错误。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProjectionRunnerConfigError {
+    /// poll 间隔越界。
+    #[error("projection poll_interval {got:?} out of range [{min:?}, {max:?}]")]
+    PollIntervalOutOfRange {
+        got: Duration,
+        min: Duration,
+        max: Duration,
+    },
+}
+
 // ── 公开结果类型 ──────────────────────────────────────────────────────────────
 
 /// 单次 [`ProjectionHarness::run`] 的执行结果。
@@ -46,7 +137,7 @@ const SUMMARY_PROJECTION_POISON: DeadLetterSummary = DeadLetterSummary::new("pro
 pub struct ProjectionRun {
     /// 本轮成功 apply 的事件数（不含已跳过 / 失败事件）。
     pub applied: usize,
-    /// 本轮跳过的事件数（lsn ≤ checkpoint baseline，已投过）。
+    /// 本轮跳过的事件数（lsn ≤ checkpoint baseline，或显式 poison skip）。
     pub skipped: usize,
     /// 本轮停止原因。
     pub stop: ProjectionStop,
@@ -90,6 +181,18 @@ pub enum ProjectionStop {
     DeadLetterUnsaved {
         /// DLQ 写失败对应的 poison lsn。
         failed_at: Lsn,
+    },
+    /// 显式 skip policy 已在 DLQ 写成功后把 checkpoint 推过 poison。
+    PoisonSkipped {
+        /// 被跳过的 poison lsn。
+        skipped_at: Lsn,
+        /// 被跳过的错误分类（当前只允许 `Permanent`）。
+        kind: EngineErrorKind,
+    },
+    /// projection event source 读取失败。
+    SourceReadFailed {
+        /// 事件源错误分类。
+        kind: EngineErrorKind,
     },
     /// checkpoint **读** infra 故障——**fail-closed，不 apply 任何事件**。
     ///
@@ -149,6 +252,15 @@ where
     /// 流程：读 baseline → apply 批次（跳过 lsn ≤ baseline）→ 整批一次 CAS 到 high_water。
     /// apply 与 checkpoint CAS **分开两次 await**，靠幂等 + CAS 保证 effectively-once（对标 saga）。
     pub async fn run<E: ProjectionEvent>(&self, events: &[E]) -> ProjectionRun {
+        self.run_with_poison_policy(events, ProjectionPoisonPolicy::Isolate)
+            .await
+    }
+
+    async fn run_with_poison_policy<E: ProjectionEvent>(
+        &self,
+        events: &[E],
+        poison_policy: ProjectionPoisonPolicy,
+    ) -> ProjectionRun {
         // checkpoint 读失败 → fail-closed：不 apply，返回 CheckpointUnread 让 caller 退避 / 重试。
         let Some((baseline, version)) = self.read_baseline().await else {
             return ProjectionRun {
@@ -157,27 +269,34 @@ where
                 stop: ProjectionStop::CheckpointUnread,
             };
         };
+        self.run_from_baseline(events, baseline, version, poison_policy)
+            .await
+    }
+
+    async fn run_from_baseline<E: ProjectionEvent>(
+        &self,
+        events: &[E],
+        baseline: Option<Lsn>,
+        version: CheckpointVersion,
+        poison_policy: ProjectionPoisonPolicy,
+    ) -> ProjectionRun {
         let progress = self.apply_batch(events, baseline).await;
-        let advance =
-            if progress.dead_letter_write_failed.is_some() || progress.out_of_order.is_some() {
-                Advance::NoChange
-            } else {
-                match progress.high_water {
-                    // 仅当 high_water 存在且 > baseline 时 CAS（有新进展才写 checkpoint）。
-                    Some(hw) if baseline != Some(hw) => self.advance_checkpoint(hw, version).await,
-                    // reason: 无新进展（空批 / 全跳过 / 首条即失败），不写 checkpoint（避免无效 CAS）。
-                    _ => Advance::NoChange,
-                }
-            };
+        let skipped_poison = skipped_poison(&progress.failure, poison_policy);
+        let advance = self
+            .advance_after_progress(&progress, baseline, version, skipped_poison)
+            .await;
+        let stop = stop_of(
+            advance,
+            progress.failure,
+            progress.out_of_order,
+            progress.dead_letter_write_failed,
+            skipped_poison,
+        );
         let result = ProjectionRun {
             applied: progress.applied,
-            skipped: progress.skipped,
-            stop: stop_of(
-                advance,
-                progress.failure,
-                progress.out_of_order,
-                progress.dead_letter_write_failed,
-            ),
+            skipped: progress.skipped
+                + usize::from(matches!(stop, ProjectionStop::PoisonSkipped { .. })),
+            stop,
         };
         // debug 级 run 完成摘要（生产默认关闭）。
         tracing::debug!(
@@ -189,6 +308,27 @@ where
             "projection run complete"
         );
         result
+    }
+
+    async fn advance_after_progress(
+        &self,
+        progress: &BatchProgress,
+        baseline: Option<Lsn>,
+        version: CheckpointVersion,
+        skipped_poison: Option<(Lsn, EngineErrorKind)>,
+    ) -> Advance {
+        if progress.dead_letter_write_failed.is_some() || progress.out_of_order.is_some() {
+            return Advance::NoChange;
+        }
+        if let Some((failed_at, _kind)) = skipped_poison {
+            return self.advance_checkpoint(failed_at, version).await;
+        }
+        match progress.high_water {
+            // 仅当 high_water 存在且 > baseline 时 CAS（有新进展才写 checkpoint）。
+            Some(hw) if baseline != Some(hw) => self.advance_checkpoint(hw, version).await,
+            // reason: 无新进展（空批 / 全跳过 / 首条即失败），不写 checkpoint（避免无效 CAS）。
+            _ => Advance::NoChange,
+        }
     }
 
     /// 读当前 checkpoint baseline。返回 `Some((baseline, version))` 进入 apply；`None` = 读 infra 故障，
@@ -372,6 +512,7 @@ where
 // ── 内部辅助类型（crate 私有）────────────────────────────────────────────────
 
 /// advance_checkpoint 结论（内部控制流；不出公开 API）。
+#[derive(Clone, Copy)]
 enum Advance {
     /// CAS 成功，checkpoint 已推进。
     Advanced,
@@ -404,6 +545,7 @@ fn stop_of(
     failure: Option<(Lsn, EngineErrorKind)>,
     out_of_order: Option<Lsn>,
     dead_letter_write_failed: Option<Lsn>,
+    skipped_poison: Option<(Lsn, EngineErrorKind)>,
 ) -> ProjectionStop {
     if let Some(failed_at) = dead_letter_write_failed {
         return ProjectionStop::DeadLetterUnsaved { failed_at };
@@ -412,12 +554,268 @@ fn stop_of(
         Advance::Fenced => ProjectionStop::Fenced,
         Advance::Unsaved => ProjectionStop::CheckpointUnsaved,
         // out_of_order 与 failure 互斥（apply_batch break 于首个命中）；乱序优先报 OutOfOrder。
-        Advance::Advanced | Advance::NoChange => match (out_of_order, failure) {
-            (Some(failed_at), _) => ProjectionStop::OutOfOrder { failed_at },
-            (None, Some((failed_at, kind))) => ProjectionStop::ApplyFailed { failed_at, kind },
-            (None, None) => ProjectionStop::Completed,
-        },
+        Advance::Advanced | Advance::NoChange => {
+            if let Some((skipped_at, kind)) = skipped_poison {
+                return ProjectionStop::PoisonSkipped { skipped_at, kind };
+            }
+            match (out_of_order, failure) {
+                (Some(failed_at), _) => ProjectionStop::OutOfOrder { failed_at },
+                (None, Some((failed_at, kind))) => ProjectionStop::ApplyFailed { failed_at, kind },
+                (None, None) => ProjectionStop::Completed,
+            }
+        }
     }
+}
+
+fn skipped_poison(
+    failure: &Option<(Lsn, EngineErrorKind)>,
+    policy: ProjectionPoisonPolicy,
+) -> Option<(Lsn, EngineErrorKind)> {
+    match (policy, failure) {
+        (
+            ProjectionPoisonPolicy::SkipPermanentAfterDlx,
+            Some((failed_at, EngineErrorKind::Permanent)),
+        ) => Some((*failed_at, EngineErrorKind::Permanent)),
+        _ => None,
+    }
+}
+
+// ── Projection runner / worker ───────────────────────────────────────────────
+
+/// 执行一轮 projection runner：读 checkpoint → 从 source 拉批次 → harness apply/checkpoint/DLX。
+pub async fn projection_runner_once<S, P, C, D>(
+    source: &S,
+    harness: &ProjectionHarness<P, C, D>,
+    config: ProjectionRunnerConfig,
+) -> ProjectionRun
+where
+    S: ProjectionEventSource,
+    P: Projector + Send + Sync + 'static,
+    C: OwnerCheckpointStore + Send + Sync + 'static,
+    D: DeadLetterStore + Send + Sync + 'static,
+{
+    let Some((baseline, version)) = harness.read_baseline().await else {
+        return ProjectionRun {
+            applied: 0,
+            skipped: 0,
+            stop: ProjectionStop::CheckpointUnread,
+        };
+    };
+    let batch_limit = config.batch_limit();
+    let after_lsn = baseline
+        .map(|lsn| lsn.get().to_string())
+        .unwrap_or_else(|| "source-start".to_string());
+    let events = match source.read_from(baseline, batch_limit).await {
+        Ok(events) => events,
+        Err(err) => {
+            let kind = err.kind();
+            tracing::error!(
+                owner = harness.owner.as_str(),
+                projection_id = harness.projection_id.as_str(),
+                after_lsn = after_lsn.as_str(),
+                batch_limit = batch_limit.get(),
+                kind = ?kind,
+                error = %err,
+                "projection: source read failed"
+            );
+            return ProjectionRun {
+                applied: 0,
+                skipped: 0,
+                stop: ProjectionStop::SourceReadFailed { kind },
+            };
+        }
+    };
+    harness
+        .run_from_baseline(&events, baseline, version, config.poison_policy())
+        .await
+}
+
+/// Projection runner tail loop。取消后在当前批次结束处收敛。
+pub async fn projection_runner_loop<S, P, C, D>(
+    source: S,
+    harness: ProjectionHarness<P, C, D>,
+    config: ProjectionRunnerConfig,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+) where
+    S: ProjectionEventSource,
+    P: Projector + Send + Sync + 'static,
+    C: OwnerCheckpointStore + Send + Sync + 'static,
+    D: DeadLetterStore + Send + Sync + 'static,
+{
+    let mut ticker = tokio::time::interval(config.poll_interval());
+    'outer: loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+        loop {
+            if token.is_cancelled() {
+                break 'outer;
+            }
+            let run = projection_runner_once(&source, &harness, config).await;
+            record_projection_health(&run, &health);
+            match projection_loop_action(&run, config.batch_limit()) {
+                ProjectionLoopAction::ContinueNow => continue,
+                ProjectionLoopAction::Wait => break,
+                ProjectionLoopAction::Stop => break 'outer,
+            }
+        }
+    }
+    health.mark_stopped();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionLoopAction {
+    ContinueNow,
+    Wait,
+    Stop,
+}
+
+fn projection_loop_action(
+    run: &ProjectionRun,
+    batch_limit: ProjectionBatchLimit,
+) -> ProjectionLoopAction {
+    match run.stop {
+        ProjectionStop::Completed => {
+            if run.applied + run.skipped >= batch_limit.get() as usize {
+                ProjectionLoopAction::ContinueNow
+            } else {
+                ProjectionLoopAction::Wait
+            }
+        }
+        ProjectionStop::PoisonSkipped { .. } => ProjectionLoopAction::ContinueNow,
+        ProjectionStop::ApplyFailed {
+            kind: EngineErrorKind::Transient,
+            ..
+        }
+        | ProjectionStop::CheckpointUnread
+        | ProjectionStop::CheckpointUnsaved
+        | ProjectionStop::DeadLetterUnsaved { .. }
+        | ProjectionStop::SourceReadFailed {
+            kind: EngineErrorKind::Transient,
+        } => ProjectionLoopAction::Wait,
+        _ => ProjectionLoopAction::Stop,
+    }
+}
+
+fn record_projection_health(run: &ProjectionRun, health: &WorkerHealth) {
+    match run.stop {
+        ProjectionStop::Completed => health.mark_healthy(),
+        _ => health.mark_degraded(),
+    }
+}
+
+/// 受监督的 projection worker（专用 OS 线程 + current-thread runtime）。
+pub struct ProjectionWorker {
+    name: String,
+    inner: Mutex<Option<std::thread::JoinHandle<()>>>,
+    health: Arc<WorkerHealth>,
+    token: CancellationToken,
+}
+
+impl ProjectionWorker {
+    fn adopt(
+        name: String,
+        handle: std::thread::JoinHandle<()>,
+        health: Arc<WorkerHealth>,
+        token: CancellationToken,
+    ) -> Self {
+        Self {
+            name,
+            inner: Mutex::new(Some(handle)),
+            health,
+            token,
+        }
+    }
+
+    pub fn health(&self) -> Arc<WorkerHealth> {
+        self.health.clone()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("projection worker thread panicked")]
+struct ProjectionThreadPanicked;
+
+#[allow(unknown_lints, rss_diport_impl_allowlist)]
+// reason(rss_diport_impl_allowlist): projection 后台 worker 归 eventexec 服务层并 impl
+// `ManagedResource`，同 ConsumerWorker / RelayWorker 范式。
+impl ManagedResource for ProjectionWorker {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown_timeout(&self) -> Duration {
+        PROJECTION_SHUTDOWN_TIMEOUT
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        self.token.cancel();
+        let handle = self.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(handle) = handle else {
+            return Ok(());
+        };
+        match tokio::task::spawn_blocking(move || handle.join()).await {
+            Err(join_err) => Err(diport::ShutdownError::new(join_err)),
+            Ok(Err(_panic)) => Err(diport::ShutdownError::new(ProjectionThreadPanicked)),
+            Ok(Ok(())) => Ok(()),
+        }
+    }
+}
+
+fn spawn_projection_thread<Fut, M>(
+    worker_name: &str,
+    health: Arc<WorkerHealth>,
+    make_body: M,
+) -> std::thread::JoinHandle<()>
+where
+    M: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let worker_name = worker_name.to_string();
+    std::thread::spawn(move || {
+        let _stopped = health.stopped_on_exit();
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(
+                    worker = worker_name,
+                    error = %e,
+                    "projection: worker runtime build failed; worker unhealthy"
+                );
+                return;
+            }
+        };
+        rt.block_on(make_body());
+    })
+}
+
+/// Spawn a supervised projection worker.
+pub fn spawn_projection_worker<S, P, C, D>(
+    name: String,
+    source: S,
+    harness: ProjectionHarness<P, C, D>,
+    config: ProjectionRunnerConfig,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+) -> ProjectionWorker
+where
+    S: ProjectionEventSource + Send + 'static,
+    P: Projector + Send + Sync + 'static,
+    C: OwnerCheckpointStore + Send + Sync + 'static,
+    D: DeadLetterStore + Send + Sync + 'static,
+{
+    let token_run = token.clone();
+    let health_run = Arc::clone(&health);
+    let handle = spawn_projection_thread(&name, Arc::clone(&health), move || async move {
+        projection_runner_loop(source, harness, config, token_run, health_run).await;
+    });
+    ProjectionWorker::adopt(name, handle, health, token)
 }
 
 fn projection_dead_letter_message_id(
@@ -446,11 +844,17 @@ fn projection_dead_letter_metadata(metadata: &ProjectionEventMetadata) -> Envelo
     let mut out = EnvelopeMetadata::empty();
     if let serde_json::Value::Object(map) = metadata.metadata_json() {
         for (key, value) in map {
+            if key == KEY_TENANT_AUTHORITY {
+                continue;
+            }
             if let Some(value) = projection_metadata_value(value) {
                 insert_projection_dead_letter_metadata(&mut out, key.as_str(), value);
             }
         }
     }
+    out.insert_wire_pair(KEY_TENANT_ID, metadata.tenant().to_string());
+    out.insert_wire_pair(KEY_SCHEMA_VERSION, metadata.contract_version());
+    out.insert_wire_pair(KEY_SCHEMA_HASH, metadata.schema_hash());
     if let Some(partition_key) = metadata.partition_key() {
         insert_projection_dead_letter_metadata(&mut out, "partitionKey", partition_key.to_string());
     }
@@ -465,9 +869,7 @@ fn insert_projection_dead_letter_metadata(
     key: impl Into<String>,
     value: impl Into<String>,
 ) {
-    match metadata.try_insert(key, value) {
-        Ok(()) | Err(MetadataError::ReservedKey) => {}
-    }
+    metadata.insert_wire_pair(key, value);
 }
 
 fn projection_metadata_value(value: &serde_json::Value) -> Option<String> {
@@ -485,19 +887,28 @@ fn projection_metadata_value(value: &serde_json::Value) -> Option<String> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use std::time::Duration;
+
     use consistency::outbox::Topic;
     use consistency::{
-        EngineError, EngineErrorKind, Lsn, ProjectionEvent, ProjectionEventMetadata, Projector,
+        EngineError, EngineErrorKind, Lsn, ProjectionBatchLimit, ProjectionEvent,
+        ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource, Projector,
     };
     use diport::{
         Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-        DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterStoreError,
-        OwnerCheckpointStore, SaveOutcome,
+        DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterStoreError, KEY_SCHEMA_HASH,
+        KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, OwnerCheckpointStore, SaveOutcome,
     };
+    use primitives::healthz::HealthStatus;
 
+    use crate::relay::WorkerHealth;
     use consistency::PartitionSerialDelivery;
 
-    use super::{ProjectionHarness, ProjectionRun, ProjectionStop};
+    use super::{
+        ProjectionHarness, ProjectionLoopAction, ProjectionPoisonPolicy, ProjectionRun,
+        ProjectionRunnerConfig, ProjectionStop, projection_loop_action, projection_runner_once,
+        record_projection_health,
+    };
 
     type HarnessParts = (
         ProjectionHarness<RecordingProjector, FakeCheckpointStore, FakeDeadLetterStore>,
@@ -563,6 +974,83 @@ mod tests {
     /// 构造 seq 号批次 `start..=end`。
     fn evs(start: u64, end: u64) -> Vec<FakeEvent> {
         (start..=end).map(ev).collect()
+    }
+
+    #[allow(clippy::expect_used)]
+    fn projection_record(seq: u64) -> ProjectionEventRecord {
+        ProjectionEventRecord::with_metadata(
+            Lsn::new(seq),
+            Topic::parse("proj.test").expect("proj.test is valid topic"),
+            vec![],
+            projection_metadata(),
+        )
+    }
+
+    fn projection_records(start: u64, end: u64) -> Vec<ProjectionEventRecord> {
+        (start..=end).map(projection_record).collect()
+    }
+
+    struct FakeProjectionSource {
+        events: Vec<ProjectionEventRecord>,
+        calls: Mutex<Vec<(Option<u64>, u32)>>,
+        fail_kind: Option<EngineErrorKind>,
+    }
+
+    impl FakeProjectionSource {
+        fn new(events: Vec<ProjectionEventRecord>) -> Self {
+            Self {
+                events,
+                calls: Mutex::new(vec![]),
+                fail_kind: None,
+            }
+        }
+
+        fn fail(kind: EngineErrorKind) -> Self {
+            Self {
+                events: vec![],
+                calls: Mutex::new(vec![]),
+                fail_kind: Some(kind),
+            }
+        }
+
+        fn read_calls(&self) -> Vec<(Option<u64>, u32)> {
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl PartitionSerialDelivery for FakeProjectionSource {}
+
+    impl ProjectionEventSource for FakeProjectionSource {
+        async fn read_from(
+            &self,
+            after: Option<Lsn>,
+            limit: ProjectionBatchLimit,
+        ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((after.map(|lsn| lsn.get()), limit.get()));
+            if let Some(kind) = self.fail_kind {
+                return Err(EngineError::new(kind));
+            }
+            Ok(self
+                .events
+                .iter()
+                .filter(|event| after.is_none_or(|after| event.lsn() > after))
+                .take(limit.get() as usize)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn runner_config(policy: ProjectionPoisonPolicy) -> ProjectionRunnerConfig {
+        ProjectionRunnerConfig::new(
+            ProjectionBatchLimit::MAX,
+            Duration::from_millis(100),
+            policy,
+        )
+        .expect("valid runner config")
     }
 
     // ── RecordingProjector ────────────────────────────────────────────────────
@@ -1113,7 +1601,7 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     // reason: tracing capture test uses Mutex/runtime construction as test assertions.
-    fn checkpoint_infra_errors_log_redacted_error_field() {
+    fn projection_infra_errors_log_redacted_error_field() {
         use std::collections::HashMap;
         use tracing::field::{Field, Visit};
         use tracing::subscriber::Interest;
@@ -1190,9 +1678,17 @@ mod tests {
                     harness(RecordingProjector::new(), FakeCheckpointStore::fail_get());
                 let _ = read_harness.run(&evs(1, 1)).await;
 
-                let (save_harness, _p, _c, _d) =
-                    harness(RecordingProjector::new(), FakeCheckpointStore::fail_save());
-                let _ = save_harness.run(&evs(1, 1)).await;
+                let source = FakeProjectionSource::fail(EngineErrorKind::Transient);
+                let (source_harness, _p, _c, _d) = harness(
+                    RecordingProjector::new(),
+                    FakeCheckpointStore::preset(Lsn::new(10), CheckpointVersion::new(1)),
+                );
+                let _ = projection_runner_once(
+                    &source,
+                    &source_harness,
+                    runner_config(ProjectionPoisonPolicy::Isolate),
+                )
+                .await;
             });
         });
 
@@ -1202,22 +1698,45 @@ mod tests {
             .filter_map(|event| event.get("error").map(String::as_str))
             .collect();
 
-        assert_eq!(
-            error_fields.len(),
-            2,
-            "read and save checkpoint infra errors must both log an error field: {events:?}"
-        );
         assert!(
             error_fields
                 .iter()
-                .all(|value| value.contains("checkpoint store operation failed")),
-            "checkpoint logs must preserve safe error summary: {error_fields:?}"
+                .any(|value| value.contains("transient engine error")),
+            "source read log must preserve safe engine error summary: {error_fields:?}"
         );
         assert!(
             error_fields
                 .iter()
                 .all(|value| !value.contains("fake store")),
             "checkpoint logs must not expose redacted inner source: {error_fields:?}"
+        );
+        let source_event = events.iter().find(|event| {
+            event
+                .get("message")
+                .is_some_and(|value| value.contains("projection: source read failed"))
+        });
+        assert!(
+            source_event.is_some(),
+            "must capture source read failure log: {events:?}"
+        );
+        let source_event = source_event.unwrap();
+        assert!(
+            source_event
+                .get("kind")
+                .is_some_and(|value| value.contains("Transient")),
+            "source read log must include closed error kind field: {events:?}"
+        );
+        assert!(
+            source_event
+                .get("after_lsn")
+                .is_some_and(|value| value == "10"),
+            "source read log must include checkpoint cursor: {events:?}"
+        );
+        assert!(
+            source_event
+                .get("batch_limit")
+                .is_some_and(|value| { value == &ProjectionBatchLimit::MAX.get().to_string() }),
+            "source read log must include batch limit: {events:?}"
         );
     }
 
@@ -1294,5 +1813,304 @@ mod tests {
         let ok = h2.run(&evs(1, 4)).await;
         assert_eq!(ok.stop, ProjectionStop::Completed, "升序批正常完成");
         assert_eq!(p2.applied_lsns(), vec![1u64, 2, 3, 4]);
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn runner_reads_from_checkpoint_offset_and_commits_high_water() {
+        let source = FakeProjectionSource::new(projection_records(1, 100));
+        let (h, p, c, _d) = harness(
+            RecordingProjector::new(),
+            FakeCheckpointStore::preset(Lsn::new(50), CheckpointVersion::new(1)),
+        );
+
+        let result =
+            projection_runner_once(&source, &h, runner_config(ProjectionPoisonPolicy::Isolate))
+                .await;
+
+        assert_eq!(
+            source.read_calls(),
+            vec![(Some(50), ProjectionBatchLimit::MAX.get())]
+        );
+        assert_eq!(result.applied, 50);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(result.stop, ProjectionStop::Completed);
+        assert_eq!(p.applied_lsns(), (51u64..=100).collect::<Vec<_>>());
+        let ckpt = c.current().expect("checkpoint should be updated");
+        assert_eq!(ckpt.offset, Lsn::new(100));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn runner_empty_batch_does_not_write_checkpoint() {
+        let source = FakeProjectionSource::new(vec![]);
+        let (h, _p, c, _d) = harness(
+            RecordingProjector::new(),
+            FakeCheckpointStore::preset(Lsn::new(10), CheckpointVersion::new(3)),
+        );
+
+        let result =
+            projection_runner_once(&source, &h, runner_config(ProjectionPoisonPolicy::Isolate))
+                .await;
+
+        assert_eq!(
+            source.read_calls(),
+            vec![(Some(10), ProjectionBatchLimit::MAX.get())]
+        );
+        assert_eq!(result.stop, ProjectionStop::Completed);
+        let ckpt = c.current().expect("checkpoint should remain unchanged");
+        assert_eq!(ckpt.offset, Lsn::new(10));
+        assert_eq!(ckpt.version, CheckpointVersion::new(3));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn runner_empty_checkpoint_reads_from_source_start_including_lsn_zero() {
+        let source = FakeProjectionSource::new(projection_records(0, 2));
+        let (h, p, c, _d) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+
+        let result =
+            projection_runner_once(&source, &h, runner_config(ProjectionPoisonPolicy::Isolate))
+                .await;
+
+        assert_eq!(
+            source.read_calls(),
+            vec![(None, ProjectionBatchLimit::MAX.get())]
+        );
+        assert_eq!(result.stop, ProjectionStop::Completed);
+        assert_eq!(result.applied, 3);
+        assert_eq!(p.applied_lsns(), vec![0u64, 1, 2]);
+        let ckpt = c.current().expect("checkpoint should advance");
+        assert_eq!(ckpt.offset, Lsn::new(2));
+    }
+
+    #[tokio::test]
+    async fn source_read_transient_waits_without_checkpoint_advance() {
+        let source = FakeProjectionSource::fail(EngineErrorKind::Transient);
+        let (h, p, c, _d) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+
+        let result =
+            projection_runner_once(&source, &h, runner_config(ProjectionPoisonPolicy::Isolate))
+                .await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::SourceReadFailed {
+                kind: EngineErrorKind::Transient
+            }
+        );
+        assert_eq!(
+            projection_loop_action(&result, ProjectionBatchLimit::MAX),
+            ProjectionLoopAction::Wait
+        );
+        assert_eq!(result.applied, 0);
+        assert_eq!(result.skipped, 0);
+        assert!(p.applied_lsns().is_empty());
+        assert!(c.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn source_read_permanent_or_invariant_stops() {
+        for kind in [EngineErrorKind::Permanent, EngineErrorKind::Invariant] {
+            let source = FakeProjectionSource::fail(kind);
+            let (h, _p, _c, _d) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+
+            let result =
+                projection_runner_once(&source, &h, runner_config(ProjectionPoisonPolicy::Isolate))
+                    .await;
+
+            assert_eq!(result.stop, ProjectionStop::SourceReadFailed { kind });
+            assert_eq!(
+                projection_loop_action(&result, ProjectionBatchLimit::MAX),
+                ProjectionLoopAction::Stop
+            );
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn skip_policy_advances_permanent_poison_after_dlx() {
+        let source = FakeProjectionSource::new(projection_records(1, 5));
+        let (h, p, c, d) = harness(
+            RecordingProjector::failing_at(3, EngineErrorKind::Permanent),
+            FakeCheckpointStore::empty(),
+        );
+
+        let result = projection_runner_once(
+            &source,
+            &h,
+            runner_config(ProjectionPoisonPolicy::SkipPermanentAfterDlx),
+        )
+        .await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::PoisonSkipped {
+                skipped_at: Lsn::new(3),
+                kind: EngineErrorKind::Permanent,
+            }
+        );
+        assert_eq!(result.applied, 2);
+        assert_eq!(result.skipped, 1);
+        let ckpt = c.current().expect("poison skip should commit checkpoint");
+        assert_eq!(ckpt.offset, Lsn::new(3));
+        assert_eq!(d.records().len(), 1);
+        assert_projection_dlx(&d.records()[0], 3, "projection apply permanent");
+        let health = WorkerHealth::healthy();
+        record_projection_health(&result, &health);
+        assert_eq!(
+            health.status(),
+            HealthStatus::Degraded,
+            "skipping a poison event must surface degraded worker health"
+        );
+
+        let next = projection_runner_once(
+            &source,
+            &h,
+            runner_config(ProjectionPoisonPolicy::SkipPermanentAfterDlx),
+        )
+        .await;
+        assert_eq!(next.stop, ProjectionStop::Completed);
+        assert_eq!(p.applied_lsns(), vec![1u64, 2, 4, 5]);
+        let ckpt = c
+            .current()
+            .expect("checkpoint should advance past later events");
+        assert_eq!(ckpt.offset, Lsn::new(5));
+    }
+
+    #[tokio::test]
+    async fn skip_policy_does_not_skip_invariant() {
+        let source = FakeProjectionSource::new(projection_records(1, 5));
+        let (h, _p, c, d) = harness(
+            RecordingProjector::failing_at(3, EngineErrorKind::Invariant),
+            FakeCheckpointStore::empty(),
+        );
+
+        let result = projection_runner_once(
+            &source,
+            &h,
+            runner_config(ProjectionPoisonPolicy::SkipPermanentAfterDlx),
+        )
+        .await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::ApplyFailed {
+                failed_at: Lsn::new(3),
+                kind: EngineErrorKind::Invariant,
+            }
+        );
+        assert_eq!(c.current().map(|cp| cp.offset), Some(Lsn::new(2)));
+        assert_eq!(d.records().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn skip_policy_does_not_skip_out_of_order() {
+        let source = FakeProjectionSource::new(vec![
+            projection_record(1),
+            projection_record(2),
+            projection_record(5),
+            projection_record(3),
+        ]);
+        let (h, _p, c, d) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+
+        let result = projection_runner_once(
+            &source,
+            &h,
+            runner_config(ProjectionPoisonPolicy::SkipPermanentAfterDlx),
+        )
+        .await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::OutOfOrder {
+                failed_at: Lsn::new(3)
+            }
+        );
+        assert!(c.current().is_none());
+        assert_eq!(d.records().len(), 1);
+    }
+
+    #[allow(clippy::expect_used)]
+    #[tokio::test]
+    async fn projection_dlx_preserves_reserved_envelope_headers_without_tenant_authority() {
+        let tenant_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        let schema_hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        let event = ProjectionEventRecord::with_metadata(
+            Lsn::new(7),
+            Topic::parse("inventory.projected").expect("valid topic"),
+            b"payload".to_vec(),
+            ProjectionEventMetadata::new(
+                vocab::TenantId::parse(tenant_id).expect("canonical tenant"),
+                "event-reserved",
+                "inventory",
+                "contract-projection",
+                "v2",
+                schema_hash,
+                serde_json::json!({
+                    KEY_TENANT_ID: tenant_id,
+                    KEY_SCHEMA_VERSION: "v2",
+                    KEY_SCHEMA_HASH: schema_hash,
+                    KEY_TENANT_AUTHORITY: "SECRET_AUTHORITY",
+                    "customerTier": "gold"
+                }),
+                Some("inventory:sku-1".to_string()),
+                Some("cause-1".to_string()),
+            ),
+        );
+        let (h, _p, _c, d) = harness(
+            RecordingProjector::failing_at(7, EngineErrorKind::Permanent),
+            FakeCheckpointStore::empty(),
+        );
+
+        let result = h.run(&[event]).await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::ApplyFailed {
+                failed_at: Lsn::new(7),
+                kind: EngineErrorKind::Permanent
+            }
+        );
+        let record = d
+            .records()
+            .pop()
+            .expect("permanent projection error should write DLQ");
+        let metadata = record.metadata();
+        assert_eq!(metadata.get(KEY_TENANT_ID), Some(tenant_id));
+        assert_eq!(metadata.get(KEY_SCHEMA_VERSION), Some("v2"));
+        assert_eq!(metadata.get(KEY_SCHEMA_HASH), Some(schema_hash));
+        assert_eq!(metadata.get("customerTier"), Some("gold"));
+        assert_eq!(metadata.get("partitionKey"), Some("inventory:sku-1"));
+        assert_eq!(metadata.get("causationId"), Some("cause-1"));
+        assert!(
+            metadata.get(KEY_TENANT_AUTHORITY).is_none(),
+            "tenantAuthority must not be propagated to projection DLQ metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_policy_dlx_write_failure_keeps_poison_unskipped() {
+        let source = FakeProjectionSource::new(projection_records(1, 5));
+        let (h, _p, c, _d) = harness_with_dlx(
+            RecordingProjector::failing_at(3, EngineErrorKind::Permanent),
+            FakeCheckpointStore::empty(),
+            FakeDeadLetterStore::fail_write(),
+        );
+
+        let result = projection_runner_once(
+            &source,
+            &h,
+            runner_config(ProjectionPoisonPolicy::SkipPermanentAfterDlx),
+        )
+        .await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::DeadLetterUnsaved {
+                failed_at: Lsn::new(3)
+            }
+        );
+        assert!(c.current().is_none());
     }
 }

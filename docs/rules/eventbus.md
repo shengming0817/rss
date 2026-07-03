@@ -415,9 +415,14 @@ outbox 派生投影的 durable journal（`projection_events`）只由 outbox wri
 写权限；append 函数还要求参数与同事务可见 outbox row 完全匹配，且该 row 命中 DB registry，防止直接 SQL
 绕过 Rust funnel 凭空写 projection journal。append 函数持 xact advisory lock 后插入，使 projection LSN identity 顺序跟随已提交 projection append 顺序。
 0040 migration 是 pre-GA breaking cut：旧 `projection_events` 非空即 fail-fast，不 backfill、不保留裸 append shim。
-Projection harness 对 `Permanent` / `Invariant` / `OutOfOrder` 写 projection DLQ 后停当前 projection，不自动 skip；
-`Transient` 不写 DLQ；DLQ 写失败不推进 checkpoint。`PgCheckpointStore::save_checkpoint` 在 SQL update 路径拒绝
-offset regression。
+`ProjectionEventSource::read_from(None, limit)` 表示从 source 起点读取；runner 不用 `Lsn(0)` 兼作起点前哨兵。
+Postgres `projection_events` 的 identity 实际从 1 开始，`PgProjectionEvents` 内部才把 `None` 映射为 DB 固定函数的
+exclusive `after=0`。
+Projection harness 默认对 `Permanent` / `Invariant` / `OutOfOrder` 写 projection DLQ 后停当前 projection，不自动
+skip；`Transient` 不写 DLQ；DLQ 写失败不推进 checkpoint。projection runner 仅在显式
+`ProjectionPoisonPolicy::SkipPermanentAfterDlx` 下允许跳过 `Permanent` poison，且必须先写入 projection DLQ
+成功，再用 checkpoint CAS 推进到该 poison LSN；`Invariant` / `OutOfOrder` 不允许 runner 自动 skip。
+`PgCheckpointStore::save_checkpoint` 在 SQL update 路径拒绝 offset regression。
 append-only 主守卫是 serving role 的 DB 引擎权限与固定函数面（Hard、不可绕）；
 code-level `DELETE`/`TRUNCATE projection_events` 字面量与固定函数 direct callsite 另由 verify guard
 （Medium，含 anti-vacuity + RED/GREEN fixture）守。

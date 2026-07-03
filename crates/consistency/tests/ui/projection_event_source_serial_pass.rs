@@ -12,7 +12,7 @@ impl PartitionSerialDelivery for SerialSource {}
 impl ProjectionEventSource for SerialSource {
     async fn read_from(
         &self,
-        _after: Lsn,
+        _after: Option<Lsn>,
         _limit: ProjectionBatchLimit,
     ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
         Ok(Vec::new())

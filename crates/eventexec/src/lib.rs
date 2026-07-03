@@ -58,7 +58,11 @@ pub use reconcile::{
 };
 
 pub mod projection;
-pub use projection::{ProjectionHarness, ProjectionRun, ProjectionStop};
+pub use projection::{
+    PROJECTION_WORKER_PROBE, ProjectionHarness, ProjectionPoisonPolicy, ProjectionRun,
+    ProjectionRunnerConfig, ProjectionRunnerConfigError, ProjectionStop, ProjectionWorker,
+    projection_runner_loop, projection_runner_once, spawn_projection_worker,
+};
 
 pub mod saga;
 pub use saga::{

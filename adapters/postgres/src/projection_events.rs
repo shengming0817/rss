@@ -256,11 +256,17 @@ impl PgProjectionEvents {
     /// （内存 + 延迟权衡）。
     pub async fn read_from(
         &self,
-        after: Lsn,
+        after: Option<Lsn>,
         limit: ProjectionBatchLimit,
     ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
-        let after_i64 =
-            i64::try_from(after.get()).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+        // projection_events.id 是 BIGSERIAL/IDENTITY 1-based；`None` 表示从起点读，映射到 DB
+        // 函数的 exclusive `after=0`。
+        let after_i64 = after
+            .map(|lsn| lsn.get())
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?
+            .unwrap_or(0);
         let limit_i64 = i64::from(limit.get());
 
         let rows: Vec<ProjectionEventRow> = sqlx::query_as(
@@ -348,7 +354,7 @@ impl PartitionSerialDelivery for PgProjectionEvents {}
 impl ProjectionEventSource for PgProjectionEvents {
     async fn read_from(
         &self,
-        after: Lsn,
+        after: Option<Lsn>,
         limit: ProjectionBatchLimit,
     ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
         PgProjectionEvents::read_from(self, after, limit).await

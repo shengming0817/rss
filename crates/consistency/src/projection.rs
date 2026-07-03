@@ -468,10 +468,14 @@ pub trait PartitionSerialDelivery {}
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费；这是 ADR-003 既定范式，禁 dynosaur/Box<dyn>。
 pub trait ProjectionEventSource: PartitionSerialDelivery {
-    /// 读 `after` 之后至多 `limit` 条投影事件；返回必须按全局 LSN 升序排列。
+    /// 读 `after` 之后至多 `limit` 条投影事件；`None` 表示从事件源起点读取。
+    ///
+    /// 返回必须按全局 LSN 升序排列。调用方不得用具体 LSN 值兼作“起点前”哨兵：`Lsn(0)`
+    /// 对内存/测试 source 仍是合法事件坐标，持久化 adapter 若天然 1-based 可在实现内把 `None`
+    /// 映射为自身的起点前游标。
     async fn read_from(
         &self,
-        after: Lsn,
+        after: Option<Lsn>,
         limit: ProjectionBatchLimit,
     ) -> Result<Vec<ProjectionEventRecord>, EngineError>;
 }
