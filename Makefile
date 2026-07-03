@@ -25,20 +25,22 @@
 
 .PHONY: verify verify-fast ci audit integration docker-build docker-smoke
 
+RSS_CARGO ?= ./hack/cargo.sh
+
 verify:
-	cargo xtask verify
+	$(RSS_CARGO) xtask verify
 
 verify-fast:
-	cargo xtask verify --fast
+	$(RSS_CARGO) xtask verify --fast
 
 ci:
-	cargo xtask ci
+	$(RSS_CARGO) xtask ci
 
 audit:
-	cargo xtask audit
+	$(RSS_CARGO) xtask audit
 
 integration:
-	cargo xtask integration
+	$(RSS_CARGO) xtask integration
 
 docker-build:
 	docker build -t rss-server:dev .

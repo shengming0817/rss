@@ -24,6 +24,7 @@ rust-project.json
 Thumbs.db
 
 # Temporary
+/.cache/
 /.claude/tools/
 tmp/
 *.tmp
