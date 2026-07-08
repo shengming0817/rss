@@ -11544,12 +11544,12 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
 
 use identity::ports::{
     AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Operator,
-    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyObligations,
-    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, Role, RoleBinding,
-    RoleBindingLifecycle, RolePage, RoleRepo,
+    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyLifecycle,
+    PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, Role,
+    RoleBinding, RoleBindingLifecycle, RolePage, RoleRepo,
 };
 
-use crate::{PgPolicyRepo, PgRoleBindingLifecycle, PgRoleRepo};
+use crate::{PgPolicyLifecycle, PgPolicyRepo, PgRoleBindingLifecycle, PgRoleRepo};
 
 const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -11560,6 +11560,13 @@ fn role_tenant(raw: &str) -> Result<TenantId, Box<dyn std::error::Error + Send +
 
 const POLICY_CONTRACT_ID: &str = "identity.roles";
 const POLICY_PERMISSION: &str = "identity:role:read";
+const POLICY_UPDATED_TOPIC: &str = "identity.policy-updated";
+const POLICY_UPDATED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
+    "identity",
+    "identity.policy-updated",
+    "v1",
+    "sha256:47b84018a53fa99bd8674f8b3344b11da69a9964e569b57de821483c8b2d0de2",
+);
 
 fn policy_time(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -11641,6 +11648,152 @@ fn principal_kind_rule_json(operator_json: &str) -> String {
     format!(
         r#"{{"rules":[{{"condition":{{"attribute":"{POLICY_ATTR_PRINCIPAL_KIND}","operator":{operator_json}}},"effect":"allow"}}]}}"#
     )
+}
+
+fn policy_lifecycle_event(
+    tenant: TenantId,
+    policy_id: &str,
+    change_kind: &'static str,
+    version: PolicyVersion,
+) -> Result<(Entry, diport::OutboxEnvelopeParts), IdentityError> {
+    policy_lifecycle_event_with_id(
+        tenant,
+        policy_id,
+        change_kind,
+        version,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+fn policy_lifecycle_event_with_id(
+    tenant: TenantId,
+    policy_id: &str,
+    change_kind: &'static str,
+    version: PolicyVersion,
+    event_id: &str,
+) -> Result<(Entry, diport::OutboxEnvelopeParts), IdentityError> {
+    let actor = uuid::Uuid::from_u128(0xA11CE);
+    let payload = serde_json::json!({
+        "policyId": policy_id,
+        "changeKind": change_kind,
+        "version": version.get(),
+        "contractId": POLICY_CONTRACT_ID,
+        "permission": POLICY_PERMISSION,
+        "updatedBy": actor,
+        "actorKind": "admin",
+        "tenantId": tenant.to_string(),
+        "occurredAt": expected_occurred_at(),
+    });
+    let payload = serde_json::to_vec(&payload).map_err(|e| IdentityError::Storage(Box::new(e)))?;
+    let entry = Entry::new(
+        Topic::parse(POLICY_UPDATED_TOPIC).map_err(|_| IdentityError::InvalidPolicy)?,
+        IdemKey::parse(event_id).map_err(|_| IdentityError::InvalidPolicy)?,
+        OutboxPayload::from_reviewed_event_bytes(payload),
+    );
+    let actor_subject = actor.hyphenated().to_string();
+    let envelope = diport::OutboxEnvelopeParts::new(
+        POLICY_UPDATED_CONTRACT,
+        tenant,
+        diport::EnvelopeSubjectId::from_opaque(actor_subject.clone())
+            .map_err(|_| IdentityError::InvalidPolicy)?,
+        diport::OutboxActor::scoped(
+            vocab::PrincipalKind::Admin,
+            diport::OpaqueActorId::from_opaque(actor_subject)
+                .map_err(|_| IdentityError::InvalidPolicy)?,
+            tenant,
+            vocab::ScopedTenant::Tenant,
+        ),
+    );
+    Ok((entry, envelope))
+}
+
+async fn policy_create_and_emit(
+    lifecycle: &PgPolicyLifecycle,
+    tenant: TenantId,
+    policy: Policy,
+) -> Result<Policy, IdentityError> {
+    let (entry, envelope) =
+        policy_lifecycle_event(tenant, policy.id().as_str(), "created", policy.version())?;
+    lifecycle
+        .create_and_emit(tenant, policy, entry, envelope)
+        .await
+}
+
+async fn policy_update_and_emit(
+    lifecycle: &PgPolicyLifecycle,
+    tenant: TenantId,
+    policy: Policy,
+    expected: PolicyVersion,
+) -> Result<Policy, IdentityError> {
+    let (entry, envelope) = policy_lifecycle_event(
+        tenant,
+        policy.id().as_str(),
+        "updated",
+        expected.next_checked()?,
+    )?;
+    lifecycle
+        .update_and_emit(tenant, policy, expected, entry, envelope)
+        .await
+}
+
+async fn policy_deactivate_and_emit(
+    lifecycle: &PgPolicyLifecycle,
+    tenant: TenantId,
+    id: PolicyId,
+    expected: PolicyVersion,
+) -> Result<bool, IdentityError> {
+    let (entry, envelope) =
+        policy_lifecycle_event(tenant, id.as_str(), "deactivated", expected.next_checked()?)?;
+    lifecycle
+        .deactivate_and_emit(tenant, id, expected, entry, envelope)
+        .await
+}
+
+async fn policy_update_and_emit_event(
+    lifecycle: &PgPolicyLifecycle,
+    tenant: TenantId,
+    policy: Policy,
+    expected: PolicyVersion,
+    event_id: &str,
+) -> Result<Policy, IdentityError> {
+    let (entry, envelope) = policy_lifecycle_event_with_id(
+        tenant,
+        policy.id().as_str(),
+        "updated",
+        expected.next_checked()?,
+        event_id,
+    )?;
+    lifecycle
+        .update_and_emit(tenant, policy, expected, entry, envelope)
+        .await
+}
+
+async fn policy_deactivate_and_emit_event(
+    lifecycle: &PgPolicyLifecycle,
+    tenant: TenantId,
+    id: PolicyId,
+    expected: PolicyVersion,
+    event_id: &str,
+) -> Result<bool, IdentityError> {
+    let (entry, envelope) = policy_lifecycle_event_with_id(
+        tenant,
+        id.as_str(),
+        "deactivated",
+        expected.next_checked()?,
+        event_id,
+    )?;
+    lifecycle
+        .deactivate_and_emit(tenant, id, expected, entry, envelope)
+        .await
+}
+
+async fn policy_outbox_exists(store: &PgStore, event_id: &str) -> Result<bool, IdentityError> {
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(event_id)
+        .fetch_one(&store.pool)
+        .await
+        .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+    Ok(count.0 == 1)
 }
 
 // CRUD：save 新角色 → find 往返一致；同 id 二次 save → upsert 覆盖 name+permissions（非新增行）；查无 → None。
@@ -11775,6 +11928,7 @@ async fn policy_repo_lifecycle_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let created = policy_fixture(
         "policy-lifecycle",
@@ -11802,8 +11956,12 @@ async fn policy_repo_lifecycle_conformance() -> TestResult {
             created_policy: created,
             updated_policy: updated,
             create: |tenant, _key, policy| {
-                let repo = &repo;
-                async move { repo.create(tenant, policy).await.map(|_| ()) }
+                let lifecycle = &lifecycle;
+                async move {
+                    policy_create_and_emit(lifecycle, tenant, policy)
+                        .await
+                        .map(|_| ())
+                }
             },
             find: |tenant, key| {
                 let repo = &repo;
@@ -11817,19 +11975,24 @@ async fn policy_repo_lifecycle_conformance() -> TestResult {
                 }
             },
             update: |tenant, _key, policy| {
-                let repo = &repo;
+                let lifecycle = &lifecycle;
                 async move {
-                    repo.update(tenant, policy, policy_version(1)?)
+                    policy_update_and_emit(lifecycle, tenant, policy, policy_version(1)?)
                         .await
                         .map(|_| ())
                 }
             },
             delete: |tenant, key| {
-                let repo = &repo;
+                let lifecycle = &lifecycle;
                 async move {
-                    repo.delete(tenant, policy_id(key)?, policy_version(2)?)
-                        .await
-                        .map(|_| ())
+                    policy_deactivate_and_emit(
+                        lifecycle,
+                        tenant,
+                        policy_id(key)?,
+                        policy_version(2)?,
+                    )
+                    .await
+                    .map(|_| ())
                 }
             },
         },
@@ -11846,6 +12009,7 @@ async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let created = policy_fixture(
         "policy-delete-tombstone",
@@ -11873,8 +12037,12 @@ async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
             created_policy: created,
             recreated_policy: recreated,
             create: |tenant, _key, policy| {
-                let repo = &repo;
-                async move { repo.create(tenant, policy).await.map(|_| ()) }
+                let lifecycle = &lifecycle;
+                async move {
+                    policy_create_and_emit(lifecycle, tenant, policy)
+                        .await
+                        .map(|_| ())
+                }
             },
             find: |tenant, key| {
                 let repo = &repo;
@@ -11888,11 +12056,16 @@ async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
                 }
             },
             delete: |tenant, key| {
-                let repo = &repo;
+                let lifecycle = &lifecycle;
                 async move {
-                    repo.delete(tenant, policy_id(key)?, policy_version(1)?)
-                        .await
-                        .map(|_| ())
+                    policy_deactivate_and_emit(
+                        lifecycle,
+                        tenant,
+                        policy_id(key)?,
+                        policy_version(1)?,
+                    )
+                    .await
+                    .map(|_| ())
                 }
             },
             is_recreate_rejected: |err: &IdentityError| {
@@ -11912,6 +12085,7 @@ async fn policy_repo_tenant_isolation_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
     let tenant_a_policy = policy_fixture(
@@ -11951,8 +12125,12 @@ async fn policy_repo_tenant_isolation_conformance() -> TestResult {
             tenant_b_policy,
             tenant_b_updated_policy,
             create: |tenant, _key, policy| {
-                let repo = &repo;
-                async move { repo.create(tenant, policy).await.map(|_| ()) }
+                let lifecycle = &lifecycle;
+                async move {
+                    policy_create_and_emit(lifecycle, tenant, policy)
+                        .await
+                        .map(|_| ())
+                }
             },
             find: |tenant, key| {
                 let repo = &repo;
@@ -11966,19 +12144,24 @@ async fn policy_repo_tenant_isolation_conformance() -> TestResult {
                 }
             },
             update: |tenant, _key, policy| {
-                let repo = &repo;
+                let lifecycle = &lifecycle;
                 async move {
-                    repo.update(tenant, policy, policy_version(1)?)
+                    policy_update_and_emit(lifecycle, tenant, policy, policy_version(1)?)
                         .await
                         .map(|_| ())
                 }
             },
             delete: |tenant, key| {
-                let repo = &repo;
+                let lifecycle = &lifecycle;
                 async move {
-                    repo.delete(tenant, policy_id(key)?, policy_version(2)?)
-                        .await
-                        .map(|_| ())
+                    policy_deactivate_and_emit(
+                        lifecycle,
+                        tenant,
+                        policy_id(key)?,
+                        policy_version(2)?,
+                    )
+                    .await
+                    .map(|_| ())
                 }
             },
         },
@@ -11994,7 +12177,7 @@ async fn policy_repo_tenant_isolation_conformance() -> TestResult {
 async fn policy_repo_cas_update_delete_conflicts() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let created = policy_fixture(
         "policy-cas",
@@ -12005,56 +12188,84 @@ async fn policy_repo_cas_update_delete_conflicts() -> TestResult {
         PolicyEffect::Allow,
         PolicyObligations::empty(),
     )?;
-    repo.create(tenant, created).await?;
+    policy_create_and_emit(&lifecycle, tenant, created).await?;
 
-    let stale_update = repo
-        .update(
+    let stale_update_event = unique_event_id("policy-cas-stale-update");
+    let stale_update = policy_update_and_emit_event(
+        &lifecycle,
+        tenant,
+        policy_fixture(
+            "policy-cas",
             tenant,
-            policy_fixture(
-                "policy-cas",
-                tenant,
-                2,
-                10,
-                None,
-                PolicyEffect::Deny,
-                PolicyObligations::empty(),
-            )?,
-            policy_version(2)?,
-        )
-        .await;
+            2,
+            10,
+            None,
+            PolicyEffect::Deny,
+            PolicyObligations::empty(),
+        )?,
+        policy_version(2)?,
+        &stale_update_event,
+    )
+    .await;
     assert!(
         matches!(stale_update, Err(IdentityError::VersionConflict)),
         "wrong expected version must conflict, got: {stale_update:?}"
     );
+    assert!(
+        !policy_outbox_exists(&store, &stale_update_event).await?,
+        "stale update must not write policy-updated outbox"
+    );
 
-    let stale_delete = repo
-        .delete(tenant, policy_id("policy-cas")?, policy_version(2)?)
-        .await;
+    let stale_delete_event = unique_event_id("policy-cas-stale-delete");
+    let stale_delete = policy_deactivate_and_emit_event(
+        &lifecycle,
+        tenant,
+        policy_id("policy-cas")?,
+        policy_version(2)?,
+        &stale_delete_event,
+    )
+    .await;
     assert!(
         matches!(stale_delete, Err(IdentityError::VersionConflict)),
         "delete with wrong expected version must conflict, got: {stale_delete:?}"
     );
+    assert!(
+        !policy_outbox_exists(&store, &stale_delete_event).await?,
+        "stale delete must not write policy-updated outbox"
+    );
 
-    let updated = repo
-        .update(
+    let update_event = unique_event_id("policy-cas-update");
+    let updated = policy_update_and_emit_event(
+        &lifecycle,
+        tenant,
+        policy_fixture(
+            "policy-cas",
             tenant,
-            policy_fixture(
-                "policy-cas",
-                tenant,
-                2,
-                10,
-                None,
-                PolicyEffect::Deny,
-                PolicyObligations::empty(),
-            )?,
-            policy_version(1)?,
-        )
-        .await?;
+            2,
+            10,
+            None,
+            PolicyEffect::Deny,
+            PolicyObligations::empty(),
+        )?,
+        policy_version(1)?,
+        &update_event,
+    )
+    .await?;
     assert_eq!(updated.version().get(), 2, "CAS update increments version");
+    assert!(
+        policy_outbox_exists(&store, &update_event).await?,
+        "successful update writes policy-updated outbox"
+    );
 
-    let stale_delete_after_update = repo
-        .delete(tenant, policy_id("policy-cas")?, policy_version(1)?)
-        .await;
+    let stale_delete_after_update_event = unique_event_id("policy-cas-stale-delete-after-update");
+    let stale_delete_after_update = policy_deactivate_and_emit_event(
+        &lifecycle,
+        tenant,
+        policy_id("policy-cas")?,
+        policy_version(1)?,
+        &stale_delete_after_update_event,
+    )
+    .await;
     assert!(
         matches!(
             stale_delete_after_update,
@@ -12063,15 +12274,215 @@ async fn policy_repo_cas_update_delete_conflicts() -> TestResult {
         "stale delete after update must conflict, got: {stale_delete_after_update:?}"
     );
     assert!(
-        repo.delete(tenant, policy_id("policy-cas")?, policy_version(2)?)
-            .await?,
+        !policy_outbox_exists(&store, &stale_delete_after_update_event).await?,
+        "stale delete after update must not write policy-updated outbox"
+    );
+
+    let delete_event = unique_event_id("policy-cas-delete");
+    assert!(
+        policy_deactivate_and_emit_event(
+            &lifecycle,
+            tenant,
+            policy_id("policy-cas")?,
+            policy_version(2)?,
+            &delete_event,
+        )
+        .await?,
         "delete at current version succeeds"
     );
     assert!(
-        !repo
-            .delete(tenant, policy_id("policy-cas")?, policy_version(2)?)
-            .await?,
+        policy_outbox_exists(&store, &delete_event).await?,
+        "successful delete writes policy-updated outbox"
+    );
+
+    let missing_delete_event = unique_event_id("policy-cas-delete-missing");
+    assert!(
+        !policy_deactivate_and_emit_event(
+            &lifecycle,
+            tenant,
+            policy_id("policy-cas")?,
+            policy_version(2)?,
+            &missing_delete_event,
+        )
+        .await?,
         "delete of missing policy is idempotent false"
+    );
+    assert!(
+        !policy_outbox_exists(&store, &missing_delete_event).await?,
+        "idempotent missing delete must not write policy-updated outbox"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy L2 co-tx：policy 行写入后若事务失败，policy 与 outbox 必须一起回滚。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let tenant_pool = PgTenantPool::new(&store);
+    let event_id = unique_event_id("policy-cotx-rollback");
+    let (entry, _) = policy_lifecycle_event_with_id(
+        tenant,
+        "policy-cotx-rollback",
+        "created",
+        policy_version(1)?,
+        &event_id,
+    )?;
+    let env = OutboxEnvelope::new(
+        POLICY_UPDATED_CONTRACT.domain().to_string(),
+        POLICY_UPDATED_CONTRACT.contract_id().to_string(),
+        OutboxMetadata::new(expected_occurred_at(), tenant, POLICY_UPDATED_CONTRACT)
+            .with_subject_id(subject_id("policy-cotx-rollback")),
+    );
+
+    let result = tenant_pool
+        .co_tx_with_outbox(
+            tenant,
+            &entry,
+            &env,
+            move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO abac_policies \
+                         (tenant_id, id, version, contract_id, permission, effective_from, effective_until, rules) \
+                         VALUES ($1::uuid, $2, 1, $3, $4, to_timestamp(10), NULL, $5::jsonb)",
+                    )
+                    .bind(ROLE_TENANT_A)
+                    .bind("policy-cotx-rollback")
+                    .bind(POLICY_CONTRACT_ID)
+                    .bind(POLICY_PERMISSION)
+                    .bind(principal_kind_rule_json(r#"{"kind":"eq","value":"admin"}"#))
+                    .execute(conn.conn())
+                    .await
+                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+                    Err::<(), IdentityError>(IdentityError::VersionConflict)
+                })
+            },
+            |e| IdentityError::Storage(Box::new(e)),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(IdentityError::VersionConflict)),
+        "forced business failure must bubble"
+    );
+
+    let policy_count: (i64,) = sqlx::query_as("SELECT count(*) FROM abac_policies WHERE id = $1")
+        .bind("policy-cotx-rollback")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(policy_count.0, 0, "rolled back policy row must not exist");
+    assert!(
+        !policy_outbox_exists(&store, &event_id).await?,
+        "rolled back transaction must not write outbox"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// policy manage read side：list_active 按 policy id 稳定分页，deactivate 后 get/list 均不可见。
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+
+    for id in ["policy-list-c", "policy-list-a", "policy-list-b"] {
+        policy_create_and_emit(
+            &lifecycle,
+            tenant,
+            policy_fixture(
+                id,
+                tenant,
+                1,
+                10,
+                None,
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            )?,
+        )
+        .await?;
+    }
+
+    let first = repo
+        .list_active(
+            tenant,
+            PolicyPage {
+                limit: vocab::Limit::new(2)?,
+                after: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        first
+            .policies
+            .iter()
+            .map(|policy| policy.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["policy-list-a", "policy-list-b"],
+        "list_active must sort by policy id"
+    );
+    assert!(first.has_more, "over-fetch must report has_more");
+
+    let second = repo
+        .list_active(
+            tenant,
+            PolicyPage {
+                limit: vocab::Limit::new(2)?,
+                after: Some(policy_id("policy-list-b")?),
+            },
+        )
+        .await?;
+    assert_eq!(
+        second
+            .policies
+            .iter()
+            .map(|policy| policy.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["policy-list-c"],
+        "cursor must resume strictly after the last policy id"
+    );
+    assert!(!second.has_more, "last page must not report has_more");
+
+    assert!(
+        policy_deactivate_and_emit(
+            &lifecycle,
+            tenant,
+            policy_id("policy-list-b")?,
+            policy_version(1)?,
+        )
+        .await?,
+        "deactivate existing policy"
+    );
+    assert!(
+        repo.find(tenant, policy_id("policy-list-b")?)
+            .await?
+            .is_none(),
+        "deactivated policy must be hidden from get"
+    );
+
+    let after_deactivate = repo
+        .list_active(
+            tenant,
+            PolicyPage {
+                limit: vocab::Limit::new(10)?,
+                after: None,
+            },
+        )
+        .await?;
+    assert_eq!(
+        after_deactivate
+            .policies
+            .iter()
+            .map(|policy| policy.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["policy-list-a", "policy-list-c"],
+        "deactivated policy must be hidden from list"
     );
 
     store.shutdown().await?;
@@ -12084,6 +12495,7 @@ async fn policy_repo_active_window_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let expired = policy_fixture(
         "policy-window-expired",
@@ -12129,8 +12541,12 @@ async fn policy_repo_active_window_conformance() -> TestResult {
             expected_during: vec![active],
             expected_after: Vec::new(),
             create: |tenant, _key, policy| {
-                let repo = &repo;
-                async move { repo.create(tenant, policy).await.map(|_| ()) }
+                let lifecycle = &lifecycle;
+                async move {
+                    policy_create_and_emit(lifecycle, tenant, policy)
+                        .await
+                        .map(|_| ())
+                }
             },
             active_at: |tenant, at| {
                 let repo = &repo;
@@ -12215,6 +12631,7 @@ async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgPolicyRepo::new(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let obligations = PolicyObligations::new(
         Some(vocab::ScopedTenant::Tenant),
@@ -12237,8 +12654,12 @@ async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
             policy,
             expected_obligations: obligations,
             create: |tenant, _key, policy| {
-                let repo = &repo;
-                async move { repo.create(tenant, policy).await.map(|_| ()) }
+                let lifecycle = &lifecycle;
+                async move {
+                    policy_create_and_emit(lifecycle, tenant, policy)
+                        .await
+                        .map(|_| ())
+                }
             },
             find: |tenant, key| {
                 let repo = &repo;

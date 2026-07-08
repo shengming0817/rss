@@ -31,6 +31,10 @@ use diport::Message;
 use futures::future::BoxFuture;
 use generated::event::SubscriptionSpec;
 use generated::event::identity_v1::{
+    policy_updated::{
+        IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
+        IdentityPolicyUpdatedPayloadChangeKind, SUBSCRIPTIONS as POLICY_UPDATED_SUBSCRIPTIONS,
+    },
     role_assigned::{
         IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind,
         SUBSCRIPTIONS as ROLE_ASSIGNED_SUBSCRIPTIONS,
@@ -63,10 +67,14 @@ const AUDIT_DOMAIN: &str = "audit";
 /// 审计资源类别（const literal）。
 const RESOURCE_KIND_SESSION: &str = "session";
 const RESOURCE_KIND_ROLE_BINDING: &str = "role-binding";
+const RESOURCE_KIND_POLICY: &str = "policy";
 /// 登录动作（`domain:verb`，vocab::Action 形态）。
 const ACTION_LOGIN: &str = "identity:login";
 const ACTION_ROLE_ASSIGN: &str = "identity:role_assign";
 const ACTION_ROLE_REVOKE: &str = "identity:role_revoke";
+const ACTION_POLICY_CREATE: &str = "identity:policy_create";
+const ACTION_POLICY_UPDATE: &str = "identity:policy_update";
+const ACTION_POLICY_DEACTIVATE: &str = "identity:policy_deactivate";
 
 /// admin 读路由组 nest 前缀（Admin listener；与 contracts/http/audit/v1 单源对齐）。
 const AUDIT_ROUTE_PREFIX: &str = "/api/v1/audit";
@@ -87,6 +95,8 @@ pub enum AuditEventKind {
     RoleAssigned,
     /// `identity.role-revoked`.
     RoleRevoked,
+    /// `identity.policy-updated`.
+    PolicyUpdated,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +123,7 @@ pub fn audit_record_from_event_message(
         AuditEventKind::SessionCreated => session_created_record_from_message(message),
         AuditEventKind::RoleAssigned => role_assigned_record_from_message(message),
         AuditEventKind::RoleRevoked => role_revoked_record_from_message(message),
+        AuditEventKind::PolicyUpdated => policy_updated_record_from_message(message),
     }
 }
 
@@ -222,6 +233,34 @@ fn role_revoked_record_from_message(
         actor_kind: revoked_actor_kind(payload.actor_kind),
         action,
         resource: ResourceRef::new(RESOURCE_KIND_ROLE_BINDING, resource_id),
+        outcome: AuditOutcome::Success,
+        recorded_at: from_unix_secs(payload.occurred_at),
+    })
+}
+
+fn policy_updated_record_from_message(
+    message: &Message,
+) -> Result<AuditRecord, AuditEventRecordError> {
+    let payload: IdentityPolicyUpdatedPayload = serde_json::from_slice(message.payload.as_bytes())
+        .map_err(AuditEventRecordError::Decode)?;
+    let tenant =
+        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let action = vocab::Action::parse(policy_updated_action(payload.change_kind))
+        .map_err(AuditEventRecordError::Action)?;
+    Ok(AuditRecord {
+        tenant,
+        actor: ids::UserId::new(payload.updated_by),
+        actor_kind: policy_updated_actor_kind(payload.actor_kind),
+        action,
+        resource: ResourceRef::new(
+            RESOURCE_KIND_POLICY,
+            policy_resource_id(
+                tenant,
+                &payload.policy_id,
+                &payload.contract_id,
+                &payload.permission,
+            ),
+        ),
         outcome: AuditOutcome::Success,
         recorded_at: from_unix_secs(payload.occurred_at),
     })
@@ -624,6 +663,23 @@ fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &st
     format!("tenant/{tenant}/role/{role_id}/subject/{subject}")
 }
 
+fn policy_resource_id(
+    tenant: vocab::TenantId,
+    policy_id: &str,
+    contract_id: &str,
+    permission: &str,
+) -> String {
+    format!("tenant/{tenant}/policy/{policy_id}/contract/{contract_id}/permission/{permission}")
+}
+
+fn policy_updated_action(kind: IdentityPolicyUpdatedPayloadChangeKind) -> &'static str {
+    match kind {
+        IdentityPolicyUpdatedPayloadChangeKind::Created => ACTION_POLICY_CREATE,
+        IdentityPolicyUpdatedPayloadChangeKind::Updated => ACTION_POLICY_UPDATE,
+        IdentityPolicyUpdatedPayloadChangeKind::Deactivated => ACTION_POLICY_DEACTIVATE,
+    }
+}
+
 fn assigned_actor_kind(kind: IdentityRoleAssignedPayloadActorKind) -> vocab::PrincipalKind {
     match kind {
         IdentityRoleAssignedPayloadActorKind::User => vocab::PrincipalKind::User,
@@ -643,6 +699,17 @@ fn revoked_actor_kind(kind: IdentityRoleRevokedPayloadActorKind) -> vocab::Princ
         IdentityRoleRevokedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
         IdentityRoleRevokedPayloadActorKind::Service => vocab::PrincipalKind::Service,
         IdentityRoleRevokedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
+    }
+}
+
+fn policy_updated_actor_kind(kind: IdentityPolicyUpdatedPayloadActorKind) -> vocab::PrincipalKind {
+    match kind {
+        IdentityPolicyUpdatedPayloadActorKind::User => vocab::PrincipalKind::User,
+        IdentityPolicyUpdatedPayloadActorKind::Device => vocab::PrincipalKind::Device,
+        IdentityPolicyUpdatedPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
+        IdentityPolicyUpdatedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
+        IdentityPolicyUpdatedPayloadActorKind::Service => vocab::PrincipalKind::Service,
+        IdentityPolicyUpdatedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
     }
 }
 
@@ -707,6 +774,30 @@ impl SubscriberHandler for RoleRevokedAuditHandler {
                     reject_audit_event_record_error(&msg_id, "identity.role-revoked", e)
                 })?;
             append_audit_record(repo, &msg_id, "identity.role-revoked", record).await
+        })
+    }
+}
+
+pub(crate) struct PolicyUpdatedAuditHandler {
+    repo: Arc<DynAuditRepo<'static>>,
+}
+
+impl PolicyUpdatedAuditHandler {
+    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
+        Self { repo }
+    }
+}
+
+impl SubscriberHandler for PolicyUpdatedAuditHandler {
+    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
+        let repo = self.repo.clone();
+        Box::pin(async move {
+            let msg_id = message.id.as_str().to_string();
+            let record = audit_record_from_event_message(AuditEventKind::PolicyUpdated, &message)
+                .map_err(|e| {
+                reject_audit_event_record_error(&msg_id, "identity.policy-updated", e)
+            })?;
+            append_audit_record(repo, &msg_id, "identity.policy-updated", record).await
         })
     }
 }
@@ -786,6 +877,11 @@ where
             ROLE_REVOKED_SUBSCRIPTIONS,
             Box::new(RoleRevokedAuditHandler::new(self.repo.clone())),
         )?;
+        register_audit_subscriber(
+            reg,
+            POLICY_UPDATED_SUBSCRIPTIONS,
+            Box::new(PolicyUpdatedAuditHandler::new(self.repo.clone())),
+        )?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
         let read_deps = AuditReadDeps {
@@ -859,6 +955,7 @@ mod tests {
     /// canonical UUID session_id（审计 resource id 是 typed `ids::SessionId`，非 uuid 被 fail-closed 拒，F3）。
     const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
     const ROLE_ID: &str = "tenant-admin";
+    const POLICY_ID: &str = "policy-admin-read";
     /// contract.toml 声明的完整路径（= `AUDIT_ROUTE_PREFIX` ‖ `AUDIT_ENTRIES_SUBPATH`）；测试据此断言
     /// finalize 后真实挂载路径 + 直挂 handler-logic 测试路径。
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
@@ -1103,6 +1200,24 @@ mod tests {
         format!("tenant/{CANON_TENANT}/role/{ROLE_ID}/subject/{subject}")
     }
 
+    #[allow(clippy::expect_used)]
+    fn policy_updated_payload_bytes(
+        change_kind: IdentityPolicyUpdatedPayloadChangeKind,
+    ) -> Vec<u8> {
+        let payload = IdentityPolicyUpdatedPayload {
+            policy_id: POLICY_ID.to_string(),
+            change_kind,
+            version: std::num::NonZeroU32::new(2).expect("non-zero version"),
+            contract_id: "identity.policies-get".to_string(),
+            permission: "identity:policy:read".to_string(),
+            updated_by: uuid::Uuid::parse_str(CANON_SUBJECT).expect("canonical actor uuid"),
+            actor_kind: IdentityPolicyUpdatedPayloadActorKind::Admin,
+            tenant_id: CANON_TENANT.to_string(),
+            occurred_at: 1_700_000_300,
+        };
+        serde_json::to_vec(&payload).expect("encode")
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn session_created_appends_verifiable_chain_entry() {
@@ -1196,6 +1311,43 @@ mod tests {
         assert_eq!(
             entry.resource().id(),
             expected_role_binding_resource_id("target-subject")
+        );
+        assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
+        assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policy_updated_appends_audit_entry() {
+        let repo = repo();
+        let handler = PolicyUpdatedAuditHandler::new(repo.clone());
+        handler
+            .handle(Message::new(
+                "m-policy-updated",
+                policy_updated_payload_bytes(IdentityPolicyUpdatedPayloadChangeKind::Updated),
+            ))
+            .await
+            .expect("handle ok");
+
+        let listed = repo
+            .list(
+                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                AuditPage {
+                    limit: vocab::Limit::new(10).expect("limit"),
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list");
+        assert_eq!(listed.entries.len(), 1);
+        let entry = &listed.entries[0];
+        assert_eq!(entry.action().as_str(), ACTION_POLICY_UPDATE);
+        assert_eq!(entry.resource().kind(), RESOURCE_KIND_POLICY);
+        assert_eq!(
+            entry.resource().id(),
+            format!(
+                "tenant/{CANON_TENANT}/policy/{POLICY_ID}/contract/identity.policies-get/permission/identity:policy:read"
+            )
         );
         assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
         assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
@@ -1382,11 +1534,12 @@ mod tests {
             SESSION_CREATED_SUBSCRIPTIONS,
             ROLE_ASSIGNED_SUBSCRIPTIONS,
             ROLE_REVOKED_SUBSCRIPTIONS,
+            POLICY_UPDATED_SUBSCRIPTIONS,
         ]
         .into_iter()
         .flat_map(|specs| specs.iter())
         .collect();
-        assert_eq!(expected.len(), 3);
+        assert_eq!(expected.len(), 4);
         assert_eq!(subs.len(), expected.len());
         for spec in expected {
             assert_eq!(spec.consumer, AUDIT_DOMAIN);

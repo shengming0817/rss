@@ -57,10 +57,11 @@ use eventexec::{
 };
 use httpd::HttpServer;
 use identity::{
-    IdentityDomain, LoginService, RbacAdminService, RefreshService,
+    IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
+    RefreshService,
     ports::{
-        DynCredentialRepo, DynPolicyRepo, DynRefreshTokenStore, DynRoleBindingLifecycle,
-        DynRoleRepo, DynSessionLifecycle,
+        DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
+        DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
     },
 };
 use oidc::OidcProvider;
@@ -3787,6 +3788,9 @@ pub fn wire_identity_with(
     let roles_for_admin = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
     let roles_for_list = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(identity_pg.policy_repo()));
+    let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
+        identity_pg.policy_lifecycle(Box::new(SystemClock)),
+    ));
     let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
         identity_pg.role_binding_lifecycle(Box::new(SystemClock)),
     ));
@@ -3821,15 +3825,21 @@ pub fn wire_identity_with(
         Arc::clone(&bindings),
         Box::new(SystemClock),
     ));
-    Ok(IdentityDomain::new(
+    let policy_manage = Arc::new(PolicyManageService::new(
+        Arc::clone(&policies),
+        policy_lifecycle,
+        Box::new(SystemClock),
+    ));
+    Ok(IdentityDomain::new(IdentityDomainDeps {
         login,
         refresh,
         rbac_admin,
-        roles_for_list,
+        policy_manage,
+        roles: roles_for_list,
         bindings,
         policies,
-        Arc::new(SystemClock),
-    ))
+        clock: Arc::new(SystemClock),
+    }))
 }
 
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
@@ -4918,44 +4928,23 @@ mod tests {
     struct EmptyPolicyRepo;
 
     impl identity::ports::PolicyRepo for EmptyPolicyRepo {
-        async fn create(
-            &self,
-            _tenant: vocab::TenantId,
-            _policy: identity::ports::Policy,
-        ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test policy repo is read-only",
-            ))
-        }
-
-        async fn update(
-            &self,
-            _tenant: vocab::TenantId,
-            _policy: identity::ports::Policy,
-            _expected: identity::ports::PolicyVersion,
-        ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test policy repo is read-only",
-            ))
-        }
-
-        async fn delete(
-            &self,
-            _tenant: vocab::TenantId,
-            _id: identity::ports::PolicyId,
-            _expected: identity::ports::PolicyVersion,
-        ) -> Result<bool, identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test policy repo is read-only",
-            ))
-        }
-
         async fn find(
             &self,
             _tenant: vocab::TenantId,
             _id: identity::ports::PolicyId,
         ) -> Result<Option<identity::ports::Policy>, identity::ports::IdentityError> {
             Ok(None)
+        }
+
+        async fn list_active(
+            &self,
+            _tenant: vocab::TenantId,
+            _page: identity::ports::PolicyPage,
+        ) -> Result<identity::ports::PolicyListResult, identity::ports::IdentityError> {
+            Ok(identity::ports::PolicyListResult {
+                policies: Vec::new(),
+                has_more: false,
+            })
         }
 
         async fn list_effective(
@@ -4965,6 +4954,48 @@ mod tests {
             _at: SystemTime,
         ) -> Result<Vec<identity::ports::Policy>, identity::ports::IdentityError> {
             Ok(Vec::new())
+        }
+    }
+
+    struct EmptyPolicyLifecycle;
+
+    impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
+        async fn create_and_emit(
+            &self,
+            _tenant: vocab::TenantId,
+            _policy: identity::ports::Policy,
+            _entry: consistency::Entry,
+            _envelope: diport::OutboxEnvelopeParts,
+        ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test policy lifecycle must not be called",
+            ))
+        }
+
+        async fn update_and_emit(
+            &self,
+            _tenant: vocab::TenantId,
+            _policy: identity::ports::Policy,
+            _expected: identity::ports::PolicyVersion,
+            _entry: consistency::Entry,
+            _envelope: diport::OutboxEnvelopeParts,
+        ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test policy lifecycle must not be called",
+            ))
+        }
+
+        async fn deactivate_and_emit(
+            &self,
+            _tenant: vocab::TenantId,
+            _id: identity::ports::PolicyId,
+            _expected: identity::ports::PolicyVersion,
+            _entry: consistency::Entry,
+            _envelope: diport::OutboxEnvelopeParts,
+        ) -> Result<bool, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test policy lifecycle must not be called",
+            ))
         }
     }
 
@@ -5179,15 +5210,25 @@ mod tests {
             Arc::clone(&bindings),
             Box::new(SystemClock),
         ));
-        identity::IdentityDomain::new(
+        let policies = Arc::from(identity::ports::DynPolicyRepo::new_box(EmptyPolicyRepo));
+        let policy_lifecycle = Arc::from(identity::ports::DynPolicyLifecycle::new_box(
+            EmptyPolicyLifecycle,
+        ));
+        let policy_manage = Arc::new(identity::PolicyManageService::new(
+            Arc::clone(&policies),
+            policy_lifecycle,
+            Box::new(SystemClock),
+        ));
+        identity::IdentityDomain::new(identity::IdentityDomainDeps {
             login,
             refresh,
             rbac_admin,
+            policy_manage,
             roles,
             bindings,
-            Arc::from(identity::ports::DynPolicyRepo::new_box(EmptyPolicyRepo)),
-            Arc::new(SystemClock),
-        )
+            policies,
+            clock: Arc::new(SystemClock),
+        })
     }
 
     #[allow(clippy::expect_used)]

@@ -1,0 +1,24 @@
+# identity policy-updated event 契约（active）——ABAC policy 管理写侧 outbox 闭环（#1589）。
+id = "identity.policy-updated"
+kind = "event"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "active"
+topic = "identity.policy-updated"
+delivery = "at-least-once"
+
+[schemas]
+payload = "payload.schema.json"
+
+[capabilities.outbox]
+role = "fact"
+
+[[subscriptions]]
+consumer = "audit"
+group = "audit.policy-updated"
+
+[subscriptions.topology]
+partitionKey = "none"
+readiness = "required"

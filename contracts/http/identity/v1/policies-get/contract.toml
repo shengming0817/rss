@@ -1,0 +1,18 @@
+# ABAC policy 单条读取 HTTP 契约。tenant-scoped read ⇒ L0。
+id = "identity.policies-get"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/identity/policies/{policyId}"
+method = "GET"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:policy:read"

@@ -18,11 +18,15 @@ use diport::{
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
-    DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Policy, PolicyId,
-    PolicyRepo, PolicyRouteScope, PolicyVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId,
-    RoleListResult, RolePage, RoleRepo,
+    DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Policy,
+    PolicyId, PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope,
+    PolicyVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId, RoleListResult, RolePage,
+    RoleRepo,
 };
-use identity::{IdentityDomain, LoginService, RbacAdminService, RefreshService};
+use identity::{
+    IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
+    RefreshService,
+};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use vocab::TenantId;
 
@@ -319,34 +323,23 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
 struct NoopPolicyRepo;
 
 impl PolicyRepo for NoopPolicyRepo {
-    async fn create(&self, _tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError> {
-        Ok(policy)
-    }
-
-    async fn update(
-        &self,
-        _tenant: TenantId,
-        policy: Policy,
-        _expected: PolicyVersion,
-    ) -> Result<Policy, IdentityError> {
-        Ok(policy)
-    }
-
-    async fn delete(
-        &self,
-        _tenant: TenantId,
-        _id: PolicyId,
-        _expected: PolicyVersion,
-    ) -> Result<bool, IdentityError> {
-        Ok(false)
-    }
-
     async fn find(
         &self,
         _tenant: TenantId,
         _id: PolicyId,
     ) -> Result<Option<Policy>, IdentityError> {
         Ok(None)
+    }
+
+    async fn list_active(
+        &self,
+        _tenant: TenantId,
+        _page: PolicyPage,
+    ) -> Result<PolicyListResult, IdentityError> {
+        Ok(PolicyListResult {
+            policies: Vec::new(),
+            has_more: false,
+        })
     }
 
     async fn list_effective(
@@ -356,6 +349,42 @@ impl PolicyRepo for NoopPolicyRepo {
         _at: std::time::SystemTime,
     ) -> Result<Vec<Policy>, IdentityError> {
         Ok(Vec::new())
+    }
+}
+
+struct NoopPolicyLifecycle;
+
+impl PolicyLifecycle for NoopPolicyLifecycle {
+    async fn create_and_emit(
+        &self,
+        _tenant: TenantId,
+        policy: Policy,
+        _entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError> {
+        Ok(policy)
+    }
+
+    async fn update_and_emit(
+        &self,
+        _tenant: TenantId,
+        policy: Policy,
+        _expected: PolicyVersion,
+        _entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError> {
+        Ok(policy)
+    }
+
+    async fn deactivate_and_emit(
+        &self,
+        _tenant: TenantId,
+        _id: PolicyId,
+        _expected: PolicyVersion,
+        _entry: Entry,
+        _envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, IdentityError> {
+        Ok(false)
     }
 }
 
@@ -371,20 +400,28 @@ where
     let bindings: Arc<DynRoleBindingLifecycle<'static>> =
         Arc::from(DynRoleBindingLifecycle::new_box(NoopRoleBindingLifecycle));
     let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(NoopPolicyRepo));
+    let policy_lifecycle: Arc<DynPolicyLifecycle<'static>> =
+        Arc::from(DynPolicyLifecycle::new_box(NoopPolicyLifecycle));
     let rbac = Arc::new(RbacAdminService::new(
         roles.clone(),
         Arc::clone(&bindings),
         Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     ));
-    IdentityDomain::new(
+    let policy_manage = Arc::new(PolicyManageService::new(
+        Arc::clone(&policies),
+        policy_lifecycle,
+        Box::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
+    ));
+    IdentityDomain::new(IdentityDomainDeps {
         login,
         refresh,
-        rbac,
+        rbac_admin: rbac,
+        policy_manage,
         roles,
         bindings,
         policies,
-        Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
-    )
+        clock: Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
+    })
 }
 
 /// 取 session-created 订阅绑定（audit 域可能还声明其它 event subscriptions）。

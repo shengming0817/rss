@@ -43,6 +43,7 @@ trait-variant = { workspace = true }
 # 登录服务：注入 diport::Publisher（发 session-created outbox fact）+ Clock（会话到期）。
 diport = { path = "../diport" }
 # session-created event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # EventId 独立 opaque UUID（F1：不复用 session_id，session_id 已被 secure 列敏感，不得进 broker metadata）。
 uuid = { workspace = true, features = ["v4"] }

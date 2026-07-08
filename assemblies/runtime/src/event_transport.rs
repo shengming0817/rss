@@ -938,6 +938,7 @@ enum ConsumerTxKind {
     AuditSessionCreated,
     AuditRoleAssigned,
     AuditRoleRevoked,
+    AuditPolicyUpdated,
     SettingsConfigVersionChanged,
 }
 
@@ -981,6 +982,12 @@ fn consumer_tx_kind_for_parts(
             "audit.role-revoked",
         ) => Some(ConsumerTxKind::AuditRoleRevoked),
         (
+            "audit",
+            generated::event::identity_v1::policy_updated::CONTRACT_ID,
+            generated::event::identity_v1::policy_updated::TOPIC,
+            "audit.policy-updated",
+        ) => Some(ConsumerTxKind::AuditPolicyUpdated),
+        (
             "settings",
             generated::event::settings_v1::CONTRACT_ID,
             generated::event::settings_v1::TOPIC,
@@ -1018,6 +1025,14 @@ fn consumer_tx_handler_for_subscription(
             Ok(pg
                 .for_domain::<caps::Audit>()
                 .role_revoked_consumer_tx(hasher)
+                .into_handler())
+        }
+        Some(ConsumerTxKind::AuditPolicyUpdated) => {
+            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+                .context("audit policy-updated consumer tx chain key")?;
+            Ok(pg
+                .for_domain::<caps::Audit>()
+                .policy_updated_consumer_tx(hasher)
                 .into_handler())
         }
         Some(ConsumerTxKind::SettingsConfigVersionChanged) => Ok(pg

@@ -36,6 +36,16 @@ pub mod settings_v1;
 /// consumer bundle inputs. Do not enumerate per-contract subscription slices in runtime wiring.
 pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[
     SubscriptionSpec {
+        contract_id: identity_v1::policy_updated::CONTRACT_ID,
+        topic: identity_v1::policy_updated::TOPIC,
+        schema_version: identity_v1::policy_updated::CONTRACT.version(),
+        schema_hash: identity_v1::policy_updated::CONTRACT.schema_hash(),
+        consumer: "audit",
+        group: "audit.policy-updated",
+        partition_key: "none",
+        readiness: "required",
+    },
+    SubscriptionSpec {
         contract_id: identity_v1::role_assigned::CONTRACT_ID,
         topic: identity_v1::role_assigned::TOPIC,
         schema_version: identity_v1::role_assigned::CONTRACT.version(),

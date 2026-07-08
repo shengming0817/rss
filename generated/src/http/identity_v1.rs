@@ -534,6 +534,5740 @@ pub mod password_change {
     };
 }
 
+/// 端点 `policies-create` 派生契约（源 `policies-create/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod policies_create {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentityPoliciesCreateRequest`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesCreateRequest",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "contractId",
+    ///    "effectiveFrom",
+    ///    "permission",
+    ///    "policyId",
+    ///    "rules"
+    ///  ],
+    ///  "properties": {
+    ///    "contractId": {
+    ///      "type": "string"
+    ///    },
+    ///    "effectiveFrom": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "effectiveUntil": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "permission": {
+    ///      "type": "string"
+    ///    },
+    ///    "policyId": {
+    ///      "type": "string"
+    ///    },
+    ///    "rules": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyCreateRule",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "condition",
+    ///          "effect"
+    ///        ],
+    ///        "properties": {
+    ///          "condition": {
+    ///            "title": "IdentityPolicyCreateCondition",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "attribute",
+    ///              "operator"
+    ///            ],
+    ///            "properties": {
+    ///              "attribute": {
+    ///                "type": "string"
+    ///              },
+    ///              "operator": {
+    ///                "title": "IdentityPolicyCreateOperator",
+    ///                "oneOf": [
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eq"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "ne"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "pattern"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "like"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "value": false
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "gt"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "lt"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "attribute",
+    ///                      "kind"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eqAttr"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": false
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  }
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          },
+    ///          "effect": {
+    ///            "type": "string",
+    ///            "enum": [
+    ///              "allow",
+    ///              "deny"
+    ///            ]
+    ///          },
+    ///          "obligations": {
+    ///            "title": "IdentityPolicyCreateObligations",
+    ///            "type": "object",
+    ///            "properties": {
+    ///              "fieldMask": {
+    ///                "default": [],
+    ///                "type": "array",
+    ///                "items": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "rowScope": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "selfOnly",
+    ///                  "device",
+    ///                  "tenant"
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      },
+    ///      "minItems": 1
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesCreateRequest {
+        #[serde(rename = "contractId")]
+        #[redact(sensitivity = public)]
+        pub contract_id: ::std::string::String,
+        #[serde(rename = "effectiveFrom")]
+        #[redact(sensitivity = public)]
+        pub effective_from: i64,
+        #[serde(
+            rename = "effectiveUntil",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub effective_until: ::std::option::Option<i64>,
+        #[redact(sensitivity = public)]
+        pub permission: ::std::string::String,
+        #[serde(rename = "policyId")]
+        #[redact(sensitivity = public)]
+        pub policy_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub rules: ::std::vec::Vec<IdentityPolicyCreateRule>,
+    }
+    ///`IdentityPoliciesCreateResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesCreateResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "data"
+    ///  ],
+    ///  "properties": {
+    ///    "data": {
+    ///      "title": "IdentityPolicyCreateView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "contractId",
+    ///        "effectiveFrom",
+    ///        "permission",
+    ///        "policyId",
+    ///        "rules",
+    ///        "version"
+    ///      ],
+    ///      "properties": {
+    ///        "contractId": {
+    ///          "type": "string"
+    ///        },
+    ///        "effectiveFrom": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "effectiveUntil": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "permission": {
+    ///          "type": "string"
+    ///        },
+    ///        "policyId": {
+    ///          "type": "string"
+    ///        },
+    ///        "rules": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "title": "IdentityPolicyCreateRuleView",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "condition",
+    ///              "effect"
+    ///            ],
+    ///            "properties": {
+    ///              "condition": {
+    ///                "title": "IdentityPolicyCreateConditionView",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "attribute",
+    ///                  "operator"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "operator": {
+    ///                    "title": "IdentityPolicyCreateOperatorView",
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eq",
+    ///                          "ne",
+    ///                          "like",
+    ///                          "gt",
+    ///                          "lt",
+    ///                          "eqAttr"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              },
+    ///              "effect": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "allow",
+    ///                  "deny"
+    ///                ]
+    ///              },
+    ///              "obligations": {
+    ///                "title": "IdentityPolicyCreateObligationsView",
+    ///                "type": "object",
+    ///                "properties": {
+    ///                  "fieldMask": {
+    ///                    "default": [],
+    ///                    "type": "array",
+    ///                    "items": {
+    ///                      "type": "string"
+    ///                    }
+    ///                  },
+    ///                  "rowScope": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "selfOnly",
+    ///                      "device",
+    ///                      "tenant"
+    ///                    ]
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "version": {
+    ///          "type": "integer",
+    ///          "format": "int32",
+    ///          "minimum": 1.0
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesCreateResponse {
+        #[redact(sensitivity = public)]
+        pub data: IdentityPolicyCreateView,
+    }
+    ///`IdentityPolicyCreateCondition`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateCondition",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyCreateOperator",
+    ///      "oneOf": [
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eq"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "ne"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "pattern"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "like"
+    ///              ]
+    ///            },
+    ///            "pattern": {
+    ///              "type": "string"
+    ///            },
+    ///            "value": false
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "gt"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "lt"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "attribute",
+    ///            "kind"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": {
+    ///              "type": "string"
+    ///            },
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eqAttr"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": false
+    ///          },
+    ///          "additionalProperties": false
+    ///        }
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateCondition {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyCreateOperator,
+    }
+    ///`IdentityPolicyCreateConditionView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateConditionView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyCreateOperatorView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eq",
+    ///            "ne",
+    ///            "like",
+    ///            "gt",
+    ///            "lt",
+    ///            "eqAttr"
+    ///          ]
+    ///        },
+    ///        "pattern": {
+    ///          "type": "string"
+    ///        },
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateConditionView {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyCreateOperatorView,
+    }
+    ///`IdentityPolicyCreateObligations`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateObligations",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateObligations {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyCreateObligationsRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyCreateObligations {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyCreateObligationsRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateObligationsRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateObligationsRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateObligationsRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateObligationsView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateObligationsView",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateObligationsView {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyCreateObligationsViewRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyCreateObligationsView {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyCreateObligationsViewRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateObligationsViewRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateObligationsViewRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateObligationsViewRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateObligationsViewRowScope
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateObligationsViewRowScope
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperator`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperator",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eq"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ne"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "pattern"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "like"
+    ///          ]
+    ///        },
+    ///        "pattern": {
+    ///          "type": "string"
+    ///        },
+    ///        "value": false
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "gt"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "lt"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "kind"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eqAttr"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": false
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum IdentityPolicyCreateOperator {
+        #[serde(rename = "eq")]
+        Eq { value: ::std::string::String },
+        #[serde(rename = "ne")]
+        Ne { value: ::std::string::String },
+        #[serde(rename = "like")]
+        Like { pattern: ::std::string::String },
+        #[serde(rename = "gt")]
+        Gt { value: ::std::string::String },
+        #[serde(rename = "lt")]
+        Lt { value: ::std::string::String },
+        #[serde(rename = "eqAttr")]
+        EqAttr { attribute: ::std::string::String },
+    }
+    ///`IdentityPolicyCreateOperatorView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne",
+    ///        "like",
+    ///        "gt",
+    ///        "lt",
+    ///        "eqAttr"
+    ///      ]
+    ///    },
+    ///    "pattern": {
+    ///      "type": "string"
+    ///    },
+    ///    "value": {
+    ///      "type": "string"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateOperatorView {
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::option::Option<::std::string::String>,
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyCreateOperatorViewKind,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub pattern: ::std::option::Option<::std::string::String>,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub value: ::std::option::Option<::std::string::String>,
+    }
+    ///`IdentityPolicyCreateOperatorViewKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne",
+    ///    "like",
+    ///    "gt",
+    ///    "lt",
+    ///    "eqAttr"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorViewKind {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+        #[serde(rename = "like")]
+        Like,
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "eqAttr")]
+        EqAttr,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorViewKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+                Self::Like => f.write_str("like"),
+                Self::Gt => f.write_str("gt"),
+                Self::Lt => f.write_str("lt"),
+                Self::EqAttr => f.write_str("eqAttr"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorViewKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                "like" => Ok(Self::Like),
+                "gt" => Ok(Self::Gt),
+                "lt" => Ok(Self::Lt),
+                "eqAttr" => Ok(Self::EqAttr),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorViewKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateOperatorViewKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorViewKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateRule`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateRule",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyCreateCondition",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyCreateOperator",
+    ///          "oneOf": [
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "eq"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "ne"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "pattern"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "like"
+    ///                  ]
+    ///                },
+    ///                "pattern": {
+    ///                  "type": "string"
+    ///                },
+    ///                "value": false
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "gt"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "lt"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "attribute",
+    ///                "kind"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": {
+    ///                  "type": "string"
+    ///                },
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "eqAttr"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": false
+    ///              },
+    ///              "additionalProperties": false
+    ///            }
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyCreateObligations",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateRule {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyCreateCondition,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyCreateRuleEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyCreateObligations>,
+    }
+    ///`IdentityPolicyCreateRuleEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateRuleEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateRuleEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateRuleEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateRuleView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateRuleView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyCreateConditionView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyCreateOperatorView",
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": {
+    ///              "type": "string"
+    ///            },
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eq",
+    ///                "ne",
+    ///                "like",
+    ///                "gt",
+    ///                "lt",
+    ///                "eqAttr"
+    ///              ]
+    ///            },
+    ///            "pattern": {
+    ///              "type": "string"
+    ///            },
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyCreateObligationsView",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateRuleView {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyCreateConditionView,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyCreateRuleViewEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyCreateObligationsView>,
+    }
+    ///`IdentityPolicyCreateRuleViewEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateRuleViewEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateRuleViewEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateRuleViewEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "contractId",
+    ///    "effectiveFrom",
+    ///    "permission",
+    ///    "policyId",
+    ///    "rules",
+    ///    "version"
+    ///  ],
+    ///  "properties": {
+    ///    "contractId": {
+    ///      "type": "string"
+    ///    },
+    ///    "effectiveFrom": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "effectiveUntil": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "permission": {
+    ///      "type": "string"
+    ///    },
+    ///    "policyId": {
+    ///      "type": "string"
+    ///    },
+    ///    "rules": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyCreateRuleView",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "condition",
+    ///          "effect"
+    ///        ],
+    ///        "properties": {
+    ///          "condition": {
+    ///            "title": "IdentityPolicyCreateConditionView",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "attribute",
+    ///              "operator"
+    ///            ],
+    ///            "properties": {
+    ///              "attribute": {
+    ///                "type": "string"
+    ///              },
+    ///              "operator": {
+    ///                "title": "IdentityPolicyCreateOperatorView",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "kind"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "kind": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "eq",
+    ///                      "ne",
+    ///                      "like",
+    ///                      "gt",
+    ///                      "lt",
+    ///                      "eqAttr"
+    ///                    ]
+    ///                  },
+    ///                  "pattern": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "value": {
+    ///                    "type": "string"
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          },
+    ///          "effect": {
+    ///            "type": "string",
+    ///            "enum": [
+    ///              "allow",
+    ///              "deny"
+    ///            ]
+    ///          },
+    ///          "obligations": {
+    ///            "title": "IdentityPolicyCreateObligationsView",
+    ///            "type": "object",
+    ///            "properties": {
+    ///              "fieldMask": {
+    ///                "default": [],
+    ///                "type": "array",
+    ///                "items": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "rowScope": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "selfOnly",
+    ///                  "device",
+    ///                  "tenant"
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      }
+    ///    },
+    ///    "version": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateView {
+        #[serde(rename = "contractId")]
+        #[redact(sensitivity = public)]
+        pub contract_id: ::std::string::String,
+        #[serde(rename = "effectiveFrom")]
+        #[redact(sensitivity = public)]
+        pub effective_from: i64,
+        #[serde(
+            rename = "effectiveUntil",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub effective_until: ::std::option::Option<i64>,
+        #[redact(sensitivity = public)]
+        pub permission: ::std::string::String,
+        #[serde(rename = "policyId")]
+        #[redact(sensitivity = public)]
+        pub policy_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub rules: ::std::vec::Vec<IdentityPolicyCreateRuleView>,
+        #[redact(sensitivity = public)]
+        pub version: ::std::num::NonZeroU32,
+    }
+
+    /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.policies-create";
+
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.policies-create",
+        "v1",
+        "sha256:6875e7e8b48afbcfce6fc8e20ae0224fbd421908b1d118ff32dba326d855100e",
+    );
+
+    /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PATH: &str = "/api/v1/identity/policies";
+
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
+    /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        contract_id: CONTRACT_ID,
+        contract: CONTRACT,
+        path: PATH,
+        method: "POST",
+        auth: super::super::HttpAuthSpec {
+            mode: super::super::HttpAuthMode::Permission,
+            reason: None,
+            permission: Some("identity:policy:create"),
+        },
+        resource: None,
+        self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
+        headers: &[],
+    };
+}
+
+/// 端点 `policies-deactivate` 派生契约（源 `policies-deactivate/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod policies_deactivate {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentityPoliciesDeactivateData`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesDeactivateData",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "deactivated",
+    ///    "version"
+    ///  ],
+    ///  "properties": {
+    ///    "deactivated": {
+    ///      "type": "boolean"
+    ///    },
+    ///    "version": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesDeactivateData {
+        #[redact(sensitivity = public)]
+        pub deactivated: bool,
+        #[redact(sensitivity = public)]
+        pub version: ::std::num::NonZeroU32,
+    }
+    ///`IdentityPoliciesDeactivateRequest`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesDeactivateRequest",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "expectedVersion"
+    ///  ],
+    ///  "properties": {
+    ///    "expectedVersion": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesDeactivateRequest {
+        #[serde(rename = "expectedVersion")]
+        #[redact(sensitivity = public)]
+        pub expected_version: ::std::num::NonZeroU32,
+    }
+    ///`IdentityPoliciesDeactivateResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesDeactivateResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "data"
+    ///  ],
+    ///  "properties": {
+    ///    "data": {
+    ///      "title": "IdentityPoliciesDeactivateData",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "deactivated",
+    ///        "version"
+    ///      ],
+    ///      "properties": {
+    ///        "deactivated": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "version": {
+    ///          "type": "integer",
+    ///          "format": "int32",
+    ///          "minimum": 1.0
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesDeactivateResponse {
+        #[redact(sensitivity = public)]
+        pub data: IdentityPoliciesDeactivateData,
+    }
+
+    /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.policies-deactivate";
+
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.policies-deactivate",
+        "v1",
+        "sha256:84eeeacecc2a5e83c0d731fac5b872867f04ac7a0c40fbdbac6685249726da18",
+    );
+
+    /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PATH: &str = "/api/v1/identity/policies/{policyId}/deactivate";
+
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
+    /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        contract_id: CONTRACT_ID,
+        contract: CONTRACT,
+        path: PATH,
+        method: "POST",
+        auth: super::super::HttpAuthSpec {
+            mode: super::super::HttpAuthMode::Permission,
+            reason: None,
+            permission: Some("identity:policy:deactivate"),
+        },
+        resource: None,
+        self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
+        headers: &[],
+    };
+}
+
+/// 端点 `policies-get` 派生契约（源 `policies-get/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod policies_get {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentityPoliciesGetRequest`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesGetRequest",
+    ///  "type": "object",
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesGetRequest {}
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPoliciesGetRequest {
+        fn default() -> Self {
+            Self {}
+        }
+    }
+    ///`IdentityPoliciesGetResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesGetResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "data"
+    ///  ],
+    ///  "properties": {
+    ///    "data": {
+    ///      "title": "IdentityPolicyGetView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "contractId",
+    ///        "effectiveFrom",
+    ///        "permission",
+    ///        "policyId",
+    ///        "rules",
+    ///        "version"
+    ///      ],
+    ///      "properties": {
+    ///        "contractId": {
+    ///          "type": "string"
+    ///        },
+    ///        "effectiveFrom": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "effectiveUntil": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "permission": {
+    ///          "type": "string"
+    ///        },
+    ///        "policyId": {
+    ///          "type": "string"
+    ///        },
+    ///        "rules": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "title": "IdentityPolicyGetRule",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "condition",
+    ///              "effect"
+    ///            ],
+    ///            "properties": {
+    ///              "condition": {
+    ///                "title": "IdentityPolicyGetCondition",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "attribute",
+    ///                  "operator"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "operator": {
+    ///                    "title": "IdentityPolicyGetOperator",
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eq",
+    ///                          "ne",
+    ///                          "like",
+    ///                          "gt",
+    ///                          "lt",
+    ///                          "eqAttr"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              },
+    ///              "effect": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "allow",
+    ///                  "deny"
+    ///                ]
+    ///              },
+    ///              "obligations": {
+    ///                "title": "IdentityPolicyGetObligations",
+    ///                "type": "object",
+    ///                "properties": {
+    ///                  "fieldMask": {
+    ///                    "default": [],
+    ///                    "type": "array",
+    ///                    "items": {
+    ///                      "type": "string"
+    ///                    }
+    ///                  },
+    ///                  "rowScope": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "selfOnly",
+    ///                      "device",
+    ///                      "tenant"
+    ///                    ]
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "version": {
+    ///          "type": "integer",
+    ///          "format": "int32",
+    ///          "minimum": 1.0
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesGetResponse {
+        #[redact(sensitivity = public)]
+        pub data: IdentityPolicyGetView,
+    }
+    ///`IdentityPolicyGetCondition`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyGetCondition",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyGetOperator",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eq",
+    ///            "ne",
+    ///            "like",
+    ///            "gt",
+    ///            "lt",
+    ///            "eqAttr"
+    ///          ]
+    ///        },
+    ///        "pattern": {
+    ///          "type": "string"
+    ///        },
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyGetCondition {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyGetOperator,
+    }
+    ///`IdentityPolicyGetObligations`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyGetObligations",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyGetObligations {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyGetObligationsRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyGetObligations {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyGetObligationsRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyGetObligationsRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyGetObligationsRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyGetObligationsRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyGetOperator`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyGetOperator",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne",
+    ///        "like",
+    ///        "gt",
+    ///        "lt",
+    ///        "eqAttr"
+    ///      ]
+    ///    },
+    ///    "pattern": {
+    ///      "type": "string"
+    ///    },
+    ///    "value": {
+    ///      "type": "string"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyGetOperator {
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::option::Option<::std::string::String>,
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyGetOperatorKind,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub pattern: ::std::option::Option<::std::string::String>,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub value: ::std::option::Option<::std::string::String>,
+    }
+    ///`IdentityPolicyGetOperatorKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne",
+    ///    "like",
+    ///    "gt",
+    ///    "lt",
+    ///    "eqAttr"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyGetOperatorKind {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+        #[serde(rename = "like")]
+        Like,
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "eqAttr")]
+        EqAttr,
+    }
+    impl ::std::fmt::Display for IdentityPolicyGetOperatorKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+                Self::Like => f.write_str("like"),
+                Self::Gt => f.write_str("gt"),
+                Self::Lt => f.write_str("lt"),
+                Self::EqAttr => f.write_str("eqAttr"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyGetOperatorKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                "like" => Ok(Self::Like),
+                "gt" => Ok(Self::Gt),
+                "lt" => Ok(Self::Lt),
+                "eqAttr" => Ok(Self::EqAttr),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetOperatorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetOperatorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetOperatorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyGetRule`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyGetRule",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyGetCondition",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyGetOperator",
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": {
+    ///              "type": "string"
+    ///            },
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eq",
+    ///                "ne",
+    ///                "like",
+    ///                "gt",
+    ///                "lt",
+    ///                "eqAttr"
+    ///              ]
+    ///            },
+    ///            "pattern": {
+    ///              "type": "string"
+    ///            },
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyGetObligations",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyGetRule {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyGetCondition,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyGetRuleEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyGetObligations>,
+    }
+    ///`IdentityPolicyGetRuleEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyGetRuleEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyGetRuleEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyGetRuleEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyGetView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyGetView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "contractId",
+    ///    "effectiveFrom",
+    ///    "permission",
+    ///    "policyId",
+    ///    "rules",
+    ///    "version"
+    ///  ],
+    ///  "properties": {
+    ///    "contractId": {
+    ///      "type": "string"
+    ///    },
+    ///    "effectiveFrom": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "effectiveUntil": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "permission": {
+    ///      "type": "string"
+    ///    },
+    ///    "policyId": {
+    ///      "type": "string"
+    ///    },
+    ///    "rules": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyGetRule",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "condition",
+    ///          "effect"
+    ///        ],
+    ///        "properties": {
+    ///          "condition": {
+    ///            "title": "IdentityPolicyGetCondition",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "attribute",
+    ///              "operator"
+    ///            ],
+    ///            "properties": {
+    ///              "attribute": {
+    ///                "type": "string"
+    ///              },
+    ///              "operator": {
+    ///                "title": "IdentityPolicyGetOperator",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "kind"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "kind": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "eq",
+    ///                      "ne",
+    ///                      "like",
+    ///                      "gt",
+    ///                      "lt",
+    ///                      "eqAttr"
+    ///                    ]
+    ///                  },
+    ///                  "pattern": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "value": {
+    ///                    "type": "string"
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          },
+    ///          "effect": {
+    ///            "type": "string",
+    ///            "enum": [
+    ///              "allow",
+    ///              "deny"
+    ///            ]
+    ///          },
+    ///          "obligations": {
+    ///            "title": "IdentityPolicyGetObligations",
+    ///            "type": "object",
+    ///            "properties": {
+    ///              "fieldMask": {
+    ///                "default": [],
+    ///                "type": "array",
+    ///                "items": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "rowScope": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "selfOnly",
+    ///                  "device",
+    ///                  "tenant"
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      }
+    ///    },
+    ///    "version": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyGetView {
+        #[serde(rename = "contractId")]
+        #[redact(sensitivity = public)]
+        pub contract_id: ::std::string::String,
+        #[serde(rename = "effectiveFrom")]
+        #[redact(sensitivity = public)]
+        pub effective_from: i64,
+        #[serde(
+            rename = "effectiveUntil",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub effective_until: ::std::option::Option<i64>,
+        #[redact(sensitivity = public)]
+        pub permission: ::std::string::String,
+        #[serde(rename = "policyId")]
+        #[redact(sensitivity = public)]
+        pub policy_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub rules: ::std::vec::Vec<IdentityPolicyGetRule>,
+        #[redact(sensitivity = public)]
+        pub version: ::std::num::NonZeroU32,
+    }
+
+    /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.policies-get";
+
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.policies-get",
+        "v1",
+        "sha256:3fd7110d48010e8409b53cb0868e6aeaa521e3803c970bac32df7c690a18217e",
+    );
+
+    /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PATH: &str = "/api/v1/identity/policies/{policyId}";
+
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
+    /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        contract_id: CONTRACT_ID,
+        contract: CONTRACT,
+        path: PATH,
+        method: "GET",
+        auth: super::super::HttpAuthSpec {
+            mode: super::super::HttpAuthMode::Permission,
+            reason: None,
+            permission: Some("identity:policy:read"),
+        },
+        resource: None,
+        self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
+        headers: &[],
+    };
+}
+
+/// 端点 `policies-list` 派生契约（源 `policies-list/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod policies_list {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentityPoliciesListRequest`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesListRequest",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "cursor": {
+    ///      "type": "string"
+    ///    },
+    ///    "limit": {
+    ///      "description": "Page size; minimum 1, maximum 500, default 50.",
+    ///      "default": 50,
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "maximum": 500.0,
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesListRequest {
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub cursor: ::std::option::Option<::std::string::String>,
+        ///Page size; minimum 1, maximum 500, default 50.
+        #[serde(default = "defaults::default_nzu64::<::std::num::NonZeroU32, 50>")]
+        #[redact(sensitivity = public)]
+        pub limit: ::std::num::NonZeroU32,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPoliciesListRequest {
+        fn default() -> Self {
+            Self {
+                cursor: Default::default(),
+                limit: defaults::default_nzu64::<::std::num::NonZeroU32, 50>(),
+            }
+        }
+    }
+    ///`IdentityPoliciesListResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesListResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "data",
+    ///    "hasMore"
+    ///  ],
+    ///  "properties": {
+    ///    "data": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyListView",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "contractId",
+    ///          "effectiveFrom",
+    ///          "permission",
+    ///          "policyId",
+    ///          "rules",
+    ///          "version"
+    ///        ],
+    ///        "properties": {
+    ///          "contractId": {
+    ///            "type": "string"
+    ///          },
+    ///          "effectiveFrom": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "effectiveUntil": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "permission": {
+    ///            "type": "string"
+    ///          },
+    ///          "policyId": {
+    ///            "type": "string"
+    ///          },
+    ///          "rules": {
+    ///            "type": "array",
+    ///            "items": {
+    ///              "title": "IdentityPolicyListRule",
+    ///              "type": "object",
+    ///              "required": [
+    ///                "condition",
+    ///                "effect"
+    ///              ],
+    ///              "properties": {
+    ///                "condition": {
+    ///                  "title": "IdentityPolicyListCondition",
+    ///                  "type": "object",
+    ///                  "required": [
+    ///                    "attribute",
+    ///                    "operator"
+    ///                  ],
+    ///                  "properties": {
+    ///                    "attribute": {
+    ///                      "type": "string"
+    ///                    },
+    ///                    "operator": {
+    ///                      "title": "IdentityPolicyListOperator",
+    ///                      "type": "object",
+    ///                      "required": [
+    ///                        "kind"
+    ///                      ],
+    ///                      "properties": {
+    ///                        "attribute": {
+    ///                          "type": "string"
+    ///                        },
+    ///                        "kind": {
+    ///                          "type": "string",
+    ///                          "enum": [
+    ///                            "eq",
+    ///                            "ne",
+    ///                            "like",
+    ///                            "gt",
+    ///                            "lt",
+    ///                            "eqAttr"
+    ///                          ]
+    ///                        },
+    ///                        "pattern": {
+    ///                          "type": "string"
+    ///                        },
+    ///                        "value": {
+    ///                          "type": "string"
+    ///                        }
+    ///                      },
+    ///                      "additionalProperties": false
+    ///                    }
+    ///                  },
+    ///                  "additionalProperties": false
+    ///                },
+    ///                "effect": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "allow",
+    ///                    "deny"
+    ///                  ]
+    ///                },
+    ///                "obligations": {
+    ///                  "title": "IdentityPolicyListObligations",
+    ///                  "type": "object",
+    ///                  "properties": {
+    ///                    "fieldMask": {
+    ///                      "default": [],
+    ///                      "type": "array",
+    ///                      "items": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "rowScope": {
+    ///                      "type": "string",
+    ///                      "enum": [
+    ///                        "selfOnly",
+    ///                        "device",
+    ///                        "tenant"
+    ///                      ]
+    ///                    }
+    ///                  },
+    ///                  "additionalProperties": false
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            }
+    ///          },
+    ///          "version": {
+    ///            "type": "integer",
+    ///            "format": "int32",
+    ///            "minimum": 1.0
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      }
+    ///    },
+    ///    "hasMore": {
+    ///      "type": "boolean"
+    ///    },
+    ///    "nextCursor": {
+    ///      "type": "string"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesListResponse {
+        #[redact(sensitivity = public)]
+        pub data: ::std::vec::Vec<IdentityPolicyListView>,
+        #[serde(rename = "hasMore")]
+        #[redact(sensitivity = public)]
+        pub has_more: bool,
+        #[serde(
+            rename = "nextCursor",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub next_cursor: ::std::option::Option<::std::string::String>,
+    }
+    ///`IdentityPolicyListCondition`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyListCondition",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyListOperator",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eq",
+    ///            "ne",
+    ///            "like",
+    ///            "gt",
+    ///            "lt",
+    ///            "eqAttr"
+    ///          ]
+    ///        },
+    ///        "pattern": {
+    ///          "type": "string"
+    ///        },
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyListCondition {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyListOperator,
+    }
+    ///`IdentityPolicyListObligations`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyListObligations",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyListObligations {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyListObligationsRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyListObligations {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyListObligationsRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyListObligationsRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyListObligationsRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyListObligationsRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyListObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyListOperator`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyListOperator",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne",
+    ///        "like",
+    ///        "gt",
+    ///        "lt",
+    ///        "eqAttr"
+    ///      ]
+    ///    },
+    ///    "pattern": {
+    ///      "type": "string"
+    ///    },
+    ///    "value": {
+    ///      "type": "string"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyListOperator {
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::option::Option<::std::string::String>,
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyListOperatorKind,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub pattern: ::std::option::Option<::std::string::String>,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub value: ::std::option::Option<::std::string::String>,
+    }
+    ///`IdentityPolicyListOperatorKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne",
+    ///    "like",
+    ///    "gt",
+    ///    "lt",
+    ///    "eqAttr"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyListOperatorKind {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+        #[serde(rename = "like")]
+        Like,
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "eqAttr")]
+        EqAttr,
+    }
+    impl ::std::fmt::Display for IdentityPolicyListOperatorKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+                Self::Like => f.write_str("like"),
+                Self::Gt => f.write_str("gt"),
+                Self::Lt => f.write_str("lt"),
+                Self::EqAttr => f.write_str("eqAttr"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyListOperatorKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                "like" => Ok(Self::Like),
+                "gt" => Ok(Self::Gt),
+                "lt" => Ok(Self::Lt),
+                "eqAttr" => Ok(Self::EqAttr),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyListOperatorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListOperatorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListOperatorKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyListRule`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyListRule",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyListCondition",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyListOperator",
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": {
+    ///              "type": "string"
+    ///            },
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eq",
+    ///                "ne",
+    ///                "like",
+    ///                "gt",
+    ///                "lt",
+    ///                "eqAttr"
+    ///              ]
+    ///            },
+    ///            "pattern": {
+    ///              "type": "string"
+    ///            },
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyListObligations",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyListRule {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyListCondition,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyListRuleEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyListObligations>,
+    }
+    ///`IdentityPolicyListRuleEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyListRuleEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyListRuleEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyListRuleEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyListRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyListView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyListView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "contractId",
+    ///    "effectiveFrom",
+    ///    "permission",
+    ///    "policyId",
+    ///    "rules",
+    ///    "version"
+    ///  ],
+    ///  "properties": {
+    ///    "contractId": {
+    ///      "type": "string"
+    ///    },
+    ///    "effectiveFrom": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "effectiveUntil": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "permission": {
+    ///      "type": "string"
+    ///    },
+    ///    "policyId": {
+    ///      "type": "string"
+    ///    },
+    ///    "rules": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyListRule",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "condition",
+    ///          "effect"
+    ///        ],
+    ///        "properties": {
+    ///          "condition": {
+    ///            "title": "IdentityPolicyListCondition",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "attribute",
+    ///              "operator"
+    ///            ],
+    ///            "properties": {
+    ///              "attribute": {
+    ///                "type": "string"
+    ///              },
+    ///              "operator": {
+    ///                "title": "IdentityPolicyListOperator",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "kind"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "kind": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "eq",
+    ///                      "ne",
+    ///                      "like",
+    ///                      "gt",
+    ///                      "lt",
+    ///                      "eqAttr"
+    ///                    ]
+    ///                  },
+    ///                  "pattern": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "value": {
+    ///                    "type": "string"
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          },
+    ///          "effect": {
+    ///            "type": "string",
+    ///            "enum": [
+    ///              "allow",
+    ///              "deny"
+    ///            ]
+    ///          },
+    ///          "obligations": {
+    ///            "title": "IdentityPolicyListObligations",
+    ///            "type": "object",
+    ///            "properties": {
+    ///              "fieldMask": {
+    ///                "default": [],
+    ///                "type": "array",
+    ///                "items": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "rowScope": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "selfOnly",
+    ///                  "device",
+    ///                  "tenant"
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      }
+    ///    },
+    ///    "version": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyListView {
+        #[serde(rename = "contractId")]
+        #[redact(sensitivity = public)]
+        pub contract_id: ::std::string::String,
+        #[serde(rename = "effectiveFrom")]
+        #[redact(sensitivity = public)]
+        pub effective_from: i64,
+        #[serde(
+            rename = "effectiveUntil",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub effective_until: ::std::option::Option<i64>,
+        #[redact(sensitivity = public)]
+        pub permission: ::std::string::String,
+        #[serde(rename = "policyId")]
+        #[redact(sensitivity = public)]
+        pub policy_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub rules: ::std::vec::Vec<IdentityPolicyListRule>,
+        #[redact(sensitivity = public)]
+        pub version: ::std::num::NonZeroU32,
+    }
+    /// Generation of default values for serde.
+    pub mod defaults {
+        #[allow(clippy::unwrap_used)]
+        pub(super) fn default_nzu64<T, const V: u64>() -> T
+        where
+            T: ::std::convert::TryFrom<::std::num::NonZeroU64>,
+            <T as ::std::convert::TryFrom<::std::num::NonZeroU64>>::Error: ::std::fmt::Debug,
+        {
+            T::try_from(::std::num::NonZeroU64::try_from(V).unwrap()).unwrap()
+        }
+    }
+
+    /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.policies-list";
+
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.policies-list",
+        "v1",
+        "sha256:9b2bae406916217de251a14a999f0be4096991e6da875fd7483cc252d0f74ce2",
+    );
+
+    /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PATH: &str = "/api/v1/identity/policies";
+
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
+    /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        contract_id: CONTRACT_ID,
+        contract: CONTRACT,
+        path: PATH,
+        method: "GET",
+        auth: super::super::HttpAuthSpec {
+            mode: super::super::HttpAuthMode::Permission,
+            reason: None,
+            permission: Some("identity:policy:read"),
+        },
+        resource: None,
+        self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
+        headers: &[],
+    };
+}
+
+/// 端点 `policies-update` 派生契约（源 `policies-update/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
+pub mod policies_update {
+    /// Error types.
+    pub mod error {
+        /// Error from a `TryFrom` or `FromStr` implementation.
+        pub struct ConversionError(::std::borrow::Cow<'static, str>);
+        impl ::std::error::Error for ConversionError {}
+        impl ::std::fmt::Display for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Display::fmt(&self.0, f)
+            }
+        }
+        impl ::std::fmt::Debug for ConversionError {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                ::std::fmt::Debug::fmt(&self.0, f)
+            }
+        }
+        impl From<&'static str> for ConversionError {
+            fn from(value: &'static str) -> Self {
+                Self(value.into())
+            }
+        }
+        impl From<String> for ConversionError {
+            fn from(value: String) -> Self {
+                Self(value.into())
+            }
+        }
+    }
+    ///`IdentityPoliciesUpdateRequest`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesUpdateRequest",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "contractId",
+    ///    "effectiveFrom",
+    ///    "expectedVersion",
+    ///    "permission",
+    ///    "rules"
+    ///  ],
+    ///  "properties": {
+    ///    "contractId": {
+    ///      "type": "string"
+    ///    },
+    ///    "effectiveFrom": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "effectiveUntil": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "expectedVersion": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    },
+    ///    "permission": {
+    ///      "type": "string"
+    ///    },
+    ///    "rules": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyUpdateRule",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "condition",
+    ///          "effect"
+    ///        ],
+    ///        "properties": {
+    ///          "condition": {
+    ///            "title": "IdentityPolicyUpdateCondition",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "attribute",
+    ///              "operator"
+    ///            ],
+    ///            "properties": {
+    ///              "attribute": {
+    ///                "type": "string"
+    ///              },
+    ///              "operator": {
+    ///                "title": "IdentityPolicyUpdateOperator",
+    ///                "oneOf": [
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eq"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "ne"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "pattern"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "like"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "value": false
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "gt"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind",
+    ///                      "value"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": false,
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "lt"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  },
+    ///                  {
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "attribute",
+    ///                      "kind"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eqAttr"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": false,
+    ///                      "value": false
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  }
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          },
+    ///          "effect": {
+    ///            "type": "string",
+    ///            "enum": [
+    ///              "allow",
+    ///              "deny"
+    ///            ]
+    ///          },
+    ///          "obligations": {
+    ///            "title": "IdentityPolicyUpdateObligations",
+    ///            "type": "object",
+    ///            "properties": {
+    ///              "fieldMask": {
+    ///                "default": [],
+    ///                "type": "array",
+    ///                "items": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "rowScope": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "selfOnly",
+    ///                  "device",
+    ///                  "tenant"
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      },
+    ///      "minItems": 1
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesUpdateRequest {
+        #[serde(rename = "contractId")]
+        #[redact(sensitivity = public)]
+        pub contract_id: ::std::string::String,
+        #[serde(rename = "effectiveFrom")]
+        #[redact(sensitivity = public)]
+        pub effective_from: i64,
+        #[serde(
+            rename = "effectiveUntil",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub effective_until: ::std::option::Option<i64>,
+        #[serde(rename = "expectedVersion")]
+        #[redact(sensitivity = public)]
+        pub expected_version: ::std::num::NonZeroU32,
+        #[redact(sensitivity = public)]
+        pub permission: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub rules: ::std::vec::Vec<IdentityPolicyUpdateRule>,
+    }
+    ///`IdentityPoliciesUpdateResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPoliciesUpdateResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "data"
+    ///  ],
+    ///  "properties": {
+    ///    "data": {
+    ///      "title": "IdentityPolicyUpdateView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "contractId",
+    ///        "effectiveFrom",
+    ///        "permission",
+    ///        "policyId",
+    ///        "rules",
+    ///        "version"
+    ///      ],
+    ///      "properties": {
+    ///        "contractId": {
+    ///          "type": "string"
+    ///        },
+    ///        "effectiveFrom": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "effectiveUntil": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "permission": {
+    ///          "type": "string"
+    ///        },
+    ///        "policyId": {
+    ///          "type": "string"
+    ///        },
+    ///        "rules": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "title": "IdentityPolicyUpdateRuleView",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "condition",
+    ///              "effect"
+    ///            ],
+    ///            "properties": {
+    ///              "condition": {
+    ///                "title": "IdentityPolicyUpdateConditionView",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "attribute",
+    ///                  "operator"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "operator": {
+    ///                    "title": "IdentityPolicyUpdateOperatorView",
+    ///                    "type": "object",
+    ///                    "required": [
+    ///                      "kind"
+    ///                    ],
+    ///                    "properties": {
+    ///                      "attribute": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "kind": {
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "eq",
+    ///                          "ne",
+    ///                          "like",
+    ///                          "gt",
+    ///                          "lt",
+    ///                          "eqAttr"
+    ///                        ]
+    ///                      },
+    ///                      "pattern": {
+    ///                        "type": "string"
+    ///                      },
+    ///                      "value": {
+    ///                        "type": "string"
+    ///                      }
+    ///                    },
+    ///                    "additionalProperties": false
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              },
+    ///              "effect": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "allow",
+    ///                  "deny"
+    ///                ]
+    ///              },
+    ///              "obligations": {
+    ///                "title": "IdentityPolicyUpdateObligationsView",
+    ///                "type": "object",
+    ///                "properties": {
+    ///                  "fieldMask": {
+    ///                    "default": [],
+    ///                    "type": "array",
+    ///                    "items": {
+    ///                      "type": "string"
+    ///                    }
+    ///                  },
+    ///                  "rowScope": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "selfOnly",
+    ///                      "device",
+    ///                      "tenant"
+    ///                    ]
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "version": {
+    ///          "type": "integer",
+    ///          "format": "int32",
+    ///          "minimum": 1.0
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPoliciesUpdateResponse {
+        #[redact(sensitivity = public)]
+        pub data: IdentityPolicyUpdateView,
+    }
+    ///`IdentityPolicyUpdateCondition`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateCondition",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyUpdateOperator",
+    ///      "oneOf": [
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eq"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "ne"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "pattern"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "like"
+    ///              ]
+    ///            },
+    ///            "pattern": {
+    ///              "type": "string"
+    ///            },
+    ///            "value": false
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "gt"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind",
+    ///            "value"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": false,
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "lt"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        },
+    ///        {
+    ///          "type": "object",
+    ///          "required": [
+    ///            "attribute",
+    ///            "kind"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": {
+    ///              "type": "string"
+    ///            },
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eqAttr"
+    ///              ]
+    ///            },
+    ///            "pattern": false,
+    ///            "value": false
+    ///          },
+    ///          "additionalProperties": false
+    ///        }
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateCondition {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyUpdateOperator,
+    }
+    ///`IdentityPolicyUpdateConditionView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateConditionView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyUpdateOperatorView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eq",
+    ///            "ne",
+    ///            "like",
+    ///            "gt",
+    ///            "lt",
+    ///            "eqAttr"
+    ///          ]
+    ///        },
+    ///        "pattern": {
+    ///          "type": "string"
+    ///        },
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateConditionView {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyUpdateOperatorView,
+    }
+    ///`IdentityPolicyUpdateObligations`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateObligations",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateObligations {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyUpdateObligationsRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyUpdateObligations {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyUpdateObligationsRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateObligationsRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateObligationsRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateObligationsRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateObligationsRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateObligationsView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateObligationsView",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateObligationsView {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyUpdateObligationsViewRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyUpdateObligationsView {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyUpdateObligationsViewRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateObligationsViewRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateObligationsViewRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateObligationsViewRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateObligationsViewRowScope
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateObligationsViewRowScope
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperator`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperator",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eq"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ne"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "pattern"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "like"
+    ///          ]
+    ///        },
+    ///        "pattern": {
+    ///          "type": "string"
+    ///        },
+    ///        "value": false
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "gt"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": false,
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "lt"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "kind"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "eqAttr"
+    ///          ]
+    ///        },
+    ///        "pattern": false,
+    ///        "value": false
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum IdentityPolicyUpdateOperator {
+        #[serde(rename = "eq")]
+        Eq { value: ::std::string::String },
+        #[serde(rename = "ne")]
+        Ne { value: ::std::string::String },
+        #[serde(rename = "like")]
+        Like { pattern: ::std::string::String },
+        #[serde(rename = "gt")]
+        Gt { value: ::std::string::String },
+        #[serde(rename = "lt")]
+        Lt { value: ::std::string::String },
+        #[serde(rename = "eqAttr")]
+        EqAttr { attribute: ::std::string::String },
+    }
+    ///`IdentityPolicyUpdateOperatorView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne",
+    ///        "like",
+    ///        "gt",
+    ///        "lt",
+    ///        "eqAttr"
+    ///      ]
+    ///    },
+    ///    "pattern": {
+    ///      "type": "string"
+    ///    },
+    ///    "value": {
+    ///      "type": "string"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateOperatorView {
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::option::Option<::std::string::String>,
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyUpdateOperatorViewKind,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub pattern: ::std::option::Option<::std::string::String>,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub value: ::std::option::Option<::std::string::String>,
+    }
+    ///`IdentityPolicyUpdateOperatorViewKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne",
+    ///    "like",
+    ///    "gt",
+    ///    "lt",
+    ///    "eqAttr"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorViewKind {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+        #[serde(rename = "like")]
+        Like,
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "eqAttr")]
+        EqAttr,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorViewKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+                Self::Like => f.write_str("like"),
+                Self::Gt => f.write_str("gt"),
+                Self::Lt => f.write_str("lt"),
+                Self::EqAttr => f.write_str("eqAttr"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorViewKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                "like" => Ok(Self::Like),
+                "gt" => Ok(Self::Gt),
+                "lt" => Ok(Self::Lt),
+                "eqAttr" => Ok(Self::EqAttr),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorViewKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateOperatorViewKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorViewKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateRule`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateRule",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyUpdateCondition",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyUpdateOperator",
+    ///          "oneOf": [
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "eq"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "ne"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "pattern"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "like"
+    ///                  ]
+    ///                },
+    ///                "pattern": {
+    ///                  "type": "string"
+    ///                },
+    ///                "value": false
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "gt"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "kind",
+    ///                "value"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": false,
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "lt"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "additionalProperties": false
+    ///            },
+    ///            {
+    ///              "type": "object",
+    ///              "required": [
+    ///                "attribute",
+    ///                "kind"
+    ///              ],
+    ///              "properties": {
+    ///                "attribute": {
+    ///                  "type": "string"
+    ///                },
+    ///                "kind": {
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "eqAttr"
+    ///                  ]
+    ///                },
+    ///                "pattern": false,
+    ///                "value": false
+    ///              },
+    ///              "additionalProperties": false
+    ///            }
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyUpdateObligations",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateRule {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyUpdateCondition,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyUpdateRuleEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyUpdateObligations>,
+    }
+    ///`IdentityPolicyUpdateRuleEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateRuleEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateRuleEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateRuleEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateRuleEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateRuleView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateRuleView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyUpdateConditionView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyUpdateOperatorView",
+    ///          "type": "object",
+    ///          "required": [
+    ///            "kind"
+    ///          ],
+    ///          "properties": {
+    ///            "attribute": {
+    ///              "type": "string"
+    ///            },
+    ///            "kind": {
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "eq",
+    ///                "ne",
+    ///                "like",
+    ///                "gt",
+    ///                "lt",
+    ///                "eqAttr"
+    ///              ]
+    ///            },
+    ///            "pattern": {
+    ///              "type": "string"
+    ///            },
+    ///            "value": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "additionalProperties": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyUpdateObligationsView",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateRuleView {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyUpdateConditionView,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyUpdateRuleViewEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyUpdateObligationsView>,
+    }
+    ///`IdentityPolicyUpdateRuleViewEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateRuleViewEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateRuleViewEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateRuleViewEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "contractId",
+    ///    "effectiveFrom",
+    ///    "permission",
+    ///    "policyId",
+    ///    "rules",
+    ///    "version"
+    ///  ],
+    ///  "properties": {
+    ///    "contractId": {
+    ///      "type": "string"
+    ///    },
+    ///    "effectiveFrom": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "effectiveUntil": {
+    ///      "type": "integer",
+    ///      "format": "int64"
+    ///    },
+    ///    "permission": {
+    ///      "type": "string"
+    ///    },
+    ///    "policyId": {
+    ///      "type": "string"
+    ///    },
+    ///    "rules": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "title": "IdentityPolicyUpdateRuleView",
+    ///        "type": "object",
+    ///        "required": [
+    ///          "condition",
+    ///          "effect"
+    ///        ],
+    ///        "properties": {
+    ///          "condition": {
+    ///            "title": "IdentityPolicyUpdateConditionView",
+    ///            "type": "object",
+    ///            "required": [
+    ///              "attribute",
+    ///              "operator"
+    ///            ],
+    ///            "properties": {
+    ///              "attribute": {
+    ///                "type": "string"
+    ///              },
+    ///              "operator": {
+    ///                "title": "IdentityPolicyUpdateOperatorView",
+    ///                "type": "object",
+    ///                "required": [
+    ///                  "kind"
+    ///                ],
+    ///                "properties": {
+    ///                  "attribute": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "kind": {
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "eq",
+    ///                      "ne",
+    ///                      "like",
+    ///                      "gt",
+    ///                      "lt",
+    ///                      "eqAttr"
+    ///                    ]
+    ///                  },
+    ///                  "pattern": {
+    ///                    "type": "string"
+    ///                  },
+    ///                  "value": {
+    ///                    "type": "string"
+    ///                  }
+    ///                },
+    ///                "additionalProperties": false
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          },
+    ///          "effect": {
+    ///            "type": "string",
+    ///            "enum": [
+    ///              "allow",
+    ///              "deny"
+    ///            ]
+    ///          },
+    ///          "obligations": {
+    ///            "title": "IdentityPolicyUpdateObligationsView",
+    ///            "type": "object",
+    ///            "properties": {
+    ///              "fieldMask": {
+    ///                "default": [],
+    ///                "type": "array",
+    ///                "items": {
+    ///                  "type": "string"
+    ///                }
+    ///              },
+    ///              "rowScope": {
+    ///                "type": "string",
+    ///                "enum": [
+    ///                  "selfOnly",
+    ///                  "device",
+    ///                  "tenant"
+    ///                ]
+    ///              }
+    ///            },
+    ///            "additionalProperties": false
+    ///          }
+    ///        },
+    ///        "additionalProperties": false
+    ///      }
+    ///    },
+    ///    "version": {
+    ///      "type": "integer",
+    ///      "format": "int32",
+    ///      "minimum": 1.0
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateView {
+        #[serde(rename = "contractId")]
+        #[redact(sensitivity = public)]
+        pub contract_id: ::std::string::String,
+        #[serde(rename = "effectiveFrom")]
+        #[redact(sensitivity = public)]
+        pub effective_from: i64,
+        #[serde(
+            rename = "effectiveUntil",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub effective_until: ::std::option::Option<i64>,
+        #[redact(sensitivity = public)]
+        pub permission: ::std::string::String,
+        #[serde(rename = "policyId")]
+        #[redact(sensitivity = public)]
+        pub policy_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub rules: ::std::vec::Vec<IdentityPolicyUpdateRuleView>,
+        #[redact(sensitivity = public)]
+        pub version: ::std::num::NonZeroU32,
+    }
+
+    /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT_ID: &str = "identity.policies-update";
+
+    /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
+        "identity",
+        "identity.policies-update",
+        "v1",
+        "sha256:67e925cdb60e56e31d52dc2876dfe62bf0e3abd5c71dedab24288e240ed49a21",
+    );
+
+    /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PATH: &str = "/api/v1/identity/policies/{policyId}";
+
+    /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+
+    /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        contract_id: CONTRACT_ID,
+        contract: CONTRACT,
+        path: PATH,
+        method: "PUT",
+        auth: super::super::HttpAuthSpec {
+            mode: super::super::HttpAuthMode::Permission,
+            reason: None,
+            permission: Some("identity:policy:update"),
+        },
+        resource: None,
+        self_scoped: false,
+        projection_fields: PROJECTION_FIELDS,
+        headers: &[],
+    };
+}
+
 /// 端点 `profile` 派生契约（源 `profile/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
 pub mod profile {
     /// Error types.

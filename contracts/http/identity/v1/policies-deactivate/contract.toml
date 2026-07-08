@@ -1,0 +1,23 @@
+# ABAC policy 停用 HTTP 契约。policy tombstone + identity.policy-updated outbox fact ⇒ L2。
+id = "identity.policies-deactivate"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "OutboxFact"
+lifecycle = "active"
+path = "/api/v1/identity/policies/{policyId}/deactivate"
+method = "POST"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:policy:deactivate"
+
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["identity.policy-updated"]

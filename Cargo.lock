@@ -2874,6 +2874,7 @@ dependencies = [
  "rstest",
  "runctx",
  "secure",
+ "serde",
  "serde_json",
  "support",
  "testkit",

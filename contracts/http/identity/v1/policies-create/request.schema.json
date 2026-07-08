@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IdentityPoliciesCreateRequest",
+  "type": "object",
+  "required": ["policyId", "contractId", "permission", "effectiveFrom", "rules"],
+  "properties": {
+    "policyId": { "type": "string" },
+    "contractId": { "type": "string" },
+    "permission": { "type": "string" },
+    "effectiveFrom": { "type": "integer", "format": "int64" },
+    "effectiveUntil": { "type": "integer", "format": "int64" },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "title": "IdentityPolicyCreateRule",
+        "type": "object",
+        "required": ["condition", "effect"],
+        "properties": {
+          "condition": {
+            "title": "IdentityPolicyCreateCondition",
+            "type": "object",
+            "required": ["attribute", "operator"],
+            "properties": {
+              "attribute": { "type": "string" },
+              "operator": {
+                "title": "IdentityPolicyCreateOperator",
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": ["kind", "value"],
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["eq"] },
+                      "value": { "type": "string" },
+                      "pattern": false,
+                      "attribute": false
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "value"],
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["ne"] },
+                      "value": { "type": "string" },
+                      "pattern": false,
+                      "attribute": false
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "pattern"],
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["like"] },
+                      "value": false,
+                      "pattern": { "type": "string" },
+                      "attribute": false
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "value"],
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["gt"] },
+                      "value": { "type": "string" },
+                      "pattern": false,
+                      "attribute": false
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "value"],
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["lt"] },
+                      "value": { "type": "string" },
+                      "pattern": false,
+                      "attribute": false
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "required": ["kind", "attribute"],
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["eqAttr"] },
+                      "value": false,
+                      "pattern": false,
+                      "attribute": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "effect": { "type": "string", "enum": ["allow", "deny"] },
+          "obligations": {
+            "title": "IdentityPolicyCreateObligations",
+            "type": "object",
+            "properties": {
+              "rowScope": { "type": "string", "enum": ["selfOnly", "device", "tenant"] },
+              "fieldMask": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": []
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

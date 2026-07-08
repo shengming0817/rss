@@ -2,17 +2,23 @@
 
 use std::time::SystemTime;
 
+use consistency::Entry;
+use diport::{Clock, OutboxEnvelopeParts};
 use identity::ports::{
     AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, Policy, PolicyCondition,
-    PolicyEffect, PolicyId, PolicyObligations, PolicyRepo, PolicyRouteScope, PolicyRule,
-    PolicyVersion, TenantId,
+    PolicyEffect, PolicyId, PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage,
+    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, TenantId,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
-use crate::outbox::{epoch_secs_to_time, unix_secs};
+use crate::outbox::{
+    OutboxEnvelope, append_outbox_with_projection, epoch_secs_to_time, metadata_with_ambient,
+    unix_secs,
+};
+use crate::projection_events::ProjectionWriteRegistry;
 
 pub struct PgPolicyRepo {
     pool: PgTenantPool,
@@ -23,6 +29,47 @@ impl PgPolicyRepo {
         Self {
             pool: PgTenantPool::new(store),
         }
+    }
+}
+
+pub struct PgPolicyLifecycle {
+    pool: PgTenantPool,
+    clock: Box<dyn Clock>,
+}
+
+impl PgPolicyLifecycle {
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn new(store: &PgStore, clock: Box<dyn Clock>) -> Self {
+        Self::new_with_projection_registry(store, clock, ProjectionWriteRegistry::empty())
+    }
+
+    pub(crate) fn new_with_projection_registry(
+        store: &PgStore,
+        clock: Box<dyn Clock>,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> Self {
+        Self {
+            pool: PgTenantPool::with_projection_registry(store, projection_registry),
+            clock,
+        }
+    }
+
+    fn envelope(
+        &self,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<(TenantId, OutboxEnvelope), IdentityError> {
+        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+            envelope.into_parts();
+        let env = OutboxEnvelope::new(
+            contract.domain().to_string(),
+            contract.contract_id().to_string(),
+            metadata_with_ambient(unix_secs(self.clock.now()), tenant, contract)
+                .with_subject_id(subject_id)
+                .with_actor(actor),
+        )
+        .with_partition_key_opt(partition_key)
+        .with_causation_id_opt(causation_id);
+        Ok((tenant, env))
     }
 }
 
@@ -280,176 +327,6 @@ fn hydrate_policy(tenant: TenantId, raw: RawPolicy) -> Result<Policy, IdentityEr
 }
 
 impl PolicyRepo for PgPolicyRepo {
-    async fn create(&self, tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError> {
-        if policy.tenant() != tenant || policy.version().get() != 1 {
-            return Err(IdentityError::InvalidPolicy);
-        }
-        let tenant_uuid = tenant_param(tenant);
-        let rules_json = encode_rules(&policy)?;
-        let id = policy.id().as_str().to_string();
-        let version = version_param(policy.version())?;
-        let contract_id = policy.route_scope().contract_id().to_string();
-        let permission = policy.route_scope().permission().to_string();
-        let effective_from = unix_secs(policy.effective_from());
-        let effective_until = policy.effective_until().map(unix_secs);
-        let inserted = self
-            .pool
-            .write(
-                tenant,
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO abac_policies
-                                (tenant_id, id, version, contract_id, permission,
-                                 effective_from, effective_until, rules)
-                            VALUES
-                                ($1::uuid, $2, $3, $4, $5,
-                                 to_timestamp($6), to_timestamp($7), $8::jsonb)
-                            ON CONFLICT (tenant_id, id) DO NOTHING
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(&id)
-                        .bind(version)
-                        .bind(&contract_id)
-                        .bind(&permission)
-                        .bind(effective_from)
-                        .bind(effective_until)
-                        .bind(rules_json)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(storage)
-                        .map(|r| r.rows_affected())
-                    })
-                },
-                storage,
-            )
-            .await?;
-        if inserted == 0 {
-            return Err(IdentityError::PolicyAlreadyExists);
-        }
-        Ok(policy)
-    }
-
-    async fn update(
-        &self,
-        tenant: TenantId,
-        policy: Policy,
-        expected: PolicyVersion,
-    ) -> Result<Policy, IdentityError> {
-        if policy.tenant() != tenant {
-            return Err(IdentityError::InvalidPolicy);
-        }
-        let tenant_uuid = tenant_param(tenant);
-        let rules_json = encode_rules(&policy)?;
-        let id = policy.id().clone();
-        let expected_version = version_param(expected)?;
-        let raw: Option<RawPolicy> = self
-            .pool
-            .write(
-                tenant,
-                move |conn| {
-                    Box::pin(async move {
-                        let row = sqlx::query(
-                            r#"
-                            UPDATE abac_policies
-                            SET version = version + 1,
-                                contract_id = $4,
-                                permission = $5,
-                                effective_from = to_timestamp($6),
-                                effective_until = to_timestamp($7),
-                                rules = $8::jsonb,
-                                updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND id = $2
-                              AND version = $3
-                              AND deleted_at IS NULL
-                            RETURNING id, version, contract_id, permission,
-                                      extract(epoch from effective_from)::bigint AS effective_from,
-                                      extract(epoch from effective_until)::bigint AS effective_until,
-                                      rules::text AS rules_json
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(policy.id().as_str())
-                        .bind(expected_version)
-                        .bind(policy.route_scope().contract_id())
-                        .bind(policy.route_scope().permission())
-                        .bind(unix_secs(policy.effective_from()))
-                        .bind(policy.effective_until().map(unix_secs))
-                        .bind(rules_json)
-                        .fetch_optional(conn.conn())
-                        .await
-                        .map_err(storage)?;
-                        row.map(row_to_raw).transpose().map_err(storage)
-                    })
-                },
-                storage,
-            )
-            .await?;
-
-        match raw {
-            Some(raw) => hydrate_policy(tenant, raw),
-            None => {
-                if self.find(tenant, id).await?.is_some() {
-                    Err(IdentityError::VersionConflict)
-                } else {
-                    Err(IdentityError::PolicyNotFound)
-                }
-            }
-        }
-    }
-
-    async fn delete(
-        &self,
-        tenant: TenantId,
-        id: PolicyId,
-        expected: PolicyVersion,
-    ) -> Result<bool, IdentityError> {
-        let tenant_uuid = tenant_param(tenant);
-        let id_str = id.as_str().to_string();
-        let expected_version = version_param(expected)?;
-        let deleted = self
-            .pool
-            .write(
-                tenant,
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            UPDATE abac_policies
-                            SET version = version + 1,
-                                deleted_at = now(),
-                                updated_at = now()
-                            WHERE tenant_id = $1::uuid
-                              AND id = $2
-                              AND version = $3
-                              AND deleted_at IS NULL
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(&id_str)
-                        .bind(expected_version)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(storage)
-                        .map(|r| r.rows_affected())
-                    })
-                },
-                storage,
-            )
-            .await?;
-        if deleted > 0 {
-            return Ok(true);
-        }
-        if self.find(tenant, id).await?.is_some() {
-            Err(IdentityError::VersionConflict)
-        } else {
-            Ok(false)
-        }
-    }
-
     async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError> {
         let tenant_uuid = tenant_param(tenant);
         let id_str = id.as_str().to_string();
@@ -479,6 +356,54 @@ impl PolicyRepo for PgPolicyRepo {
             .await
             .map_err(storage)?;
         raw.map(|raw| hydrate_policy(tenant, raw)).transpose()
+    }
+
+    async fn list_active(
+        &self,
+        tenant: TenantId,
+        page: PolicyPage,
+    ) -> Result<PolicyListResult, IdentityError> {
+        let tenant_uuid = tenant_param(tenant);
+        let limit = usize::from(page.limit.get());
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(storage_boxed)?;
+        let after = page.after.map(|id| id.as_str().to_string());
+        let raw: Vec<RawPolicy> = self
+            .pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    let rows = sqlx::query(
+                        r#"
+                        SELECT id, version, contract_id, permission,
+                               extract(epoch from effective_from)::bigint AS effective_from,
+                               extract(epoch from effective_until)::bigint AS effective_until,
+                               rules::text AS rules_json
+                        FROM abac_policies
+                        WHERE tenant_id = $1::uuid
+                          AND ($2::text IS NULL OR id > $2)
+                          AND deleted_at IS NULL
+                        ORDER BY id ASC
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(tenant_uuid)
+                    .bind(after)
+                    .bind(fetch_limit)
+                    .fetch_all(&mut *conn)
+                    .await?;
+                    rows.into_iter()
+                        .map(row_to_raw)
+                        .collect::<Result<Vec<RawPolicy>, sqlx::Error>>()
+                })
+            })
+            .await
+            .map_err(storage)?;
+        let has_more = raw.len() > limit;
+        let mut policies = raw
+            .into_iter()
+            .map(|raw| hydrate_policy(tenant, raw))
+            .collect::<Result<Vec<_>, _>>()?;
+        policies.truncate(limit);
+        Ok(PolicyListResult { policies, has_more })
     }
 
     async fn list_effective(
@@ -525,6 +450,240 @@ impl PolicyRepo for PgPolicyRepo {
         raw.into_iter()
             .map(|raw| hydrate_policy(tenant, raw))
             .collect()
+    }
+}
+
+impl PolicyLifecycle for PgPolicyLifecycle {
+    async fn create_and_emit(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError> {
+        if policy.tenant() != tenant || policy.version().get() != 1 {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let (env_tenant, env) = self.envelope(envelope)?;
+        if env_tenant != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let tenant_uuid = tenant_param(tenant);
+        let rules_json = encode_rules(&policy)?;
+        let id = policy.id().as_str().to_string();
+        let version = version_param(policy.version())?;
+        let contract_id = policy.route_scope().contract_id().to_string();
+        let permission = policy.route_scope().permission().to_string();
+        let effective_from = unix_secs(policy.effective_from());
+        let effective_until = policy.effective_until().map(unix_secs);
+        let projection_registry = self.pool.projection_registry();
+        let inserted = self
+            .pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO abac_policies
+                                (tenant_id, id, version, contract_id, permission,
+                                 effective_from, effective_until, rules)
+                            VALUES
+                                ($1::uuid, $2, $3, $4, $5,
+                                 to_timestamp($6), to_timestamp($7), $8::jsonb)
+                            ON CONFLICT (tenant_id, id) DO NOTHING
+                            "#,
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(&id)
+                        .bind(version)
+                        .bind(&contract_id)
+                        .bind(&permission)
+                        .bind(effective_from)
+                        .bind(effective_until)
+                        .bind(rules_json)
+                        .execute(conn.conn())
+                        .await
+                        .map_err(storage)
+                        .and_then(|r| {
+                            let rows = r.rows_affected();
+                            if rows > 0 {
+                                Ok(rows)
+                            } else {
+                                Err(IdentityError::PolicyAlreadyExists)
+                            }
+                        })?;
+                        append_outbox_with_projection(conn, &entry, &env, &projection_registry)
+                            .await
+                            .map_err(storage)?;
+                        Ok(1)
+                    })
+                },
+                storage,
+            )
+            .await?;
+        debug_assert_eq!(inserted, 1);
+        Ok(policy)
+    }
+
+    async fn update_and_emit(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        expected: PolicyVersion,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError> {
+        if policy.tenant() != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let (env_tenant, env) = self.envelope(envelope)?;
+        if env_tenant != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let tenant_uuid = tenant_param(tenant);
+        let rules_json = encode_rules(&policy)?;
+        let id = policy.id().clone();
+        let expected_version = version_param(expected)?;
+        let projection_registry = self.pool.projection_registry();
+        let raw: Option<RawPolicy> = self
+            .pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        let row = sqlx::query(
+                            r#"
+                            UPDATE abac_policies
+                            SET version = version + 1,
+                                contract_id = $4,
+                                permission = $5,
+                                effective_from = to_timestamp($6),
+                                effective_until = to_timestamp($7),
+                                rules = $8::jsonb,
+                                updated_at = now()
+                            WHERE tenant_id = $1::uuid
+                              AND id = $2
+                              AND version = $3
+                              AND deleted_at IS NULL
+                            RETURNING id, version, contract_id, permission,
+                                      extract(epoch from effective_from)::bigint AS effective_from,
+                                      extract(epoch from effective_until)::bigint AS effective_until,
+                                      rules::text AS rules_json
+                            "#,
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(policy.id().as_str())
+                        .bind(expected_version)
+                        .bind(policy.route_scope().contract_id())
+                        .bind(policy.route_scope().permission())
+                        .bind(unix_secs(policy.effective_from()))
+                        .bind(policy.effective_until().map(unix_secs))
+                        .bind(rules_json)
+                        .fetch_optional(conn.conn())
+                        .await
+                        .map_err(storage)?;
+                        if row.is_some() {
+                            append_outbox_with_projection(
+                                conn,
+                                &entry,
+                                &env,
+                                &projection_registry,
+                            )
+                            .await
+                            .map_err(storage)?;
+                        }
+                        row.map(row_to_raw).transpose().map_err(storage)
+                    })
+                },
+                storage,
+            )
+            .await?;
+
+        match raw {
+            Some(raw) => hydrate_policy(tenant, raw),
+            None => {
+                if (PgPolicyRepo {
+                    pool: self.pool.clone(),
+                })
+                .find(tenant, id)
+                .await?
+                .is_some()
+                {
+                    Err(IdentityError::VersionConflict)
+                } else {
+                    Err(IdentityError::PolicyNotFound)
+                }
+            }
+        }
+    }
+
+    async fn deactivate_and_emit(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+        expected: PolicyVersion,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, IdentityError> {
+        let (env_tenant, env) = self.envelope(envelope)?;
+        if env_tenant != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let tenant_uuid = tenant_param(tenant);
+        let id_str = id.as_str().to_string();
+        let expected_version = version_param(expected)?;
+        let projection_registry = self.pool.projection_registry();
+        let deleted = self
+            .pool
+            .write(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        let rows = sqlx::query(
+                            r#"
+                            UPDATE abac_policies
+                            SET version = version + 1,
+                                deleted_at = now(),
+                                updated_at = now()
+                            WHERE tenant_id = $1::uuid
+                              AND id = $2
+                              AND version = $3
+                              AND deleted_at IS NULL
+                            "#,
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(&id_str)
+                        .bind(expected_version)
+                        .execute(conn.conn())
+                        .await
+                        .map_err(storage)
+                        .map(|r| r.rows_affected())?;
+                        if rows > 0 {
+                            append_outbox_with_projection(conn, &entry, &env, &projection_registry)
+                                .await
+                                .map_err(storage)?;
+                        }
+                        Ok(rows)
+                    })
+                },
+                storage,
+            )
+            .await?;
+        if deleted > 0 {
+            return Ok(true);
+        }
+        if (PgPolicyRepo {
+            pool: self.pool.clone(),
+        })
+        .find(tenant, id)
+        .await?
+        .is_some()
+        {
+            Err(IdentityError::VersionConflict)
+        } else {
+            Ok(false)
+        }
     }
 }
 

@@ -45,6 +45,10 @@ where
         Self::new(store, hasher, AuditEventKind::RoleRevoked)
     }
 
+    pub(crate) fn policy_updated(store: &PgStore, hasher: AuditChainHasher<M>) -> Self {
+        Self::new(store, hasher, AuditEventKind::PolicyUpdated)
+    }
+
     fn new(store: &PgStore, hasher: AuditChainHasher<M>, kind: AuditEventKind) -> Self {
         Self {
             pool: PgTenantPool::new(store),

@@ -37,32 +37,23 @@ pub use crate::domain::{
 };
 pub use vocab::TenantId;
 
-/// durable ABAC policy repository DI port（tenant-scoped，domain-shaped）。
+/// durable ABAC policy read repository DI port（tenant-scoped，domain-shaped）。
 ///
-/// 本 port 只暴露 repo 能力；产品管理 HTTP API 不在本 PR 范围。`list_effective` 是授权热路径读口：
-/// provider 必须按 `(tenant, route scope, effective window)` 收敛，任何存储 / decode / validation 错误由
-/// caller fail-closed 映射为 deny。
+/// 本 port 只暴露读侧能力。管理写侧必须经 [`PolicyLifecycle`] 的 combined co-tx API，以类型边界避免
+/// “先写 policy 再发事件”的两步调用。`list_effective` 是授权热路径读口：provider 必须按
+/// `(tenant, route scope, effective window)` 收敛，任何存储 / decode / validation 错误由 caller fail-closed
+/// 映射为 deny。
 #[trait_variant::make(PolicyRepo: Send)]
 #[dynosaur(pub DynPolicyRepo = dyn(box) PolicyRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 pub trait PolicyRepoLocal: Send + Sync {
-    async fn create(&self, tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError>;
-
-    async fn update(
-        &self,
-        tenant: TenantId,
-        policy: Policy,
-        expected: PolicyVersion,
-    ) -> Result<Policy, IdentityError>;
-
-    async fn delete(
-        &self,
-        tenant: TenantId,
-        id: PolicyId,
-        expected: PolicyVersion,
-    ) -> Result<bool, IdentityError>;
-
     async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError>;
+
+    async fn list_active(
+        &self,
+        tenant: TenantId,
+        page: PolicyPage,
+    ) -> Result<PolicyListResult, IdentityError>;
 
     async fn list_effective(
         &self,
@@ -70,6 +61,52 @@ pub trait PolicyRepoLocal: Send + Sync {
         scope: PolicyRouteScope,
         at: SystemTime,
     ) -> Result<Vec<Policy>, IdentityError>;
+}
+
+/// 策略列表分页参数（handler 已完成 query/cursor 校验，repo 只接收 typed page）。
+#[derive(Debug, Clone)]
+pub struct PolicyPage {
+    pub limit: vocab::Limit,
+    pub after: Option<PolicyId>,
+}
+
+/// 策略列表分页结果（`has_more` 由 repo over-fetch 判定；`nextCursor` 由 handler 用末项 policy id 派生）。
+#[derive(Debug)]
+pub struct PolicyListResult {
+    pub policies: Vec<Policy>,
+    pub has_more: bool,
+}
+
+/// ABAC policy lifecycle DI port（domain-shaped）——policy mutation + `identity.policy-updated` outbox 的唯一写口。
+#[trait_variant::make(PolicyLifecycle: Send)]
+#[dynosaur(pub DynPolicyLifecycle = dyn(box) PolicyLifecycle, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait PolicyLifecycleLocal: Send + Sync {
+    async fn create_and_emit(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError>;
+
+    async fn update_and_emit(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        expected: PolicyVersion,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError>;
+
+    async fn deactivate_and_emit(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+        expected: PolicyVersion,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, IdentityError>;
 }
 
 /// 角色仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。

@@ -132,8 +132,7 @@ impl PolicyVersion {
         self.0
     }
 
-    #[cfg(test)]
-    pub(crate) fn next(self) -> Result<Self, IdentityError> {
+    pub fn next_checked(self) -> Result<Self, IdentityError> {
         self.0
             .checked_add(1)
             .map(Self)

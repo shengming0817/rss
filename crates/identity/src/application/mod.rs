@@ -22,7 +22,7 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use base64::Engine as _;
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{Entry, IdemKey, OutboxPayload, Topic};
@@ -43,6 +43,13 @@ use generated::http::identity_v1::{
         IdentityPasswordChangeData, IdentityPasswordChangeRequest, IdentityPasswordChangeResponse,
         SPEC as PASSWORD_CHANGE_HTTP_SPEC,
     },
+    policies_create::{IdentityPoliciesCreateRequest, SPEC as POLICIES_CREATE_HTTP_SPEC},
+    policies_deactivate::{
+        IdentityPoliciesDeactivateRequest, SPEC as POLICIES_DEACTIVATE_HTTP_SPEC,
+    },
+    policies_get::SPEC as POLICIES_GET_HTTP_SPEC,
+    policies_list::{IdentityPoliciesListRequest, SPEC as POLICIES_LIST_HTTP_SPEC},
+    policies_update::{IdentityPoliciesUpdateRequest, SPEC as POLICIES_UPDATE_HTTP_SPEC},
     profile::{
         IdentityProfileData, IdentityProfileDataKind, IdentityProfileResponse,
         SPEC as PROFILE_HTTP_SPEC,
@@ -81,25 +88,29 @@ use vocab::{CoreError, CoreErrorKind, ProjectionField, TenantId};
 use crate::domain::{
     AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
-    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PolicyEvaluation,
-    PolicyObligations, PolicyRouteScope, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, RoleId, Session, SessionId, evaluate_policies_for_tenant,
+    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PermissionId,
+    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RoleId, Session, SessionId,
+    evaluate_policies_for_tenant,
 };
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo,
-    DynSessionLifecycle, PolicyRepo, RefreshTokenStore, RoleBindingLifecycle, RolePage, RoleRepo,
-    SessionLifecycle,
+    DynSessionLifecycle, PolicyPage, PolicyRepo, RefreshTokenStore, RoleBindingLifecycle, RolePage,
+    RoleRepo, SessionLifecycle,
 };
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
 pub use rbac_admin::{RbacAdminError, RbacAdminService};
+mod policy_manage;
+pub use policy_manage::{PolicyManageError, PolicyManageService};
 
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
 /// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
 const SESSION_DOMAIN: &str = CONTRACT.domain();
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
+const POLICY_MANAGE_PERMISSION_PREFIX: &str = "identity:policy:manage:";
 
 /// JWT 署名用途字面量（seed-login / test 路径；≥ 3 处使用，rust-standards §工程护栏抽 const）。
 #[cfg(any(test, feature = "seed-login"))]
@@ -1015,6 +1026,19 @@ fn builtin_admin_permission(contract_id: &'static str, permission: &str) -> bool
         .any(|spec| spec.contract_id == contract_id && spec.auth.permission == Some(permission))
 }
 
+fn policy_management_permission_for(target_permission: &str) -> Result<String, AuthReject> {
+    if target_permission.starts_with(POLICY_MANAGE_PERMISSION_PREFIX) {
+        return Err(AuthReject::Forbidden);
+    }
+    let permission = format!("{POLICY_MANAGE_PERMISSION_PREFIX}{target_permission}");
+    PermissionId::parse(&permission).map_err(|_| AuthReject::Forbidden)?;
+    Ok(permission)
+}
+
+fn policy_management_permission(scope: &PolicyRouteScope) -> Result<String, AuthReject> {
+    policy_management_permission_for(scope.permission())
+}
+
 fn contract_auth_policy(
     request: &RouteAuthorizationRequest,
 ) -> Result<ContractAuthPolicy, AuthReject> {
@@ -1041,6 +1065,26 @@ fn contract_auth_policy(
         }
         id if id == ROLES_REVOKE_HTTP_SPEC.contract_id => {
             permission_from_request(request, &ROLES_REVOKE_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
+        id if id == POLICIES_CREATE_HTTP_SPEC.contract_id => {
+            permission_from_request(request, &POLICIES_CREATE_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
+        id if id == POLICIES_UPDATE_HTTP_SPEC.contract_id => {
+            permission_from_request(request, &POLICIES_UPDATE_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
+        id if id == POLICIES_DEACTIVATE_HTTP_SPEC.contract_id => {
+            permission_from_request(request, &POLICIES_DEACTIVATE_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
+        id if id == POLICIES_GET_HTTP_SPEC.contract_id => {
+            permission_from_request(request, &POLICIES_GET_HTTP_SPEC)
+                .map(ContractAuthPolicy::RolePermission)
+        }
+        id if id == POLICIES_LIST_HTTP_SPEC.contract_id => {
+            permission_from_request(request, &POLICIES_LIST_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
         _ if request.resource.is_none() => {
@@ -1200,6 +1244,57 @@ impl ContractAuthorizer {
             Err(AuthReject::Forbidden)
         }
     }
+
+    async fn authorize_policy_scope_management(
+        &self,
+        auth: &AuthUserContext,
+        scope: &PolicyRouteScope,
+    ) -> Result<(), AuthReject> {
+        if auth.kind != vocab::PrincipalKind::Admin {
+            return Err(AuthReject::Forbidden);
+        }
+        let required = policy_management_permission(scope)?;
+        let subject = auth.user_id.as_uuid().hyphenated().to_string();
+        let bindings = self
+            .bindings
+            .list_for_subject(auth.tenant, subject.clone())
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %auth.tenant,
+                    target_contract_id = scope.contract_id(),
+                    target_permission = scope.permission(),
+                    "identity policy management binding lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+
+        let role_ids = bindings
+            .into_iter()
+            .filter(|binding| binding.tenant() == auth.tenant && binding.subject() == subject)
+            .map(|binding| binding.role_id().clone())
+            .collect::<Vec<_>>();
+
+        for role_id in role_ids {
+            let role = self.roles.find(auth.tenant, role_id).await.map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %auth.tenant,
+                    target_contract_id = scope.contract_id(),
+                    target_permission = scope.permission(),
+                    "identity policy management role lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+            if role.is_some_and(|role| role.permission_ids().any(|p| p == required)) {
+                return Ok(());
+            }
+        }
+        Err(AuthReject::Forbidden)
+    }
 }
 
 fn audit_projection_route(contract_id: &'static str, permission: &str) -> bool {
@@ -1304,6 +1399,12 @@ struct RbacHandlerState {
     service: Arc<RbacAdminService>,
 }
 
+#[derive(Clone)]
+struct PolicyManageHandlerState {
+    service: Arc<PolicyManageService>,
+    authorizer: Arc<ContractAuthorizer>,
+}
+
 struct SelfServiceHandlerState<S> {
     service: Arc<LoginService<S>>,
 }
@@ -1395,6 +1496,23 @@ fn decode_role_cursor(raw: &str) -> Result<RoleId, ()> {
 
 fn encode_role_cursor(role_id: &RoleId) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(role_id.as_str().as_bytes())
+}
+
+fn policy_id_from_wire(raw: &str) -> Result<PolicyId, ()> {
+    policy_manage::policy_id_from_wire(raw).map_err(|_| ())
+}
+
+fn decode_policy_cursor(raw: &str) -> Result<PolicyId, ()> {
+    let cursor = vocab::Cursor::parse(raw).map_err(|_| ())?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| ())?;
+    let decoded = std::str::from_utf8(&bytes).map_err(|_| ())?;
+    policy_id_from_wire(decoded)
+}
+
+fn encode_policy_cursor(policy_id: &PolicyId) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(policy_id.as_str().as_bytes())
 }
 
 async fn roles_assign_handler(
@@ -1562,6 +1680,273 @@ async fn roles_list_handler(
         .into_response()
 }
 
+async fn policies_create_handler(
+    State(state): State<PolicyManageHandlerState>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let subject = match authenticated_subject_context(&req) {
+        Ok(ctx) => ctx,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let auth = match authorized_user_context(subject) {
+        Ok(auth) => auth,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let body = match body_bytes(req, &request_id).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    let request: IdentityPoliciesCreateRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let draft = match policy_manage::PolicyCreateDraft::try_from(request) {
+        Ok(draft) => draft,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    if let Err(reject) = state
+        .authorizer
+        .authorize_policy_scope_management(&auth, draft.target_scope())
+        .await
+    {
+        return reject.into_response(&request_id);
+    }
+    match state
+        .service
+        .create_policy(auth.tenant, auth.user_id, auth.kind, draft)
+        .await
+        .and_then(|policy| policy_manage::create_response(&policy))
+    {
+        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Err(err) => {
+            policy_error_response(&err, auth.tenant, &request_id, &POLICIES_CREATE_HTTP_SPEC)
+        }
+    }
+}
+
+async fn policies_update_handler(
+    State(state): State<PolicyManageHandlerState>,
+    Path(policy_id_raw): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let subject = match authenticated_subject_context(&req) {
+        Ok(ctx) => ctx,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let auth = match authorized_user_context(subject) {
+        Ok(auth) => auth,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let policy_id = match policy_id_from_wire(&policy_id_raw) {
+        Ok(policy_id) => policy_id,
+        Err(()) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let body = match body_bytes(req, &request_id).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    let request: IdentityPoliciesUpdateRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let draft = match policy_manage::PolicyUpdateDraft::try_from_wire(policy_id, request) {
+        Ok(draft) => draft,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let current = match state
+        .service
+        .get_policy(auth.tenant, draft.policy_id().clone())
+        .await
+    {
+        Ok(policy) => policy,
+        Err(err) => {
+            return policy_error_response(
+                &err,
+                auth.tenant,
+                &request_id,
+                &POLICIES_UPDATE_HTTP_SPEC,
+            );
+        }
+    };
+    for scope in [current.route_scope(), draft.target_scope()] {
+        if let Err(reject) = state
+            .authorizer
+            .authorize_policy_scope_management(&auth, scope)
+            .await
+        {
+            return reject.into_response(&request_id);
+        }
+    }
+    match state
+        .service
+        .update_policy(auth.tenant, auth.user_id, auth.kind, draft)
+        .await
+        .and_then(|policy| policy_manage::update_response(&policy))
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            policy_error_response(&err, auth.tenant, &request_id, &POLICIES_UPDATE_HTTP_SPEC)
+        }
+    }
+}
+
+async fn policies_deactivate_handler(
+    State(state): State<PolicyManageHandlerState>,
+    Path(policy_id_raw): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let subject = match authenticated_subject_context(&req) {
+        Ok(ctx) => ctx,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let auth = match authorized_user_context(subject) {
+        Ok(auth) => auth,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let policy_id = match policy_id_from_wire(&policy_id_raw) {
+        Ok(policy_id) => policy_id,
+        Err(()) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let body = match body_bytes(req, &request_id).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    let request: IdentityPoliciesDeactivateRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let draft = match policy_manage::PolicyDeactivateDraft::try_from_wire(policy_id, request) {
+        Ok(draft) => draft,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let current = match state
+        .service
+        .get_policy(auth.tenant, draft.policy_id().clone())
+        .await
+    {
+        Ok(policy) => policy,
+        Err(err) => {
+            return policy_error_response(
+                &err,
+                auth.tenant,
+                &request_id,
+                &POLICIES_DEACTIVATE_HTTP_SPEC,
+            );
+        }
+    };
+    if let Err(reject) = state
+        .authorizer
+        .authorize_policy_scope_management(&auth, current.route_scope())
+        .await
+    {
+        return reject.into_response(&request_id);
+    }
+    match state
+        .service
+        .deactivate_policy(auth.tenant, auth.user_id, auth.kind, draft)
+        .await
+        .and_then(policy_manage::deactivate_response)
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => policy_error_response(
+            &err,
+            auth.tenant,
+            &request_id,
+            &POLICIES_DEACTIVATE_HTTP_SPEC,
+        ),
+    }
+}
+
+async fn policies_get_handler(
+    State(state): State<PolicyManageHandlerState>,
+    Path(policy_id_raw): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let subject = match authenticated_subject_context(&req) {
+        Ok(ctx) => ctx,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let policy_id = match policy_id_from_wire(&policy_id_raw) {
+        Ok(policy_id) => policy_id,
+        Err(()) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    match state
+        .service
+        .get_policy(subject.tenant, policy_id)
+        .await
+        .and_then(|policy| policy_manage::get_response(&policy))
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            policy_error_response(&err, subject.tenant, &request_id, &POLICIES_GET_HTTP_SPEC)
+        }
+    }
+}
+
+async fn policies_list_handler(
+    State(state): State<PolicyManageHandlerState>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let subject = match authenticated_subject_context(&req) {
+        Ok(ctx) => ctx,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let request = match Query::<IdentityPoliciesListRequest>::try_from_uri(req.uri()) {
+        Ok(Query(request)) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let limit = match u16::try_from(request.limit.get())
+        .ok()
+        .and_then(|limit| vocab::Limit::new(limit).ok())
+    {
+        Some(limit) => limit,
+        None => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let after = match request
+        .cursor
+        .as_deref()
+        .map(decode_policy_cursor)
+        .transpose()
+    {
+        Ok(after) => after,
+        Err(()) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let result = match state
+        .service
+        .list_policies(subject.tenant, PolicyPage { limit, after })
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            return policy_error_response(
+                &err,
+                subject.tenant,
+                &request_id,
+                &POLICIES_LIST_HTTP_SPEC,
+            );
+        }
+    };
+    let next_cursor = if result.has_more {
+        result
+            .policies
+            .last()
+            .map(|policy| encode_policy_cursor(policy.id()))
+    } else {
+        None
+    };
+    match policy_manage::list_response(result.policies, result.has_more, next_cursor) {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            policy_error_response(&err, subject.tenant, &request_id, &POLICIES_LIST_HTTP_SPEC)
+        }
+    }
+}
+
 async fn profile_handler(req: Request<Body>) -> Response {
     let request_id = request_id_from(&req);
     let subject = match authenticated_subject_context(&req) {
@@ -1709,6 +2094,35 @@ fn rbac_error_response(
     core_response(kind, request_id)
 }
 
+fn policy_error_response(
+    err: &PolicyManageError,
+    tenant: TenantId,
+    request_id: &str,
+    spec: &HttpSpec,
+) -> Response {
+    let kind = match err {
+        PolicyManageError::InvalidPolicy => CoreErrorKind::Validation,
+        PolicyManageError::PolicyNotFound => CoreErrorKind::NotFound,
+        PolicyManageError::PolicyAlreadyExists | PolicyManageError::VersionConflict => {
+            CoreErrorKind::Conflict
+        }
+        PolicyManageError::PayloadEncode(_)
+        | PolicyManageError::EntryBuild
+        | PolicyManageError::Store(_) => CoreErrorKind::Internal,
+    };
+    if matches!(kind, CoreErrorKind::Internal) {
+        tracing::error!(
+            error = %err,
+            error_chain = %secure::redact_error(&err),
+            request_id,
+            tenant_id = %tenant,
+            contract_id = spec.contract_id,
+            "identity policy handler failed"
+        );
+    }
+    core_response(kind, request_id)
+}
+
 fn password_error_response(
     err: &ChangePasswordError,
     tenant: TenantId,
@@ -1736,24 +2150,38 @@ fn password_error_response(
 
 /// identity 域 bootstrap 生命周期：声明 identity HTTP 路由组（Primary listener，同 `/api/v1/identity` 前缀）。
 /// 泛型 `S: Signer` 随 login/refresh 服务穿透，组合根单态化 `S = vault::VaultSigner`。
+pub struct IdentityDomainDeps<S> {
+    pub login: Arc<LoginService<S>>,
+    pub refresh: Arc<RefreshService<S>>,
+    pub rbac_admin: Arc<RbacAdminService>,
+    pub policy_manage: Arc<PolicyManageService>,
+    pub roles: Arc<DynRoleRepo<'static>>,
+    pub bindings: Arc<DynRoleBindingLifecycle<'static>>,
+    pub policies: Arc<DynPolicyRepo<'static>>,
+    pub clock: Arc<dyn Clock>,
+}
+
 pub struct IdentityDomain<S> {
     login: Arc<LoginService<S>>,
     refresh: Arc<RefreshService<S>>,
     rbac_admin: Arc<RbacAdminService>,
+    policy_manage: Arc<PolicyManageService>,
     roles: Arc<DynRoleRepo<'static>>,
     authorizer: Arc<ContractAuthorizer>,
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
-    pub fn new(
-        login: Arc<LoginService<S>>,
-        refresh: Arc<RefreshService<S>>,
-        rbac_admin: Arc<RbacAdminService>,
-        roles: Arc<DynRoleRepo<'static>>,
-        bindings: Arc<DynRoleBindingLifecycle<'static>>,
-        policies: Arc<DynPolicyRepo<'static>>,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
+    pub fn new(deps: IdentityDomainDeps<S>) -> Self {
+        let IdentityDomainDeps {
+            login,
+            refresh,
+            rbac_admin,
+            policy_manage,
+            roles,
+            bindings,
+            policies,
+            clock,
+        } = deps;
         let authorizer = Arc::new(ContractAuthorizer::new(
             Arc::clone(&roles),
             bindings,
@@ -1764,6 +2192,7 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             login,
             refresh,
             rbac_admin,
+            policy_manage,
             roles,
             authorizer,
         }
@@ -1782,6 +2211,14 @@ impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
             service: Arc::clone(&self.rbac_admin),
         };
         let rbac_revoke = rbac_assign.clone();
+        let policies_create = PolicyManageHandlerState {
+            service: Arc::clone(&self.policy_manage),
+            authorizer: Arc::clone(&self.authorizer),
+        };
+        let policies_update = policies_create.clone();
+        let policies_deactivate = policies_create.clone();
+        let policies_get = policies_create.clone();
+        let policies_list = policies_create.clone();
         let roles = RolesListHandlerState {
             roles: Arc::clone(&self.roles),
         };
@@ -1811,6 +2248,26 @@ impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
                 get(roles_list_handler).with_state(roles),
             );
             let rb = rb.mount_primary(
+                primary_route_from_spec(&POLICIES_CREATE_HTTP_SPEC)?,
+                post(policies_create_handler).with_state(policies_create),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&POLICIES_UPDATE_HTTP_SPEC)?,
+                put(policies_update_handler).with_state(policies_update),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&POLICIES_DEACTIVATE_HTTP_SPEC)?,
+                post(policies_deactivate_handler).with_state(policies_deactivate),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&POLICIES_GET_HTTP_SPEC)?,
+                get(policies_get_handler).with_state(policies_get),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&POLICIES_LIST_HTTP_SPEC)?,
+                get(policies_list_handler).with_state(policies_list),
+            );
+            let rb = rb.mount_primary(
                 primary_route_from_spec(&PROFILE_HTTP_SPEC)?,
                 get(profile_handler),
             );
@@ -1834,7 +2291,8 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::ports::{
-        Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule, Role,
+        DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
+        PolicyRule, Role,
     };
     use diport::OutboxEmitError;
     use testkit::ContractRequest;
@@ -1990,15 +2448,17 @@ mod tests {
             Arc::clone(&bindings),
             make_clock(now_secs),
         ));
-        IdentityDomain::new(
+        let (policy_manage, policies) = empty_policy_manage(now_secs);
+        IdentityDomain::new(IdentityDomainDeps {
             login,
             refresh,
             rbac_admin,
-            roles_for_list,
+            policy_manage,
+            roles: roles_for_list,
             bindings,
-            empty_policy_repo(),
-            make_shared_clock(now_secs),
-        )
+            policies,
+            clock: make_shared_clock(now_secs),
+        })
     }
 
     fn user_evidence(subject: &str) -> AuthorizedSubject {
@@ -2043,8 +2503,161 @@ mod tests {
         ))
     }
 
+    fn empty_policy_manage(
+        now_secs: u64,
+    ) -> (Arc<PolicyManageService>, Arc<DynPolicyRepo<'static>>) {
+        policy_manage_from_repo(crate::internal::mem::InMemPolicyRepo::new(), now_secs)
+    }
+
+    fn policy_manage_from_repo(
+        repo: crate::internal::mem::InMemPolicyRepo,
+        now_secs: u64,
+    ) -> (Arc<PolicyManageService>, Arc<DynPolicyRepo<'static>>) {
+        let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(repo.clone()));
+        let lifecycle: Arc<DynPolicyLifecycle<'static>> =
+            Arc::from(DynPolicyLifecycle::new_box(repo));
+        (
+            Arc::new(PolicyManageService::new(
+                Arc::clone(&policies),
+                lifecycle,
+                make_clock(now_secs),
+            )),
+            policies,
+        )
+    }
+
+    fn policy_manage_state_from_repo(
+        repo: crate::internal::mem::InMemPolicyRepo,
+        now_secs: u64,
+    ) -> (
+        PolicyManageHandlerState,
+        crate::internal::mem::InMemPolicyRepo,
+    ) {
+        policy_manage_state_from_repo_with_permissions(
+            repo,
+            now_secs,
+            &["identity:policy:manage:identity:policy:read"],
+        )
+    }
+
+    fn policy_manage_state_from_repo_with_permissions(
+        repo: crate::internal::mem::InMemPolicyRepo,
+        now_secs: u64,
+        management_permissions: &[&str],
+    ) -> (
+        PolicyManageHandlerState,
+        crate::internal::mem::InMemPolicyRepo,
+    ) {
+        let (service, _) = policy_manage_from_repo(repo.clone(), now_secs);
+        let manager_role = role(
+            "role-policy-manager",
+            "Policy Manager",
+            management_permissions,
+        );
+        let manager_role_id = manager_role.id().clone();
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), manager_role),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &manager_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(repo.clone()));
+        let authorizer = Arc::new(ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            make_shared_clock(now_secs),
+        ));
+        (
+            PolicyManageHandlerState {
+                service,
+                authorizer,
+            },
+            repo,
+        )
+    }
+
+    fn policy_manage_router(state: PolicyManageHandlerState) -> axum::Router {
+        axum::Router::new()
+            .route("/policies", post(policies_create_handler))
+            .route("/policies", get(policies_list_handler))
+            .route("/policies/{policyId}", put(policies_update_handler))
+            .route("/policies/{policyId}", get(policies_get_handler))
+            .route(
+                "/policies/{policyId}/deactivate",
+                post(policies_deactivate_handler),
+            )
+            .with_state(state)
+    }
+
     fn policy_repo(repo: crate::internal::mem::InMemPolicyRepo) -> Arc<DynPolicyRepo<'static>> {
         Arc::from(DynPolicyRepo::new_box(repo))
+    }
+
+    fn policy_create_body(policy_id: &str) -> serde_json::Value {
+        policy_create_body_for(
+            policy_id,
+            POLICIES_GET_HTTP_SPEC.contract_id,
+            "identity:policy:read",
+        )
+    }
+
+    fn policy_create_body_for(
+        policy_id: &str,
+        contract_id: &'static str,
+        permission: &'static str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "policyId": policy_id,
+            "contractId": contract_id,
+            "permission": permission,
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": POLICY_ATTR_PRINCIPAL_KIND,
+                    "operator": { "kind": "eq", "value": "admin" }
+                },
+                "effect": "allow"
+            }]
+        })
+    }
+
+    fn policy_update_body(expected_version: u32) -> serde_json::Value {
+        policy_update_body_for(
+            expected_version,
+            POLICIES_GET_HTTP_SPEC.contract_id,
+            "identity:policy:read",
+        )
+    }
+
+    fn policy_update_body_for(
+        expected_version: u32,
+        contract_id: &'static str,
+        permission: &'static str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "expectedVersion": expected_version,
+            "contractId": contract_id,
+            "permission": permission,
+            "effectiveFrom": 1_700_000_010,
+            "rules": [{
+                "condition": {
+                    "attribute": POLICY_ATTR_PRINCIPAL_KIND,
+                    "operator": { "kind": "eq", "value": "admin" }
+                },
+                "effect": "deny"
+            }]
+        })
+    }
+
+    fn policy_deactivate_body(expected_version: u32) -> serde_json::Value {
+        serde_json::json!({ "expectedVersion": expected_version })
     }
 
     #[allow(clippy::expect_used)]
@@ -2852,6 +3465,36 @@ mod tests {
                 "GET",
                 "/roles",
                 Some("identity:role:read"),
+            ),
+            (
+                &POLICIES_CREATE_HTTP_SPEC,
+                "POST",
+                "/policies",
+                Some("identity:policy:create"),
+            ),
+            (
+                &POLICIES_UPDATE_HTTP_SPEC,
+                "PUT",
+                "/policies/{policyId}",
+                Some("identity:policy:update"),
+            ),
+            (
+                &POLICIES_DEACTIVATE_HTTP_SPEC,
+                "POST",
+                "/policies/{policyId}/deactivate",
+                Some("identity:policy:deactivate"),
+            ),
+            (
+                &POLICIES_GET_HTTP_SPEC,
+                "GET",
+                "/policies/{policyId}",
+                Some("identity:policy:read"),
+            ),
+            (
+                &POLICIES_LIST_HTTP_SPEC,
+                "GET",
+                "/policies",
+                Some("identity:policy:read"),
             ),
             (
                 &PROFILE_HTTP_SPEC,
@@ -3673,6 +4316,295 @@ mod tests {
         invalid_limit
             .ensure_status(StatusCode::BAD_REQUEST)
             .expect("limit=0 -> 400");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_create_handler_returns_201_and_emits_policy_updated() {
+        let (state, repo) =
+            policy_manage_state_from_repo(crate::internal::mem::InMemPolicyRepo::new(), 1_000);
+        let router = with_auth(policy_manage_router(state), admin_evidence(CANON_USER));
+
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/policies").json(&policy_create_body("policy-http-a")),
+        )
+        .await
+        .expect("call create");
+
+        resp.ensure_status(StatusCode::CREATED).expect("201");
+        let decoded: serde_json::Value = resp.json().expect("json");
+        assert_eq!(decoded["data"]["policyId"], "policy-http-a");
+        assert_eq!(repo.emitted().len(), 1, "create 应发 policy-updated");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_create_handler_requires_target_scope_management_permission() {
+        let (state, repo) =
+            policy_manage_state_from_repo(crate::internal::mem::InMemPolicyRepo::new(), 1_000);
+        let router = with_auth(policy_manage_router(state), admin_evidence(CANON_USER));
+
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/policies").json(&policy_create_body_for(
+                "policy-target-scope",
+                ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                "identity:role:assign",
+            )),
+        )
+        .await
+        .expect("call create without target management permission");
+
+        resp.ensure_status(StatusCode::FORBIDDEN)
+            .expect("missing target management permission -> 403");
+        assert_eq!(repo.emitted().len(), 0, "forbidden create must not emit");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_update_and_deactivate_require_current_and_new_scope_management_permissions() {
+        let repo = crate::internal::mem::InMemPolicyRepo::new();
+        let (state, repo) = policy_manage_state_from_repo(repo, 1_000);
+        let router = with_auth(policy_manage_router(state), admin_evidence(CANON_USER));
+        testkit::call(
+            router.clone(),
+            ContractRequest::post("/policies").json(&policy_create_body("policy-scope-change")),
+        )
+        .await
+        .expect("create")
+        .ensure_status(StatusCode::CREATED)
+        .expect("create read policy");
+
+        let update_to_role_assign =
+            ContractRequest::put("/policies/policy-scope-change").json(&policy_update_body_for(
+                1,
+                ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                "identity:role:assign",
+            ));
+        let denied_update = testkit::call(router.clone(), update_to_role_assign)
+            .await
+            .expect("update without new target management permission");
+        denied_update
+            .ensure_status(StatusCode::FORBIDDEN)
+            .expect("missing new target management permission -> 403");
+        assert_eq!(repo.emitted().len(), 1, "forbidden update must not emit");
+
+        let (broad_state, repo) = policy_manage_state_from_repo_with_permissions(
+            repo,
+            1_000,
+            &[
+                "identity:policy:manage:identity:policy:read",
+                "identity:policy:manage:identity:role:assign",
+            ],
+        );
+        let broad_router = with_auth(
+            policy_manage_router(broad_state),
+            admin_evidence(CANON_USER),
+        );
+        testkit::call(
+            broad_router.clone(),
+            ContractRequest::put("/policies/policy-scope-change").json(&policy_update_body_for(
+                1,
+                ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                "identity:role:assign",
+            )),
+        )
+        .await
+        .expect("update with both management permissions")
+        .ensure_status(StatusCode::OK)
+        .expect("update succeeds");
+        assert_eq!(repo.emitted().len(), 2, "successful update emits");
+
+        let (read_only_state, repo) = policy_manage_state_from_repo(repo, 1_000);
+        let read_only_router = with_auth(
+            policy_manage_router(read_only_state),
+            admin_evidence(CANON_USER),
+        );
+        let denied_current_scope = testkit::call(
+            read_only_router.clone(),
+            ContractRequest::put("/policies/policy-scope-change").json(&policy_update_body(2)),
+        )
+        .await
+        .expect("update without current target management permission");
+        denied_current_scope
+            .ensure_status(StatusCode::FORBIDDEN)
+            .expect("missing current target management permission -> 403");
+        assert_eq!(
+            repo.emitted().len(),
+            2,
+            "forbidden update from unmanaged current scope must not emit"
+        );
+
+        let denied_deactivate = testkit::call(
+            read_only_router,
+            ContractRequest::post("/policies/policy-scope-change/deactivate")
+                .json(&policy_deactivate_body(2)),
+        )
+        .await
+        .expect("deactivate without current target management permission");
+        denied_deactivate
+            .ensure_status(StatusCode::FORBIDDEN)
+            .expect("missing current target management permission -> 403");
+        assert_eq!(
+            repo.emitted().len(),
+            2,
+            "forbidden deactivate must not emit"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_get_and_list_handlers_do_not_emit_policy_updated() {
+        let (state, repo) =
+            policy_manage_state_from_repo(crate::internal::mem::InMemPolicyRepo::new(), 1_000);
+        let router = with_auth(policy_manage_router(state), admin_evidence(CANON_USER));
+        testkit::call(
+            router.clone(),
+            ContractRequest::post("/policies").json(&policy_create_body("policy-http-read")),
+        )
+        .await
+        .expect("create")
+        .ensure_status(StatusCode::CREATED)
+        .expect("create 201");
+        assert_eq!(repo.emitted().len(), 1);
+
+        let get_resp = testkit::call(
+            router.clone(),
+            ContractRequest::get("/policies/policy-http-read"),
+        )
+        .await
+        .expect("get");
+        get_resp.ensure_status(StatusCode::OK).expect("get 200");
+        let get_json: serde_json::Value = get_resp.json().expect("get json");
+        assert_eq!(get_json["data"]["policyId"], "policy-http-read");
+
+        let list_resp = testkit::call(router, ContractRequest::get("/policies?limit=1"))
+            .await
+            .expect("list");
+        list_resp.ensure_status(StatusCode::OK).expect("list 200");
+        let list_json: serde_json::Value = list_resp.json().expect("list json");
+        assert_eq!(list_json["data"][0]["policyId"], "policy-http-read");
+        assert_eq!(repo.emitted().len(), 1, "get/list 不应发事件");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_handlers_map_bad_wire_and_auth_to_400_401_403() {
+        let (state, repo) =
+            policy_manage_state_from_repo(crate::internal::mem::InMemPolicyRepo::new(), 1_000);
+        let router = policy_manage_router(state);
+
+        let missing_auth = testkit::call(
+            router.clone(),
+            ContractRequest::post("/policies").json(&policy_create_body("policy-missing-auth")),
+        )
+        .await
+        .expect("missing auth");
+        missing_auth
+            .ensure_status(StatusCode::UNAUTHORIZED)
+            .expect("missing auth -> 401");
+
+        let bad_actor = testkit::call(
+            with_auth(router.clone(), admin_evidence("not-a-uuid")),
+            ContractRequest::post("/policies").json(&policy_create_body("policy-bad-actor")),
+        )
+        .await
+        .expect("bad actor");
+        bad_actor
+            .ensure_status(StatusCode::FORBIDDEN)
+            .expect("non uuid admin actor -> 403");
+
+        let malformed_body = testkit::call(
+            with_auth(router.clone(), admin_evidence(CANON_USER)),
+            ContractRequest::post("/policies").raw_json(br#"{"policyId":"policy-bad""#.to_vec()),
+        )
+        .await
+        .expect("malformed body");
+        malformed_body
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("malformed body -> 400");
+
+        let empty_rules = testkit::call(
+            with_auth(router.clone(), admin_evidence(CANON_USER)),
+            ContractRequest::post("/policies").json(&serde_json::json!({
+                "policyId": "policy-empty-rules",
+                "contractId": POLICIES_GET_HTTP_SPEC.contract_id,
+                "permission": "identity:policy:read",
+                "effectiveFrom": 1_700_000_000,
+                "rules": []
+            })),
+        )
+        .await
+        .expect("empty rules");
+        empty_rules
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("empty rules -> 400");
+
+        let bad_path = testkit::call(
+            with_auth(router, admin_evidence(CANON_USER)),
+            ContractRequest::put("/policies/bad%20policy").json(&policy_update_body(1)),
+        )
+        .await
+        .expect("bad path");
+        bad_path
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("bad policyId path -> 400");
+
+        assert_eq!(repo.emitted().len(), 0, "失败路径零事件");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policies_handlers_map_not_found_and_version_conflict() {
+        let (state, repo) =
+            policy_manage_state_from_repo(crate::internal::mem::InMemPolicyRepo::new(), 1_000);
+        let router = with_auth(policy_manage_router(state), admin_evidence(CANON_USER));
+
+        let missing = testkit::call(
+            router.clone(),
+            ContractRequest::get("/policies/policy-missing"),
+        )
+        .await
+        .expect("missing get");
+        missing
+            .ensure_status(StatusCode::NOT_FOUND)
+            .expect("missing policy -> 404");
+
+        testkit::call(
+            router.clone(),
+            ContractRequest::post("/policies").json(&policy_create_body("policy-conflict")),
+        )
+        .await
+        .expect("create")
+        .ensure_status(StatusCode::CREATED)
+        .expect("create 201");
+
+        let conflict = testkit::call(
+            router.clone(),
+            ContractRequest::put("/policies/policy-conflict").json(&policy_update_body(2)),
+        )
+        .await
+        .expect("conflict update");
+        conflict
+            .ensure_status(StatusCode::CONFLICT)
+            .expect("stale update -> 409");
+        assert_eq!(repo.emitted().len(), 1, "conflict 不应发新事件");
+
+        let deactivate = testkit::call(
+            router,
+            ContractRequest::post("/policies/policy-conflict/deactivate")
+                .json(&policy_deactivate_body(1)),
+        )
+        .await
+        .expect("deactivate");
+        deactivate
+            .ensure_status(StatusCode::OK)
+            .expect("deactivate 200");
+        let deactivated: serde_json::Value = deactivate.json().expect("deactivate json");
+        assert_eq!(deactivated["data"]["deactivated"], true);
+        assert_eq!(deactivated["data"]["version"], 2);
+        assert_eq!(repo.emitted().len(), 2, "deactivate 应发事件");
     }
 
     #[tokio::test]

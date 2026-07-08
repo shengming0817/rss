@@ -21,21 +21,27 @@ use anyhow::{Context as _, Result};
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
-use consistency::OutboxSource;
+use consistency::{Entry, IdemKey, OutboxPayload, OutboxSource, Topic as OutboxTopic};
 use diport::{
-    DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider,
-    KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
-    Publisher, RedactedBytes, Topic,
+    DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName,
+    KeyProvider, KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor,
+    PublishRequest, Publisher, RedactedBytes, Topic,
 };
 use eventexec::TenantAuthorityBinding;
-use generated::event::identity_v1::session_created::{self, IdentitySessionCreatedPayload};
+use generated::event::identity_v1::{
+    policy_updated::{self, IdentityPolicyUpdatedPayload},
+    session_created::{self, IdentitySessionCreatedPayload},
+};
 use generated::event::settings_v1;
 use generated::http::identity_v1::login::IdentityLoginRequest;
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use identity::ports::{
-    DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, TenantId,
+    AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle,
+    DynRoleRepo, DynSessionLifecycle, Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy,
+    PolicyCondition, PolicyEffect, PolicyLifecycle, PolicyObligations, PolicyRouteScope,
+    PolicyRule, TenantId,
 };
-use identity::{IdentityDomain, LoginService};
+use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -416,6 +422,73 @@ async fn audit_login_count(pool: &sqlx::PgPool, tenant: TenantId, session_id: &s
     Ok(count)
 }
 
+async fn audit_policy_count(
+    pool: &sqlx::PgPool,
+    tenant: TenantId,
+    resource_id: &str,
+) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let (count,): (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*)
+        FROM audit_entries
+        WHERE tenant_id = $1::uuid
+          AND action = 'identity:policy:create'
+          AND resource_kind = 'policy'
+          AND resource_id = $2
+          AND outcome = 'success'
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(resource_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(count)
+}
+
+fn policy_updated_entry_and_envelope(
+    tenant: TenantId,
+    policy_id: &str,
+    contract_id: &str,
+    permission: &str,
+    event_id: &str,
+) -> Result<(Entry, diport::OutboxEnvelopeParts)> {
+    let payload = IdentityPolicyUpdatedPayload {
+        policy_id: policy_id.to_string(),
+        change_kind: policy_updated::IdentityPolicyUpdatedPayloadChangeKind::Created,
+        version: std::num::NonZeroU32::new(1).context("policy version is non-zero")?,
+        contract_id: contract_id.to_string(),
+        permission: permission.to_string(),
+        updated_by: uuid::Uuid::parse_str(CANON_USER)?,
+        actor_kind: policy_updated::IdentityPolicyUpdatedPayloadActorKind::Admin,
+        tenant_id: tenant.to_string(),
+        occurred_at: i64::try_from(NOW_SECS)?,
+    };
+    let entry = Entry::new(
+        OutboxTopic::parse(policy_updated::TOPIC)?,
+        IdemKey::parse(event_id)?,
+        OutboxPayload::from_reviewed_event_bytes(serde_json::to_vec(&payload)?),
+    );
+    let actor = OutboxActor::scoped(
+        vocab::PrincipalKind::Admin,
+        OpaqueActorId::from_opaque(CANON_USER)?,
+        tenant,
+        vocab::ScopedTenant::Tenant,
+    );
+    let envelope = diport::OutboxEnvelopeParts::new(
+        policy_updated::CONTRACT,
+        tenant,
+        EnvelopeSubjectId::from_opaque(CANON_USER)?,
+        actor,
+    );
+    Ok((entry, envelope))
+}
+
 // ── e2e 测试主体 ───────────────────────────────────────────────────────────────────────────
 
 /// durable e2e：`wire_event_transport` 真容器贯通验收（#1251 task 6）。
@@ -467,6 +540,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let roles_for_admin = Arc::from(DynRoleRepo::new_box(id.role_repo()));
     let roles_for_list = Arc::from(DynRoleRepo::new_box(id.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
+    let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
+        id.policy_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+    ));
+    let policy_lifecycle_for_service = Arc::clone(&policy_lifecycle);
     let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
         id.role_binding_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
@@ -475,15 +552,21 @@ async fn event_transport_durable_e2e() -> Result<()> {
         Arc::clone(&bindings),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
-    let identity_domain = IdentityDomain::new(
-        login_identity,
-        refresh_identity,
+    let policy_manage = Arc::new(identity::PolicyManageService::new(
+        Arc::clone(&policies),
+        policy_lifecycle_for_service,
+        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+    ));
+    let identity_domain = IdentityDomain::new(IdentityDomainDeps {
+        login: login_identity,
+        refresh: refresh_identity,
         rbac_admin,
-        roles_for_list,
+        policy_manage,
+        roles: roles_for_list,
         bindings,
         policies,
-        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-    );
+        clock: Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+    });
     let (settings_configs, settings_writer, settings_secrets) = settings_pg
         .settings_bundle(
             Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
@@ -561,6 +644,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .find(|spec| spec.contract_id == settings_v1::CONTRACT_ID && spec.consumer == "settings")
         .map(|spec| spec.group.to_owned())
         .context("e2e must declare settings config-version-changed subscriber")?;
+    let policy_consumer_group = generated::event::SUBSCRIPTIONS
+        .iter()
+        .find(|spec| spec.contract_id == policy_updated::CONTRACT_ID && spec.consumer == "audit")
+        .map(|spec| spec.group.to_owned())
+        .context("e2e must declare audit policy-updated subscriber")?;
 
     // ── 步骤 5：构造 EventTransportConfig（注入式 env builder，无 ambient env 侧效应）────────────
 
@@ -711,6 +799,68 @@ async fn event_transport_durable_e2e() -> Result<()> {
         Some("enabled"),
         "settings ConsumerTx must refresh the subscriber service cache from the old value"
     );
+
+    // ── 步骤 8b：identity.policy-updated active event 走生产 relay + audit ConsumerTx ─────────────
+
+    let policy_id = "policy-runtime-e2e";
+    let policy_contract_id = "identity.policies-get";
+    let policy_permission = "identity:policy:read";
+    let policy = Policy::build(
+        policy_id,
+        tenant,
+        PolicyRouteScope::parse(policy_contract_id, policy_permission)?,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
+        None,
+        vec![PolicyRule::with_obligations(
+            PolicyCondition::new(
+                AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)?,
+                Operator::Eq(AttributeValue::new("admin")),
+            ),
+            PolicyEffect::Allow,
+            PolicyObligations::empty(),
+        )],
+    )?;
+    let policy_event_id = "policy-runtime-e2e-created-v1";
+    let (policy_entry, policy_envelope) = policy_updated_entry_and_envelope(
+        tenant,
+        policy_id,
+        policy_contract_id,
+        policy_permission,
+        policy_event_id,
+    )?;
+    policy_lifecycle
+        .create_and_emit(tenant, policy, policy_entry, policy_envelope)
+        .await?;
+    let policy_outbox_event_id =
+        latest_outbox_event_id(&assertion_pool, "identity", policy_updated::TOPIC).await?;
+    assert_eq!(
+        policy_outbox_event_id, policy_event_id,
+        "policy lifecycle must write the generated identity.policy-updated outbox event"
+    );
+    wait_inbox_done(
+        &assertion_pool,
+        &policy_outbox_event_id,
+        &policy_consumer_group,
+    )
+    .await?;
+    let policy_resource_id = format!(
+        "tenant/{tenant}/policy/{policy_id}/contract/{policy_contract_id}/permission/{policy_permission}"
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if audit_policy_count(&assertion_pool, tenant, &policy_resource_id)
+                .await
+                .is_ok_and(|count| count == 1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("timeout 20s 内 audit 未收到 policy-updated 事件（policy_id={policy_id}）")
+    })?;
 
     // ── 步骤 8：生产侧登录（PgSessionLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
 

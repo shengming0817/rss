@@ -73,7 +73,7 @@ pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use outbox_cdc::PgOutboxCdcEmitter;
-pub use policy_repo::PgPolicyRepo;
+pub use policy_repo::{PgPolicyLifecycle, PgPolicyRepo};
 pub use projection_control::{
     PgProjectionControl, ProjectionControlError, ProjectionMaintenanceCapability,
     ProjectionPointerPrecondition, ProjectionPointerStatus, ProjectionPromoteOutcome,

@@ -66,11 +66,11 @@ use crate::{
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
     PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
-    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance, PgPolicyRepo,
-    PgProjectionControl, PgProjectionEvents, PgReadinessSampler, PgReconcileStore,
-    PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal,
-    PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
-    PgStoreGuard, ProjectionMaintenanceCapability,
+    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance,
+    PgPolicyLifecycle, PgPolicyRepo, PgProjectionControl, PgProjectionEvents, PgReadinessSampler,
+    PgReconcileStore, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore,
+    PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx,
+    PgStore, PgStoreGuard, ProjectionMaintenanceCapability,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -630,6 +630,16 @@ impl PgDomainDeps<caps::Identity> {
         PgPolicyRepo::new(&self.store)
     }
 
+    /// durable ABAC policy lifecycle（policy mutation + policy-updated outbox co-tx）。
+    #[must_use]
+    pub fn policy_lifecycle(&self, clock: Box<dyn Clock>) -> PgPolicyLifecycle {
+        PgPolicyLifecycle::new_with_projection_registry(
+            &self.store,
+            clock,
+            self.projection_registry,
+        )
+    }
+
     /// 角色绑定生命周期（binding co-tx + role event outbox）。
     #[must_use]
     pub fn role_binding_lifecycle(&self, clock: Box<dyn Clock>) -> PgRoleBindingLifecycle {
@@ -716,6 +726,18 @@ impl PgDomainDeps<caps::Audit> {
         M: primitives::MacVerifier + Send + Sync + 'static,
     {
         PgAuditConsumerTx::role_revoked(&self.store, hasher)
+    }
+
+    /// ConsumerTx handler for `identity.policy-updated` consumed by audit.
+    #[must_use]
+    pub fn policy_updated_consumer_tx<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> PgAuditConsumerTx<M>
+    where
+        M: primitives::MacVerifier + Send + Sync + 'static,
+    {
+        PgAuditConsumerTx::policy_updated(&self.store, hasher)
     }
 }
 

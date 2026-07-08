@@ -37,7 +37,9 @@ use crate::ports::RefreshTokenStore;
 #[cfg(test)]
 use crate::domain::{Policy, PolicyId, PolicyRouteScope, PolicyVersion, Role, RoleBinding, RoleId};
 #[cfg(test)]
-use crate::ports::{PolicyRepo, RoleBindingLifecycle, RoleRepo};
+use crate::ports::{
+    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, RoleBindingLifecycle, RoleRepo,
+};
 #[cfg(test)]
 use std::collections::HashSet;
 
@@ -289,7 +291,9 @@ impl StoredPolicy {
 #[derive(Clone, Default)]
 pub(crate) struct InMemPolicyRepo {
     policies: Arc<Mutex<PolicyStore>>, // (tenant, policy_id)
+    emitted: Arc<Mutex<Vec<CapturedEvent>>>,
     fail_reads: bool,
+    fail_writes: bool,
 }
 
 #[cfg(test)]
@@ -301,6 +305,13 @@ impl InMemPolicyRepo {
     pub(crate) fn failing_reads() -> Self {
         Self {
             fail_reads: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn failing_writes() -> Self {
+        Self {
+            fail_writes: true,
             ..Self::default()
         }
     }
@@ -328,76 +339,42 @@ impl InMemPolicyRepo {
         }
         Ok(recover(&self.policies))
     }
+
+    /// 已捕获的 policy-updated 事件序列（确定性快照）。
+    pub(crate) fn emitted(&self) -> Vec<CapturedEvent> {
+        recover(&self.emitted).clone()
+    }
 }
 
 #[cfg(test)]
 impl PolicyRepo for InMemPolicyRepo {
-    async fn create(&self, tenant: TenantId, policy: Policy) -> Result<Policy, IdentityError> {
-        if policy.tenant() != tenant || policy.version() != PolicyVersion::first() {
-            return Err(IdentityError::InvalidPolicy);
-        }
-        let key = Self::key(tenant, policy.id());
-        let mut guard = recover(&self.policies);
-        if guard.contains_key(&key) {
-            return Err(IdentityError::PolicyAlreadyExists);
-        }
-        guard.insert(key, StoredPolicy::active(policy.clone()));
-        Ok(policy)
-    }
-
-    async fn update(
-        &self,
-        tenant: TenantId,
-        policy: Policy,
-        expected: PolicyVersion,
-    ) -> Result<Policy, IdentityError> {
-        if policy.tenant() != tenant {
-            return Err(IdentityError::InvalidPolicy);
-        }
-        let key = Self::key(tenant, policy.id());
-        let mut guard = recover(&self.policies);
-        let Some(current) = guard.get_mut(&key) else {
-            return Err(IdentityError::PolicyNotFound);
-        };
-        if current.active.is_none() {
-            return Err(IdentityError::PolicyNotFound);
-        }
-        if current.version != expected {
-            return Err(IdentityError::VersionConflict);
-        }
-        let next = policy.with_version(expected.next()?);
-        current.version = next.version();
-        current.active = Some(next.clone());
-        Ok(next)
-    }
-
-    async fn delete(
-        &self,
-        tenant: TenantId,
-        id: PolicyId,
-        expected: PolicyVersion,
-    ) -> Result<bool, IdentityError> {
-        let key = Self::key(tenant, &id);
-        let mut guard = recover(&self.policies);
-        let Some(current) = guard.get_mut(&key) else {
-            return Ok(false);
-        };
-        let Some(active) = current.active.as_ref() else {
-            return Ok(false);
-        };
-        if active.version() != expected {
-            return Err(IdentityError::VersionConflict);
-        }
-        current.version = expected.next()?;
-        current.active = None;
-        Ok(true)
-    }
-
     async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError> {
         Ok(self
             .read_guard()?
             .get(&Self::key(tenant, &id))
             .and_then(|stored| stored.active.clone()))
+    }
+
+    async fn list_active(
+        &self,
+        tenant: TenantId,
+        page: PolicyPage,
+    ) -> Result<PolicyListResult, IdentityError> {
+        let limit = usize::from(page.limit.get());
+        let after = page.after.as_ref().map(PolicyId::as_str);
+        let mut policies = self
+            .read_guard()?
+            .values()
+            .filter_map(|stored| stored.active.as_ref())
+            .filter(|policy| {
+                policy.tenant() == tenant && after.is_none_or(|a| policy.id().as_str() > a)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        policies.sort_by(|a, b| a.id().as_str().cmp(b.id().as_str()));
+        let has_more = policies.len() > limit;
+        policies.truncate(limit);
+        Ok(PolicyListResult { policies, has_more })
     }
 
     async fn list_effective(
@@ -419,6 +396,98 @@ impl PolicyRepo for InMemPolicyRepo {
             .collect::<Vec<_>>();
         policies.sort_by(|a, b| a.id().as_str().cmp(b.id().as_str()));
         Ok(policies)
+    }
+}
+
+#[cfg(test)]
+impl PolicyLifecycle for InMemPolicyRepo {
+    async fn create_and_emit(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError> {
+        if self.fail_writes {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-policy-cotx-fail",
+            ))));
+        }
+        if policy.tenant() != tenant || policy.version() != PolicyVersion::first() {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let key = Self::key(tenant, policy.id());
+        let mut guard = recover(&self.policies);
+        if guard.contains_key(&key) {
+            return Err(IdentityError::PolicyAlreadyExists);
+        }
+        guard.insert(key, StoredPolicy::active(policy.clone()));
+        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        Ok(policy)
+    }
+
+    async fn update_and_emit(
+        &self,
+        tenant: TenantId,
+        policy: Policy,
+        expected: PolicyVersion,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<Policy, IdentityError> {
+        if self.fail_writes {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-policy-cotx-fail",
+            ))));
+        }
+        if policy.tenant() != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let key = Self::key(tenant, policy.id());
+        let mut guard = recover(&self.policies);
+        let Some(current) = guard.get_mut(&key) else {
+            return Err(IdentityError::PolicyNotFound);
+        };
+        if current.active.is_none() {
+            return Err(IdentityError::PolicyNotFound);
+        }
+        if current.version != expected {
+            return Err(IdentityError::VersionConflict);
+        }
+        let next = policy.with_version(expected.next_checked()?);
+        current.version = next.version();
+        current.active = Some(next.clone());
+        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        Ok(next)
+    }
+
+    async fn deactivate_and_emit(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+        expected: PolicyVersion,
+        entry: Entry,
+        envelope: OutboxEnvelopeParts,
+    ) -> Result<bool, IdentityError> {
+        if self.fail_writes {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-policy-cotx-fail",
+            ))));
+        }
+        let key = Self::key(tenant, &id);
+        let mut guard = recover(&self.policies);
+        let Some(current) = guard.get_mut(&key) else {
+            return Ok(false);
+        };
+        let Some(active) = current.active.as_ref() else {
+            return Ok(false);
+        };
+        if active.version() != expected {
+            return Err(IdentityError::VersionConflict);
+        }
+        current.version = expected.next_checked()?;
+        current.active = None;
+        recover(&self.emitted).push(CapturedEvent::of(&entry, &envelope));
+        Ok(true)
     }
 }
 
@@ -445,6 +514,12 @@ impl InMemRoleRepo {
             (tenant.to_string(), role_id.as_str().to_string()),
             Role::new(role_id.clone(), "seeded".to_string(), vec![]),
         );
+        self
+    }
+
+    /// 种子：保存完整 role（含权限），供 handler/authorizer 测试构造 RBAC baseline。
+    pub(crate) fn with_role_entity(self, tenant: TenantId, role: Role) -> Self {
+        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
         self
     }
 }
@@ -725,7 +800,7 @@ mod tests {
         AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId, PolicyVersion, Session,
         SessionId,
     };
-    use crate::ports::{CredentialRepo, PolicyRepo, SessionLifecycle};
+    use crate::ports::{CredentialRepo, PolicyLifecycle, PolicyRepo, SessionLifecycle};
     use consistency::{Entry, IdemKey, OutboxPayload, Topic};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
     use std::time::{Duration, SystemTime};
@@ -1012,13 +1087,24 @@ mod tests {
         let tenant = tid(TENANT_A);
         let id = policy_id("policy-tombstone");
 
-        repo.create(tenant, policy("policy-tombstone", tenant))
-            .await
-            .expect("create policy");
+        repo.create_and_emit(
+            tenant,
+            policy("policy-tombstone", tenant),
+            dummy_entry(),
+            dummy_envelope(),
+        )
+        .await
+        .expect("create policy");
         assert!(
-            repo.delete(tenant, id.clone(), PolicyVersion::first())
-                .await
-                .expect("delete policy"),
+            repo.deactivate_and_emit(
+                tenant,
+                id.clone(),
+                PolicyVersion::first(),
+                dummy_entry(),
+                dummy_envelope(),
+            )
+            .await
+            .expect("delete policy"),
             "first delete succeeds"
         );
         assert!(
@@ -1030,7 +1116,12 @@ mod tests {
         );
 
         let recreate = repo
-            .create(tenant, policy("policy-tombstone", tenant))
+            .create_and_emit(
+                tenant,
+                policy("policy-tombstone", tenant),
+                dummy_entry(),
+                dummy_envelope(),
+            )
             .await;
         assert!(
             matches!(recreate, Err(IdentityError::PolicyAlreadyExists)),
