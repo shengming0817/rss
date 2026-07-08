@@ -24,8 +24,10 @@ pub mod auth_bridge;
 pub mod distributed_runtime;
 pub mod event_transport;
 pub mod infra;
+pub mod listeners;
 pub mod module;
 pub mod phase;
+pub mod routes;
 
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
 pub use infra::oidc::{build_provider, provider_from_b64};
@@ -38,9 +40,9 @@ pub use infra::vault::{
 };
 pub use module::SharedRuntimeDeps;
 
+use bootstrap::DomainModuleResult;
 use infra::oidc::{OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_runtime_oidc_provider};
 use infra::pg::{build_readiness_interval, legacy_config_plaintext_policy};
-use infra::plaintext_endpoint_policy_from;
 use infra::redis::{
     REDIS_READY_PROBE_NAME, RedisReadyProbe, build_redis_readiness_interval,
     spawn_redis_readiness_sampler,
@@ -51,21 +53,16 @@ use infra::vault::{
     spawn_keyprovider_readiness_sampler, verify_keyprovider_ready,
 };
 use infra::vault::{build_vault_key_provider_from, build_vault_signer_with};
-
-use bootstrap::DomainModuleResult;
 use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use audit::AuditDomain;
 use audit::ports::{AuditChainHasher, DynAuditRepo};
-use axum::http::Method;
 use base64::Engine as _;
 use bootstrap::shutdown::ShutdownStack;
 use consistency::{EngineErrorKind, ProjectionBatchLimit, SerialInOrder};
@@ -84,30 +81,18 @@ use identity::{
         DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
     },
 };
-use oidc::OidcProvider;
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
     MaintenanceAuditOutcome, PgAuthAuditSink, PgDbReadiness, PgMaintenanceDeps, PgRuntimeDeps,
     PoolReadiness, ProjectionMaintenanceCapability, ProjectionPointerPrecondition, caps,
 };
-use primitives::{
-    AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName,
-    RequiredScheme,
-};
-use ratelimit::GovernorLimiter;
-use secure::PlaintextEndpointPolicy;
+use primitives::{AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName};
 use settings::ports::DynSecretRepo;
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
 use vault::{VaultSigner, caps as vault_caps};
 
-/// Internal listener auth mode. Default is mTLS; `service-token` is loopback local-test only.
-const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
-const INTERNAL_AUTH_SCHEME_MTLS: &str = "mtls";
-const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
-/// Comma-separated exact SPIFFE IDs accepted on the Internal mTLS listener.
-const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
 const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
 /// Comma-separated remote domains that must have outbound domain transport configured.
@@ -190,324 +175,6 @@ impl diport::AuditSink for TracingAuthAuditSink {
     }
 }
 
-fn auth_scheme(listener: ListenerKind) -> anyhow::Result<AuthScheme> {
-    auth_scheme_from(listener, |name| std::env::var(name).ok())
-}
-
-fn auth_scheme_from(
-    listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<AuthScheme> {
-    Ok(match listener {
-        ListenerKind::Primary | ListenerKind::Admin => AuthScheme::Jwt,
-        ListenerKind::Internal => internal_auth_scheme_from(get)?,
-        ListenerKind::Health => AuthScheme::NoAuth,
-        // ListenerKind non_exhaustive——未知 listener fail-closed 要求 JWT 认证（绝不默认 NoAuth）+ 配置期 warn 埋点。
-        _ => {
-            tracing::warn!(listener = ?listener, "unknown ListenerKind; fail-closed to JWT auth scheme");
-            AuthScheme::Jwt
-        }
-    })
-}
-
-fn internal_auth_scheme_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<AuthScheme> {
-    let Some(raw) = get(INTERNAL_AUTH_SCHEME_ENV) else {
-        return Ok(AuthScheme::Mtls);
-    };
-    let normalized = raw.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        INTERNAL_AUTH_SCHEME_MTLS => Ok(AuthScheme::Mtls),
-        INTERNAL_AUTH_SCHEME_SERVICE_TOKEN => {
-            tracing::warn!(
-                env = INTERNAL_AUTH_SCHEME_ENV,
-                "internal listener using local-test service-token auth; mTLS is the production default"
-            );
-            Ok(AuthScheme::ServiceToken)
-        }
-        "" => anyhow::bail!(
-            "{INTERNAL_AUTH_SCHEME_ENV} must be either '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}'"
-        ),
-        _ => anyhow::bail!(
-            "{INTERNAL_AUTH_SCHEME_ENV} has unsupported value '{raw}' (expected '{INTERNAL_AUTH_SCHEME_MTLS}' or '{INTERNAL_AUTH_SCHEME_SERVICE_TOKEN}')"
-        ),
-    }
-}
-
-fn required_scheme_for_auth_scheme(scheme: AuthScheme) -> Option<RequiredScheme> {
-    match scheme {
-        AuthScheme::Jwt | AuthScheme::JwtFromAssembly => Some(RequiredScheme::Jwt),
-        AuthScheme::ServiceToken => Some(RequiredScheme::ServiceToken),
-        AuthScheme::Mtls => Some(RequiredScheme::Mtls),
-        AuthScheme::NoAuth => None,
-        other => {
-            tracing::warn!(scheme = ?other, "listener auth scheme has no verify-bridge; Require routes fail-closed 401");
-            None
-        }
-    }
-}
-
-pub struct AssembledListener {
-    listener: ListenerKind,
-    routes: httpserve::AuthenticatedRoutes,
-    mtls_health: Option<Arc<MtlsHealthSlot>>,
-}
-
-impl AssembledListener {
-    pub fn listener(&self) -> ListenerKind {
-        self.listener
-    }
-
-    pub fn into_parts(self) -> (ListenerKind, httpserve::AuthenticatedRoutes) {
-        (self.listener, self.routes)
-    }
-
-    fn plain(listener: ListenerKind, routes: httpserve::AuthenticatedRoutes) -> Self {
-        Self {
-            listener,
-            routes,
-            mtls_health: None,
-        }
-    }
-}
-
-struct MtlsHealthSlot {
-    config: Mutex<Option<httpd::MtlsServerConfig>>,
-}
-
-impl MtlsHealthSlot {
-    fn new() -> Self {
-        Self {
-            config: Mutex::new(None),
-        }
-    }
-
-    fn set(&self, config: httpd::MtlsServerConfig) -> anyhow::Result<()> {
-        let mut guard = self
-            .config
-            .lock()
-            .map_err(|_| anyhow::anyhow!("mtls health slot lock poisoned"))?;
-        *guard = Some(config);
-        Ok(())
-    }
-
-    fn check(&self) -> (HealthStatus, &'static str) {
-        let Ok(guard) = self.config.lock() else {
-            return (HealthStatus::Unhealthy, "slot-poisoned");
-        };
-        match guard.as_ref() {
-            Some(config) if config.is_healthy() => (HealthStatus::Healthy, "ready"),
-            Some(_) => (HealthStatus::Unhealthy, "down"),
-            None => (HealthStatus::Unhealthy, "not-bound"),
-        }
-    }
-}
-
-struct MtlsSourceHealthProbe {
-    name: ProbeName,
-    slot: Arc<MtlsHealthSlot>,
-}
-
-impl MtlsSourceHealthProbe {
-    fn new(name: ProbeName, slot: Arc<MtlsHealthSlot>) -> Self {
-        Self { name, slot }
-    }
-}
-
-impl bootstrap::HealthProbe for MtlsSourceHealthProbe {
-    fn check(&self) -> HealthCheck {
-        let (status, detail) = self.slot.check();
-        HealthCheck::new(self.name.clone(), status, detail)
-    }
-}
-
-const MTLS_SOURCE_READY_PROBE_NAME: &str = "mtls_source_ready";
-
-fn mtls_probe_name(listener: ListenerKind) -> anyhow::Result<ProbeName> {
-    anyhow::ensure!(
-        listener == ListenerKind::Internal,
-        "mTLS health probe is only wired for Internal"
-    );
-    ProbeName::parse(MTLS_SOURCE_READY_PROBE_NAME).context("valid mtls probe name")
-}
-
-struct MtlsRouteAuthorizer {
-    allow_set: authn::MtlsAllowSet,
-}
-
-impl httpserve::RouteAuthorizer for MtlsRouteAuthorizer {
-    fn authorize<'a>(
-        &'a self,
-        request: httpserve::RouteAuthorizationRequest,
-    ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
-        Box::pin(async move {
-            let allowed = request.principal_kind == vocab::PrincipalKind::Service
-                && authn::SpiffeId::parse(&request.principal_id)
-                    .map(|id| self.allow_set.allows(&id))
-                    .unwrap_or(false);
-            if allowed {
-                httpserve::RouteAuthorizationDecision::Allow
-            } else {
-                httpserve::RouteAuthorizationDecision::Deny
-            }
-        })
-    }
-}
-
-fn mtls_route_authorizer_from_env(
-    listener: ListenerKind,
-) -> anyhow::Result<Arc<dyn httpserve::RouteAuthorizer>> {
-    let allow_set = mtls_allow_set_from_env(listener, |name| std::env::var(name).ok())?;
-    Ok(Arc::new(MtlsRouteAuthorizer { allow_set }))
-}
-
-/// 默认限流配额：10 req/s，burst 20（per-peer-IP keyed，组合根 owner；可配置化 follow-up #1106）。
-///
-/// `NonZeroU32::new(10/20)` 对字面量非零常量不可失败——`expect` 是构造期 programmer error
-/// （此处不可恢复，item-level carve-out，error-handling.md §Carve-out）。
-#[allow(clippy::expect_used)]
-fn default_rate_quota() -> ratelimit::QuotaConfig {
-    // reason: 10 / 20 是 compile-time 字面量，NonZeroU32::new 仅在 0 时返 None；
-    // 字面量非零，此 expect 是构造期 programmer error（不可恢复，item-level carve-out）。
-    ratelimit::QuotaConfig::per_second(
-        std::num::NonZeroU32::new(10).expect("non-zero rate-per-second constant"),
-        std::num::NonZeroU32::new(20).expect("non-zero burst constant"),
-    )
-}
-
-/// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 auth finalizer + 外层验签桥
-/// + rate-limit 中间件（组合根叠加点，INVARIANT RATELIMIT-BEFORE-AUTH-01）。
-///
-/// Primary listener：`finalize_primary_auth_with_audit(routes, plan, ..., primary_authorizer)` 注入
-/// `RouteAuthorizer`；Admin listener 也注入同一 Authorizer 供 field projection 消费；其它非 Primary
-/// listener：`finalize_auth_with_audit(routes, plan, ...)`。三者均消费
-/// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
-/// `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
-/// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
-/// 产出 `AuthenticatedRoutes` 经 `into_make_service` 绑 socket + serve（[`serve_until_signal`]）——bind 点
-/// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
-///
-/// 层序（外→内）：body-limit（httpserve sealed_router，最外防护）→ rate-limit（本函数 verify-bridge 后叠）
-/// → 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
-/// （INVARIANT RATELIMIT-BEFORE-AUTH-01：组合根在 verify-bridge 后 .layer ⇒ outer 于桥）。
-///
-/// Health listener 由 [`health_listener`] 单独构造、**不经本函数、不叠限流**——探针不限速（k8s
-/// liveness/readiness 在高负载下不应被限流触发级联重启），有意设计。
-///
-/// 借 `&mut Registry`（仅 drain `finalize_routes`，**不**消费）：registry 的探针在此后仍存活，组合根经
-/// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
-/// Health listener 的 readyz handler（每请求 `report`，[`health_listener`]）；整体非 `Sync` 的 `Registry`
-/// 无法进 axum handler 闭包。
-pub fn assemble_authed_routers(
-    registry: &mut bootstrap::Registry,
-    provider: Arc<OidcProvider>,
-    audit_sink: httpserve::AuditSinkHandle,
-    audit_clock: Arc<dyn diport::Clock>,
-    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-) -> anyhow::Result<Vec<AssembledListener>> {
-    // 默认限流配额（owner=组合根，可调）：10 req/s，burst 20。peer-IP keyed（见 #1106 / RealIP follow-up）。
-    // 共享跨所有 listener——统一 per-IP 预算，避免分散 listener 各自独立 bucket 使 burst 预算 N 倍膨胀。
-    //
-    // 已知限制（multi-instance）：in-mem `GovernorLimiter` 是 per-instance 独立桶，N 副本部署下
-    // 每实例独立配额（全局视图 ≈ N × 单实例率）；全局一致限流须 redis-distributed provider（future）。
-    // 叠加 peer-IP-after-proxy 退化（RealIP follow-up），本限流当前为单实例 best-effort 防护。
-    let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
-    let mut out = Vec::new();
-    for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
-        let scheme = auth_scheme(listener).context("resolve listener auth scheme")?;
-        let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
-        let mtls_health = if scheme == AuthScheme::Mtls {
-            let slot = Arc::new(MtlsHealthSlot::new());
-            let probe_name = mtls_probe_name(listener)?;
-            registry
-                .probe(
-                    probe_name.clone(),
-                    Box::new(MtlsSourceHealthProbe::new(probe_name, slot.clone())),
-                )
-                .context("register mtls source health probe")?;
-            Some(slot)
-        } else {
-            None
-        };
-        let authed = finalize_listener_auth(
-            listener,
-            routes,
-            plan,
-            audit_sink.clone(),
-            audit_clock.clone(),
-            primary_authorizer.clone(),
-            scheme,
-        )
-        .context("finalize_auth")?;
-        let required = required_scheme_for_auth_scheme(scheme);
-        let wired = match required {
-            Some(req) => auth_bridge::apply_verify_bridge(authed, provider.clone(), req),
-            None => authed,
-        };
-        // INVARIANT RATELIMIT-BEFORE-AUTH-01 —— rate-limit 在 verify-bridge 之后 .layer，
-        // 层序上 outer 于桥（请求方向先 rate-limit 后验签），在 auth 计算前拦截超额请求。
-        let wired = wired.layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&rate_limiter),
-            httpserve::rate_limit::<GovernorLimiter>,
-        ));
-        // 装配决策可观测：operator 启动时从日志核查每 listener 的 auth scheme + 是否挂验签桥
-        //（闭值枚举，无 PII）——否则「Primary 究竟 Jwt+桥 还是意外 NoAuth」从日志无从核查。
-        tracing::info!(
-            listener = ?listener,
-            auth_scheme = ?scheme,
-            verify_bridge = required.is_some(),
-            "listener auth wiring assembled"
-        );
-        out.push(AssembledListener {
-            listener,
-            routes: wired,
-            mtls_health,
-        });
-    }
-    Ok(out)
-}
-
-fn finalize_listener_auth(
-    listener: ListenerKind,
-    routes: httpserve::UnfinalizedRoutes,
-    plan: AuthPlan,
-    audit_sink: httpserve::AuditSinkHandle,
-    audit_clock: Arc<dyn diport::Clock>,
-    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
-    scheme: AuthScheme,
-) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
-    if listener == ListenerKind::Primary {
-        return httpserve::finalize_primary_auth_with_audit(
-            routes,
-            plan,
-            audit_sink,
-            audit_clock,
-            primary_authorizer,
-        )
-        .map_err(Into::into);
-    }
-    if listener == ListenerKind::Admin {
-        return httpserve::finalize_auth_with_audit_and_authorizer(
-            routes,
-            plan,
-            audit_sink,
-            audit_clock,
-            primary_authorizer,
-        )
-        .map_err(Into::into);
-    }
-    if scheme == AuthScheme::Mtls {
-        return httpserve::finalize_auth_with_audit_and_authorizer(
-            routes,
-            plan,
-            audit_sink,
-            audit_clock,
-            mtls_route_authorizer_from_env(listener)?,
-        )
-        .map_err(Into::into);
-    }
-    httpserve::finalize_auth_with_audit(routes, plan, audit_sink, audit_clock).map_err(Into::into)
-}
-
 /// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
 pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
@@ -584,7 +251,7 @@ fn outbound_mtls_policy_for_domain_from(
     let allow_env = domain_transport_mtls_allow_set_env(domain);
     let raw_allow_set =
         get(&allow_env).ok_or_else(|| anyhow::anyhow!("missing required env var: {allow_env}"))?;
-    let server_allow_set = mtls_allow_set_from_csv_for_env(&raw_allow_set, &allow_env)?;
+    let server_allow_set = routes::mtls_allow_set_from_csv_for_env(&raw_allow_set, &allow_env)?;
     let trust_domain_names = server_allow_set
         .iter()
         .map(|id| id.trust_domain().as_str().to_owned())
@@ -2662,195 +2329,6 @@ pub fn wire_identity_with(
     }))
 }
 
-// ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
-
-/// Health listener 路由组前缀（liveness/readiness 在专用 listener 上；operator 配 k8s probe 路径指向此前缀下）。
-const HEALTH_ROUTE_PREFIX: &str = "/health/v1";
-/// liveness 端点契约 ID（框架归属基础设施探针，非域 wire 契约）。
-const HEALTHZ_CONTRACT_ID: &str = "framework.healthz";
-/// readiness 端点契约 ID（框架归属）。
-const READYZ_CONTRACT_ID: &str = "framework.readyz";
-/// `/metrics` scrape 端点契约 ID（框架归属基础设施导出，非域 wire 契约——同 healthz/readyz 为 inline 常量，
-/// 无 `contracts/` 条目 / `frameworkContracts` 声明）。
-const METRICS_CONTRACT_ID: &str = "framework.metrics";
-
-/// 构造 Health listener 的已认证路由（`/health/v1/healthz` liveness + `/health/v1/readyz` readiness）。
-///
-/// Health 是**框架/组合根**归属：域 crate 不声明 health 路由组，组合根在此经公开 funnel
-/// （`UnfinalizedRoutes::empty().nest_group::<Health>` → `finalize_auth`）挂载——产物仍是 `AuthenticatedRoutes`
-/// （ROUTE-AUTH-FUNNEL：health router 也经 finalize_auth + request_id/correlation 封口；trace 由
-/// `httpserve` 的 listener policy 对 Health 禁用，避免 probe/scrape span 噪声）。
-/// `NoAuth` plan（Health listener 无验签桥）。readyz handler 闭包持 `Arc<HealthReporter>`（`Send + Sync`，
-/// 整体非 `Sync` 的 `Registry` 无法进 handler）每请求 `report`（worst-of 聚合所有已注册探针，含 `configs_ready`）。
-///
-/// `metrics` 是组合根注入的 `Arc<dyn diport::MetricsExporter>`（生产 = Prometheus，测试 = 替身）——`/metrics`
-/// scrape handler 每请求 `render()` 取 exposition body。**必填**（非 `Option`/silent-noop，runtime-api Option 范式）。
-///
-/// **scrape 路径**：metrics 与 healthz/readyz 同组挂在 [`HEALTH_ROUTE_PREFIX`] 下，完整路径
-/// `/health/v1/metrics`（非 Prometheus 默认 `/metrics`）——运维须在 scrape target 显式配
-/// `metrics_path: /health/v1/metrics`（否则默认 `/metrics` 抓取得 404、被记空抓取）。挂 Health listener（内部
-/// 网络面）而非对外 Primary：scrape 流量与 health probe 同隔离，且非-Primary `Route` 类型层无法降级 Public。
-///
-/// `pub`：供冒烟 e2e（`tests/runtime_serve_e2e.rs`）经真实 socket 绑定验证 serve + readyz + `/metrics` + 优雅关停闭环。
-pub fn health_listener(
-    reporter: Arc<bootstrap::HealthReporter>,
-    metrics: Arc<dyn diport::MetricsExporter>,
-) -> anyhow::Result<(ListenerKind, httpserve::AuthenticatedRoutes)> {
-    let routes = httpserve::UnfinalizedRoutes::empty()
-        .nest_group::<httpserve::Health, core::convert::Infallible>(
-            HEALTH_ROUTE_PREFIX,
-            move |rb| {
-                Ok(rb
-                    .mount(
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/healthz",
-                            contract_id: HEALTHZ_CONTRACT_ID,
-                        },
-                        httpserve::health::healthz(),
-                    )
-                    .mount(
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/readyz",
-                            contract_id: READYZ_CONTRACT_ID,
-                        },
-                        httpserve::health::readyz(move || reporter.report()),
-                    )
-                    .mount(
-                        // `/metrics` 在 Health listener（内部网络面）；非-Primary `Route` 无 opt-out 字段 ⇒ 不可降级 Public。
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/metrics",
-                            contract_id: METRICS_CONTRACT_ID,
-                        },
-                        httpserve::health::metrics(move || metrics.render()),
-                    ))
-            },
-        )
-        .context("nest health route group")?;
-    let plan =
-        AuthPlan::new(ListenerKind::Health, AuthScheme::NoAuth).context("health auth plan")?;
-    let authed = httpserve::finalize_auth(routes, plan).context("finalize_auth health")?;
-    Ok((ListenerKind::Health, authed))
-}
-
-// ── listener bind 地址（per-listener env，缺配 fail-fast）─────────────────────────────────────────
-
-const LISTENER_ALLOW_PLAINTEXT_ENV: &str = "RSS_LISTENER_ALLOW_PLAINTEXT";
-
-/// listener → bind 地址 env 变量名（`RSS_<LISTENER>_LISTEN_ADDR`，值为 `host:port` SocketAddr 串）。
-///
-/// `ListenerKind` 为 `non_exhaustive`：未知 listener 无 env、fail-fast（绝不静默 bind 未知 listener）。
-fn listener_addr_env(listener: ListenerKind) -> anyhow::Result<&'static str> {
-    Ok(match listener {
-        ListenerKind::Primary => "RSS_PRIMARY_LISTEN_ADDR",
-        ListenerKind::Internal => "RSS_INTERNAL_LISTEN_ADDR",
-        ListenerKind::Admin => "RSS_ADMIN_LISTEN_ADDR",
-        ListenerKind::Health => "RSS_HEALTH_LISTEN_ADDR",
-        other => {
-            anyhow::bail!("listener {other:?} has no listen-addr env var (unknown ListenerKind)")
-        }
-    })
-}
-
-/// ShutdownStack 关闭日志的稳定 listener 名（区分多 listener）。
-fn listener_name(listener: ListenerKind) -> &'static str {
-    match listener {
-        ListenerKind::Primary => "http-primary",
-        ListenerKind::Internal => "http-internal",
-        ListenerKind::Admin => "http-admin",
-        ListenerKind::Health => "http-health",
-        // ListenerKind non_exhaustive——未知 listener 用 fallback 名 + 配置期 warn 埋点（与 auth_scheme
-        // 的未知 listener 处理一致）；实际 bind 时 listener_addr_env 已 fail-fast 拒未知 listener。
-        _ => {
-            tracing::warn!(listener = ?listener, "unknown ListenerKind; using fallback name 'http-unknown'");
-            "http-unknown"
-        }
-    }
-}
-
-/// 由注入的配置读取器解析 listener bind 地址（DI 核心，可测）。**fail-fast**：有路由的 listener 缺
-/// `RSS_<LISTENER>_LISTEN_ADDR` 或值非法 SocketAddr 立即 `Err`（不静默 ready）。错误含 env 变量名。
-fn listener_addr_from(
-    listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<SocketAddr> {
-    // reason: composition-root startup policy compares operator-provided migration expiry with the
-    // process clock. Domain logic still receives clocks by DI; this is env guard evaluation.
-    #[allow(clippy::disallowed_methods)]
-    let now = SystemTime::now();
-    listener_addr_from_at(listener, get, now)
-}
-
-fn listener_addr_from_at(
-    listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
-    now: SystemTime,
-) -> anyhow::Result<SocketAddr> {
-    let var = listener_addr_env(listener)?;
-    let raw = get(var)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {var} (listener has routes)"))?;
-    let addr = raw
-        .parse::<SocketAddr>()
-        .with_context(|| format!("{var} must be a valid host:port SocketAddr: {raw}"))?;
-    let scheme = auth_scheme_from(listener, &get)
-        .context("resolve listener auth scheme for plaintext policy")?;
-    enforce_listener_plaintext_policy(listener, scheme, addr, &get, now)?;
-    Ok(addr)
-}
-
-fn enforce_listener_plaintext_policy(
-    listener: ListenerKind,
-    scheme: AuthScheme,
-    addr: SocketAddr,
-    get: impl Fn(&str) -> Option<String>,
-    _now: SystemTime,
-) -> anyhow::Result<()> {
-    if scheme == AuthScheme::Mtls {
-        return Ok(());
-    }
-    let policy = plaintext_endpoint_policy_from(&get, LISTENER_ALLOW_PLAINTEXT_ENV)?;
-    match policy {
-        PlaintextEndpointPolicy::Deny => anyhow::bail!(
-            "{LISTENER_ALLOW_PLAINTEXT_ENV} must explicitly allow plaintext listener {listener:?} at {addr}"
-        ),
-        PlaintextEndpointPolicy::AllowLoopback => {
-            anyhow::ensure!(
-                addr.ip().is_loopback(),
-                "{LISTENER_ALLOW_PLAINTEXT_ENV}=true only allows loopback plaintext listener binds"
-            );
-        }
-        PlaintextEndpointPolicy::AllowDevContainer => {
-            anyhow::ensure!(
-                addr.ip().is_loopback() || addr.ip().is_unspecified(),
-                "{LISTENER_ALLOW_PLAINTEXT_ENV}=dev-container only allows loopback or wildcard demo listener binds"
-            );
-        }
-    }
-    enforce_internal_service_token_loopback_only(listener, scheme, addr)
-}
-
-fn enforce_internal_service_token_loopback_only(
-    listener: ListenerKind,
-    scheme: AuthScheme,
-    addr: SocketAddr,
-) -> anyhow::Result<()> {
-    if listener != ListenerKind::Internal || scheme != AuthScheme::ServiceToken {
-        return Ok(());
-    }
-    anyhow::ensure!(
-        addr.ip().is_loopback(),
-        "Internal service-token listener is local-test only; non-loopback Internal listener must use mTLS"
-    );
-    Ok(())
-}
-
-/// 从 `std::env` 解析 listener bind 地址（薄壳，委托 [`listener_addr_from`]）。
-fn listener_addr(listener: ListenerKind) -> anyhow::Result<SocketAddr> {
-    listener_addr_from(listener, |name| std::env::var(name).ok())
-}
-
 // ── per-listener bind + serve + 信号优雅关停 ───────────────────────────────────────────────────
 
 /// 逐 listener bind socket + serve，经 `ShutdownStack` 托管；SIGTERM/SIGINT → LIFO 优雅 drain。
@@ -2863,40 +2341,42 @@ fn listener_addr(listener: ListenerKind) -> anyhow::Result<SocketAddr> {
 /// （SHUTDOWN-TOKEN-FUNNEL-01）。信号到达 → `stack.shutdown()` 阶段 1 广播 cancel 触发各 serve graceful
 /// drain、阶段 2 LIFO await 收敛。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
 async fn serve_until_signal(
-    listeners: Vec<AssembledListener>,
+    listeners: Vec<routes::AssembledListener>,
     register_background: impl FnOnce(&mut ShutdownStack),
 ) -> anyhow::Result<()> {
     // 生产装配：真实 env 地址解析 + 真实信号 future（薄壳，委托可测核心 [`serve_until`]）。
     serve_until(
         listeners,
         register_background,
-        listener_addr,
+        listeners::listener_addr_for_scheme,
         wait_for_shutdown_signal(),
     )
     .await
 }
 
-/// 可测核心：注入 `addr_resolver`（listener→bind 地址）与 `shutdown` future（关停触发），驱动 bind 各
-/// listener socket → 经 `ShutdownStack` 托管 serve → `shutdown` resolve 后 LIFO 优雅 drain。
+/// 可测核心：注入 `addr_resolver`（listener + resolved auth scheme → bind 地址）与 `shutdown` future
+///（关停触发），驱动 bind 各 listener socket → 经 `ShutdownStack` 托管 serve → `shutdown` resolve 后
+/// LIFO 优雅 drain。
 ///
 /// `register_background`：bind 循环前注册后台 worker 进 `ShutdownStack`（LIFO：先注册后停——sampler 先注册
 /// 则最后停，确保 listener drain 后 sampler 才停）。
 ///
-/// 生产经 [`serve_until_signal`] 注入真实 env 解析 + 信号 future；测试注入 `|_| Ok(127.0.0.1:0)` + 立即
-/// resolve 的 future，覆盖 bind 循环 + 多 listener + ensure-非空 + drain 聚合（serve_until_signal 本身依赖
-/// OS 信号不可 hermetic 测，故抽核心）。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
+/// 生产经 [`serve_until_signal`] 注入真实 env 解析 + 信号 future；测试注入
+/// `|_, _| Ok(127.0.0.1:0)` + 立即 resolve 的 future，覆盖 bind 循环 + 多 listener + ensure-非空 +
+/// drain 聚合（serve_until_signal 本身依赖 OS 信号不可 hermetic 测，故抽核心）。任一 listener 关闭失败聚合后
+/// 非零退出（不静默丢弃）。
 // reason: bind 循环 + 启动就绪 / drain 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点；
 // 实际控制流是「bind 各 listener → 等关停 → shutdown」三段——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 async fn serve_until<B, R, S>(
-    listeners: Vec<AssembledListener>,
+    listeners: Vec<routes::AssembledListener>,
     register_background: B,
     addr_resolver: R,
     shutdown: S,
 ) -> anyhow::Result<()>
 where
     B: FnOnce(&mut ShutdownStack),
-    R: Fn(ListenerKind) -> anyhow::Result<SocketAddr>,
+    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
     S: std::future::Future<Output = anyhow::Result<()>>,
 {
     anyhow::ensure!(
@@ -2923,30 +2403,30 @@ where
 ///
 /// async bind 在注册前完成 ⇒ 端口冲突 fail-fast；同步 `bound.serve(svc, token)` 在 `register_with_token`
 /// 闭包内消费注入的 child token（SHUTDOWN-TOKEN-FUNNEL-01）。`addr_resolver` 由 [`serve_until`] 注入
-/// （生产 = env 解析，测试 = `127.0.0.1:0` ephemeral）。
+/// （生产 = env 解析，测试 = `127.0.0.1:0` ephemeral），并消费 route finalize 阶段已解析的 auth scheme。
 // reason: this is the per-listener assembly junction; keeping bind, auth-scheme selection, and
 // plaintext/mTLS ShutdownStack registration together makes fail-fast startup order explicit.
 #[allow(clippy::cognitive_complexity)]
 async fn bind_and_register<R>(
     stack: &mut ShutdownStack,
-    listener: AssembledListener,
+    listener: routes::AssembledListener,
     addr_resolver: &R,
 ) -> anyhow::Result<()>
 where
-    R: Fn(ListenerKind) -> anyhow::Result<SocketAddr>,
+    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
 {
-    let AssembledListener {
+    let routes::AssembledListener {
         listener,
+        scheme,
         routes,
         mtls_health,
     } = listener;
-    let name = listener_name(listener);
-    let addr = addr_resolver(listener)?;
+    let name = listeners::listener_name(listener);
+    let addr = addr_resolver(listener, scheme)?;
     let bound = HttpServer::bind(name, addr)
         .await
         .with_context(|| format!("bind {name} listener at {addr}"))?;
     tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
-    let scheme = auth_scheme(listener).context("resolve listener auth scheme for serve")?;
     let svc = routes.into_make_service();
     match scheme {
         AuthScheme::Mtls => {
@@ -2975,36 +2455,8 @@ where
     Ok(())
 }
 
-fn mtls_allow_set_from_csv(raw: &str) -> anyhow::Result<authn::MtlsAllowSet> {
-    mtls_allow_set_from_csv_for_env(raw, INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV)
-}
-
-fn mtls_allow_set_from_csv_for_env(raw: &str, env: &str) -> anyhow::Result<authn::MtlsAllowSet> {
-    let mut ids = Vec::new();
-    for part in raw.split(',') {
-        let trimmed = part.trim();
-        anyhow::ensure!(!trimmed.is_empty(), "{env} must not contain empty entries");
-        ids.push(trimmed.to_owned());
-    }
-    authn::MtlsAllowSet::new(ids).map_err(|e| anyhow::anyhow!("{env} invalid: {e}"))
-}
-
-fn mtls_allow_set_from_env(
-    listener: ListenerKind,
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<authn::MtlsAllowSet> {
-    anyhow::ensure!(
-        listener == ListenerKind::Internal,
-        "mTLS listener config is only wired for Internal"
-    );
-    let raw = get(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV).ok_or_else(|| {
-        anyhow::anyhow!("missing required env var: {INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV}")
-    })?;
-    mtls_allow_set_from_csv(&raw)
-}
-
 async fn mtls_config_from_env(listener: ListenerKind) -> anyhow::Result<httpd::MtlsServerConfig> {
-    let allow_set = mtls_allow_set_from_env(listener, |name| std::env::var(name).ok())?;
+    let allow_set = routes::mtls_allow_set_from_env(listener, |name| std::env::var(name).ok())?;
     let endpoint = std::env::var(SPIFFE_ENDPOINT_SOCKET_ENV).ok();
     httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref())
         .await
@@ -3363,6 +2815,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let listeners = phase_result(
         RuntimePhase::Finalize,
         (|| {
+            use crate::listeners::health_listener;
+            use crate::routes::{AssembledListener, assemble_authed_routers};
+
             // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
             // Auth decision audit is a flat durable sink, not the `audit::AuditRepo` hash-chain actor model.
             let auth_audit_sink =
@@ -3429,35 +2884,18 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::listeners::health_listener;
+    use crate::routes::{AssembledListener, assemble_authed_routers};
+
+    use axum::http::Method;
     use diport::ServiceTokenReplayGuard;
+    use oidc::OidcProvider;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    /// 测试时钟（这些测试只验构造成功/失败，不验 token exp，故 SystemClock 即可）。
-    fn clk() -> Box<dyn diport::Clock> {
-        Box::new(SystemClock)
-    }
-
-    #[derive(Clone)]
-    struct AllowAuthorizer;
-
-    impl httpserve::RouteAuthorizer for AllowAuthorizer {
-        fn authorize<'a>(
-            &'a self,
-            _request: httpserve::RouteAuthorizationRequest,
-        ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
-        {
-            Box::pin(async { httpserve::RouteAuthorizationDecision::Allow })
-        }
-    }
-
-    fn allow_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
-        Arc::new(AllowAuthorizer)
-    }
 
     fn identity_storage_error(message: &'static str) -> identity::ports::IdentityError {
         identity::ports::IdentityError::Storage(Box::new(std::io::Error::other(message)))
@@ -4076,95 +3514,6 @@ mod tests {
         assert_eq!(target_json["data"][0]["actor"], "<redacted>");
         assert_eq!(target_json["data"][0]["resourceId"], "<redacted>");
         Ok(())
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn finalize_listener_routes_injects_primary_authorizer_into_admin_listener() {
-        use axum::extract::Extension;
-        use axum::response::IntoResponse as _;
-        use tower::ServiceExt as _;
-
-        let admin =
-            httpserve::UnfinalizedRoutes::empty()
-                .nest_group::<httpserve::Admin, anyhow::Error>("/admin", |rb| {
-                    Ok(rb.mount(
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/probe",
-                            contract_id: generated::http::audit_v1::SPEC.contract_id,
-                        },
-                        axum::routing::get(
-                            |Extension(authorizer): Extension<
-                                Arc<dyn httpserve::RouteAuthorizer>,
-                            >| async move {
-                                match authorizer
-                                    .authorize(httpserve::RouteAuthorizationRequest {
-                                        contract_id: generated::http::audit_v1::SPEC.contract_id,
-                                        permission: vocab::AUDIT_READ_PERMISSION,
-                                        tenant_id: Some(
-                                            vocab::TenantId::parse(
-                                                "00000000-0000-4000-8000-000000000001",
-                                            )
-                                            .expect("tenant"),
-                                        ),
-                                        principal_kind: vocab::PrincipalKind::Admin,
-                                        principal_id: "admin-subject".to_string(),
-                                        resource: None,
-                                    })
-                                    .await
-                                {
-                                    httpserve::RouteAuthorizationDecision::Allow
-                                    | httpserve::RouteAuthorizationDecision::AllowWithProjection(
-                                        _,
-                                    ) => axum::http::StatusCode::NO_CONTENT.into_response(),
-                                    httpserve::RouteAuthorizationDecision::Deny => {
-                                        axum::http::StatusCode::FORBIDDEN.into_response()
-                                    }
-                                }
-                            },
-                        ),
-                    ))
-                })
-                .expect("admin route");
-        let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).expect("admin jwt plan");
-        let routes = finalize_listener_auth(
-            ListenerKind::Admin,
-            admin,
-            plan,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-            allow_authorizer(),
-            AuthScheme::Jwt,
-        )
-        .expect("finalize admin listener")
-        .layer(axum::middleware::from_fn(
-            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
-                req.extensions_mut().insert(httpserve::Authenticated::new(
-                    primitives::RequiredScheme::Jwt,
-                    vocab::PrincipalKind::Admin,
-                    "admin-subject",
-                    Some(
-                        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")
-                            .expect("tenant"),
-                    ),
-                ));
-                next.run(req).await
-            },
-        ));
-
-        let response = routes
-            .into_router_for_test()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/admin/probe")
-                    .body(axum::body::Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-
-        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
     }
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -5570,113 +4919,6 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn mtls_source_health_probe_is_unhealthy_before_bind() {
-        use bootstrap::HealthProbe;
-
-        let slot = Arc::new(MtlsHealthSlot::new());
-        let probe = MtlsSourceHealthProbe::new(
-            mtls_probe_name(ListenerKind::Internal).expect("probe name"),
-            slot,
-        );
-        let check = probe.check();
-        assert_eq!(check.status(), HealthStatus::Unhealthy);
-        assert_eq!(check.detail(), "not-bound");
-        assert_eq!(check.name().as_str(), MTLS_SOURCE_READY_PROBE_NAME);
-    }
-
-    #[test]
-    #[allow(clippy::unwrap_used)]
-    fn auth_scheme_per_listener() {
-        assert_eq!(
-            auth_scheme_from(ListenerKind::Primary, |_| None).unwrap(),
-            AuthScheme::Jwt
-        );
-        assert_eq!(
-            auth_scheme_from(ListenerKind::Admin, |_| None).unwrap(),
-            AuthScheme::Jwt
-        );
-        assert_eq!(
-            auth_scheme_from(ListenerKind::Internal, |_| None).unwrap(),
-            AuthScheme::Mtls
-        );
-        assert_eq!(
-            auth_scheme_from(ListenerKind::Health, |_| None).unwrap(),
-            AuthScheme::NoAuth
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_requires_explicit_transition_flag() {
-        let scheme = auth_scheme_from(ListenerKind::Internal, |name| {
-            (name == INTERNAL_AUTH_SCHEME_ENV)
-                .then(|| INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string())
-        })
-        .expect("explicit service-token transition is accepted");
-        assert_eq!(scheme, AuthScheme::ServiceToken);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_auth_scheme_rejects_unknown_value() {
-        let err = auth_scheme_from(ListenerKind::Internal, |name| {
-            (name == INTERNAL_AUTH_SCHEME_ENV).then(|| "mtls-or-token".to_string())
-        })
-        .expect_err("unknown internal auth scheme must fail-fast");
-        assert!(
-            err.to_string().contains(INTERNAL_AUTH_SCHEME_ENV),
-            "error should name env var: {err}"
-        );
-    }
-
-    #[test]
-    fn required_scheme_maps_and_health_is_none() {
-        assert_eq!(
-            required_scheme_for_auth_scheme(AuthScheme::Jwt),
-            Some(RequiredScheme::Jwt)
-        );
-        assert_eq!(
-            required_scheme_for_auth_scheme(AuthScheme::Mtls),
-            Some(RequiredScheme::Mtls)
-        );
-        assert_eq!(
-            required_scheme_for_auth_scheme(AuthScheme::ServiceToken),
-            Some(RequiredScheme::ServiceToken)
-        );
-        assert_eq!(required_scheme_for_auth_scheme(AuthScheme::NoAuth), None);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn mtls_allow_set_from_csv_rejects_empty_and_wildcard() {
-        let err = mtls_allow_set_from_csv("spiffe://example.org/ns/rss/sa/internal,")
-            .expect_err("trailing comma must not be ignored");
-        assert!(
-            err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
-            "error should name env var: {err}"
-        );
-
-        let err = mtls_allow_set_from_csv("spiffe://example.org/ns/rss/sa/*")
-            .expect_err("wildcard spiffe ids must fail");
-        assert!(
-            err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
-            "error should name env var: {err}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn mtls_allow_set_from_env_requires_config_for_internal_mtls() {
-        let err = mtls_allow_set_from_env(ListenerKind::Internal, |_| None)
-            .expect_err("mTLS allow-set must be configured");
-        assert!(
-            err.to_string().contains(INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV),
-            "error should name env var: {err}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
     fn domain_transport_required_domains_must_be_non_empty() {
         let err = build_domain_transport_targets_from(bootstrap::Topology::DurableShared, |_| None)
             .expect_err("missing required domains must fail");
@@ -5886,34 +5128,6 @@ mod tests {
         assert!(build_audit_hasher(get).is_ok(), "有效 32B key 须构造成功");
     }
 
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn assemble_empty_registry_yields_no_routers() {
-        let secret = B64.encode([7u8; 32]);
-        let provider = Arc::new(
-            provider_from_b64(
-                "https://issuer.test",
-                "rss",
-                "user",
-                None,
-                Some(&secret),
-                Some("cell-a.svc-a"),
-                clk(),
-            )
-            .expect("provider"),
-        );
-        let mut registry = bootstrap::compose(&[]).expect("compose empty");
-        let routers = assemble_authed_routers(
-            &mut registry,
-            provider,
-            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
-            Arc::new(SystemClock),
-            allow_authorizer(),
-        )
-        .expect("assemble ok");
-        assert!(routers.is_empty(), "空域图 ⇒ 无 per-listener router");
-    }
-
     // ── ConfigsReadyProbe / readiness_to_health 测试 ─────────────────────────────────────
 
     /// `PoolReadiness::Ready` → `(Healthy, "ready")`。
@@ -6062,218 +5276,6 @@ mod tests {
         );
     }
 
-    // ── listener bind 地址解析（fail-fast）─────────────────────────────────────────────
-
-    /// 各标准 listener → 正确 env 变量名（per-listener `RSS_<LISTENER>_LISTEN_ADDR`）。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_addr_env_maps_each_listener() {
-        assert_eq!(
-            listener_addr_env(ListenerKind::Primary).expect("primary"),
-            "RSS_PRIMARY_LISTEN_ADDR"
-        );
-        assert_eq!(
-            listener_addr_env(ListenerKind::Internal).expect("internal"),
-            "RSS_INTERNAL_LISTEN_ADDR"
-        );
-        assert_eq!(
-            listener_addr_env(ListenerKind::Admin).expect("admin"),
-            "RSS_ADMIN_LISTEN_ADDR"
-        );
-        assert_eq!(
-            listener_addr_env(ListenerKind::Health).expect("health"),
-            "RSS_HEALTH_LISTEN_ADDR"
-        );
-    }
-
-    /// 有路由的 listener 缺 addr env → fail-fast，错误含 env 变量名（不静默 ready）。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_addr_missing_env_fails_fast() {
-        let err = listener_addr_from(ListenerKind::Primary, |_| None).expect_err("missing addr");
-        assert!(
-            err.to_string().contains("RSS_PRIMARY_LISTEN_ADDR"),
-            "error 含 env 变量名: {err}"
-        );
-    }
-
-    /// addr env 值非法 SocketAddr → fail-fast，错误含 env 变量名。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_addr_invalid_value_fails_fast() {
-        let err = listener_addr_from(ListenerKind::Health, |_| Some("not-an-addr".to_string()))
-            .expect_err("invalid addr");
-        assert!(
-            err.to_string().contains("RSS_HEALTH_LISTEN_ADDR"),
-            "含 env 名: {err}"
-        );
-    }
-
-    /// 合法 `host:port` → 解析成功。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_addr_valid_value_parses() {
-        let addr = listener_addr_from(ListenerKind::Primary, |name| match name {
-            "RSS_PRIMARY_LISTEN_ADDR" => Some("0.0.0.0:8080".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-            _ => None,
-        })
-        .expect("valid dev-container listener addr");
-        assert_eq!(addr.port(), 8080);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_plaintext_default_rejects_loopback() {
-        let err = listener_addr_from(ListenerKind::Health, |name| {
-            (name == "RSS_HEALTH_LISTEN_ADDR").then(|| "127.0.0.1:8083".to_string())
-        })
-        .expect_err("plaintext listener needs explicit opt-in even on loopback");
-        assert!(
-            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
-            "error must identify plaintext opt-in env: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_plaintext_default_rejects_non_loopback() {
-        let err = listener_addr_from(ListenerKind::Primary, |name| {
-            (name == "RSS_PRIMARY_LISTEN_ADDR").then(|| "0.0.0.0:8080".to_string())
-        })
-        .expect_err("non-loopback plaintext listener must fail closed by default");
-        assert!(
-            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
-            "error must identify plaintext opt-in env: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_plaintext_true_allows_loopback_only() {
-        let loopback = listener_addr_from(ListenerKind::Health, |name| match name {
-            "RSS_HEALTH_LISTEN_ADDR" => Some("127.0.0.1:8083".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-            _ => None,
-        })
-        .expect("explicit loopback opt-in should allow loopback bind");
-        assert!(loopback.ip().is_loopback());
-
-        let err = listener_addr_from(ListenerKind::Health, |name| match name {
-            "RSS_HEALTH_LISTEN_ADDR" => Some("10.0.0.8:8083".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-            _ => None,
-        })
-        .expect_err("loopback opt-in must reject fixed non-loopback addresses");
-        assert!(format!("{err:#}").contains("loopback"), "{err:#}");
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_plaintext_dev_container_allows_only_loopback_or_unspecified() {
-        for raw in ["0.0.0.0:8080", "[::]:8080", "127.0.0.1:8080"] {
-            let addr = listener_addr_from(ListenerKind::Primary, |name| match name {
-                "RSS_PRIMARY_LISTEN_ADDR" => Some(raw.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-                _ => None,
-            })
-            .expect("dev-container policy allows compose wildcard and loopback binds");
-            assert!(addr.ip().is_unspecified() || addr.ip().is_loopback());
-        }
-
-        let err = listener_addr_from(ListenerKind::Primary, |name| match name {
-            "RSS_PRIMARY_LISTEN_ADDR" => Some("10.0.0.8:8080".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-            _ => None,
-        })
-        .expect_err("dev-container policy must not allow arbitrary non-loopback binds");
-        assert!(
-            format!("{err:#}").contains("dev-container"),
-            "error should mention dev-container policy: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn listener_plaintext_invalid_opt_in_fails_fast() {
-        let err = listener_addr_from(ListenerKind::Health, |name| match name {
-            "RSS_HEALTH_LISTEN_ADDR" => Some("127.0.0.1:8083".to_string()),
-            LISTENER_ALLOW_PLAINTEXT_ENV => Some("enabled".to_string()),
-            _ => None,
-        })
-        .expect_err("invalid plaintext opt-in should fail");
-        assert!(
-            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
-            "error must identify opt-in env: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_mtls_listener_is_not_plaintext() {
-        let addr = listener_addr_from(ListenerKind::Internal, |name| {
-            (name == "RSS_INTERNAL_LISTEN_ADDR").then(|| "0.0.0.0:8081".to_string())
-        })
-        .expect("default Internal listener is mTLS and not gated as plaintext");
-        assert!(addr.ip().is_unspecified());
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_listener_is_plaintext_and_requires_opt_in() {
-        let err = listener_addr_from(ListenerKind::Internal, |name| match name {
-            "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-            "RSS_INTERNAL_AUTH_SCHEME" => Some("service-token".to_string()),
-            _ => None,
-        })
-        .expect_err("Internal service-token mode is plaintext and must be gated");
-        assert!(
-            format!("{err:#}").contains(LISTENER_ALLOW_PLAINTEXT_ENV),
-            "error must identify plaintext opt-in env: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_non_loopback_rejects_even_with_legacy_migration_envs() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
-        let err = listener_addr_from_at(
-            ListenerKind::Internal,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-                "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET" => Some("SEC-1500".to_string()),
-                "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX" => Some("3000".to_string()),
-                _ => None,
-            },
-            now,
-        )
-        .expect_err("non-loopback Internal service-token is no longer a migration path");
-        assert!(
-            format!("{err:#}").contains("mTLS"),
-            "error should require mTLS instead of migration envs: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_loopback_remains_local_test_path() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
-        let addr = listener_addr_from_at(
-            ListenerKind::Internal,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("127.0.0.1:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-                _ => None,
-            },
-            now,
-        )
-        .expect("loopback service-token listener remains a local test path");
-        assert!(addr.ip().is_loopback());
-    }
-
     // ── shutdown 失败聚合（report_shutdown_failures）────────────────────────────────────
 
     /// 空失败列表 → `Ok`（干净退出）；非空 → `Err` 含失败计数（非零退出码不静默丢弃关闭错误）。
@@ -6396,7 +5398,7 @@ mod tests {
     }
 
     /// 注入 `127.0.0.1:0` ephemeral 地址解析器（测试用）。
-    fn ephemeral_addr(_l: ListenerKind) -> anyhow::Result<SocketAddr> {
+    fn ephemeral_addr(_l: ListenerKind, _scheme: AuthScheme) -> anyhow::Result<SocketAddr> {
         "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
     }
 
@@ -6434,6 +5436,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn serve_until_passes_assembled_scheme_to_addr_resolver() {
+        let listener = test_health_assembled();
+        let resolved = Arc::new(std::sync::Mutex::new(None));
+        let seen = Arc::clone(&resolved);
+
+        serve_until(
+            vec![listener],
+            |_stack| {},
+            move |listener, scheme| {
+                assert_eq!(listener, ListenerKind::Health);
+                *seen.lock().expect("scheme lock") = Some(scheme);
+                "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
+            },
+            std::future::ready(anyhow::Ok(())),
+        )
+        .await
+        .expect("serve_until binds listener");
+
+        assert_eq!(
+            *resolved.lock().expect("scheme lock"),
+            Some(AuthScheme::NoAuth)
+        );
+    }
+
     /// serve_until addr_resolver 失败 → bind 前 fail-fast 冒泡 Err（不静默 ready）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -6442,7 +5470,7 @@ mod tests {
         let err = serve_until(
             listeners,
             |_stack| {}, // 无后台 worker（测 serve 循环本身）
-            |_| anyhow::bail!("no addr configured for listener"),
+            |_, _| anyhow::bail!("no addr configured for listener"),
             std::future::ready(anyhow::Ok(())),
         )
         .await
@@ -6450,108 +5478,6 @@ mod tests {
         assert!(
             err.to_string().contains("no addr configured"),
             "error: {err}"
-        );
-    }
-
-    // ── Health listener readyz/healthz（经 funnel 出口 oneshot）──────────────────────────
-
-    /// Health listener 经 funnel 构造（NoAuth）：空探针 → readyz 503（fail-closed）；
-    /// 注册一个 Healthy 探针 → readyz 200。
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    async fn health_listener_readyz_reflects_probes() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt as _;
-
-        let mut empty_reg = bootstrap::compose(&[]).expect("compose empty");
-        let empty = Arc::new(empty_reg.take_health_reporter());
-        let (_, authed) = health_listener(empty, noop_metrics()).expect("health listener");
-        let resp = authed
-            .into_router_for_test()
-            .oneshot(
-                Request::builder()
-                    .uri("/health/v1/readyz")
-                    .body(Body::empty())
-                    .expect("req"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(
-            resp.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "空探针 → readyz fail-closed 503"
-        );
-
-        struct HealthyProbe;
-        impl bootstrap::HealthProbe for HealthyProbe {
-            fn check(&self) -> HealthCheck {
-                HealthCheck::new(
-                    ProbeName::parse("ok").expect("name"),
-                    HealthStatus::Healthy,
-                    "ready",
-                )
-            }
-        }
-        let mut reg = bootstrap::compose(&[]).expect("compose");
-        reg.probe(
-            ProbeName::parse("ok").expect("name"),
-            Box::new(HealthyProbe),
-        )
-        .expect("register probe");
-        let reporter = Arc::new(reg.take_health_reporter());
-        let (_, authed) = health_listener(reporter, noop_metrics()).expect("health listener");
-        let resp = authed
-            .into_router_for_test()
-            .oneshot(
-                Request::builder()
-                    .uri("/health/v1/readyz")
-                    .body(Body::empty())
-                    .expect("req"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(resp.status(), StatusCode::OK, "Healthy 探针 → readyz 200");
-    }
-
-    /// Down 路径（fail-closed，不连 DB）：新建 `PgDbReadiness`（初值 Down）→ readyz 503。
-    ///
-    /// 验证在未经任何采样 tick 前，`ConfigsReadyProbe` 报 Down → overall unhealthy → 503。
-    /// 迁自 `tests/configs_ready_e2e.rs`（原在 integration feature 门控下，azure 不跑）——
-    /// 此测试无需真实 DB，应在非 integration 路径下运行（[T2] #1309 review）。
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    async fn configs_ready_initial_down_readyz_503() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt as _;
-
-        // 初值 Down（fail-closed，不连 DB）。
-        let health = Arc::new(PgDbReadiness::new());
-        let mut reg = bootstrap::compose(&[]).expect("compose");
-        reg.probe(
-            ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name"),
-            Box::new(ConfigsReadyProbe::new(Arc::clone(&health))),
-        )
-        .expect("register probe");
-        let reporter = Arc::new(reg.take_health_reporter());
-
-        let (_listener, authed) =
-            health_listener(reporter, noop_metrics()).expect("health listener");
-        let resp = authed
-            .into_router_for_test()
-            .oneshot(
-                Request::builder()
-                    .uri("/health/v1/readyz")
-                    .body(Body::empty())
-                    .expect("req"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(
-            resp.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "初值 Down（未采样）→ readyz fail-closed 503"
         );
     }
 
@@ -6691,31 +5617,5 @@ mod tests {
             }
         };
         build_jwt_issuer_config(get).expect("all JWT issuer vars present → Ok");
-    }
-
-    /// Health listener liveness 端点 `/health/v1/healthz` 恒 200（存活即活）。
-    #[tokio::test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    async fn health_listener_healthz_is_200() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt as _;
-
-        let mut reg = bootstrap::compose(&[]).expect("compose");
-        let reporter = Arc::new(reg.take_health_reporter());
-        let (listener, authed) =
-            health_listener(reporter, noop_metrics()).expect("health listener");
-        assert_eq!(listener, ListenerKind::Health);
-        let resp = authed
-            .into_router_for_test()
-            .oneshot(
-                Request::builder()
-                    .uri("/health/v1/healthz")
-                    .body(Body::empty())
-                    .expect("req"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(resp.status(), StatusCode::OK, "liveness 恒 200");
     }
 }

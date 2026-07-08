@@ -446,7 +446,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
     let mut registry = bootstrap::compose(&[&identity_domain])?;
     let mut primary = None;
-    for assembled in runtime::assemble_authed_routers(
+    for assembled in runtime::routes::assemble_authed_routers(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
@@ -682,7 +682,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &settings_domain];
     let mut registry = bootstrap::compose(&domains)?;
     let mut primary = None;
-    for assembled in runtime::assemble_authed_routers(
+    for assembled in runtime::routes::assemble_authed_routers(
         &mut registry,
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
