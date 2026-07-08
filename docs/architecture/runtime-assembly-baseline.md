@@ -44,7 +44,7 @@ The current production runtime assembly has these phases:
    - outbound domain transport module result
    - event transport module result
 6. Register direct framework probes for RLS and Redis readiness.
-7. Bridge generated event subscriptions, then call `wire_distributed` and `event_transport::wire_event_transport`.
+7. Call `wire_distributed`, bridge generated event subscriptions, then call `event_transport::wire_event_transport`.
 8. Drain module probes into `Registry` before `take_health_reporter`.
 9. Assemble authenticated routers and the dedicated health listener.
 10. Serve listeners through `serve_until_signal`.

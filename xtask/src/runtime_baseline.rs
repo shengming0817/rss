@@ -391,12 +391,17 @@ fn domain_module_result(root: &Path) -> Result<DomainModuleInventory> {
     let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
     let fields = parse_struct_fields(&text, "DomainModuleResult")
         .with_context(|| format!("解析 DomainModuleResult 字段失败: {}", path.display()))?;
-    let merge_present = text.contains("pub fn merge(&mut self, other: DomainModuleResult)");
+    let merge_body =
+        extract_braced_body(&text, "pub fn merge(&mut self, other: DomainModuleResult)");
+    let merge_scan = merge_body
+        .map(mask_comments_and_strings)
+        .unwrap_or_default();
+    let merge_present = merge_body.is_some();
     let mut merge_extends = Vec::new();
     if merge_present {
         for field in &fields {
             let pattern = format!("self.{}.extend(other.{})", field.name, field.name);
-            if text.contains(&pattern) {
+            if merge_scan.contains(&pattern) {
                 merge_extends.push(field.name.clone());
             }
         }
@@ -599,7 +604,7 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
             file_cache.get(spec.path).expect("inserted file cache")
         };
 
-        let scope = anchor_search_scope(spec.path, text);
+        let scope = mask_comments_and_strings(anchor_search_scope(spec.path, text));
         let status = match scope.find(spec.pattern) {
             None => AnchorStatus::Missing,
             Some(pos) => {
@@ -624,12 +629,161 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
 
 fn anchor_search_scope<'a>(path: &str, text: &'a str) -> &'a str {
     if path == RUNTIME_LIB_PATH {
-        return text
-            .find("pub async fn run(")
-            .map(|pos| &text[pos..])
-            .unwrap_or(text);
+        return extract_braced_body(text, "pub async fn run(").unwrap_or("");
     }
     text
+}
+
+fn extract_braced_body<'a>(src: &'a str, needle: &str) -> Option<&'a str> {
+    let start = src.find(needle)?;
+    let open = src[start..].find('{')? + start;
+    let scan = mask_comments_and_strings(&src[open..]);
+    let mut depth = 0usize;
+    for (offset, byte) in scan.as_bytes().iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&src[open + 1..open + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn mask_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if let Some(end) = raw_string_end(bytes, index) {
+            mask_range(bytes, index, end, &mut out);
+            index = end;
+            continue;
+        }
+
+        if is_prefixed_string_start(bytes, index) {
+            let end = quoted_string_end(bytes, index + 2);
+            mask_range(bytes, index, end, &mut out);
+            index = end;
+            continue;
+        }
+
+        if bytes[index] == b'"' {
+            let end = quoted_string_end(bytes, index + 1);
+            mask_range(bytes, index, end, &mut out);
+            index = end;
+            continue;
+        }
+
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            let end = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|offset| index + offset)
+                .unwrap_or(bytes.len());
+            mask_range(bytes, index, end, &mut out);
+            index = end;
+            continue;
+        }
+
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let end = block_comment_end(bytes, index);
+            mask_range(bytes, index, end, &mut out);
+            index = end;
+            continue;
+        }
+
+        out.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(out).expect("masking preserves UTF-8")
+}
+
+fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut cursor = match bytes.get(index) {
+        Some(b'r') => index + 1,
+        Some(b'b' | b'c') if bytes.get(index + 1) == Some(&b'r') => index + 2,
+        _ => return None,
+    };
+    let hashes_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'"') {
+        return None;
+    }
+    let hashes = cursor - hashes_start;
+    cursor += 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' && has_raw_string_hashes(bytes, cursor + 1, hashes) {
+            return Some(cursor + 1 + hashes);
+        }
+        cursor += 1;
+    }
+    Some(bytes.len())
+}
+
+fn has_raw_string_hashes(bytes: &[u8], start: usize, hashes: usize) -> bool {
+    start + hashes <= bytes.len()
+        && bytes[start..start + hashes]
+            .iter()
+            .all(|byte| *byte == b'#')
+}
+
+fn is_prefixed_string_start(bytes: &[u8], index: usize) -> bool {
+    matches!(bytes.get(index), Some(b'b' | b'c')) && bytes.get(index + 1) == Some(&b'"')
+}
+
+fn quoted_string_end(bytes: &[u8], mut index: usize) -> usize {
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn block_comment_end(bytes: &[u8], mut index: usize) -> usize {
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+            depth = depth.saturating_sub(1);
+            index += 2;
+            if depth == 0 {
+                return index;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn mask_range(bytes: &[u8], start: usize, end: usize, out: &mut Vec<u8>) {
+    for byte in &bytes[start..end] {
+        match byte {
+            b'\n' | b'\r' => out.push(*byte),
+            _ => out.push(b' '),
+        }
+    }
 }
 
 fn render_baseline(
@@ -810,12 +964,22 @@ impl DomainModuleResult {
     }
 
     fn runtime_lib_fixture(omit: Option<&str>) -> String {
+        format!(
+            "pub async fn run() {{\n{}\n}}\n",
+            runtime_anchor_lines(omit)
+        )
+    }
+
+    fn runtime_anchor_lines(omit: Option<&str>) -> String {
         let mut lines = Vec::new();
         for anchor in RUNTIME_ANCHORS {
             if omit == Some(anchor.id) {
                 continue;
             }
             lines.push(anchor.pattern);
+            if anchor.id == "run.shared-deps" {
+                lines.push("}");
+            }
         }
         lines.join("\n")
     }
@@ -956,6 +1120,82 @@ diportProviders = []
             report.findings.iter().any(|f| {
                 f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_ignores_anchor_outside_run_body() -> Result<()> {
+        let root = fixture_root("runtime-baseline-anchor-outside-run")?;
+        write(
+            &root.join(RUNTIME_LIB_PATH),
+            &format!(
+                "{}\n#[cfg(test)]\nmod tests {{ fn false_positive() {{ {} }} }}\n",
+                runtime_lib_fixture(Some("run.wire.identity")),
+                "wire_identity(&deps);"
+            ),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
+            }),
+            "anchor outside run() body must not satisfy runtime wiring baseline"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_ignores_anchor_in_comment_and_string() -> Result<()> {
+        let root = fixture_root("runtime-baseline-anchor-comment-string")?;
+        write(
+            &root.join(RUNTIME_LIB_PATH),
+            &format!(
+                "pub async fn run() {{\n{}\n// {}\nlet _ = {:?};\n}}\n",
+                runtime_anchor_lines(Some("run.wire.identity")),
+                "wire_identity(&deps);",
+                "wire_identity(&deps);"
+            ),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
+            }),
+            "comment/string anchor must not satisfy runtime wiring baseline"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_ignores_merge_extend_in_comment() -> Result<()> {
+        let root = fixture_root("runtime-baseline-merge-comment")?;
+        write(
+            &root.join(BOOTSTRAP_MODULE_PATH),
+            r#"
+pub struct DomainModuleResult {
+    pub probes: Vec<(ProbeName, Box<dyn HealthProbe>)>,
+    pub resources: Vec<Box<DynManagedResource<'static>>>,
+    pub workers: Vec<WorkerSpec>,
+}
+
+impl DomainModuleResult {
+    pub fn merge(&mut self, other: DomainModuleResult) {
+        self.probes.extend(other.probes);
+        // self.resources.extend(other.resources);
+        self.workers.extend(other.workers);
+    }
+}
+"#,
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor
+                    && f.detail.contains("DomainModuleResult::merge")
+                    && f.detail.contains("resources")
+            }),
+            "commented merge extend must not satisfy DomainModuleResult merge baseline"
         );
         Ok(())
     }
