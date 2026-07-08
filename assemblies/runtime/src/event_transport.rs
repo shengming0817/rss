@@ -44,10 +44,12 @@ use primitives::{HealthCheck, MacKey, ProbeName};
 use settings::SettingsService;
 use vault::VaultKeyProvider;
 
+use crate::SystemClock;
 use crate::distributed_runtime::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
 };
-use crate::{DEFAULT_VAULT_TIMEOUT, SystemClock, build_vault_tls_client_from};
+use crate::infra::plaintext_endpoint_policy_from;
+use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
@@ -497,7 +499,7 @@ pub fn build_event_transport_config_from(
         // env 只把 AMQP 配置完整映射成 typed config——per-domain（`RSS_<DOMAIN>_AMQP_URL`，优先）+ 共享回退
         // （`RSS_AMQP_URL`）；per-domain/shared 完备性与隔离由 `eventtransport::resolve` 单源 fail-closed 强制，
         // env builder 不提前收窄语义（review #342 F1：durable-shared 仅配 RSS_AMQP_URL 也应可启动）。
-        let policy = crate::plaintext_endpoint_policy_from(&get, AMQP_ALLOW_PLAINTEXT_ENV)?;
+        let policy = plaintext_endpoint_policy_from(&get, AMQP_ALLOW_PLAINTEXT_ENV)?;
         let mut per_domain = BTreeMap::new();
         for domain in RELAY_DOMAINS {
             let env = format!("RSS_{}_AMQP_URL", domain.to_ascii_uppercase());
