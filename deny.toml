@@ -90,6 +90,7 @@ deny = [
   #   否则其对域/adapter/generated 的合法依赖会被 deny 误拦。此一致性的持久守卫 = `cargo xtask layer-deps`
   #   的 LAYER-DEPS-06（wrappers ⟷ 源分类交叉核对，接入 verify CI 门；issue #1022 落地）。
   #   `journeys` 是验收 journey 组合根（RW-G1，#999）——故出现在每条域/adapter/generated wrappers。
+  #   `examples/*` 是收窄示例层，只能依赖基础/引擎/DI-infra/服务；不进这些全权限 wrappers。
   #   adapter wrapper 经 LAYER-DEPS-06 反向②补强：必须有真实 adapter→domain source edge。
   # postgres impl RoleRepo + SessionLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   SessionLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。

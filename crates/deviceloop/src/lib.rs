@@ -1,15 +1,24 @@
-//! deviceloop — L4 设备证书生命周期收敛环（签名冻结；所有函数体 = `todo!()`，ADR-004 C8 豁免）。
+//! deviceloop — L4 设备长延迟收敛模型。
 //!
 //! 对标：
 //! - kube-rs `kube-runtime/src/controller/mod.rs`（`reconcile(obj, ctx) -> Result<Action, E>` +
 //!   `error_policy`；`Action::requeue / await_change`）
+//! - statig `statig/src/lib.rs`（显式 state/event transition；RSS 使用手写闭值集，不引入宏）
 //! - rcgen `rcgen/src/lib.rs`（`CertificateParams` / `SanType` / `ExtendedKeyUsagePurpose`——
 //!   RSS 用 provider-agnostic enum，不依赖 rcgen；实际签发经 `diport::Signer`）
 //!
 //! 分层：服务层（依赖基础 + 引擎 + `diport`；不依赖域 / adapters）。
 
+pub mod command;
+
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
+
+pub use command::{
+    DeviceAck, DeviceAckId, DeviceCommandDecision, DeviceCommandError, DeviceCommandId,
+    DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandState, DeviceConvergenceResult,
+    DeviceDispatchIntent, DevicePresence, DeviceReconcileTransition,
+};
 
 // 证书生命周期 API 以 `diport::CertScope`（tenant + device）为第一等输入——租户边界 correct-by-construction
 // 进入函数签名（F2，零信任）：reconcile / 签发 / 撤销 共用同一 scope，杜绝从 ambient ctx 二次查租户。

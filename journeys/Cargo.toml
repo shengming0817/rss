@@ -23,6 +23,7 @@ httpserve = { path = "../crates/httpserve" }
 settings = { path = "../crates/settings", features = ["seed-data"] }
 bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
+deviceloop = { path = "../crates/deviceloop" }
 # run_consumer 幂等消费驱动的载体类型：HandleResult / InboxStore / Entry / IdemKey / ConsumerGroup。
 consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport" }
@@ -51,6 +52,8 @@ sqlx = { workspace = true }
 amqp = { path = "../adapters/amqp" }
 # F6：durable journey 经 payload 解码关联本轮 session-created entry（F1 后 idem_key = 独立 EventId ≠ session_id）。
 serde_json = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
 uuid = { workspace = true }
 # 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），

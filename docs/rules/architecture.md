@@ -105,7 +105,7 @@ rss/
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。**定义自身域形 repo/service DI port**(`pub mod ports`,签名引用域内实体,由 adapter 经 DIP 实现,ADR-005);为此可依赖 dynosaur/trait-variant(DIPORT-MACRO-CONFINE-02 白名单)。
 - **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
-- **bins/**、**xtask/**、**assemblies/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试)。`assemblies/{name}/assembly.toml`
+- **bins/**、**xtask/**、**assemblies/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖域、adapters 或 generated。`assemblies/{name}/assembly.toml`
   是组合根 DI provider 注入事实源：`[[diportProviders]]` 声明 provider 的 port / providerCrate /
   requiredFeatures / consumer / lifecycle / durability / purpose；`cargo xtask assembly validate` 守 active
   provider 的依赖 / feature 与安全边界（例如 production `diport::RevocationStore` 必须持久）。DI port provider 声明不替代

@@ -116,6 +116,21 @@ success 分支经 `ReconcileResultLabel::from_outcome(&outcome)`，`Err(Reconcil
 `ReconcileResultLabel::from_error(&error)`，`catch_unwind` panic 分支经 `ReconcileResultLabel::from_panic()`，
 随后统一调用 `.as_label()`；禁止手写 result 字符串或从 duration/error text/adapter reason 推导 label。
 
+### Device Command Convergence Lag Metrics
+
+`deviceloop` 设备命令 L4 journey 发射下列 metric（bare 名，唯一消费入口 =
+`deviceloop::DeviceReconcileTransition::finalize`，底层 emit site 为 crate 内部函数，经 `metrics` facade）：
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `device_command_convergence_lag_seconds` | Histogram | `result` | 命令从进入队列到 ack / timeout 终态的收敛耗时 |
+
+label 闭值集纪律：
+
+- `result` 闭合于 `deviceloop::DeviceConvergenceResult::as_label()`（`acked` / `timed_out`）。
+- tenant、device id、command id、ack id、dispatch key、payload、错误文本和离线原因均不得进入 metric label。
+- 需要定位具体设备命令时使用受控日志 / store 查询；metric 仅承载低基数 SLO 信号。
+
 ### HTTP Idempotency state Label
 
 `idempotency_requests_total{state}` 的 state 值集必须闭合；新增或改名必须同步 schema、

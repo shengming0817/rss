@@ -1604,6 +1604,8 @@ dependencies = [
  "consistency",
  "diport",
  "ids",
+ "metrics",
+ "metrics-exporter-prometheus",
  "primitives",
  "runctx",
  "secure",
@@ -2951,6 +2953,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "iotdevice"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "deviceloop",
+ "ids",
+ "vocab",
+]
+
+[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3045,6 +3057,7 @@ dependencies = [
  "audit",
  "bootstrap",
  "consistency",
+ "deviceloop",
  "diagctx",
  "diport",
  "eventexec",
@@ -3054,6 +3067,8 @@ dependencies = [
  "identity",
  "ids",
  "memory",
+ "metrics",
+ "metrics-exporter-prometheus",
  "postgres",
  "primitives",
  "secure",

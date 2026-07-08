@@ -4,7 +4,7 @@
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain）；
-//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `journeys` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `examples/*` / `journeys` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -110,6 +110,8 @@ pub(crate) enum Layer {
     Domain,
     Adapter,
     Generated,
+    /// 示例包（examples）：只准依赖基础 / 引擎 / DI-infra / 服务，不准直接依赖域 / adapter / generated。
+    Example,
     /// 组合根（bins / xtask / assemblies / journeys）：可依赖所有库 crate。
     Root,
 }
@@ -128,6 +130,9 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
         || member_path.starts_with("journeys/")
     {
         return Some(Layer::Root);
+    }
+    if member_path.starts_with("examples/") {
+        return Some(Layer::Example);
     }
     if member_path.starts_with("adapters/") {
         return Some(Layer::Adapter);
@@ -160,10 +165,12 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 未授予任一分组同层依赖；基础"仅 std+外部"直接排除基础互依赖）——fail-closed：只放行 §分层
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
-    use Layer::{Adapter, Basis, DiPort, Domain, Engine, Generated, Root, Service};
+    use Layer::{Adapter, Basis, DiPort, Domain, Engine, Example, Generated, Root, Service};
     match from {
         // 组合根可依赖所有库 crate。
         Root => true,
+        // 示例包可演示 provider-agnostic 服务模型；禁止直接装配域/adapters/generated。
+        Example => matches!(to, Basis | Engine | DiPort | Service),
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
         Generated => to == Basis,
         // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务 + 域（impl 域 repo/service port，
@@ -237,6 +244,7 @@ mod tests {
     #[case("generated", "generated", Some(Layer::Generated))]
     #[case("server", "bins/server", Some(Layer::Root))]
     #[case("rss", "bins/rss", Some(Layer::Root))]
+    #[case("iotdevice", "examples/iotdevice", Some(Layer::Example))]
     #[case("xtask", "xtask", Some(Layer::Root))]
     #[case("journeys", "journeys", Some(Layer::Root))]
     #[case("memory", "adapters/memory", Some(Layer::Adapter))]
@@ -352,6 +360,14 @@ mod tests {
     #[case(Layer::Root, Layer::Adapter, true)]
     #[case(Layer::Root, Layer::Generated, true)]
     #[case(Layer::Root, Layer::DiPort, true)]
+    // Example 收窄：可依赖 provider-agnostic 服务模型，不可直接依赖域 / adapter / generated。
+    #[case(Layer::Example, Layer::Basis, true)]
+    #[case(Layer::Example, Layer::Engine, true)]
+    #[case(Layer::Example, Layer::DiPort, true)]
+    #[case(Layer::Example, Layer::Service, true)]
+    #[case(Layer::Example, Layer::Domain, false)]
+    #[case(Layer::Example, Layer::Adapter, false)]
+    #[case(Layer::Example, Layer::Generated, false)]
     // 同层横向依赖：禁（§分层 未授予任一分组同层依赖）。
     #[case(Layer::Basis, Layer::Basis, false)]
     #[case(Layer::Engine, Layer::Engine, false)]

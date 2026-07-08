@@ -56,6 +56,7 @@ members = [
   "adapters/memory",
   # 组合根（可依赖所有库 crate）
   "assemblies/runtime",
+  "examples/iotdevice",
   "bins/server",
   "bins/rss",
   "xtask",
