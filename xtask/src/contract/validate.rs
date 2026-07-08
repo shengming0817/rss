@@ -31,6 +31,9 @@
 //! HTTP request schema 不得声明 ambient tenant `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only
 //! header 或 service-token MAC 绑定 header（R19）；#1583 audit.list-entries GET 顶层 query `tenantId`
 //! 是 target tenant，非 ambient tenant source，按窄例外放行。
+//! INVARIANT: CONTRACT-HTTP-PROJECTION-COVERAGE-01 { level = "Medium", exec = "verify", source = "code" }— active GET response
+//! 中的 `x-pii` 字段与 `tenantId` 字段必须经 `[endpoints.http.projection]` 的 `responsePath` 精确 enrollment（R23）；
+//! contract metadata/codegen 是唯一 carrier，handler 不维护人工矩阵。
 //! INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— `consistencyLevel`
 //! 必须有 typed `[capabilities.*]` 证据，且能力块不得跨等级漂移（R22）。HTTP L2 producer 的 `emits`
 //! 须引用存在的 L2 active event contract，L3 只接受当前 manifest 能表达的 workflow 证据；L4 还要求
@@ -48,7 +51,7 @@
 //! 规则执行顺序（注释编号 = 执行先后）：
 //!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
 //!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
-//!   → R9 PerKindFieldScope → R18 HttpAuth → R19 HttpTenantSource → R10 SagaBlock
+//!   → R9 PerKindFieldScope → R18 HttpAuth → R19 HttpTenantSource → R23 HttpProjectionCoverage → R10 SagaBlock
 //!   → R11 ActiveDeliverySupported → R13 SchemaTitle → R16 SchemaRedaction → R17 SchemaProtection
 //!   → R14 ActiveSubscriber → R20 SlugSyntax
 //!   跨契约（validate_cross，需全局视图）：R12 DuplicateId → R21 SlugMixing → R22 ConsistencyCapability
@@ -63,7 +66,7 @@ use super::manifest::{
     FIELD_DELIVERY, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
     FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
     FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth,
-    HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpResourceSharingMode, Lifecycle,
+    HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod, HttpResourceSharingMode, Lifecycle,
     LocalTxBoundary, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST,
     SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
@@ -174,6 +177,8 @@ pub(crate) enum Rule {
     /// populate-only header 或 service-token MAC 绑定 header。#1583 audit.list-entries GET 顶层 query
     /// `tenantId` 表示 target tenant，按窄例外放行。
     HttpTenantSource,
+    /// R23：active GET response 中的 `x-pii` 字段与 `tenantId` 字段必须由 projection responsePath 精确覆盖。
+    HttpProjectionCoverage,
     /// R20：嵌套形态（`{kind}/{domain}/{version}/{slug}/`）的 slug 段语法须收口——slug 经 kebab→snake 拼进
     /// generated `pub mod <slug_ident>`（见 codegen），须为合法 Rust 模块标识符前体（首 `a-z`、余 `[a-z0-9_-]`、
     /// 无首尾 `-`），杜绝坏值流入生成子模块名 / 路径。与 codegen 写盘前防逃逸守卫互为表里。
@@ -868,6 +873,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_perkind_field_scope(&c.manifest, &label));
     findings.extend(rule_http_auth(&c.manifest, &label));
     findings.extend(rule_http_request_tenant_source(c, &label));
+    findings.extend(rule_http_projection_response_coverage(c, &label));
     findings.extend(rule_saga_block(&c.manifest, &label));
     findings.extend(rule_active_delivery_supported(&c.manifest, &label));
     findings.extend(rule_schema_title(c, &label));
@@ -1291,10 +1297,11 @@ fn rule_http_projection_fields(http: &HttpEndpoint, label: &str, out: &mut Vec<F
     let mut fields = BTreeSet::new();
     let mut permissions = BTreeSet::new();
     let mut obligations = BTreeSet::new();
+    let mut response_paths = BTreeSet::new();
     for field in &projection.fields {
         if !fields.insert(field.field) {
             out.push(finding(
-                Rule::HttpAuth,
+                Rule::HttpProjectionCoverage,
                 label,
                 format!(
                     "{FIELD_ENDPOINTS_HTTP_PROJECTION} field {:?} 重复",
@@ -1304,13 +1311,13 @@ fn rule_http_projection_fields(http: &HttpEndpoint, label: &str, out: &mut Vec<F
         }
         if field.permission.trim().is_empty() {
             out.push(finding(
-                Rule::HttpAuth,
+                Rule::HttpProjectionCoverage,
                 label,
                 format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} permission 必须非空"),
             ));
         } else if !permissions.insert(field.permission.as_str()) {
             out.push(finding(
-                Rule::HttpAuth,
+                Rule::HttpProjectionCoverage,
                 label,
                 format!(
                     "{FIELD_ENDPOINTS_HTTP_PROJECTION} permission {:?} 重复",
@@ -1318,19 +1325,68 @@ fn rule_http_projection_fields(http: &HttpEndpoint, label: &str, out: &mut Vec<F
                 ),
             ));
         }
+        if field.permission != field.field.canonical_permission() {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} field {:?} permission 必须为 {:?}",
+                    field.field.as_wire(),
+                    field.field.canonical_permission()
+                ),
+            ));
+        }
         if field.obligation_key.trim().is_empty() {
             out.push(finding(
-                Rule::HttpAuth,
+                Rule::HttpProjectionCoverage,
                 label,
                 format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} obligationKey 必须非空"),
             ));
         } else if !obligations.insert(field.obligation_key.as_str()) {
             out.push(finding(
-                Rule::HttpAuth,
+                Rule::HttpProjectionCoverage,
                 label,
                 format!(
                     "{FIELD_ENDPOINTS_HTTP_PROJECTION} obligationKey {:?} 重复",
                     field.obligation_key
+                ),
+            ));
+        }
+        if field.obligation_key != field.field.canonical_obligation_key() {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} field {:?} obligationKey 必须为 {:?}",
+                    field.field.as_wire(),
+                    field.field.canonical_obligation_key()
+                ),
+            ));
+        }
+        if field.response_path.trim().is_empty() {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} responsePath 必须非空"),
+            ));
+        } else if !response_paths.insert(field.response_path.as_str()) {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} responsePath {:?} 重复",
+                    field.response_path
+                ),
+            ));
+        }
+        if field.response_path != field.field.canonical_response_path() {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} field {:?} responsePath 必须为 {:?}",
+                    field.field.as_wire(),
+                    field.field.canonical_response_path()
                 ),
             ));
         }
@@ -1569,6 +1625,144 @@ fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<F
         )];
     }
     Vec::new()
+}
+
+fn rule_http_projection_response_coverage(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+    let m = &c.manifest;
+    if m.kind != ContractKind::Http
+        || m.lifecycle != Lifecycle::Active
+        || m.method != Some(HttpMethod::Get)
+    {
+        return Vec::new();
+    }
+    let Some(response) = m.schemas.response.as_deref() else {
+        return Vec::new();
+    };
+    if pathsafe::is_unsafe_segment(response) {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(c.dir.join(response)) else {
+        return Vec::new();
+    };
+    let Ok(schema) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let protected = protected_response_paths(&schema);
+    let declared = m
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+        .and_then(|http| http.projection.as_ref())
+        .map(|projection| {
+            projection
+                .fields
+                .iter()
+                .map(|field| field.response_path.as_str())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for path in &protected {
+        if !declared.contains(path.as_str()) {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "active GET response protected field {path:?} 必须声明 {FIELD_ENDPOINTS_HTTP_PROJECTION} responsePath"
+                ),
+            ));
+        }
+    }
+    for path in declared {
+        if !response_path_exists(&schema, path) {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} responsePath {path:?} 不存在于 response schema {response}"
+                ),
+            ));
+        } else if !protected.contains(path) {
+            out.push(finding(
+                Rule::HttpProjectionCoverage,
+                label,
+                format!(
+                    "{FIELD_ENDPOINTS_HTTP_PROJECTION} responsePath {path:?} 未指向 x-pii 或 tenantId protected field"
+                ),
+            ));
+        }
+    }
+    out
+}
+
+fn protected_response_paths(schema: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_protected_response_paths(schema, "", &mut out);
+    out
+}
+
+fn collect_protected_response_paths(
+    schema: &serde_json::Value,
+    prefix: &str,
+    out: &mut BTreeSet<String>,
+) {
+    let serde_json::Value::Object(map) = schema else {
+        return;
+    };
+    if let Some(serde_json::Value::Object(properties)) = map.get("properties") {
+        for (name, child) in properties {
+            let path = join_response_path(prefix, name);
+            if name == "tenantId" || child.get("x-pii").is_some() {
+                out.insert(path.clone());
+            }
+            collect_protected_response_paths(child, &path, out);
+        }
+    }
+    if let Some(items) = map.get("items") {
+        let array_prefix = format!("{prefix}[]");
+        collect_protected_response_paths(items, &array_prefix, out);
+    }
+}
+
+fn join_response_path(prefix: &str, field: &str) -> String {
+    if prefix.is_empty() {
+        field.to_string()
+    } else {
+        format!("{prefix}.{field}")
+    }
+}
+
+fn response_path_exists(schema: &serde_json::Value, path: &str) -> bool {
+    if path.trim().is_empty() {
+        return false;
+    }
+    let mut current = schema;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return false;
+        }
+        let (property, array) = match segment.strip_suffix("[]") {
+            Some(property) if !property.is_empty() => (property, true),
+            Some(_) => return false,
+            None => (segment, false),
+        };
+        let Some(next) = current
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get(property))
+        else {
+            return false;
+        };
+        current = next;
+        if array {
+            let Some(items) = current.get("items") else {
+                return false;
+            };
+            current = items;
+        }
+    }
+    true
 }
 
 /// R10：saga 契约的 `[saga]` block 结构语义（saga.md governance，**无条件、不论 lifecycle**）：
@@ -2956,11 +3150,13 @@ mod tests {
                             field: HttpProjectionFieldName::AuditActor,
                             permission: "audit:field:actor".to_string(),
                             obligation_key: "audit.actor".to_string(),
+                            response_path: "data[].actor".to_string(),
                         },
                         HttpProjectionField {
                             field: HttpProjectionFieldName::AuditResourceId,
                             permission: "audit:field:resource_id".to_string(),
                             obligation_key: "audit.resource_id".to_string(),
+                            response_path: "data[].resourceId".to_string(),
                         },
                     ],
                 }),
@@ -2997,11 +3193,13 @@ mod tests {
                             field: HttpProjectionFieldName::AuditActor,
                             permission: "audit:field:same".to_string(),
                             obligation_key: "audit.actor".to_string(),
+                            response_path: "data[].actor".to_string(),
                         },
                         HttpProjectionField {
                             field: HttpProjectionFieldName::AuditResourceId,
                             permission: "audit:field:same".to_string(),
                             obligation_key: "audit.resource_id".to_string(),
+                            response_path: "data[].resourceId".to_string(),
                         },
                     ],
                 }),
@@ -3009,9 +3207,11 @@ mod tests {
         });
         let findings = rule_http_auth(&m, "x");
         assert!(
-            findings
-                .iter()
-                .any(|f| f.detail.contains("permission") && f.detail.contains("重复")),
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage
+                    && f.detail.contains("permission")
+                    && f.detail.contains("重复")
+            }),
             "{findings:?}"
         );
     }
@@ -3509,6 +3709,162 @@ mod tests {
         let findings = rule_http_request_tenant_source(&c, "x");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r23_active_get_protected_response_requires_projection_path() -> anyhow::Result<()> {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"ProfileRequest","type":"object","properties":{}}"#,
+            r#"{"title":"ProfileResponse","type":"object","properties":{"data":{"type":"object","properties":{"subject":{"type":"string","x-pii":"generic"},"tenantId":{"type":"string"}}}}}"#,
+        )?;
+        make_active_get(&mut c.manifest, "/api/v1/profile", "profile:read", None);
+
+        let findings = rule_http_projection_response_coverage(&c, "x");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage && f.detail.contains("data.subject")
+            }),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage && f.detail.contains("data.tenantId")
+            }),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r23_projection_response_path_must_exist() -> anyhow::Result<()> {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"ProfileRequest","type":"object","properties":{}}"#,
+            r#"{"title":"ProfileResponse","type":"object","properties":{"data":{"type":"object","properties":{"subject":{"type":"string","x-pii":"generic"}}}}}"#,
+        )?;
+        make_active_get(
+            &mut c.manifest,
+            "/api/v1/profile",
+            "profile:read",
+            Some(HttpProjection {
+                fields: vec![HttpProjectionField {
+                    field: HttpProjectionFieldName::IdentityProfileSubject,
+                    permission: "identity:profile:field:subject".to_string(),
+                    obligation_key: "identity.profile.subject".to_string(),
+                    response_path: "data.missing".to_string(),
+                }],
+            }),
+        );
+
+        let findings = rule_http_projection_response_coverage(&c, "x");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage && f.detail.contains("不存在")
+            }),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r23_active_get_without_protected_response_does_not_require_projection() -> anyhow::Result<()>
+    {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"RolesRequest","type":"object","properties":{}}"#,
+            r#"{"title":"RolesResponse","type":"object","properties":{"data":{"type":"array","items":{"type":"object","properties":{"roleId":{"type":"string"}}}}}}"#,
+        )?;
+        make_active_get(&mut c.manifest, "/api/v1/roles", "roles:read", None);
+
+        let findings = rule_http_projection_response_coverage(&c, "x");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn r23_declared_projection_path_without_protected_response_fails() -> anyhow::Result<()> {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"RolesRequest","type":"object","properties":{}}"#,
+            r#"{"title":"RolesResponse","type":"object","properties":{"data":{"type":"array","items":{"type":"object","properties":{"roleId":{"type":"string"}}}}}}"#,
+        )?;
+        make_active_get(
+            &mut c.manifest,
+            "/api/v1/roles",
+            "roles:read",
+            Some(HttpProjection {
+                fields: vec![HttpProjectionField {
+                    field: HttpProjectionFieldName::IdentityProfileSubject,
+                    permission: "identity:profile:field:subject".to_string(),
+                    obligation_key: "identity.profile.subject".to_string(),
+                    response_path: "data[].roleId".to_string(),
+                }],
+            }),
+        );
+
+        let findings = rule_http_projection_response_coverage(&c, "x");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage && f.detail.contains("未指向")
+            }),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r23_projection_field_tuple_must_match_closed_vocabulary() -> anyhow::Result<()> {
+        let (mut c, dir) = http_contract_with_schemas(
+            r#"{"title":"ProfileRequest","type":"object","properties":{}}"#,
+            r#"{"title":"ProfileResponse","type":"object","properties":{"data":{"type":"object","properties":{"subject":{"type":"string","x-pii":"generic"},"tenantId":{"type":"string"}}}}}"#,
+        )?;
+        make_active_get(
+            &mut c.manifest,
+            "/api/v1/profile",
+            "profile:read",
+            Some(HttpProjection {
+                fields: vec![
+                    HttpProjectionField {
+                        field: HttpProjectionFieldName::IdentityProfileSubject,
+                        permission: "identity:profile:field:tenant_id".to_string(),
+                        obligation_key: "identity.profile.tenant_id".to_string(),
+                        response_path: "data.tenantId".to_string(),
+                    },
+                    HttpProjectionField {
+                        field: HttpProjectionFieldName::IdentityProfileTenantId,
+                        permission: "identity:profile:field:subject".to_string(),
+                        obligation_key: "identity.profile.subject".to_string(),
+                        response_path: "data.subject".to_string(),
+                    },
+                ],
+            }),
+        );
+
+        let findings = validate_contract(&c);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage
+                    && f.detail.contains("identityProfileSubject")
+                    && f.detail.contains("permission")
+            }),
+            "{findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::HttpProjectionCoverage
+                    && f.detail.contains("identityProfileTenantId")
+                    && f.detail.contains("responsePath")
+            }),
+            "{findings:?}"
+        );
         Ok(())
     }
 
@@ -4684,6 +5040,31 @@ mod tests {
             http_schemas(),
         );
         Ok((discovered(m, dir.clone()), dir))
+    }
+
+    fn make_active_get(
+        m: &mut ContractManifest,
+        path: &str,
+        permission: &str,
+        projection: Option<HttpProjection>,
+    ) {
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some(path.to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some(permission.to_string()),
+                }),
+                resource: None,
+                self_scoped: false,
+                resource_sharing: None,
+                headers: BTreeMap::new(),
+                projection,
+            }),
+        });
     }
 
     #[test]

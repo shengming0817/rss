@@ -205,14 +205,18 @@ NOBYPASSRLS` 已 provision，bootstrap serving pool 已由启动期 RLS 能力�
 ## ResourceProjection / FieldMask
 
 字段级数据权限由 `httpserve::ResourceProjection` 承载，字段集合来自闭枚举
-`vocab::ProjectionField`，不得用裸字符串、wildcard 或 handler-local bool 表达。粗粒度
-`audit:read` 缺 Authorizer 或被 Authorizer deny 时必须拒绝读取；读取已 allow 后，缺 projection、
-缺字段权限或未知未来字段时，敏感字段默认 mask。
+`vocab::ProjectionField`，不得用裸字符串、wildcard 或 handler-local bool 表达。active GET response
+中声明 `x-pii` 或字段名为 `tenantId` 的 protected 字段必须在 contract
+`[endpoints.http.projection].fields.responsePath` enrollment；`cargo xtask contract validate` 的 R23
+按 schema 精确覆盖校验，generated `HttpProjectionFieldSpec` 是 handler/authorizer 的单源。
 
-audit read 当前默认 mask `actor` 与 `resourceId`，以 `"<redacted>"` 保持 required string schema；`entryHash`、
-`seq`、`tenantId`、`actorKind`、`action`、`resourceKind`、`outcome`、`recordedAt`、`nextCursor`、`hasMore`
-保持明文。显式 unmask 只能由 `RouteAuthorizationDecision` 携带的 projection 进入 handler；audit handler
-只消费 projection，不读取角色、permission 字符串或 policy 细节。
+粗粒度 route permission 缺 Authorizer 或被 Authorizer deny 时必须拒绝读取；读取已 allow 后，缺
+projection、缺字段权限或未知未来字段时，protected 字段默认 mask 为 `"<redacted>"` 以保持 required
+string schema。当前 enrollment：audit read 默认 mask `tenantId`、`actor`、`resourceId`；identity
+profile 默认 mask `subject`、`tenantId`。显式 unmask 只能由
+`RouteAuthorizationDecision::AllowWithProjection` 携带的 projection 进入 handler；handler 只消费
+projection，不读取角色、permission 字符串或 policy 细节。audit 的 `entryHash`、`seq`、`actorKind`、
+`action`、`resourceKind`、`outcome`、`recordedAt`、`nextCursor`、`hasMore` 保持明文。
 
 ## Resource ownership
 
@@ -387,9 +391,9 @@ HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必
   durable startup 由 `verify_rls_capability()` 守。
 - AuthZ 路由 gate 必须经 `RouteAuthorizer`，handler 只消费 `AuthorizedSubject`，不回退到
   handler-local role/self 分支。
-- 字段级数据权限必须从 contract projection fields 派生到 generated spec，经
-  `RouteAuthorizationDecision::AllowWithProjection` 传入 `ResourceProjection`，并由 audit read
-  response rendering 消费；缺 projection 时敏感字段默认 mask。
+- 字段级数据权限必须从 contract projection fields + `responsePath` 派生到 generated spec，经
+  `RouteAuthorizationDecision::AllowWithProjection` 传入 `ResourceProjection`，并由 enrolled read
+  response rendering 消费；缺 projection 时 protected 字段默认 mask。
 - open-source AuthZ parity boundary 必须在
   `docs/architecture/202607021958-014-authz-open-source-parity-boundary.md` 记录，且本规则文件与
   ADR-006 必须引用该 ADR。

@@ -305,7 +305,10 @@ fn encode_hash(bytes: &[u8; 32]) -> String {
 fn to_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditEntryView {
     AuditEntryView {
         seq: i64::try_from(entry.seq()).unwrap_or(i64::MAX),
-        tenant_id: entry.tenant().to_string(),
+        tenant_id: projection.render(
+            vocab::ProjectionField::AuditTenantId,
+            &entry.tenant().to_string(),
+        ),
         actor: projection.render(
             vocab::ProjectionField::AuditActor,
             &entry.actor().as_uuid().to_string(),
@@ -1701,7 +1704,7 @@ mod tests {
         assert!(page1.has_more);
         assert_eq!(page1.data[0].seq, 0);
         assert_eq!(page1.data[0].action, ACTION_LOGIN);
-        assert_eq!(page1.data[0].tenant_id, CANON_TENANT);
+        assert_eq!(page1.data[0].tenant_id, "<redacted>");
         assert_eq!(page1.data[0].actor_kind, "user");
         assert_eq!(page1.data[0].outcome, "success");
         assert_eq!(page1.data[0].actor, "<redacted>");
@@ -1740,11 +1743,15 @@ mod tests {
             !raw.contains(CANON_SESSION),
             "serialized response must not leak resource id"
         );
+        assert!(
+            !raw.contains(CANON_TENANT),
+            "serialized response must not leak tenant id"
+        );
         let page: AuditListEntriesResponse = serde_json::from_slice(&body).expect("decode");
         assert_eq!(page.data.len(), 1);
         assert_eq!(page.data[0].actor, "<redacted>");
         assert_eq!(page.data[0].resource_id, "<redacted>");
-        assert_eq!(page.data[0].tenant_id, CANON_TENANT);
+        assert_eq!(page.data[0].tenant_id, "<redacted>");
         assert_eq!(page.data[0].action, ACTION_LOGIN);
         assert!(!page.data[0].entry_hash.is_empty());
     }
@@ -1752,7 +1759,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn admin_read_unmasks_only_explicitly_allowed_fields() {
-        static FIELDS: &[vocab::ProjectionField] = &[vocab::ProjectionField::AuditActor];
+        static FIELDS: &[vocab::ProjectionField] = &[
+            vocab::ProjectionField::AuditActor,
+            vocab::ProjectionField::AuditTenantId,
+        ];
         let repo = repo();
         SessionCreatedAuditHandler::new(repo.clone())
             .handle(Message::new(
@@ -1787,6 +1797,7 @@ mod tests {
         let page: AuditListEntriesResponse = serde_json::from_slice(&body).expect("decode");
         assert_eq!(page.data.len(), 1);
         assert_eq!(page.data[0].actor, CANON_SUBJECT);
+        assert_eq!(page.data[0].tenant_id, CANON_TENANT);
         assert_eq!(page.data[0].resource_id, "<redacted>");
     }
 
@@ -1879,7 +1890,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let page: AuditListEntriesResponse = serde_json::from_slice(&body).expect("decode");
         assert_eq!(page.data.len(), 1);
-        assert_eq!(page.data[0].tenant_id, CANON_TENANT);
+        assert_eq!(page.data[0].tenant_id, "<redacted>");
         assert_eq!(page.data[0].actor, "<redacted>");
         assert_eq!(page.data[0].resource_id, "<redacted>");
         let events = sink.events();

@@ -449,28 +449,95 @@ pub(crate) struct HttpProjectionField {
     pub(crate) field: HttpProjectionFieldName,
     pub(crate) permission: String,
     pub(crate) obligation_key: String,
+    pub(crate) response_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum HttpProjectionFieldName {
     AuditActor,
+    AuditTenantId,
     AuditResourceId,
+    IdentityProfileSubject,
+    IdentityProfileTenantId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HttpProjectionFieldSpec {
+    pub(crate) wire: &'static str,
+    pub(crate) vocab_variant: &'static str,
+    pub(crate) permission: &'static str,
+    pub(crate) obligation_key: &'static str,
+    pub(crate) response_path: &'static str,
+}
+
+const HTTP_PROJECTION_FIELD_SPECS: &[HttpProjectionFieldSpec] = &[
+    HttpProjectionFieldSpec {
+        wire: "auditActor",
+        vocab_variant: "AuditActor",
+        permission: "audit:field:actor",
+        obligation_key: "audit.actor",
+        response_path: "data[].actor",
+    },
+    HttpProjectionFieldSpec {
+        wire: "auditTenantId",
+        vocab_variant: "AuditTenantId",
+        permission: "audit:field:tenant_id",
+        obligation_key: "audit.tenant_id",
+        response_path: "data[].tenantId",
+    },
+    HttpProjectionFieldSpec {
+        wire: "auditResourceId",
+        vocab_variant: "AuditResourceId",
+        permission: "audit:field:resource_id",
+        obligation_key: "audit.resource_id",
+        response_path: "data[].resourceId",
+    },
+    HttpProjectionFieldSpec {
+        wire: "identityProfileSubject",
+        vocab_variant: "IdentityProfileSubject",
+        permission: "identity:profile:field:subject",
+        obligation_key: "identity.profile.subject",
+        response_path: "data.subject",
+    },
+    HttpProjectionFieldSpec {
+        wire: "identityProfileTenantId",
+        vocab_variant: "IdentityProfileTenantId",
+        permission: "identity:profile:field:tenant_id",
+        obligation_key: "identity.profile.tenant_id",
+        response_path: "data.tenantId",
+    },
+];
+
 impl HttpProjectionFieldName {
-    pub(crate) fn as_wire(self) -> &'static str {
+    pub(crate) fn spec(self) -> &'static HttpProjectionFieldSpec {
         match self {
-            Self::AuditActor => "auditActor",
-            Self::AuditResourceId => "auditResourceId",
+            Self::AuditActor => &HTTP_PROJECTION_FIELD_SPECS[0],
+            Self::AuditTenantId => &HTTP_PROJECTION_FIELD_SPECS[1],
+            Self::AuditResourceId => &HTTP_PROJECTION_FIELD_SPECS[2],
+            Self::IdentityProfileSubject => &HTTP_PROJECTION_FIELD_SPECS[3],
+            Self::IdentityProfileTenantId => &HTTP_PROJECTION_FIELD_SPECS[4],
         }
     }
 
+    pub(crate) fn as_wire(self) -> &'static str {
+        self.spec().wire
+    }
+
     pub(crate) fn as_vocab_variant(self) -> &'static str {
-        match self {
-            Self::AuditActor => "AuditActor",
-            Self::AuditResourceId => "AuditResourceId",
-        }
+        self.spec().vocab_variant
+    }
+
+    pub(crate) fn canonical_permission(self) -> &'static str {
+        self.spec().permission
+    }
+
+    pub(crate) fn canonical_obligation_key(self) -> &'static str {
+        self.spec().obligation_key
+    }
+
+    pub(crate) fn canonical_response_path(self) -> &'static str {
+        self.spec().response_path
     }
 }
 

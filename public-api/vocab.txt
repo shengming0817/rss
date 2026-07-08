@@ -687,6 +687,9 @@ pub mod vocab::projection
 #[non_exhaustive] pub enum vocab::projection::ProjectionField
 pub vocab::projection::ProjectionField::AuditActor
 pub vocab::projection::ProjectionField::AuditResourceId
+pub vocab::projection::ProjectionField::AuditTenantId
+pub vocab::projection::ProjectionField::IdentityProfileSubject
+pub vocab::projection::ProjectionField::IdentityProfileTenantId
 impl vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::from_obligation_key(&str) -> core::option::Option<Self>
 pub fn vocab::projection::ProjectionField::obligation_key(self) -> &'static str
@@ -734,8 +737,14 @@ pub fn vocab::projection::ProjectionField::from(T) -> T
 pub const vocab::projection::AUDIT_ACTOR_FIELD_OBLIGATION: &str
 pub const vocab::projection::AUDIT_FIELD_ACTOR_PERMISSION: &str
 pub const vocab::projection::AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str
+pub const vocab::projection::AUDIT_FIELD_TENANT_ID_PERMISSION: &str
 pub const vocab::projection::AUDIT_READ_PERMISSION: &str
 pub const vocab::projection::AUDIT_RESOURCE_ID_FIELD_OBLIGATION: &str
+pub const vocab::projection::AUDIT_TENANT_ID_FIELD_OBLIGATION: &str
+pub const vocab::projection::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: &str
+pub const vocab::projection::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: &str
+pub const vocab::projection::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
+pub const vocab::projection::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub mod vocab::query
 #[non_exhaustive] pub enum vocab::query::CursorError
 pub vocab::query::CursorError::Malformed
@@ -1457,6 +1466,9 @@ pub fn vocab::principal::PrincipalKind::from(T) -> T
 #[non_exhaustive] pub enum vocab::ProjectionField
 pub vocab::ProjectionField::AuditActor
 pub vocab::ProjectionField::AuditResourceId
+pub vocab::ProjectionField::AuditTenantId
+pub vocab::ProjectionField::IdentityProfileSubject
+pub vocab::ProjectionField::IdentityProfileTenantId
 impl vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::from_obligation_key(&str) -> core::option::Option<Self>
 pub fn vocab::projection::ProjectionField::obligation_key(self) -> &'static str
@@ -2261,5 +2273,11 @@ pub fn vocab::tenant::TenantId::from(T) -> T
 pub const vocab::AUDIT_ACTOR_FIELD_OBLIGATION: &str
 pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: &str
 pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str
+pub const vocab::AUDIT_FIELD_TENANT_ID_PERMISSION: &str
 pub const vocab::AUDIT_READ_PERMISSION: &str
 pub const vocab::AUDIT_RESOURCE_ID_FIELD_OBLIGATION: &str
+pub const vocab::AUDIT_TENANT_ID_FIELD_OBLIGATION: &str
+pub const vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: &str
+pub const vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: &str
+pub const vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
+pub const vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str

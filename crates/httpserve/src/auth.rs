@@ -200,37 +200,43 @@ pub struct RouteAuthorizationRequest {
 /// Field mask carried by route authorization output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldMask {
-    audit_actor: bool,
-    audit_resource_id: bool,
+    bits: u16,
 }
 
 impl FieldMask {
+    const AUDIT_ACTOR: u16 = 1 << 0;
+    const AUDIT_TENANT_ID: u16 = 1 << 1;
+    const AUDIT_RESOURCE_ID: u16 = 1 << 2;
+    const IDENTITY_PROFILE_SUBJECT: u16 = 1 << 3;
+    const IDENTITY_PROFILE_TENANT_ID: u16 = 1 << 4;
+
     fn default_masked() -> Self {
-        Self {
-            audit_actor: false,
-            audit_resource_id: false,
-        }
+        Self { bits: 0 }
     }
 
     fn allowing(fields: &[ProjectionField]) -> Self {
         let mut mask = Self::default_masked();
         for field in fields {
-            match field {
-                ProjectionField::AuditActor => mask.audit_actor = true,
-                ProjectionField::AuditResourceId => mask.audit_resource_id = true,
-                // reason: future fields must stay masked until explicitly wired.
-                _ => {}
+            if let Some(bit) = Self::bit_for(*field) {
+                mask.bits |= bit;
             }
         }
         mask
     }
 
     fn allows(self, field: ProjectionField) -> bool {
+        Self::bit_for(field).is_some_and(|bit| self.bits & bit != 0)
+    }
+
+    fn bit_for(field: ProjectionField) -> Option<u16> {
         match field {
-            ProjectionField::AuditActor => self.audit_actor,
-            ProjectionField::AuditResourceId => self.audit_resource_id,
+            ProjectionField::AuditActor => Some(Self::AUDIT_ACTOR),
+            ProjectionField::AuditTenantId => Some(Self::AUDIT_TENANT_ID),
+            ProjectionField::AuditResourceId => Some(Self::AUDIT_RESOURCE_ID),
+            ProjectionField::IdentityProfileSubject => Some(Self::IDENTITY_PROFILE_SUBJECT),
+            ProjectionField::IdentityProfileTenantId => Some(Self::IDENTITY_PROFILE_TENANT_ID),
             // reason: future fields must stay masked until explicitly wired.
-            _ => false,
+            _ => None,
         }
     }
 }
@@ -999,7 +1005,10 @@ mod tests {
     -> Result<(), String> {
         let default = ResourceProjection::default_masked();
         assert!(!default.allows(ProjectionField::AuditActor));
+        assert!(!default.allows(ProjectionField::AuditTenantId));
         assert!(!default.allows(ProjectionField::AuditResourceId));
+        assert!(!default.allows(ProjectionField::IdentityProfileSubject));
+        assert!(!default.allows(ProjectionField::IdentityProfileTenantId));
         assert_eq!(
             default.render(ProjectionField::AuditActor, "subject"),
             "<redacted>"
@@ -1012,7 +1021,10 @@ mod tests {
             other => return Err(format!("expected projection allow, got {other:?}")),
         };
         assert!(projection.allows(ProjectionField::AuditActor));
+        assert!(!projection.allows(ProjectionField::AuditTenantId));
         assert!(!projection.allows(ProjectionField::AuditResourceId));
+        assert!(!projection.allows(ProjectionField::IdentityProfileSubject));
+        assert!(!projection.allows(ProjectionField::IdentityProfileTenantId));
         assert_eq!(
             projection.render(ProjectionField::AuditActor, "subject"),
             "subject"

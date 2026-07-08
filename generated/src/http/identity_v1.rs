@@ -6558,7 +6558,20 @@ pub mod profile {
     pub const PATH: &str = "/api/v1/identity/profile";
 
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[
+        super::super::HttpProjectionFieldSpec {
+            field: ::vocab::ProjectionField::IdentityProfileSubject,
+            permission: "identity:profile:field:subject",
+            obligation_key: "identity.profile.subject",
+            response_path: "data.subject",
+        },
+        super::super::HttpProjectionFieldSpec {
+            field: ::vocab::ProjectionField::IdentityProfileTenantId,
+            permission: "identity:profile:field:tenant_id",
+            obligation_key: "identity.profile.tenant_id",
+            response_path: "data.tenantId",
+        },
+    ];
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {

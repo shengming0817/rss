@@ -304,14 +304,22 @@ pub const PATH: &str = "/api/v1/audit/entries";
 /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
     super::HttpProjectionFieldSpec {
+        field: ::vocab::ProjectionField::AuditTenantId,
+        permission: "audit:field:tenant_id",
+        obligation_key: "audit.tenant_id",
+        response_path: "data[].tenantId",
+    },
+    super::HttpProjectionFieldSpec {
         field: ::vocab::ProjectionField::AuditActor,
         permission: "audit:field:actor",
         obligation_key: "audit.actor",
+        response_path: "data[].actor",
     },
     super::HttpProjectionFieldSpec {
         field: ::vocab::ProjectionField::AuditResourceId,
         permission: "audit:field:resource_id",
         obligation_key: "audit.resource_id",
+        response_path: "data[].resourceId",
     },
 ];
 

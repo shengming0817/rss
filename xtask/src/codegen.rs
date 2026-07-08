@@ -537,6 +537,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
             for (name, value) in [
                 ("projection permission", field.permission.as_str()),
                 ("projection obligationKey", field.obligation_key.as_str()),
+                ("projection responsePath", field.response_path.as_str()),
             ] {
                 if !is_safe_codegen_string(value) {
                     bail!(
@@ -550,8 +551,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
             let variant = field.field.as_vocab_variant();
             let permission = &field.permission;
             let obligation_key = &field.obligation_key;
+            let response_path = &field.response_path;
             projection_fields.push(format!(
-                "    {sup}HttpProjectionFieldSpec {{ field: ::vocab::ProjectionField::{variant}, permission: \"{permission}\", obligation_key: \"{obligation_key}\" }}"
+                "    {sup}HttpProjectionFieldSpec {{ field: ::vocab::ProjectionField::{variant}, permission: \"{permission}\", obligation_key: \"{obligation_key}\", response_path: \"{response_path}\" }}"
             ));
         }
     }
@@ -1184,6 +1186,7 @@ pub struct HttpProjectionFieldSpec {
     pub field: ::vocab::ProjectionField,
     pub permission: &'static str,
     pub obligation_key: &'static str,
+    pub response_path: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

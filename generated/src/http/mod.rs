@@ -48,6 +48,7 @@ pub struct HttpProjectionFieldSpec {
     pub field: ::vocab::ProjectionField,
     pub permission: &'static str,
     pub obligation_key: &'static str,
+    pub response_path: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

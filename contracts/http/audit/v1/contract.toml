@@ -20,8 +20,9 @@ permission = "audit:read"
 
 [endpoints.http.projection]
 fields = [
-  { field = "auditActor", permission = "audit:field:actor", obligationKey = "audit.actor" },
-  { field = "auditResourceId", permission = "audit:field:resource_id", obligationKey = "audit.resource_id" },
+  { field = "auditTenantId", permission = "audit:field:tenant_id", obligationKey = "audit.tenant_id", responsePath = "data[].tenantId" },
+  { field = "auditActor", permission = "audit:field:actor", obligationKey = "audit.actor", responsePath = "data[].actor" },
+  { field = "auditResourceId", permission = "audit:field:resource_id", obligationKey = "audit.resource_id", responsePath = "data[].resourceId" },
 ]
 
 [schemas]

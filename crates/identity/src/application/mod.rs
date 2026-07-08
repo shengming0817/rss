@@ -32,6 +32,8 @@ use diport::{
 use generated::event::identity_v1::session_created::{
     CONTRACT, IdentitySessionCreatedPayload, TOPIC,
 };
+#[cfg(test)]
+use generated::http::audit_v1::SPEC as AUDIT_LIST_HTTP_SPEC;
 use generated::http::identity_v1::{
     login::{
         IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, SPEC as LOGIN_HTTP_SPEC,
@@ -72,11 +74,10 @@ use generated::http::identity_v1::{
 };
 use generated::http::{
     HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
-    audit_v1::SPEC as AUDIT_LIST_HTTP_SPEC, settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC,
-    settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
+    settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
 };
 use httpserve::{
-    AuthorizedSubject, Primary, PrimaryRoute, RouteAuthorizationDecision,
+    AuthorizedSubject, Primary, PrimaryRoute, ResourceProjection, RouteAuthorizationDecision,
     RouteAuthorizationRequest, RouteAuthorizer, RoutePermission, RouteResourceScope,
 };
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
@@ -990,6 +991,7 @@ struct AuthSubjectContext {
     tenant: TenantId,
     subject: String,
     kind: vocab::PrincipalKind,
+    projection: ResourceProjection,
 }
 
 struct AuthUserContext {
@@ -1120,6 +1122,7 @@ impl ContractAuthorizer {
             tenant: request.tenant_id.ok_or(AuthReject::Forbidden)?,
             subject: request.principal_id.clone(),
             kind: request.principal_kind,
+            projection: ResourceProjection::default_masked(),
         };
         let policy = contract_auth_policy(request)?;
         match self.authorize_durable_policy(&ctx, request).await? {
@@ -1139,7 +1142,14 @@ impl ContractAuthorizer {
                     .as_ref()
                     .is_some_and(|resource| resource.id() == ctx.subject)
                 {
-                    Ok(RouteAuthorizationDecision::Allow)
+                    let fields = self
+                        .projection_fields_for_subject(
+                            &ctx,
+                            request.contract_id,
+                            request.permission,
+                        )
+                        .await?;
+                    Ok(projection_decision_from_fields(&fields))
                 } else {
                     Err(AuthReject::Forbidden)
                 }
@@ -1149,6 +1159,67 @@ impl ContractAuthorizer {
                     .await
             }
         }
+    }
+
+    async fn role_permission_ids_for_subject(
+        &self,
+        ctx: &AuthSubjectContext,
+        contract_id: &'static str,
+    ) -> Result<Vec<String>, AuthReject> {
+        let bindings = self
+            .bindings
+            .list_for_subject(ctx.tenant, ctx.subject.clone())
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %ctx.tenant,
+                    contract_id,
+                    "identity contract authorizer binding lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+
+        let role_ids = bindings
+            .into_iter()
+            .filter(|binding| binding.tenant() == ctx.tenant && binding.subject() == ctx.subject)
+            .map(|binding| binding.role_id().clone())
+            .collect::<Vec<_>>();
+
+        let mut permissions = Vec::new();
+        for role_id in role_ids {
+            let role = self.roles.find(ctx.tenant, role_id).await.map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %ctx.tenant,
+                    contract_id,
+                    "identity contract authorizer role lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+            if let Some(role) = role {
+                permissions.extend(role.permission_ids().map(str::to_string));
+            }
+        }
+        Ok(permissions)
+    }
+
+    async fn projection_fields_for_subject(
+        &self,
+        ctx: &AuthSubjectContext,
+        contract_id: &'static str,
+        permission: &str,
+    ) -> Result<Vec<ProjectionField>, AuthReject> {
+        let role_permissions = self
+            .role_permission_ids_for_subject(ctx, contract_id)
+            .await?;
+        Ok(projection_fields_from_permissions(
+            contract_id,
+            permission,
+            &role_permissions,
+        ))
     }
 
     async fn authorize_durable_policy(
@@ -1245,7 +1316,7 @@ impl ContractAuthorizer {
         permission: &str,
     ) -> Result<RouteAuthorizationDecision, AuthReject> {
         if ctx.kind == vocab::PrincipalKind::SuperAdmin
-            && audit_projection_route(contract_id, permission)
+            && projection_enabled_route(contract_id, permission)
         {
             return Ok(RouteAuthorizationDecision::Allow);
         }
@@ -1255,52 +1326,15 @@ impl ContractAuthorizer {
         if builtin_admin_permission(contract_id, permission) {
             return Ok(RouteAuthorizationDecision::Allow);
         }
-        let bindings = self
-            .bindings
-            .list_for_subject(ctx.tenant, ctx.subject.clone())
-            .await
-            .map_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    error_chain = %secure::redact_error(&err),
-                    tenant_id = %ctx.tenant,
-                    contract_id,
-                    "identity contract authorizer binding lookup failed"
-                );
-                AuthReject::Forbidden
-            })?;
-
-        let role_ids = bindings
-            .into_iter()
-            .filter(|binding| binding.tenant() == ctx.tenant && binding.subject() == ctx.subject)
-            .map(|binding| binding.role_id().clone())
-            .collect::<Vec<_>>();
-
-        let mut has_permission = false;
-        let mut fields = Vec::new();
-        for role_id in role_ids {
-            let role = self.roles.find(ctx.tenant, role_id).await.map_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    error_chain = %secure::redact_error(&err),
-                    tenant_id = %ctx.tenant,
-                    contract_id,
-                    "identity contract authorizer role lookup failed"
-                );
-                AuthReject::Forbidden
-            })?;
-            if let Some(role) = role {
-                for role_permission in role.permission_ids() {
-                    if role_permission == permission {
-                        has_permission = true;
-                    }
-                    if audit_projection_route(contract_id, permission) {
-                        projection_field_from_permission(role_permission, &mut fields);
-                    }
-                }
-            }
-        }
+        let role_permissions = self
+            .role_permission_ids_for_subject(ctx, contract_id)
+            .await?;
+        let has_permission = role_permissions
+            .iter()
+            .any(|role_permission| role_permission == permission);
         if has_permission {
+            let fields =
+                projection_fields_from_permissions(contract_id, permission, &role_permissions);
             Ok(projection_decision_from_fields(&fields))
         } else {
             Err(AuthReject::Forbidden)
@@ -1359,22 +1393,51 @@ impl ContractAuthorizer {
     }
 }
 
-fn audit_projection_route(contract_id: &'static str, permission: &str) -> bool {
-    contract_id == AUDIT_LIST_HTTP_SPEC.contract_id
-        && AUDIT_LIST_HTTP_SPEC.auth.permission == Some(permission)
+fn projection_spec(contract_id: &'static str, permission: &str) -> Option<&'static HttpSpec> {
+    HTTP_SPECS.iter().find(|spec| {
+        spec.contract_id == contract_id
+            && spec.auth.permission == Some(permission)
+            && !spec.projection_fields.is_empty()
+    })
 }
 
-fn projection_field_from_permission(permission: &str, fields: &mut Vec<ProjectionField>) {
-    let field = AUDIT_LIST_HTTP_SPEC
+fn projection_enabled_route(contract_id: &'static str, permission: &str) -> bool {
+    projection_spec(contract_id, permission).is_some()
+}
+
+fn projection_field_from_permission(
+    contract_id: &'static str,
+    permission: &str,
+    field_permission: &str,
+    fields: &mut Vec<ProjectionField>,
+) {
+    let Some(spec) = projection_spec(contract_id, permission) else {
+        return;
+    };
+    let field = spec
         .projection_fields
         .iter()
-        .find(|field| field.permission == permission)
+        .find(|field| field.permission == field_permission)
         .map(|field| field.field);
     if let Some(field) = field
         && !fields.contains(&field)
     {
         fields.push(field);
     }
+}
+
+fn projection_fields_from_permissions(
+    contract_id: &'static str,
+    permission: &str,
+    role_permissions: &[String],
+) -> Vec<ProjectionField> {
+    let mut fields = Vec::new();
+    if projection_enabled_route(contract_id, permission) {
+        for role_permission in role_permissions {
+            projection_field_from_permission(contract_id, permission, role_permission, &mut fields);
+        }
+    }
+    fields
 }
 
 fn projection_decision_from_obligations(
@@ -1385,13 +1448,13 @@ fn projection_decision_from_obligations(
         return Err(AuthReject::Forbidden);
     }
     if !obligations.field_mask().is_empty()
-        && !audit_projection_route(request.contract_id, request.permission)
+        && !projection_enabled_route(request.contract_id, request.permission)
     {
         return Err(AuthReject::Forbidden);
     }
     let mut fields = Vec::new();
     for key in obligations.field_mask() {
-        let Some(field) = projection_field_from_obligation_key(key.as_str()) else {
+        let Some(field) = projection_field_from_obligation_key(request, key.as_str()) else {
             return Err(AuthReject::Forbidden);
         };
         if !fields.contains(&field) {
@@ -1401,8 +1464,11 @@ fn projection_decision_from_obligations(
     Ok(projection_decision_from_fields(&fields))
 }
 
-fn projection_field_from_obligation_key(key: &str) -> Option<ProjectionField> {
-    AUDIT_LIST_HTTP_SPEC
+fn projection_field_from_obligation_key(
+    request: &RouteAuthorizationRequest,
+    key: &str,
+) -> Option<ProjectionField> {
+    projection_spec(request.contract_id, request.permission)?
         .projection_fields
         .iter()
         .find(|field| field.obligation_key == key)
@@ -1665,6 +1731,7 @@ fn authenticated_subject_context(req: &Request<Body>) -> Result<AuthSubjectConte
         tenant: auth.tenant_id(),
         subject: auth.principal_id().to_string(),
         kind: auth.principal_kind(),
+        projection: auth.projection(),
     })
 }
 
@@ -2169,8 +2236,14 @@ async fn profile_handler(req: Request<Body>) -> Response {
         StatusCode::OK,
         Json(IdentityProfileResponse {
             data: IdentityProfileData {
-                subject: auth.subject,
-                tenant_id: auth.tenant.to_string(),
+                subject: auth.projection.render(
+                    vocab::ProjectionField::IdentityProfileSubject,
+                    &auth.subject,
+                ),
+                tenant_id: auth.projection.render(
+                    vocab::ProjectionField::IdentityProfileTenantId,
+                    &auth.tenant.to_string(),
+                ),
                 kind,
             },
         }),
@@ -2684,6 +2757,13 @@ mod tests {
             subject,
             None,
         )
+    }
+
+    fn projection_for(fields: &[ProjectionField]) -> Option<ResourceProjection> {
+        match RouteAuthorizationDecision::allow_with_unmasked_fields(fields) {
+            RouteAuthorizationDecision::AllowWithProjection(projection) => Some(projection),
+            _ => None,
+        }
     }
 
     fn with_auth(router: axum::Router, auth: AuthorizedSubject) -> axum::Router {
@@ -4288,6 +4368,7 @@ mod tests {
             tenant: tid(CANON_TENANT),
             subject: CANON_USER.to_string(),
             kind: vocab::PrincipalKind::User,
+            projection: ResourceProjection::default_masked(),
         };
         let request = RouteAuthorizationRequest {
             contract_id: "other.contract",
@@ -4407,6 +4488,7 @@ mod tests {
                 &[
                     vocab::AUDIT_READ_PERMISSION,
                     vocab::AUDIT_FIELD_ACTOR_PERMISSION,
+                    vocab::AUDIT_FIELD_TENANT_ID_PERMISSION,
                 ],
             ),
         )
@@ -4445,6 +4527,7 @@ mod tests {
             other => return Err(format!("expected projection allow, got {other:?}")),
         };
         assert!(projection.allows(vocab::ProjectionField::AuditActor));
+        assert!(projection.allows(vocab::ProjectionField::AuditTenantId));
         assert!(!projection.allows(vocab::ProjectionField::AuditResourceId));
         Ok(())
     }
@@ -4525,16 +4608,42 @@ mod tests {
     #[test]
     fn audit_projection_field_registry_is_generated_from_contract() {
         let fields = AUDIT_LIST_HTTP_SPEC.projection_fields;
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 3);
+        assert!(fields.iter().any(|field| {
+            field.field == vocab::ProjectionField::AuditTenantId
+                && field.permission == vocab::AUDIT_FIELD_TENANT_ID_PERMISSION
+                && field.obligation_key == vocab::AUDIT_TENANT_ID_FIELD_OBLIGATION
+                && field.response_path == "data[].tenantId"
+        }));
         assert!(fields.iter().any(|field| {
             field.field == vocab::ProjectionField::AuditActor
                 && field.permission == vocab::AUDIT_FIELD_ACTOR_PERMISSION
                 && field.obligation_key == vocab::AUDIT_ACTOR_FIELD_OBLIGATION
+                && field.response_path == "data[].actor"
         }));
         assert!(fields.iter().any(|field| {
             field.field == vocab::ProjectionField::AuditResourceId
                 && field.permission == vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION
                 && field.obligation_key == vocab::AUDIT_RESOURCE_ID_FIELD_OBLIGATION
+                && field.response_path == "data[].resourceId"
+        }));
+    }
+
+    #[test]
+    fn profile_projection_field_registry_is_generated_from_contract() {
+        let fields = PROFILE_HTTP_SPEC.projection_fields;
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|field| {
+            field.field == vocab::ProjectionField::IdentityProfileSubject
+                && field.permission == vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION
+                && field.obligation_key == vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION
+                && field.response_path == "data.subject"
+        }));
+        assert!(fields.iter().any(|field| {
+            field.field == vocab::ProjectionField::IdentityProfileTenantId
+                && field.permission == vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION
+                && field.obligation_key == vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION
+                && field.response_path == "data.tenantId"
         }));
     }
 
@@ -4557,7 +4666,7 @@ mod tests {
                 PolicyEffect::Allow,
                 PolicyObligations::new(
                     None,
-                    vec![AttributeKey::new(vocab::AUDIT_ACTOR_FIELD_OBLIGATION)],
+                    vec![AttributeKey::new(vocab::AUDIT_TENANT_ID_FIELD_OBLIGATION)],
                 ),
             ),
         ));
@@ -4584,8 +4693,112 @@ mod tests {
             RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
             other => return Err(format!("expected projection allow, got {other:?}")),
         };
-        assert!(projection.allows(vocab::ProjectionField::AuditActor));
+        assert!(!projection.allows(vocab::ProjectionField::AuditActor));
+        assert!(projection.allows(vocab::ProjectionField::AuditTenantId));
         assert!(!projection.allows(vocab::ProjectionField::AuditResourceId));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_profile_projection_policy_field_mask_becomes_projection()
+    -> Result<(), String> {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy(
+                "policy-profile-field",
+                PROFILE_HTTP_SPEC.contract_id,
+                "identity:profile:read",
+                PolicyEffect::Allow,
+                PolicyObligations::new(
+                    None,
+                    vec![AttributeKey::new(
+                        vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION,
+                    )],
+                ),
+            ),
+        ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: PROFILE_HTTP_SPEC.contract_id,
+                permission: "identity:profile:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: None,
+            })
+            .await;
+
+        let projection = match decision {
+            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
+            other => return Err(format!("expected projection allow, got {other:?}")),
+        };
+        assert!(projection.allows(vocab::ProjectionField::IdentityProfileSubject));
+        assert!(!projection.allows(vocab::ProjectionField::IdentityProfileTenantId));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_profile_self_scoped_role_field_permission_becomes_projection()
+    -> Result<(), String> {
+        let profile_role = role(
+            "role-profile-fields",
+            "Profile Fields",
+            &[vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION],
+        );
+        let profile_role_id = profile_role.id().clone();
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), profile_role),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &profile_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: PROFILE_HTTP_SPEC.contract_id,
+                permission: "identity:profile:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(httpserve::RouteResource::new(CANON_USER).expect("self resource")),
+            })
+            .await;
+
+        let projection = match decision {
+            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
+            other => return Err(format!("expected projection allow, got {other:?}")),
+        };
+        assert!(projection.allows(vocab::ProjectionField::IdentityProfileSubject));
+        assert!(!projection.allows(vocab::ProjectionField::IdentityProfileTenantId));
         Ok(())
     }
 
@@ -5246,8 +5459,32 @@ mod tests {
             .expect("call");
         resp.ensure_status(StatusCode::OK).expect("200");
         let decoded: IdentityProfileResponse = resp.json().expect("json");
+        assert_eq!(decoded.data.subject, "<redacted>");
+        assert_eq!(decoded.data.tenant_id, "<redacted>");
+        assert_eq!(decoded.data.kind, IdentityProfileDataKind::User);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn profile_handler_unmasks_only_explicit_profile_fields() {
+        let auth = AuthorizedSubject::for_test_with_projection(
+            tid(CANON_TENANT),
+            vocab::PrincipalKind::User,
+            CANON_USER,
+            None,
+            projection_for(&[vocab::ProjectionField::IdentityProfileSubject]).expect("projection"),
+        );
+        let router = with_auth(
+            axum::Router::new().route("/profile", get(profile_handler)),
+            auth,
+        );
+        let resp = testkit::call(router, ContractRequest::get("/profile"))
+            .await
+            .expect("call");
+        resp.ensure_status(StatusCode::OK).expect("200");
+        let decoded: IdentityProfileResponse = resp.json().expect("json");
         assert_eq!(decoded.data.subject, CANON_USER);
-        assert_eq!(decoded.data.tenant_id, CANON_TENANT);
+        assert_eq!(decoded.data.tenant_id, "<redacted>");
         assert_eq!(decoded.data.kind, IdentityProfileDataKind::User);
     }
 
@@ -5264,7 +5501,7 @@ mod tests {
             .expect("call");
         resp.ensure_status(StatusCode::OK).expect("200");
         let decoded: IdentityProfileResponse = resp.json().expect("json");
-        assert_eq!(decoded.data.subject, subject);
+        assert_eq!(decoded.data.subject, "<redacted>");
         assert_eq!(decoded.data.kind.to_string(), "user");
     }
 

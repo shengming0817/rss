@@ -10,6 +10,8 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use toml::Value;
 
+use crate::contract;
+use crate::contract::manifest::HttpProjectionFieldName;
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
@@ -187,20 +189,41 @@ const ADR_CLOSEOUT_COVERAGE: &[AdrCloseoutCoverage] = &[
     },
 ];
 
-const AUDIT_PROJECTION_FIELDS: &[AuditProjectionField] = &[
-    AuditProjectionField {
-        toml_field: "auditActor",
-        rust_variant: "AuditActor",
-        permission: "audit:field:actor",
-        obligation_key: "audit.actor",
-        wire_field: "actor",
+const AUDIT_PROJECTION_FIELDS: &[HttpProjectionFieldName] = &[
+    HttpProjectionFieldName::AuditTenantId,
+    HttpProjectionFieldName::AuditActor,
+    HttpProjectionFieldName::AuditResourceId,
+];
+
+const IDENTITY_PROFILE_PROJECTION_FIELDS: &[HttpProjectionFieldName] = &[
+    HttpProjectionFieldName::IdentityProfileSubject,
+    HttpProjectionFieldName::IdentityProfileTenantId,
+];
+
+const PROJECTION_ENDPOINTS: &[ProjectionEndpoint] = &[
+    ProjectionEndpoint {
+        chain_name: "audit",
+        contract_path: "contracts/http/audit/v1/contract.toml",
+        generated_path: "generated/src/http/audit_v1.rs",
+        generated_start: "",
+        generated_end: "",
+        rendering_path: "crates/audit/src/application.rs",
+        rendering_start: "fn to_view(",
+        rendering_end: "fn to_response",
+        render_callee: "projection",
+        fields: AUDIT_PROJECTION_FIELDS,
     },
-    AuditProjectionField {
-        toml_field: "auditResourceId",
-        rust_variant: "AuditResourceId",
-        permission: "audit:field:resource_id",
-        obligation_key: "audit.resource_id",
-        wire_field: "resource_id",
+    ProjectionEndpoint {
+        chain_name: "identity profile",
+        contract_path: "contracts/http/identity/v1/profile/contract.toml",
+        generated_path: "generated/src/http/identity_v1.rs",
+        generated_start: "pub mod profile {",
+        generated_end: "pub mod password_change {",
+        rendering_path: "crates/identity/src/application/mod.rs",
+        rendering_start: "async fn profile_handler",
+        rendering_end: "async fn password_change_handler",
+        render_callee: "auth.projection",
+        fields: IDENTITY_PROFILE_PROJECTION_FIELDS,
     },
 ];
 
@@ -261,12 +284,17 @@ struct AdrCloseoutCoverage {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct AuditProjectionField {
-    toml_field: &'static str,
-    rust_variant: &'static str,
-    permission: &'static str,
-    obligation_key: &'static str,
-    wire_field: &'static str,
+struct ProjectionEndpoint {
+    chain_name: &'static str,
+    contract_path: &'static str,
+    generated_path: &'static str,
+    generated_start: &'static str,
+    generated_end: &'static str,
+    rendering_path: &'static str,
+    rendering_start: &'static str,
+    rendering_end: &'static str,
+    render_callee: &'static str,
+    fields: &'static [HttpProjectionFieldName],
 }
 
 pub(crate) struct TenancyCloseout;
@@ -284,7 +312,7 @@ impl GovernanceCheck for TenancyCloseout {
 
         findings.extend(check_verify_ci_membership());
         findings.extend(check_required_lint_registry(&root)?);
-        findings.extend(check_audit_projection_wiring(&root)?);
+        findings.extend(check_projection_wiring(&root)?);
         findings.extend(check_required_anchors(&root)?);
         findings.extend(check_authz_parity_boundary(&root)?);
         findings.extend(check_stale_closeout_wording(&root)?);
@@ -296,11 +324,18 @@ impl GovernanceCheck for TenancyCloseout {
                 TENANCY_DYLINTS.len(),
                 REQUIRED_ANCHORS.len(),
                 AUTHZ_PARITY_FRAMEWORKS.len(),
-                AUDIT_PROJECTION_FIELDS.len()
+                projection_field_count()
             ),
             findings,
         ))
     }
+}
+
+fn projection_field_count() -> usize {
+    PROJECTION_ENDPOINTS
+        .iter()
+        .map(|endpoint| endpoint.fields.len())
+        .sum()
 }
 
 fn check_verify_ci_membership() -> Vec<Finding> {
@@ -459,33 +494,81 @@ fn check_lint_directories(root: &Path) -> Vec<Finding> {
         .collect()
 }
 
-fn check_audit_projection_wiring(root: &Path) -> Result<Vec<Finding>> {
+fn check_projection_wiring(root: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    findings.extend(scan_audit_contract_projection(&read_required(
-        root,
-        "contracts/http/audit/v1/contract.toml",
-    )?));
-    findings.extend(scan_generated_projection_fields(&read_required(
-        root,
-        "generated/src/http/audit_v1.rs",
-    )?));
     findings.extend(scan_httpserve_projection_carrier(&read_required(
         root,
         "crates/httpserve/src/auth.rs",
     )?));
-    findings.extend(scan_audit_rendering_projection(&read_required(
-        root,
-        "crates/audit/src/application.rs",
-    )?));
+    findings.extend(check_projection_endpoint_coverage(root)?);
+    for endpoint in PROJECTION_ENDPOINTS {
+        findings.extend(scan_contract_projection(
+            endpoint,
+            &read_required(root, endpoint.contract_path)?,
+        ));
+        findings.extend(scan_generated_projection_fields(
+            endpoint,
+            &read_required(root, endpoint.generated_path)?,
+        ));
+        findings.extend(scan_rendering_projection(
+            endpoint,
+            &read_required(root, endpoint.rendering_path)?,
+        ));
+    }
     Ok(findings)
 }
 
-fn scan_audit_contract_projection(content: &str) -> Vec<Finding> {
-    let Some(value) = parse_toml("contracts/http/audit/v1/contract.toml", content) else {
+fn check_projection_endpoint_coverage(root: &Path) -> Result<Vec<Finding>> {
+    let contracts_root = root.join("contracts");
+    let projection_contracts = contract::discover(&contracts_root)?
+        .into_iter()
+        .filter(|contract| {
+            contract
+                .manifest
+                .endpoints
+                .as_ref()
+                .and_then(|endpoints| endpoints.http.as_ref())
+                .and_then(|http| http.projection.as_ref())
+                .is_some_and(|projection| !projection.fields.is_empty())
+        })
+        .map(|contract| relative_contract_path(root, &contract.dir))
+        .collect::<Vec<_>>();
+    Ok(scan_projection_endpoint_coverage(projection_contracts))
+}
+
+fn relative_contract_path(root: &Path, dir: &Path) -> String {
+    let manifest_path = dir.join("contract.toml");
+    manifest_path
+        .strip_prefix(root)
+        .unwrap_or(&manifest_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn scan_projection_endpoint_coverage(projection_contracts: Vec<String>) -> Vec<Finding> {
+    let covered = PROJECTION_ENDPOINTS
+        .iter()
+        .map(|endpoint| endpoint.contract_path)
+        .collect::<BTreeSet<_>>();
+    projection_contracts
+        .into_iter()
+        .filter(|path| !covered.contains(path.as_str()))
+        .map(|path| {
+            finding(
+                Rule::ProjectionAnchor,
+                path,
+                "projection contract must have a tenancy-closeout rendering anchor",
+            )
+        })
+        .collect()
+}
+
+fn scan_contract_projection(endpoint: &ProjectionEndpoint, content: &str) -> Vec<Finding> {
+    let Some(value) = parse_toml(endpoint.contract_path, content) else {
         return vec![finding(
             Rule::ProjectionAnchor,
-            "contracts/http/audit/v1/contract.toml".to_string(),
-            "audit contract TOML must parse for projection closeout validation",
+            endpoint.contract_path.to_string(),
+            "projection contract TOML must parse for closeout validation",
         )];
     };
     let Some(fields) = value
@@ -495,47 +578,61 @@ fn scan_audit_contract_projection(content: &str) -> Vec<Finding> {
         .and_then(|projection| projection.get("fields"))
         .and_then(Value::as_array)
     else {
-        return AUDIT_PROJECTION_FIELDS
+        return endpoint
+            .fields
             .iter()
-            .map(|field| missing_projection(field, "contracts/http/audit/v1/contract.toml"))
+            .map(|field| missing_projection(endpoint, field, endpoint.contract_path))
             .collect();
     };
 
-    AUDIT_PROJECTION_FIELDS
+    endpoint
+        .fields
         .iter()
         .filter(|expected| {
+            let expected = expected.spec();
             !fields.iter().any(|field| {
-                field.get("field").and_then(Value::as_str) == Some(expected.toml_field)
+                field.get("field").and_then(Value::as_str) == Some(expected.wire)
                     && field.get("permission").and_then(Value::as_str) == Some(expected.permission)
                     && field.get("obligationKey").and_then(Value::as_str)
                         == Some(expected.obligation_key)
+                    && field.get("responsePath").and_then(Value::as_str)
+                        == Some(expected.response_path)
             })
         })
-        .map(|field| missing_projection(field, "contracts/http/audit/v1/contract.toml"))
+        .map(|field| missing_projection(endpoint, field, endpoint.contract_path))
         .collect()
 }
 
-fn scan_generated_projection_fields(content: &str) -> Vec<Finding> {
+fn scan_generated_projection_fields(endpoint: &ProjectionEndpoint, content: &str) -> Vec<Finding> {
     let stripped = strip_rust_line_comments(content);
-    let Some(block) = slice_from_marker_until(&stripped, "pub const PROJECTION_FIELDS", "];")
-    else {
-        return AUDIT_PROJECTION_FIELDS
+    let scope = if endpoint.generated_start.is_empty() {
+        stripped.as_str()
+    } else {
+        slice_from_marker_until(&stripped, endpoint.generated_start, endpoint.generated_end)
+            .unwrap_or_default()
+    };
+    let Some(block) = slice_from_marker_until(scope, "pub const PROJECTION_FIELDS", "];") else {
+        return endpoint
+            .fields
             .iter()
-            .map(|field| missing_projection(field, "generated/src/http/audit_v1.rs"))
+            .map(|field| missing_projection(endpoint, field, endpoint.generated_path))
             .collect();
     };
 
-    AUDIT_PROJECTION_FIELDS
+    endpoint
+        .fields
         .iter()
         .filter(|expected| {
-            let variant = format!("ProjectionField::{}", expected.rust_variant);
+            let expected = expected.spec();
+            let variant = format!("ProjectionField::{}", expected.vocab_variant);
             let Some(entry) = slice_from_marker_until(block, &variant, "}") else {
                 return true;
             };
             !(entry.contains(&format!("permission: \"{}\"", expected.permission))
-                && entry.contains(&format!("obligation_key: \"{}\"", expected.obligation_key)))
+                && entry.contains(&format!("obligation_key: \"{}\"", expected.obligation_key))
+                && entry.contains(&format!("response_path: \"{}\"", expected.response_path)))
         })
-        .map(|field| missing_projection(field, "generated/src/http/audit_v1.rs"))
+        .map(|field| missing_projection(endpoint, field, endpoint.generated_path))
         .collect()
 }
 
@@ -602,35 +699,72 @@ fn scan_httpserve_projection_carrier(content: &str) -> Vec<Finding> {
     findings
 }
 
-fn scan_audit_rendering_projection(content: &str) -> Vec<Finding> {
+fn scan_rendering_projection(endpoint: &ProjectionEndpoint, content: &str) -> Vec<Finding> {
     let stripped = strip_rust_line_comments(content);
-    let Some(to_view) = slice_from_marker_until(&stripped, "fn to_view(", "fn to_response") else {
-        return AUDIT_PROJECTION_FIELDS
+    let Some(rendering) =
+        slice_from_marker_until(&stripped, endpoint.rendering_start, endpoint.rendering_end)
+    else {
+        return endpoint
+            .fields
             .iter()
-            .map(|field| missing_projection(field, "crates/audit/src/application.rs"))
+            .map(|field| missing_projection(endpoint, field, endpoint.rendering_path))
             .collect();
     };
 
-    AUDIT_PROJECTION_FIELDS
+    endpoint
+        .fields
         .iter()
         .filter(|expected| {
-            let assignment = format!("{}: projection.render(", expected.wire_field);
-            let Some(window) = slice_from_marker_with_len(to_view, &assignment, 320) else {
+            let expected = expected.spec();
+            let assignment = format!(
+                "{}: {}.render(",
+                rust_field_from_response_path(expected.response_path),
+                endpoint.render_callee
+            );
+            let Some(window) = slice_from_marker_with_len(rendering, &assignment, 360) else {
                 return true;
             };
-            !window.contains(&format!("ProjectionField::{}", expected.rust_variant))
+            !window.contains(&format!("ProjectionField::{}", expected.vocab_variant))
         })
-        .map(|field| missing_projection(field, "crates/audit/src/application.rs"))
+        .map(|field| missing_projection(endpoint, field, endpoint.rendering_path))
         .collect()
 }
 
-fn missing_projection(field: &AuditProjectionField, path: &str) -> Finding {
+fn rust_field_from_response_path(response_path: &str) -> String {
+    let field = response_path
+        .rsplit_once('.')
+        .map_or(response_path, |(_, field)| field)
+        .trim_end_matches("[]");
+    camel_to_snake(field)
+}
+
+fn camel_to_snake(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn missing_projection(
+    endpoint: &ProjectionEndpoint,
+    field: &HttpProjectionFieldName,
+    path: &str,
+) -> Finding {
+    let spec = field.spec();
     finding(
         Rule::ProjectionAnchor,
-        format!("{path}:{}", field.rust_variant),
+        format!("{path}:{}", spec.vocab_variant),
         format!(
-            "audit projection chain must keep {} / {} / {} wired structurally",
-            field.toml_field, field.permission, field.obligation_key
+            "{} projection chain must keep {} / {} / {} wired structurally",
+            endpoint.chain_name, spec.wire, spec.permission, spec.obligation_key
         ),
     )
 }
@@ -1078,13 +1212,68 @@ fn to_view() -> AuditEntryView {
     }
 }
 "#;
-        let findings = scan_audit_rendering_projection(content);
+        let findings = scan_rendering_projection(&PROJECTION_ENDPOINTS[0], content);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::ProjectionAnchor && finding.subject.contains("AuditActor")
             }),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn profile_rendering_projection_comment_only_is_reported() {
+        let content = r#"
+async fn profile_handler(req: Request<Body>) -> Response {
+    // subject: auth.projection.render(vocab::ProjectionField::IdentityProfileSubject, raw)
+    Json(IdentityProfileResponse {
+        data: IdentityProfileData {
+            subject: auth.subject,
+            tenant_id: auth.tenant.to_string(),
+        },
+    })
+}
+async fn password_change_handler() {}
+"#;
+        let findings = scan_rendering_projection(&PROJECTION_ENDPOINTS[1], content);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ProjectionAnchor
+                    && finding.subject.contains("IdentityProfileSubject")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn projection_contract_without_closeout_endpoint_is_reported() {
+        let findings = scan_projection_endpoint_coverage(vec![
+            "contracts/http/audit/v1/contract.toml".to_string(),
+            "contracts/http/identity/v1/profile/contract.toml".to_string(),
+            "contracts/http/example/v1/contract.toml".to_string(),
+        ]);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ProjectionAnchor
+                    && finding
+                        .subject
+                        .contains("contracts/http/example/v1/contract.toml")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn response_path_last_segment_maps_to_rust_field_name() {
+        assert_eq!(
+            rust_field_from_response_path("data[].tenantId"),
+            "tenant_id"
+        );
+        assert_eq!(
+            rust_field_from_response_path("data[].resourceId"),
+            "resource_id"
+        );
+        assert_eq!(rust_field_from_response_path("data.subject"), "subject");
     }
 
     #[test]
@@ -1096,7 +1285,7 @@ fields = [
   { field = "auditResourceId", permission = "audit:field:resource_id", obligationKey = "audit.resource_id" },
 ]
 "#;
-        let findings = scan_audit_contract_projection(content);
+        let findings = scan_contract_projection(&PROJECTION_ENDPOINTS[0], content);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::ProjectionAnchor && finding.subject.contains("AuditActor")
@@ -1116,10 +1305,10 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
         field: ::vocab::ProjectionField::AuditResourceId,
         permission: "audit:field:resource_id",
         obligation_key: "audit.resource_id",
-    },
+        },
 ];
 "#;
-        let findings = scan_generated_projection_fields(content);
+        let findings = scan_generated_projection_fields(&PROJECTION_ENDPOINTS[0], content);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::ProjectionAnchor && finding.subject.contains("AuditActor")
