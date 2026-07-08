@@ -1,6 +1,6 @@
 # Runtime Assembly Plan Rules
 
-This document governs the runtime assembly optimization series rooted at `docs/spec/001-runtime-assembly-plan/`. It supplements the architecture single source in `docs/rules/architecture.md`; it does not replace crate graph, contract, tenancy, observability, or eventbus rules.
+This document governs the runtime assembly optimization series rooted at `docs/spec/001-runtime-assembly-plan/`. It supplements the architecture single source in `docs/rules/architecture.md`; it does not replace crate graph, contract, tenancy, observability, or eventbus rules. Review context also exposes this rule through `.claude/rules/rss/runtime-assembly-plan.md`.
 
 ## Scope Boundaries
 
@@ -23,16 +23,18 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - The current infra-only statement is a convention until a Medium or Hard carrier lands.
 - New `INVARIANT:` text for infra-only wiring is allowed only in the PR that adds the carrier and red/green tests.
 
-## PR Size Rules
+## PR Size Planning Budget
 
-- Normal PR budget: no more than 2000 net changed lines.
-- Special exception PRs must be labeled in the PR body and must match one class:
+- This section is a planning and review budget, not a current `INVARIANT:` or machine-enforced merge gate.
+- A later CI governance PR must add a Medium carrier before this budget becomes blocking enforcement.
+- Normal PR target: no more than 2000 net changed lines.
+- PRs above that target should name one exception class in the PR body:
   - move-only runtime split,
   - generated module output,
   - PG provider bundle standardization,
   - CI governance wiring.
-- A special exception must state the reason, affected file family, and validation command.
-- A PR that mixes a special exception with unrelated behavior changes violates this rule.
+- Exception notes should state the reason, affected file family, and validation command.
+- A PR that mixes an exception with unrelated behavior changes is outside this plan and should be split.
 
 ## Non-Negotiable Architecture Rules
 

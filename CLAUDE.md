@@ -3,8 +3,8 @@
 > 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
 > workspace。
 > 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
-> `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga）
-> 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api）。
+> `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga·runtime-assembly-plan）
+> 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api·runtime-assembly-plan）。
 
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
