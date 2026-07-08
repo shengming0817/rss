@@ -33,6 +33,34 @@ fn main() {
     let _ = local.tenant_id();
     let _ = local.principal_kind();
     let _ = local.self_scoped_principal_id();
+    if local.principal_kind() == PrincipalKind::Admin {
+        let _ = "bad local admin branch";
+    }
+    if PrincipalKind::SuperAdmin != local.principal_kind() {
+        let _ = "bad local super-admin branch";
+    }
+    let role_name = "Admin";
+    if role_name == "Admin" {
+        let _ = "bad role-name branch";
+    }
+    if "superAdmin" != role_name {
+        let _ = "bad super-admin role-name branch";
+    }
+    match local.principal_kind() {
+        PrincipalKind::Admin => {
+            let _ = "bad match admin branch";
+        }
+        _ => {}
+    }
+    if matches!(local.principal_kind(), PrincipalKind::SuperAdmin) {
+        let _ = "bad matches super-admin branch";
+    }
+    match role_name {
+        "service" => {
+            let _ = "bad role-name match branch";
+        }
+        _ => {}
+    }
 
     allowed_by_attr(&auth);
 }
@@ -40,4 +68,7 @@ fn main() {
 #[allow(rss_handler_local_principal_authz)] // reason: UI fixture verifies item-level escape hatch
 fn allowed_by_attr(auth: &Authenticated) {
     let _ = auth.principal_kind();
+    if auth.principal_kind() == PrincipalKind::Admin {
+        let _ = "allowed";
+    }
 }

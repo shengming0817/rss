@@ -1309,12 +1309,13 @@ fn rule_http_projection_fields(http: &HttpEndpoint, label: &str, out: &mut Vec<F
                 ),
             ));
         }
-        if field.permission.trim().is_empty() {
-            out.push(finding(
-                Rule::HttpProjectionCoverage,
-                label,
-                format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} permission 必须非空"),
-            ));
+        if let Some(permission_finding) = validate_route_permission_literal(
+            &field.permission,
+            &format!("{FIELD_ENDPOINTS_HTTP_PROJECTION} permission"),
+            label,
+            Rule::HttpProjectionCoverage,
+        ) {
+            out.push(permission_finding);
         } else if !permissions.insert(field.permission.as_str()) {
             out.push(finding(
                 Rule::HttpProjectionCoverage,
@@ -1489,6 +1490,15 @@ fn rule_http_permission_auth(
             label,
             "endpoints.http.auth mode=permission 必须声明非空 permission".to_string(),
         ));
+    } else if let Some(permission) = auth.permission.as_deref()
+        && let Some(permission_finding) = validate_route_permission_literal(
+            permission,
+            "endpoints.http.auth permission",
+            label,
+            Rule::HttpAuth,
+        )
+    {
+        out.push(permission_finding);
     }
     if auth.reason.is_some() {
         out.push(finding(
@@ -1507,6 +1517,38 @@ fn rule_http_permission_auth(
             ));
         }
     }
+}
+
+fn route_permission_is_cataloged(value: &str) -> bool {
+    vocab::RoutePermissionId::parse(value).is_ok()
+}
+
+fn validate_route_permission_literal(
+    value: &str,
+    field: &str,
+    label: &str,
+    rule: Rule,
+) -> Option<Finding> {
+    if value.trim().is_empty() {
+        return Some(finding(rule, label, format!("{field} 必须非空")));
+    }
+    if value != value.trim() {
+        return Some(finding(
+            rule,
+            label,
+            format!(
+                "{field} {value:?} 必须精确匹配 vocab::RoutePermissionId 闭值集成员，禁止前后空白"
+            ),
+        ));
+    }
+    if !route_permission_is_cataloged(value) {
+        return Some(finding(
+            rule,
+            label,
+            format!("{field} {value:?} 未注册到 vocab::RoutePermissionId 闭值集"),
+        ));
+    }
+    None
 }
 
 fn rule_http_opt_out_auth(
@@ -3078,7 +3120,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: Some("not allowed".to_string()),
-                    permission: Some("identity.login".to_string()),
+                    permission: Some("identity:profile:read".to_string()),
                 }),
                 resource: None,
                 self_scoped: false,
@@ -3110,7 +3152,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("seed.profile.read".to_string()),
+                    permission: Some("identity:profile:read".to_string()),
                 }),
                 resource: None,
                 self_scoped: true,
@@ -3120,6 +3162,81 @@ mod tests {
             }),
         });
         assert!(rule_http_auth(&m, "x").is_empty());
+    }
+
+    #[test]
+    fn r18_permission_must_be_route_permission_catalog_value() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/profile".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.profile.read".to_string()),
+                }),
+                resource: None,
+                self_scoped: true,
+                resource_sharing: None,
+                headers: BTreeMap::new(),
+                projection: None,
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("闭值集")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_permission_rejects_surrounding_whitespace() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/profile".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some(" identity:profile:read ".to_string()),
+                }),
+                resource: None,
+                self_scoped: true,
+                resource_sharing: None,
+                headers: BTreeMap::new(),
+                projection: None,
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("精确匹配")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_permission_catalog_accepts_every_vocab_permission() {
+        for permission in vocab::RoutePermissionId::ALL {
+            assert!(
+                route_permission_is_cataloged(permission.as_str()),
+                "{} must be accepted by contract validation",
+                permission.as_str()
+            );
+        }
     }
 
     #[test]
@@ -3166,6 +3283,84 @@ mod tests {
     }
 
     #[test]
+    fn r18_projection_permission_must_be_route_permission_catalog_value() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/audit/entries".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("audit:read".to_string()),
+                }),
+                resource: None,
+                self_scoped: false,
+                resource_sharing: None,
+                headers: BTreeMap::new(),
+                projection: Some(HttpProjection {
+                    fields: vec![HttpProjectionField {
+                        field: HttpProjectionFieldName::AuditActor,
+                        permission: "audit:field:email".to_string(),
+                        obligation_key: "audit.actor".to_string(),
+                        response_path: "data[].actor".to_string(),
+                    }],
+                }),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("闭值集")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_projection_permission_rejects_surrounding_whitespace() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/audit/entries".to_string());
+        m.method = Some(HttpMethod::Get);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("audit:read".to_string()),
+                }),
+                resource: None,
+                self_scoped: false,
+                resource_sharing: None,
+                headers: BTreeMap::new(),
+                projection: Some(HttpProjection {
+                    fields: vec![HttpProjectionField {
+                        field: HttpProjectionFieldName::AuditActor,
+                        permission: " audit:field:actor ".to_string(),
+                        obligation_key: "audit.actor".to_string(),
+                        response_path: "data[].actor".to_string(),
+                    }],
+                }),
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings.iter().any(|f| f.detail.contains("精确匹配")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn r18_projection_duplicate_permission_fails() {
         let mut m = manifest(
             ContractKind::Http,
@@ -3191,13 +3386,13 @@ mod tests {
                     fields: vec![
                         HttpProjectionField {
                             field: HttpProjectionFieldName::AuditActor,
-                            permission: "audit:field:same".to_string(),
+                            permission: "audit:field:actor".to_string(),
                             obligation_key: "audit.actor".to_string(),
                             response_path: "data[].actor".to_string(),
                         },
                         HttpProjectionField {
                             field: HttpProjectionFieldName::AuditResourceId,
-                            permission: "audit:field:same".to_string(),
+                            permission: "audit:field:actor".to_string(),
                             obligation_key: "audit.resource_id".to_string(),
                             response_path: "data[].resourceId".to_string(),
                         },
@@ -3232,7 +3427,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("seed.role.delete".to_string()),
+                    permission: Some("identity:role:revoke".to_string()),
                 }),
                 resource: Some("subject".to_string()),
                 self_scoped: false,
@@ -3264,7 +3459,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("seed.role.delete".to_string()),
+                    permission: Some("identity:role:revoke".to_string()),
                 }),
                 resource: Some("roleId".to_string()),
                 self_scoped: true,
@@ -3362,7 +3557,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("seed.role.delete".to_string()),
+                    permission: Some("identity:role:revoke".to_string()),
                 }),
                 resource: Some(" ".to_string()),
                 self_scoped: false,
@@ -3394,7 +3589,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("seed.role.delete".to_string()),
+                    permission: Some("identity:role:revoke".to_string()),
                 }),
                 resource: None,
                 self_scoped: false,
@@ -3437,7 +3632,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("seed.role.delete".to_string()),
+                    permission: Some("identity:role:revoke".to_string()),
                 }),
                 resource: Some("roleId".to_string()),
                 self_scoped: false,
@@ -3505,7 +3700,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("internal.call".to_string()),
+                    permission: Some("identity:policy:read".to_string()),
                 }),
                 resource: None,
                 self_scoped: false,
@@ -3576,7 +3771,7 @@ mod tests {
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
-                    permission: Some("internal.call".to_string()),
+                    permission: Some("identity:policy:read".to_string()),
                 }),
                 resource: None,
                 self_scoped: false,

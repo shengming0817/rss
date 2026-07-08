@@ -98,7 +98,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
         }
         let tenant_uuid = tenant_param(tenant);
         let contract_id = scope.contract_id().to_string();
-        let permission = scope.permission().to_string();
+        let permission = scope.permission().as_str().to_string();
         let resource_id_str = resource_id.as_str().to_string();
         let key_params = required_keys
             .iter()
@@ -171,7 +171,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
         }
         let tenant_uuid = tenant_param(tenant);
         let contract_id = attribute.route_scope().contract_id().to_string();
-        let permission = attribute.route_scope().permission().to_string();
+        let permission = attribute.route_scope().permission().as_str().to_string();
         let resource_id = attribute.resource_id().as_str().to_string();
         let key = attribute.key().as_str().to_string();
         let value = attribute.value().as_str().to_string();
@@ -293,7 +293,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
     ) -> Result<bool, IdentityError> {
         let tenant_uuid = tenant_param(tenant);
         let contract_id = scope.contract_id().to_string();
-        let permission = scope.permission().to_string();
+        let permission = scope.permission().as_str().to_string();
         let resource_id_str = resource_id.as_str().to_string();
         let key_str = key.as_str().to_string();
         let expected_version = version_param(expected)?;

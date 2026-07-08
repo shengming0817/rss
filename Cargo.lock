@@ -7097,6 +7097,7 @@ dependencies = [
  "syn",
  "toml 0.8.23",
  "typify",
+ "vocab",
 ]
 
 [[package]]

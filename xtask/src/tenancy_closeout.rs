@@ -628,8 +628,13 @@ fn scan_generated_projection_fields(endpoint: &ProjectionEndpoint, content: &str
             let Some(entry) = slice_from_marker_until(block, &variant, "}") else {
                 return true;
             };
-            !(entry.contains(&format!("permission: \"{}\"", expected.permission))
-                && entry.contains(&format!("obligation_key: \"{}\"", expected.obligation_key))
+            let Ok(permission) = vocab::RoutePermissionId::parse(expected.permission) else {
+                return true;
+            };
+            !(entry.contains(&format!(
+                "permission: ::vocab::RoutePermissionId::{}",
+                permission.variant_name()
+            )) && entry.contains(&format!("obligation_key: \"{}\"", expected.obligation_key))
                 && entry.contains(&format!("response_path: \"{}\"", expected.response_path)))
         })
         .map(|field| missing_projection(endpoint, field, endpoint.generated_path))
@@ -1303,7 +1308,7 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
     },
     super::HttpProjectionFieldSpec {
         field: ::vocab::ProjectionField::AuditResourceId,
-        permission: "audit:field:resource_id",
+        permission: ::vocab::RoutePermissionId::AuditFieldResourceId,
         obligation_key: "audit.resource_id",
         },
 ];

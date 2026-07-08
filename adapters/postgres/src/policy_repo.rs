@@ -436,7 +436,7 @@ impl PolicyRepo for PgPolicyRepo {
                     )
                     .bind(tenant_uuid)
                     .bind(scope.contract_id().to_string())
-                    .bind(scope.permission().to_string())
+                    .bind(scope.permission().as_str().to_string())
                     .bind(at_secs)
                     .fetch_all(&mut *conn)
                     .await?;
@@ -473,7 +473,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let id = policy.id().as_str().to_string();
         let version = version_param(policy.version())?;
         let contract_id = policy.route_scope().contract_id().to_string();
-        let permission = policy.route_scope().permission().to_string();
+        let permission = policy.route_scope().permission().as_str().to_string();
         let effective_from = unix_secs(policy.effective_from());
         let effective_until = policy.effective_until().map(unix_secs);
         let projection_registry = self.pool.projection_registry();
@@ -576,7 +576,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .bind(policy.id().as_str())
                         .bind(expected_version)
                         .bind(policy.route_scope().contract_id())
-                        .bind(policy.route_scope().permission())
+                        .bind(policy.route_scope().permission().as_str())
                         .bind(unix_secs(policy.effective_from()))
                         .bind(policy.effective_until().map(unix_secs))
                         .bind(rules_json)

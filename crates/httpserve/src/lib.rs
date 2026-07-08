@@ -132,7 +132,7 @@ impl PrimaryRoute {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoutePermission {
-    pub permission: &'static str,
+    pub permission: vocab::RoutePermissionId,
     pub scope: RouteResourceScope,
 }
 

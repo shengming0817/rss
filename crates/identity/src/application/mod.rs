@@ -85,13 +85,15 @@ use httpserve::{
 use primitives::ListenerKind;
 use primitives::RouteAuthOptOut;
 use uuid::Uuid;
-use vocab::{CoreError, CoreErrorKind, ProjectionField, TenantId};
+use vocab::{
+    CoreError, CoreErrorKind, GrantPermission, ProjectionField, RoutePermissionId, TenantId,
+};
 
 use crate::domain::{
     AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
-    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PermissionId,
-    Policy, PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
+    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
+    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
     RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
     Session, SessionId, evaluate_policies_for_tenant,
@@ -114,8 +116,6 @@ pub use policy_manage::{PolicyManageError, PolicyManageService};
 const SESSION_DOMAIN: &str = CONTRACT.domain();
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
-const POLICY_MANAGE_PERMISSION_PREFIX: &str = "identity:policy:manage:";
-
 /// JWT 署名用途字面量（seed-login / test 路径；≥ 3 处使用，rust-standards §工程护栏抽 const）。
 #[cfg(any(test, feature = "seed-login"))]
 pub(crate) const SEED_JWT_PURPOSE: &str = "auth.jwt.access";
@@ -1011,13 +1011,13 @@ struct ContractAuthorizer {
 
 enum ContractAuthPolicy {
     SelfScoped,
-    RolePermission(&'static str),
+    RolePermission(RoutePermissionId),
 }
 
 fn permission_from_request(
     request: &RouteAuthorizationRequest,
     spec: &HttpSpec,
-) -> Result<&'static str, AuthReject> {
+) -> Result<RoutePermissionId, AuthReject> {
     let expected = spec.auth.permission.ok_or(AuthReject::Forbidden)?;
     if request.permission == expected {
         Ok(request.permission)
@@ -1026,22 +1026,17 @@ fn permission_from_request(
     }
 }
 
-fn builtin_admin_permission(contract_id: &'static str, permission: &str) -> bool {
+fn builtin_admin_permission(contract_id: &'static str, permission: RoutePermissionId) -> bool {
     [SETTINGS_CONFIG_HTTP_SPEC, SETTINGS_SECRET_HTTP_SPEC]
         .iter()
         .any(|spec| spec.contract_id == contract_id && spec.auth.permission == Some(permission))
 }
 
-fn policy_management_permission_for(target_permission: &str) -> Result<String, AuthReject> {
-    if target_permission.starts_with(POLICY_MANAGE_PERMISSION_PREFIX) {
-        return Err(AuthReject::Forbidden);
-    }
-    let permission = format!("{POLICY_MANAGE_PERMISSION_PREFIX}{target_permission}");
-    PermissionId::parse(&permission).map_err(|_| AuthReject::Forbidden)?;
-    Ok(permission)
+fn policy_management_permission_for(target_permission: RoutePermissionId) -> GrantPermission {
+    GrantPermission::policy_manage(target_permission)
 }
 
-fn policy_management_permission(scope: &PolicyRouteScope) -> Result<String, AuthReject> {
+fn policy_management_permission(scope: &PolicyRouteScope) -> GrantPermission {
     policy_management_permission_for(scope.permission())
 }
 
@@ -1161,11 +1156,11 @@ impl ContractAuthorizer {
         }
     }
 
-    async fn role_permission_ids_for_subject(
+    async fn role_grant_permissions_for_subject(
         &self,
         ctx: &AuthSubjectContext,
         contract_id: &'static str,
-    ) -> Result<Vec<String>, AuthReject> {
+    ) -> Result<Vec<GrantPermission>, AuthReject> {
         let bindings = self
             .bindings
             .list_for_subject(ctx.tenant, ctx.subject.clone())
@@ -1200,7 +1195,7 @@ impl ContractAuthorizer {
                 AuthReject::Forbidden
             })?;
             if let Some(role) = role {
-                permissions.extend(role.permission_ids().map(str::to_string));
+                permissions.extend(role.grant_permissions().iter().copied());
             }
         }
         Ok(permissions)
@@ -1210,10 +1205,10 @@ impl ContractAuthorizer {
         &self,
         ctx: &AuthSubjectContext,
         contract_id: &'static str,
-        permission: &str,
+        permission: RoutePermissionId,
     ) -> Result<Vec<ProjectionField>, AuthReject> {
         let role_permissions = self
-            .role_permission_ids_for_subject(ctx, contract_id)
+            .role_grant_permissions_for_subject(ctx, contract_id)
             .await?;
         Ok(projection_fields_from_permissions(
             contract_id,
@@ -1227,7 +1222,7 @@ impl ContractAuthorizer {
         ctx: &AuthSubjectContext,
         request: &RouteAuthorizationRequest,
     ) -> Result<PolicyEvaluation, AuthReject> {
-        let scope = PolicyRouteScope::parse(request.contract_id, request.permission)
+        let scope = PolicyRouteScope::parse(request.contract_id, request.permission.as_str())
             .map_err(|_| AuthReject::Forbidden)?;
         let now = self.clock.now();
         let policies = self
@@ -1284,7 +1279,7 @@ impl ContractAuthorizer {
                     error_chain = %secure::redact_error(&err),
                     tenant_id = %ctx.tenant,
                     contract_id = request.contract_id,
-                    permission = request.permission,
+                    permission = %request.permission,
                     "identity contract authorizer resource attribute lookup failed"
                 );
                 AuthReject::Forbidden
@@ -1313,7 +1308,7 @@ impl ContractAuthorizer {
         &self,
         ctx: &AuthSubjectContext,
         contract_id: &'static str,
-        permission: &str,
+        permission: RoutePermissionId,
     ) -> Result<RouteAuthorizationDecision, AuthReject> {
         if ctx.kind == vocab::PrincipalKind::SuperAdmin
             && projection_enabled_route(contract_id, permission)
@@ -1327,11 +1322,11 @@ impl ContractAuthorizer {
             return Ok(RouteAuthorizationDecision::Allow);
         }
         let role_permissions = self
-            .role_permission_ids_for_subject(ctx, contract_id)
+            .role_grant_permissions_for_subject(ctx, contract_id)
             .await?;
         let has_permission = role_permissions
             .iter()
-            .any(|role_permission| role_permission == permission);
+            .any(|role_permission| role_permission.matches_route(permission));
         if has_permission {
             let fields =
                 projection_fields_from_permissions(contract_id, permission, &role_permissions);
@@ -1349,7 +1344,7 @@ impl ContractAuthorizer {
         if auth.kind != vocab::PrincipalKind::Admin {
             return Err(AuthReject::Forbidden);
         }
-        let required = policy_management_permission(scope)?;
+        let required = policy_management_permission(scope);
         let subject = auth.user_id.as_uuid().hyphenated().to_string();
         let bindings = self
             .bindings
@@ -1361,7 +1356,7 @@ impl ContractAuthorizer {
                     error_chain = %secure::redact_error(&err),
                     tenant_id = %auth.tenant,
                     target_contract_id = scope.contract_id(),
-                    target_permission = scope.permission(),
+                    target_permission = %scope.permission(),
                     "identity policy management binding lookup failed"
                 );
                 AuthReject::Forbidden
@@ -1380,12 +1375,12 @@ impl ContractAuthorizer {
                     error_chain = %secure::redact_error(&err),
                     tenant_id = %auth.tenant,
                     target_contract_id = scope.contract_id(),
-                    target_permission = scope.permission(),
+                    target_permission = %scope.permission(),
                     "identity policy management role lookup failed"
                 );
                 AuthReject::Forbidden
             })?;
-            if role.is_some_and(|role| role.permission_ids().any(|p| p == required)) {
+            if role.is_some_and(|role| role.grant_permissions().contains(&required)) {
                 return Ok(());
             }
         }
@@ -1393,7 +1388,10 @@ impl ContractAuthorizer {
     }
 }
 
-fn projection_spec(contract_id: &'static str, permission: &str) -> Option<&'static HttpSpec> {
+fn projection_spec(
+    contract_id: &'static str,
+    permission: RoutePermissionId,
+) -> Option<&'static HttpSpec> {
     HTTP_SPECS.iter().find(|spec| {
         spec.contract_id == contract_id
             && spec.auth.permission == Some(permission)
@@ -1401,16 +1399,19 @@ fn projection_spec(contract_id: &'static str, permission: &str) -> Option<&'stat
     })
 }
 
-fn projection_enabled_route(contract_id: &'static str, permission: &str) -> bool {
+fn projection_enabled_route(contract_id: &'static str, permission: RoutePermissionId) -> bool {
     projection_spec(contract_id, permission).is_some()
 }
 
 fn projection_field_from_permission(
     contract_id: &'static str,
-    permission: &str,
-    field_permission: &str,
+    permission: RoutePermissionId,
+    grant: GrantPermission,
     fields: &mut Vec<ProjectionField>,
 ) {
+    let Some(field_permission) = grant.as_route() else {
+        return;
+    };
     let Some(spec) = projection_spec(contract_id, permission) else {
         return;
     };
@@ -1428,13 +1429,18 @@ fn projection_field_from_permission(
 
 fn projection_fields_from_permissions(
     contract_id: &'static str,
-    permission: &str,
-    role_permissions: &[String],
+    permission: RoutePermissionId,
+    role_permissions: &[GrantPermission],
 ) -> Vec<ProjectionField> {
     let mut fields = Vec::new();
     if projection_enabled_route(contract_id, permission) {
         for role_permission in role_permissions {
-            projection_field_from_permission(contract_id, permission, role_permission, &mut fields);
+            projection_field_from_permission(
+                contract_id,
+                permission,
+                *role_permission,
+                &mut fields,
+            );
         }
     }
     fields
@@ -1495,7 +1501,7 @@ fn route_policy_attributes(
         policy_attr(POLICY_ATTR_PRINCIPAL_ID, &ctx.subject),
         policy_attr(POLICY_ATTR_TENANT_ID, &ctx.tenant.to_string()),
         policy_attr(POLICY_ATTR_CONTRACT_ID, request.contract_id),
-        policy_attr(POLICY_ATTR_PERMISSION, request.permission),
+        policy_attr(POLICY_ATTR_PERMISSION, request.permission.as_str()),
     ];
     if let Some(resource) = request.resource.as_ref() {
         attrs.push(policy_attr(POLICY_ATTR_RESOURCE_ID, resource.id()));
@@ -1550,7 +1556,7 @@ fn request_resource_attribute_id_in(
         tracing::warn!(
             tenant_id = %ctx.tenant,
             contract_id = request.contract_id,
-            permission = request.permission,
+            permission = %request.permission,
             "identity contract authorizer rejects dynamic resource attributes on global resource route"
         );
         return Err(AuthReject::Forbidden);
@@ -1559,7 +1565,7 @@ fn request_resource_attribute_id_in(
         tracing::warn!(
             tenant_id = %ctx.tenant,
             contract_id = request.contract_id,
-            permission = request.permission,
+            permission = %request.permission,
             "identity contract authorizer resource attributes required without route resource"
         );
         return Err(AuthReject::Forbidden);
@@ -1614,7 +1620,7 @@ fn log_resource_attribute_resolution_failure(
     tracing::warn!(
         tenant_id = %ctx.tenant,
         contract_id = request.contract_id,
-        permission = request.permission,
+        permission = %request.permission,
         attribute_key = key.as_str(),
         reason,
         "identity contract authorizer resource attribute resolution failed"
@@ -1630,7 +1636,7 @@ fn log_resource_attribute_known_invalid(
     tracing::warn!(
         tenant_id = %ctx.tenant,
         contract_id = request.contract_id,
-        permission = request.permission,
+        permission = %request.permission,
         attribute_key = key.as_str(),
         reason,
         "identity contract authorizer resource attribute repo returned invalid known set"
@@ -1940,7 +1946,7 @@ async fn roles_list_handler(
         .map(|role| IdentityRoleView {
             role_id: role.id().as_str().to_string(),
             name: role.name().to_string(),
-            permissions: role.permission_ids().map(str::to_owned).collect(),
+            permissions: role.permission_ids().collect(),
         })
         .collect();
     (
@@ -3010,7 +3016,7 @@ mod tests {
     fn route_policy(
         id: &str,
         contract_id: &'static str,
-        permission: &str,
+        permission: RoutePermissionId,
         effect: PolicyEffect,
         obligations: PolicyObligations,
     ) -> Policy {
@@ -3031,7 +3037,7 @@ mod tests {
     fn route_policy_with_condition(
         id: &str,
         contract_id: &'static str,
-        permission: &str,
+        permission: RoutePermissionId,
         condition: PolicyCondition,
         effect: PolicyEffect,
         obligations: PolicyObligations,
@@ -3040,7 +3046,7 @@ mod tests {
         Policy::build(
             id,
             tid(CANON_TENANT),
-            PolicyRouteScope::parse(contract_id, permission).expect("valid route scope"),
+            PolicyRouteScope::parse(contract_id, permission.as_str()).expect("valid route scope"),
             SystemTime::UNIX_EPOCH,
             None,
             vec![rule],
@@ -3065,7 +3071,7 @@ mod tests {
     ) -> crate::domain::ResourceAttribute {
         crate::domain::ResourceAttribute::build(
             tid(CANON_TENANT),
-            PolicyRouteScope::parse("other.contract", "other:read").expect("scope"),
+            PolicyRouteScope::parse("other.contract", "identity:policy:read").expect("scope"),
             resource_id(),
             ResourceAttributeKey::parse("resource.owner").expect("key"),
             AttributeValue::new(CANON_USER),
@@ -3079,7 +3085,7 @@ mod tests {
         route_policy_with_condition(
             id,
             "other.contract",
-            "other:read",
+            vocab::RoutePermissionId::IdentityPolicyRead,
             PolicyCondition::new(
                 AttributeKey::new("resource.owner"),
                 Operator::EqAttr(AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID)),
@@ -3103,7 +3109,7 @@ mod tests {
             auth: generated::http::HttpAuthSpec {
                 mode: generated::http::HttpAuthMode::Permission,
                 reason: None,
-                permission: Some("other:read"),
+                permission: Some(vocab::RoutePermissionId::IdentityPolicyRead),
             },
             resource: Some("resourceId"),
             self_scoped: false,
@@ -3881,67 +3887,67 @@ mod tests {
                 &ROLES_ASSIGN_HTTP_SPEC,
                 "POST",
                 "/roles/{roleId}/bindings",
-                Some("identity:role:assign"),
+                Some(vocab::RoutePermissionId::IdentityRoleAssign),
             ),
             (
                 &ROLES_REVOKE_HTTP_SPEC,
                 "DELETE",
                 "/roles/{roleId}/bindings/{subject}",
-                Some("identity:role:revoke"),
+                Some(vocab::RoutePermissionId::IdentityRoleRevoke),
             ),
             (
                 &ROLES_LIST_HTTP_SPEC,
                 "GET",
                 "/roles",
-                Some("identity:role:read"),
+                Some(vocab::RoutePermissionId::IdentityRoleRead),
             ),
             (
                 &POLICIES_CREATE_HTTP_SPEC,
                 "POST",
                 "/policies",
-                Some("identity:policy:create"),
+                Some(vocab::RoutePermissionId::IdentityPolicyCreate),
             ),
             (
                 &POLICIES_UPDATE_HTTP_SPEC,
                 "PUT",
                 "/policies/{policyId}",
-                Some("identity:policy:update"),
+                Some(vocab::RoutePermissionId::IdentityPolicyUpdate),
             ),
             (
                 &POLICIES_DEACTIVATE_HTTP_SPEC,
                 "POST",
                 "/policies/{policyId}/deactivate",
-                Some("identity:policy:deactivate"),
+                Some(vocab::RoutePermissionId::IdentityPolicyDeactivate),
             ),
             (
                 &POLICIES_GET_HTTP_SPEC,
                 "GET",
                 "/policies/{policyId}",
-                Some("identity:policy:read"),
+                Some(vocab::RoutePermissionId::IdentityPolicyRead),
             ),
             (
                 &POLICIES_LIST_HTTP_SPEC,
                 "GET",
                 "/policies",
-                Some("identity:policy:read"),
+                Some(vocab::RoutePermissionId::IdentityPolicyRead),
             ),
             (
                 &PROFILE_HTTP_SPEC,
                 "GET",
                 "/profile",
-                Some("identity:profile:read"),
+                Some(vocab::RoutePermissionId::IdentityProfileRead),
             ),
             (
                 &PASSWORD_CHANGE_HTTP_SPEC,
                 "POST",
                 "/password/change",
-                Some("identity:profile:write"),
+                Some(vocab::RoutePermissionId::IdentityProfileWrite),
             ),
             (
                 &LOGOUT_HTTP_SPEC,
                 "POST",
                 "/logout",
-                Some("identity:session:write"),
+                Some(vocab::RoutePermissionId::IdentitySessionWrite),
             ),
         ];
 
@@ -4026,7 +4032,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: ROLES_ASSIGN_HTTP_SPEC.contract_id,
-                permission: "identity:role:assign",
+                permission: vocab::RoutePermissionId::IdentityRoleAssign,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
@@ -4095,7 +4101,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4119,7 +4125,7 @@ mod tests {
             route_policy(
                 "policy-allow",
                 "other.contract",
-                "other:read",
+                vocab::RoutePermissionId::IdentityPolicyRead,
                 PolicyEffect::Allow,
                 PolicyObligations::empty(),
             ),
@@ -4135,7 +4141,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4173,7 +4179,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
@@ -4186,7 +4192,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_missing_resource_attr_denies_before_rbac_baseline() {
-        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role = role(
+            "role-resource-admin",
+            "Resource Admin",
+            &["identity:policy:read"],
+        );
         let baseline_role_id = baseline_role.id().clone();
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
@@ -4215,7 +4225,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4228,7 +4238,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_stale_resource_attr_denies_before_rbac_baseline() {
-        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role = role(
+            "role-resource-admin",
+            "Resource Admin",
+            &["identity:policy:read"],
+        );
         let baseline_role_id = baseline_role.id().clone();
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
@@ -4261,7 +4275,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4274,7 +4288,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_resource_attr_store_error_denies_before_rbac_baseline() {
-        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role = role(
+            "role-resource-admin",
+            "Resource Admin",
+            &["identity:policy:read"],
+        );
         let baseline_role_id = baseline_role.id().clone();
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
@@ -4306,7 +4324,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4319,7 +4337,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_incomplete_known_resource_attrs_denies_before_rbac_baseline() {
-        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role = role(
+            "role-resource-admin",
+            "Resource Admin",
+            &["identity:policy:read"],
+        );
         let baseline_role_id = baseline_role.id().clone();
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
@@ -4348,7 +4370,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: "other.contract",
-                permission: "other:read",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4372,7 +4394,7 @@ mod tests {
         };
         let request = RouteAuthorizationRequest {
             contract_id: "other.contract",
-            permission: "other:read",
+            permission: vocab::RoutePermissionId::IdentityPolicyRead,
             tenant_id: Some(tid(CANON_TENANT)),
             principal_kind: vocab::PrincipalKind::User,
             principal_id: CANON_USER.to_string(),
@@ -4486,9 +4508,9 @@ mod tests {
                 "role-audit",
                 "Audit",
                 &[
-                    vocab::AUDIT_READ_PERMISSION,
-                    vocab::AUDIT_FIELD_ACTOR_PERMISSION,
-                    vocab::AUDIT_FIELD_TENANT_ID_PERMISSION,
+                    vocab::AUDIT_READ_PERMISSION.as_str(),
+                    vocab::AUDIT_FIELD_ACTOR_PERMISSION.as_str(),
+                    vocab::AUDIT_FIELD_TENANT_ID_PERMISSION.as_str(),
                 ],
             ),
         )
@@ -4538,7 +4560,11 @@ mod tests {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
             tid(CANON_TENANT),
-            role("role-audit", "Audit", &[vocab::AUDIT_READ_PERMISSION]),
+            role(
+                "role-audit",
+                "Audit",
+                &[vocab::AUDIT_READ_PERMISSION.as_str()],
+            ),
         )
         .await
         .expect("save role");
@@ -4714,7 +4740,7 @@ mod tests {
             route_policy(
                 "policy-profile-field",
                 PROFILE_HTTP_SPEC.contract_id,
-                "identity:profile:read",
+                vocab::RoutePermissionId::IdentityProfileRead,
                 PolicyEffect::Allow,
                 PolicyObligations::new(
                     None,
@@ -4735,7 +4761,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: PROFILE_HTTP_SPEC.contract_id,
-                permission: "identity:profile:read",
+                permission: vocab::RoutePermissionId::IdentityProfileRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
@@ -4759,7 +4785,7 @@ mod tests {
         let profile_role = role(
             "role-profile-fields",
             "Profile Fields",
-            &[vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION],
+            &[vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION.as_str()],
         );
         let profile_role_id = profile_role.id().clone();
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
@@ -4785,7 +4811,7 @@ mod tests {
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
                 contract_id: PROFILE_HTTP_SPEC.contract_id,
-                permission: "identity:profile:read",
+                permission: vocab::RoutePermissionId::IdentityProfileRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
@@ -4882,11 +4908,11 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_allows_non_identity_permission_route_by_rbac() {
-        let external_permission = "other:read";
+        let external_permission = vocab::RoutePermissionId::SettingsConfigPublish;
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
             tid(CANON_TENANT),
-            role("role-admin", "Admin", &[external_permission]),
+            role("role-admin", "Admin", &[external_permission.as_str()]),
         )
         .await
         .expect("save role");
@@ -5101,9 +5127,12 @@ mod tests {
         )
         .await
         .expect("save a");
-        repo.save(tid(CANON_TENANT), role("role-b", "B", &["docs:write"]))
-            .await
-            .expect("save b");
+        repo.save(
+            tid(CANON_TENANT),
+            role("role-b", "B", &["identity:policy:update"]),
+        )
+        .await
+        .expect("save b");
         let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
         let state = RolesListHandlerState {
             roles: Arc::clone(&roles),

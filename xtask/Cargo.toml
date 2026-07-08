@@ -10,6 +10,7 @@ publish = false
 # `consistency::Topic::parse`，消除 contract 声明面与运行期构造面的镜像漂移。xtask 是组合根
 # （Layer::Root），依赖 Engine 层 consistency 合法（layers::allows(Root, Engine)）。
 consistency = { path = "../crates/consistency" }
+vocab = { path = "../crates/vocab" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

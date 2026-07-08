@@ -367,7 +367,7 @@ pub mod logout {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:session:write"),
+            permission: Some(::vocab::RoutePermissionId::IdentitySessionWrite),
         },
         resource: None,
         self_scoped: true,
@@ -533,7 +533,7 @@ pub mod password_change {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:profile:write"),
+            permission: Some(::vocab::RoutePermissionId::IdentityProfileWrite),
         },
         resource: None,
         self_scoped: true,
@@ -2392,7 +2392,7 @@ pub mod policies_create {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:policy:create"),
+            permission: Some(::vocab::RoutePermissionId::IdentityPolicyCreate),
         },
         resource: None,
         self_scoped: false,
@@ -2565,7 +2565,7 @@ pub mod policies_deactivate {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:policy:deactivate"),
+            permission: Some(::vocab::RoutePermissionId::IdentityPolicyDeactivate),
         },
         resource: None,
         self_scoped: false,
@@ -3468,7 +3468,7 @@ pub mod policies_get {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:policy:read"),
+            permission: Some(::vocab::RoutePermissionId::IdentityPolicyRead),
         },
         resource: None,
         self_scoped: false,
@@ -4426,7 +4426,7 @@ pub mod policies_list {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:policy:read"),
+            permission: Some(::vocab::RoutePermissionId::IdentityPolicyRead),
         },
         resource: None,
         self_scoped: false,
@@ -6287,7 +6287,7 @@ pub mod policies_update {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:policy:update"),
+            permission: Some(::vocab::RoutePermissionId::IdentityPolicyUpdate),
         },
         resource: None,
         self_scoped: false,
@@ -6561,13 +6561,13 @@ pub mod profile {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[
         super::super::HttpProjectionFieldSpec {
             field: ::vocab::ProjectionField::IdentityProfileSubject,
-            permission: "identity:profile:field:subject",
+            permission: ::vocab::RoutePermissionId::IdentityProfileFieldSubject,
             obligation_key: "identity.profile.subject",
             response_path: "data.subject",
         },
         super::super::HttpProjectionFieldSpec {
             field: ::vocab::ProjectionField::IdentityProfileTenantId,
-            permission: "identity:profile:field:tenant_id",
+            permission: ::vocab::RoutePermissionId::IdentityProfileFieldTenantId,
             obligation_key: "identity.profile.tenant_id",
             response_path: "data.tenantId",
         },
@@ -6582,7 +6582,7 @@ pub mod profile {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:profile:read"),
+            permission: Some(::vocab::RoutePermissionId::IdentityProfileRead),
         },
         resource: None,
         self_scoped: true,
@@ -6931,7 +6931,7 @@ pub mod roles_assign {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:role:assign"),
+            permission: Some(::vocab::RoutePermissionId::IdentityRoleAssign),
         },
         resource: None,
         self_scoped: false,
@@ -7164,7 +7164,7 @@ pub mod roles_list {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:role:read"),
+            permission: Some(::vocab::RoutePermissionId::IdentityRoleRead),
         },
         resource: None,
         self_scoped: false,
@@ -7315,7 +7315,7 @@ pub mod roles_revoke {
         auth: super::super::HttpAuthSpec {
             mode: super::super::HttpAuthMode::Permission,
             reason: None,
-            permission: Some("identity:role:revoke"),
+            permission: Some(::vocab::RoutePermissionId::IdentityRoleRevoke),
         },
         resource: None,
         self_scoped: false,

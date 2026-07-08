@@ -565,7 +565,7 @@ impl InMemResourceAttributeRepo {
         (
             tenant.to_string(),
             scope.contract_id().to_string(),
-            scope.permission().to_string(),
+            scope.permission().as_str().to_string(),
             resource_id.as_str().to_string(),
             key.as_str().to_string(),
         )
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     fn resource_scope() -> PolicyRouteScope {
-        PolicyRouteScope::parse("test.contract", "test:read").expect("resource scope")
+        PolicyRouteScope::parse("test.contract", "identity:policy:read").expect("resource scope")
     }
 
     fn resource_id() -> ResourceAttributeResourceId {

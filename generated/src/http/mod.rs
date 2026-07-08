@@ -19,7 +19,7 @@ pub struct HttpSpec {
 pub struct HttpAuthSpec {
     pub mode: HttpAuthMode,
     pub reason: Option<&'static str>,
-    pub permission: Option<&'static str>,
+    pub permission: Option<::vocab::RoutePermissionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub enum HttpResourceSharingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpProjectionFieldSpec {
     pub field: ::vocab::ProjectionField,
-    pub permission: &'static str,
+    pub permission: ::vocab::RoutePermissionId,
     pub obligation_key: &'static str,
     pub response_path: &'static str,
 }

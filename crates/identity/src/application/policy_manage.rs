@@ -353,7 +353,7 @@ impl PolicyManageService {
             change_kind,
             version: NonZeroU32::new(version.get()).ok_or(PolicyManageError::EntryBuild)?,
             contract_id: scope.contract_id().to_string(),
-            permission: scope.permission().to_string(),
+            permission: scope.permission().as_str().to_string(),
             updated_by: actor.as_uuid(),
             actor_kind: actor_kind_wire(actor_kind)?,
             tenant_id: tenant.to_string(),
@@ -745,7 +745,7 @@ impl WirePolicyView {
             policy_id: policy.id().as_str().to_string(),
             version: policy.version().get(),
             contract_id: policy.route_scope().contract_id().to_string(),
-            permission: policy.route_scope().permission().to_string(),
+            permission: policy.route_scope().permission().as_str().to_string(),
             effective_from: unix_secs(policy.effective_from()),
             effective_until: policy.effective_until().map(unix_secs),
             rules: policy
@@ -934,7 +934,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "policyId": policy_id,
             "contractId": "identity.global-resource",
-            "permission": "identity:global:read",
+            "permission": "identity:policy:read",
             "effectiveFrom": 1_700_000_000,
             "rules": [{
                 "condition": {
@@ -951,7 +951,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "policyId": policy_id,
             "contractId": "identity.global-resource",
-            "permission": "identity:global:read",
+            "permission": "identity:policy:read",
             "effectiveFrom": 1_700_000_000,
             "rules": [{
                 "condition": {
@@ -967,7 +967,7 @@ mod tests {
     fn global_dynamic_update_request(expected: u32) -> IdentityPoliciesUpdateRequest {
         serde_json::from_value(serde_json::json!({
             "contractId": "identity.global-resource",
-            "permission": "identity:global:read",
+            "permission": "identity:policy:read",
             "effectiveFrom": 1_700_000_010,
             "expectedVersion": expected,
             "rules": [{
@@ -1000,7 +1000,7 @@ mod tests {
             auth: generated::http::HttpAuthSpec {
                 mode: generated::http::HttpAuthMode::Permission,
                 reason: None,
-                permission: Some("identity:global:read"),
+                permission: Some(vocab::RoutePermissionId::IdentityPolicyRead),
             },
             resource: Some("resourceId"),
             self_scoped: false,
@@ -1018,7 +1018,7 @@ mod tests {
     }
 
     fn global_scope() -> PolicyRouteScope {
-        PolicyRouteScope::parse("identity.global-resource", "identity:global:read")
+        PolicyRouteScope::parse("identity.global-resource", "identity:policy:read")
             .expect("global scope")
     }
 

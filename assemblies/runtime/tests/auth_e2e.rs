@@ -235,7 +235,7 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
                 "/protected",
                 "test.protected",
                 RoutePermission {
-                    permission: "test:read",
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -269,7 +269,7 @@ fn mtls_authed_routes() -> httpserve::AuthenticatedRoutes {
                 "/protected",
                 "test.protected",
                 RoutePermission {
-                    permission: "test:read",
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -339,7 +339,7 @@ fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRo
                 "/protected",
                 "test.protected",
                 RoutePermission {
-                    permission: "test:read",
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -611,7 +611,7 @@ fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
                 "/scope",
                 "test.scope",
                 RoutePermission {
-                    permission: "test:read",
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
                     scope: RouteResourceScope::None,
                 },
             ),

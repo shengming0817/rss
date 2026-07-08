@@ -42,7 +42,7 @@ use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
 use tower::Layer;
 use tower::Service;
-use vocab::{PrincipalKind, ProjectionField, TenantId};
+use vocab::{PrincipalKind, ProjectionField, RoutePermissionId, TenantId};
 
 use crate::middleware::RequestId;
 use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope};
@@ -190,7 +190,7 @@ impl AuthorizedSubject {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteAuthorizationRequest {
     pub contract_id: &'static str,
-    pub permission: &'static str,
+    pub permission: RoutePermissionId,
     pub tenant_id: Option<TenantId>,
     pub principal_kind: PrincipalKind,
     pub principal_id: String,
@@ -313,7 +313,7 @@ pub async fn authorize_subject_for_permission(
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
     evidence: Option<&Authenticated>,
     contract_id: &'static str,
-    permission: &'static str,
+    permission: RoutePermissionId,
     tenant_id: TenantId,
     resource: Option<RouteResource>,
 ) -> Option<AuthorizedSubject> {
@@ -567,7 +567,7 @@ impl<S> Layer<S> for EnforceLayer {
 /// 拒绝响应类型别名（降低类型复杂度）。
 type DenyFuture<E> = Pin<Box<dyn Future<Output = Result<Response, E>> + Send>>;
 
-const MTLS_ROUTE_PERMISSION: &str = "mtls:invoke";
+const MTLS_ROUTE_PERMISSION: RoutePermissionId = RoutePermissionId::MtlsInvoke;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthDecision {
@@ -1056,7 +1056,7 @@ mod tests {
 
     type SeenAuthzRequest = (
         &'static str,
-        &'static str,
+        RoutePermissionId,
         Option<TenantId>,
         PrincipalKind,
         String,

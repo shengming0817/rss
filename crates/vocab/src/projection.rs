@@ -2,18 +2,24 @@
 //!
 //! The field set is closed and typed. Unknown/future fields must not become public by default.
 
+use crate::RoutePermissionId;
+
 /// Baseline audit read permission.
-pub const AUDIT_READ_PERMISSION: &str = "audit:read";
+pub const AUDIT_READ_PERMISSION: RoutePermissionId = RoutePermissionId::AuditRead;
 /// Permission granting cleartext audit actor rendering.
-pub const AUDIT_FIELD_ACTOR_PERMISSION: &str = "audit:field:actor";
+pub const AUDIT_FIELD_ACTOR_PERMISSION: RoutePermissionId = RoutePermissionId::AuditFieldActor;
 /// Permission granting cleartext audit tenant id rendering.
-pub const AUDIT_FIELD_TENANT_ID_PERMISSION: &str = "audit:field:tenant_id";
+pub const AUDIT_FIELD_TENANT_ID_PERMISSION: RoutePermissionId =
+    RoutePermissionId::AuditFieldTenantId;
 /// Permission granting cleartext audit resource id rendering.
-pub const AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str = "audit:field:resource_id";
+pub const AUDIT_FIELD_RESOURCE_ID_PERMISSION: RoutePermissionId =
+    RoutePermissionId::AuditFieldResourceId;
 /// Permission granting cleartext identity profile subject rendering.
-pub const IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: &str = "identity:profile:field:subject";
+pub const IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: RoutePermissionId =
+    RoutePermissionId::IdentityProfileFieldSubject;
 /// Permission granting cleartext identity profile tenant id rendering.
-pub const IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: &str = "identity:profile:field:tenant_id";
+pub const IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: RoutePermissionId =
+    RoutePermissionId::IdentityProfileFieldTenantId;
 
 /// Durable policy field-mask obligation key for audit actor.
 pub const AUDIT_ACTOR_FIELD_OBLIGATION: &str = "audit.actor";
@@ -55,7 +61,7 @@ impl ProjectionField {
     }
 
     /// Permission required to render this field in cleartext.
-    pub fn permission(self) -> &'static str {
+    pub fn permission(self) -> RoutePermissionId {
         match self {
             ProjectionField::AuditActor => AUDIT_FIELD_ACTOR_PERMISSION,
             ProjectionField::AuditTenantId => AUDIT_FIELD_TENANT_ID_PERMISSION,

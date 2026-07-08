@@ -190,7 +190,7 @@ mod smoke {
         // Role accessor：显式类型标注锁签名
         let _: fn(&Role) -> &RoleId = Role::id;
         let _: fn(&Role) -> &str = Role::name;
-        let _: fn(&Role) -> &[PermissionId] = Role::permissions;
+        let _: fn(&Role) -> &[vocab::GrantPermission] = Role::permissions;
 
         // Permission accessor
         let _: fn(&Permission) -> &PermissionId = Permission::id;
@@ -230,7 +230,7 @@ mod smoke {
     #[test]
     fn constructor_signatures_are_consumable() {
         // Role / Permission / RoleBinding / Policy 构造器签名可绑定（impl Into<String> 泛型用 String 实例化）
-        let _: fn(RoleId, String, Vec<PermissionId>) -> Role = Role::new;
+        let _: fn(RoleId, String, Vec<vocab::GrantPermission>) -> Role = Role::new;
         let _: fn(PermissionId, vocab::Action, ResourcePattern) -> Permission = Permission::new;
         let _: fn(String, RoleId, vocab::TenantId) -> RoleBinding = RoleBinding::new;
         let _: fn(AttributeKey, AttributeValue) -> AbacAttribute = AbacAttribute::new;

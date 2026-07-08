@@ -1,4 +1,4 @@
-//! 基础授权词汇。`Action`/`Decision` 已实现；perm 闭值集 accessor 按需 additive 添加。
+//! 基础授权词汇。`Action` 保留旧纯逻辑动作 newtype；生产 route/grant 授权走闭值集。
 
 /// `Action` 解析错误。空值 / 非法字符等非法。
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +41,226 @@ impl Action {
     }
 }
 
+/// Route/grant permission 解析错误。未知 permission 一律 fail-closed。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PermissionParseError {
+    #[error("permission is unknown")]
+    Unknown,
+}
+
+/// durable role grant 中 policy-management grant 的存储前缀。
+pub const POLICY_MANAGE_PERMISSION_PREFIX: &str = "identity:policy:manage:";
+
+/// 生产 HTTP route permission 与 audit projection permission 的闭值集。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoutePermissionId {
+    AuditRead,
+    AuditFieldActor,
+    AuditFieldTenantId,
+    AuditFieldResourceId,
+    IdentityProfileFieldSubject,
+    IdentityProfileFieldTenantId,
+    IdentityProfileRead,
+    IdentityProfileWrite,
+    IdentitySessionWrite,
+    IdentityRoleAssign,
+    IdentityRoleRead,
+    IdentityRoleRevoke,
+    IdentityPolicyCreate,
+    IdentityPolicyRead,
+    IdentityPolicyUpdate,
+    IdentityPolicyDeactivate,
+    SettingsConfigPublish,
+    SettingsSecretPublish,
+    MtlsInvoke,
+}
+
+impl RoutePermissionId {
+    /// All route permissions in the closed catalog.
+    pub const ALL: &'static [Self] = &[
+        Self::AuditRead,
+        Self::AuditFieldActor,
+        Self::AuditFieldTenantId,
+        Self::AuditFieldResourceId,
+        Self::IdentityProfileFieldSubject,
+        Self::IdentityProfileFieldTenantId,
+        Self::IdentityProfileRead,
+        Self::IdentityProfileWrite,
+        Self::IdentitySessionWrite,
+        Self::IdentityRoleAssign,
+        Self::IdentityRoleRead,
+        Self::IdentityRoleRevoke,
+        Self::IdentityPolicyCreate,
+        Self::IdentityPolicyRead,
+        Self::IdentityPolicyUpdate,
+        Self::IdentityPolicyDeactivate,
+        Self::SettingsConfigPublish,
+        Self::SettingsSecretPublish,
+        Self::MtlsInvoke,
+    ];
+
+    /// 解析 wire/storage permission；未知值拒绝。
+    pub fn parse(raw: &str) -> Result<Self, PermissionParseError> {
+        match raw {
+            "audit:read" => Ok(Self::AuditRead),
+            "audit:field:actor" => Ok(Self::AuditFieldActor),
+            "audit:field:tenant_id" => Ok(Self::AuditFieldTenantId),
+            "audit:field:resource_id" => Ok(Self::AuditFieldResourceId),
+            "identity:profile:field:subject" => Ok(Self::IdentityProfileFieldSubject),
+            "identity:profile:field:tenant_id" => Ok(Self::IdentityProfileFieldTenantId),
+            "identity:profile:read" => Ok(Self::IdentityProfileRead),
+            "identity:profile:write" => Ok(Self::IdentityProfileWrite),
+            "identity:session:write" => Ok(Self::IdentitySessionWrite),
+            "identity:role:assign" => Ok(Self::IdentityRoleAssign),
+            "identity:role:read" => Ok(Self::IdentityRoleRead),
+            "identity:role:revoke" => Ok(Self::IdentityRoleRevoke),
+            "identity:policy:create" => Ok(Self::IdentityPolicyCreate),
+            "identity:policy:read" => Ok(Self::IdentityPolicyRead),
+            "identity:policy:update" => Ok(Self::IdentityPolicyUpdate),
+            "identity:policy:deactivate" => Ok(Self::IdentityPolicyDeactivate),
+            "settings.config-publish" => Ok(Self::SettingsConfigPublish),
+            "settings.secret-publish" => Ok(Self::SettingsSecretPublish),
+            "mtls:invoke" => Ok(Self::MtlsInvoke),
+            _ => Err(PermissionParseError::Unknown),
+        }
+    }
+
+    /// 稳定 wire/storage 字符串。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuditRead => "audit:read",
+            Self::AuditFieldActor => "audit:field:actor",
+            Self::AuditFieldTenantId => "audit:field:tenant_id",
+            Self::AuditFieldResourceId => "audit:field:resource_id",
+            Self::IdentityProfileFieldSubject => "identity:profile:field:subject",
+            Self::IdentityProfileFieldTenantId => "identity:profile:field:tenant_id",
+            Self::IdentityProfileRead => "identity:profile:read",
+            Self::IdentityProfileWrite => "identity:profile:write",
+            Self::IdentitySessionWrite => "identity:session:write",
+            Self::IdentityRoleAssign => "identity:role:assign",
+            Self::IdentityRoleRead => "identity:role:read",
+            Self::IdentityRoleRevoke => "identity:role:revoke",
+            Self::IdentityPolicyCreate => "identity:policy:create",
+            Self::IdentityPolicyRead => "identity:policy:read",
+            Self::IdentityPolicyUpdate => "identity:policy:update",
+            Self::IdentityPolicyDeactivate => "identity:policy:deactivate",
+            Self::SettingsConfigPublish => "settings.config-publish",
+            Self::SettingsSecretPublish => "settings.secret-publish",
+            Self::MtlsInvoke => "mtls:invoke",
+        }
+    }
+
+    /// Rust path fragment used by code generators.
+    pub const fn variant_name(self) -> &'static str {
+        match self {
+            Self::AuditRead => "AuditRead",
+            Self::AuditFieldActor => "AuditFieldActor",
+            Self::AuditFieldTenantId => "AuditFieldTenantId",
+            Self::AuditFieldResourceId => "AuditFieldResourceId",
+            Self::IdentityProfileFieldSubject => "IdentityProfileFieldSubject",
+            Self::IdentityProfileFieldTenantId => "IdentityProfileFieldTenantId",
+            Self::IdentityProfileRead => "IdentityProfileRead",
+            Self::IdentityProfileWrite => "IdentityProfileWrite",
+            Self::IdentitySessionWrite => "IdentitySessionWrite",
+            Self::IdentityRoleAssign => "IdentityRoleAssign",
+            Self::IdentityRoleRead => "IdentityRoleRead",
+            Self::IdentityRoleRevoke => "IdentityRoleRevoke",
+            Self::IdentityPolicyCreate => "IdentityPolicyCreate",
+            Self::IdentityPolicyRead => "IdentityPolicyRead",
+            Self::IdentityPolicyUpdate => "IdentityPolicyUpdate",
+            Self::IdentityPolicyDeactivate => "IdentityPolicyDeactivate",
+            Self::SettingsConfigPublish => "SettingsConfigPublish",
+            Self::SettingsSecretPublish => "SettingsSecretPublish",
+            Self::MtlsInvoke => "MtlsInvoke",
+        }
+    }
+}
+
+impl std::fmt::Display for RoutePermissionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// durable role grant permission. Role names are display data; allow/deny compares this typed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GrantPermission {
+    Route(RoutePermissionId),
+    PolicyManage(RoutePermissionId),
+}
+
+impl GrantPermission {
+    /// 解析持久化 role grant；未知 route 或 nested policy-management grant 拒绝。
+    pub fn parse(raw: &str) -> Result<Self, PermissionParseError> {
+        if let Some(target) = raw.strip_prefix(POLICY_MANAGE_PERMISSION_PREFIX) {
+            if target.starts_with(POLICY_MANAGE_PERMISSION_PREFIX) {
+                return Err(PermissionParseError::Unknown);
+            }
+            return RoutePermissionId::parse(target).map(Self::PolicyManage);
+        }
+        RoutePermissionId::parse(raw).map(Self::Route)
+    }
+
+    pub const fn route(permission: RoutePermissionId) -> Self {
+        Self::Route(permission)
+    }
+
+    pub const fn policy_manage(permission: RoutePermissionId) -> Self {
+        Self::PolicyManage(permission)
+    }
+
+    pub const fn as_route(self) -> Option<RoutePermissionId> {
+        match self {
+            Self::Route(permission) => Some(permission),
+            Self::PolicyManage(_) => None,
+        }
+    }
+
+    pub const fn policy_manage_target(self) -> Option<RoutePermissionId> {
+        match self {
+            Self::Route(_) => None,
+            Self::PolicyManage(permission) => Some(permission),
+        }
+    }
+
+    pub const fn matches_route(self, permission: RoutePermissionId) -> bool {
+        match self {
+            Self::Route(granted) => granted as u8 == permission as u8,
+            Self::PolicyManage(_) => false,
+        }
+    }
+
+    pub const fn matches_policy_manage(self, permission: RoutePermissionId) -> bool {
+        match self {
+            Self::Route(_) => false,
+            Self::PolicyManage(granted) => granted as u8 == permission as u8,
+        }
+    }
+
+    /// 持久化/response 输出 helper。内部授权不得反向解析此字符串再比较。
+    pub fn to_storage_string(self) -> String {
+        match self {
+            Self::Route(permission) => permission.as_str().to_string(),
+            Self::PolicyManage(permission) => {
+                format!("{POLICY_MANAGE_PERMISSION_PREFIX}{}", permission.as_str())
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for GrantPermission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Route(permission) => f.write_str(permission.as_str()),
+            Self::PolicyManage(permission) => {
+                f.write_str(POLICY_MANAGE_PERMISSION_PREFIX)?;
+                f.write_str(permission.as_str())
+            }
+        }
+    }
+}
+
 /// 授权裁决。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -51,7 +271,10 @@ pub enum Decision {
 
 #[cfg(test)]
 mod tests {
-    use super::Action;
+    use super::{
+        Action, GrantPermission, POLICY_MANAGE_PERMISSION_PREFIX, PermissionParseError,
+        RoutePermissionId,
+    };
 
     #[test]
     fn action_accepts_valid_format() {
@@ -101,6 +324,112 @@ mod tests {
             assert!(
                 matches!(Action::parse(raw), Err(super::ActionError::Format)),
                 "expected Format for raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_permission_accepts_catalog_values() {
+        let cases = [
+            ("audit:read", RoutePermissionId::AuditRead),
+            ("audit:field:actor", RoutePermissionId::AuditFieldActor),
+            (
+                "audit:field:resource_id",
+                RoutePermissionId::AuditFieldResourceId,
+            ),
+            (
+                "identity:profile:read",
+                RoutePermissionId::IdentityProfileRead,
+            ),
+            (
+                "identity:profile:write",
+                RoutePermissionId::IdentityProfileWrite,
+            ),
+            (
+                "identity:session:write",
+                RoutePermissionId::IdentitySessionWrite,
+            ),
+            (
+                "identity:role:assign",
+                RoutePermissionId::IdentityRoleAssign,
+            ),
+            ("identity:role:read", RoutePermissionId::IdentityRoleRead),
+            (
+                "identity:role:revoke",
+                RoutePermissionId::IdentityRoleRevoke,
+            ),
+            (
+                "identity:policy:create",
+                RoutePermissionId::IdentityPolicyCreate,
+            ),
+            (
+                "identity:policy:read",
+                RoutePermissionId::IdentityPolicyRead,
+            ),
+            (
+                "identity:policy:update",
+                RoutePermissionId::IdentityPolicyUpdate,
+            ),
+            (
+                "identity:policy:deactivate",
+                RoutePermissionId::IdentityPolicyDeactivate,
+            ),
+            (
+                "settings.config-publish",
+                RoutePermissionId::SettingsConfigPublish,
+            ),
+            (
+                "settings.secret-publish",
+                RoutePermissionId::SettingsSecretPublish,
+            ),
+            ("mtls:invoke", RoutePermissionId::MtlsInvoke),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(RoutePermissionId::parse(raw), Ok(expected));
+            assert_eq!(expected.as_str(), raw);
+        }
+    }
+
+    #[test]
+    fn route_permission_rejects_unknown_values() {
+        for raw in [
+            "",
+            "docs:read",
+            "other:read",
+            "identity:policy:manage:identity:policy:read",
+            "audit:field:email",
+        ] {
+            assert_eq!(
+                RoutePermissionId::parse(raw),
+                Err(PermissionParseError::Unknown)
+            );
+        }
+    }
+
+    #[test]
+    fn grant_permission_accepts_route_and_policy_manage_catalog_values() {
+        let target = RoutePermissionId::IdentityPolicyRead;
+        assert_eq!(
+            GrantPermission::parse(target.as_str()),
+            Ok(GrantPermission::Route(target))
+        );
+        let manage = format!("{POLICY_MANAGE_PERMISSION_PREFIX}{}", target.as_str());
+        let grant = GrantPermission::PolicyManage(target);
+        assert_eq!(GrantPermission::parse(&manage), Ok(grant));
+        assert!(grant.matches_policy_manage(target));
+        assert_eq!(grant.to_storage_string(), manage);
+    }
+
+    #[test]
+    fn grant_permission_rejects_unknown_and_nested_policy_manage() {
+        for raw in [
+            "docs:read",
+            "identity:policy:manage:docs:read",
+            "identity:policy:manage:identity:policy:manage:identity:policy:read",
+        ] {
+            assert_eq!(
+                GrantPermission::parse(raw),
+                Err(PermissionParseError::Unknown)
             );
         }
     }

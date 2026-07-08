@@ -162,7 +162,7 @@ async fn verify_status(token: &str) -> StatusCode {
                 "/protected",
                 "test.protected",
                 RoutePermission {
-                    permission: "test:read",
+                    permission: vocab::RoutePermissionId::IdentityPolicyRead,
                     scope: RouteResourceScope::None,
                 },
             ),

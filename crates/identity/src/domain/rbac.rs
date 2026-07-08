@@ -9,6 +9,7 @@
 //! ref: casbin/casbin-rs src/rbac/default_role_manager.rs@master（多租隔离，域 Role 绑定）
 
 use super::{IdentityError, PermissionId, ResourcePattern, RoleId};
+use vocab::{GrantPermission, RoutePermissionId};
 
 // ---------------------------------------------------------------------------
 // Permission — action + resource_pattern
@@ -68,17 +69,21 @@ impl Permission {
 /// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 返回聚合被 adapter 跨 crate 命名；字段私有、构造经
 /// `Role::new`（crate 内信任 funnel）/ `Role::hydrate`（跨 crate 受控重建 funnel）——adapter 可接收/返回
 /// `Role`、按需读其访问器，但**不可伪造其不变式**（id / permission 必经 parse 白名单）。`permissions`
-/// 字段类型 `PermissionId` 仍 `pub(crate)` 不外泄；adapter 读侧经 `permission_ids()`（`&str` 迭代器）取用。
+/// 字段类型 `GrantPermission` 来自 `vocab::authz` 闭值集；adapter 读侧经 `permission_ids()` 存储 helper 输出字符串。
 #[derive(Debug, Clone)]
 pub struct Role {
     id: RoleId,
     name: String,
-    permissions: Vec<PermissionId>,
+    permissions: Vec<GrantPermission>,
 }
 
 impl Role {
     /// 构造角色（位置参，必填；crate 内「已校验值」信任构造器，funnel 边界 = `pub(crate)`）。
-    pub(crate) fn new(id: RoleId, name: impl Into<String>, permissions: Vec<PermissionId>) -> Self {
+    pub(crate) fn new(
+        id: RoleId,
+        name: impl Into<String>,
+        permissions: Vec<GrantPermission>,
+    ) -> Self {
         Self {
             id,
             name: name.into(),
@@ -100,7 +105,7 @@ impl Role {
         let id = RoleId::parse(id).map_err(|e| IdentityError::Storage(Box::new(e)))?;
         let permissions = permission_ids
             .iter()
-            .map(|p| PermissionId::parse(p))
+            .map(|p| GrantPermission::parse(p))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
         Ok(Role::new(id, name, permissions))
@@ -116,17 +121,25 @@ impl Role {
         &self.name
     }
 
-    /// 权限 ID 字符串迭代器（adapter 读侧绑 `roles.permissions text[]`）。返 `&str` 而非 `&PermissionId`——
-    /// 不外泄 `pub(crate)` 的 `PermissionId` 类型（封装边界，rbac.rs 设计意图）。
-    pub fn permission_ids(&self) -> impl Iterator<Item = &str> {
-        self.permissions.iter().map(PermissionId::as_str)
+    /// 权限 ID 字符串迭代器（adapter 读侧绑 `roles.permissions text[]` / response 输出）。
+    /// 内部授权不得反向解析该字符串比较；应读取 [`Self::grant_permissions`]。
+    pub fn permission_ids(&self) -> impl Iterator<Item = String> + '_ {
+        self.permissions
+            .iter()
+            .copied()
+            .map(GrantPermission::to_storage_string)
+    }
+
+    /// typed grant permission 列表引用（授权求值用）。
+    pub fn grant_permissions(&self) -> &[GrantPermission] {
+        &self.permissions
     }
 
     /// 取权限 ID 列表引用（域内 `authorize_rbac` 用）。
     // reason: 唯一消费方 `authorize_rbac` 生产接线待 W 阶段（PR5）⇒ 非 test 构建链路 dead（ADR-004 C8）；
     // 收窄为 item-level allow（id/name/permission_ids/hydrate 已有生产消费方，不再 dead）。
     #[allow(dead_code)]
-    pub(crate) fn permissions(&self) -> &[PermissionId] {
+    pub(crate) fn permissions(&self) -> &[GrantPermission] {
         &self.permissions
     }
 }
@@ -249,9 +262,15 @@ pub(crate) fn authorize_rbac(
         if !principal.matches_subject(binding.subject()) || binding.tenant() != tenant {
             continue;
         }
-        // 适用 binding：解析其角色，角色权限集含目标权限 id → Allow。
+        let Ok(target) = RoutePermissionId::parse(perm.id().as_str()) else {
+            return vocab::Decision::Deny;
+        };
+        // 适用 binding：解析其角色，角色权限集含目标 route grant → Allow。
         if let Some(role) = roles.iter().find(|r| r.id() == binding.role_id())
-            && role.permissions().contains(perm.id())
+            && role
+                .permissions()
+                .iter()
+                .any(|grant| grant.matches_route(target))
         {
             return vocab::Decision::Allow;
         }
@@ -271,7 +290,7 @@ mod tests {
     use authn::Principal;
     use rstest::rstest;
     use vocab::tenant::TenantId;
-    use vocab::{Decision, PrincipalKind};
+    use vocab::{Decision, GrantPermission, PrincipalKind};
 
     // 两个 canonical UUID：tenant A（principal 所属）/ tenant B（跨租）。
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -297,22 +316,26 @@ mod tests {
         )
     }
 
+    #[allow(clippy::expect_used)]
     fn role(id: &str, perms: &[&str]) -> Role {
         Role::new(
             RoleId::new(id),
             "display name",
-            perms.iter().map(|p| PermissionId::new(*p)).collect(),
+            perms
+                .iter()
+                .map(|p| GrantPermission::parse(p).expect("valid grant permission"))
+                .collect(),
         )
     }
 
     #[test]
     fn entity_accessors_echo() {
-        let p = perm("docs:read");
-        assert_eq!(p.id().as_str(), "docs:read");
+        let p = perm("identity:policy:read");
+        assert_eq!(p.id().as_str(), "identity:policy:read");
         assert_eq!(p.resource_pattern().as_str(), "docs:*");
         assert_eq!(p.action(), &action());
 
-        let r = role("admin", &["docs:read", "docs:write"]);
+        let r = role("admin", &["identity:policy:read", "identity:policy:update"]);
         assert_eq!(r.id().as_str(), "admin");
         assert_eq!(r.name(), "display name");
         assert_eq!(r.permissions().len(), 2);
@@ -359,8 +382,8 @@ mod tests {
     }
 
     fn build(scn: &Scenario) -> (Principal, Vec<RoleBinding>, Vec<Role>, Permission) {
-        let target = perm("docs:read");
-        let granting_role = role("admin", &["docs:read"]);
+        let target = perm("identity:policy:read");
+        let granting_role = role("admin", &["identity:policy:read"]);
         let bind_a = || RoleBinding::new("alice", RoleId::new("admin"), tid(TENANT_A));
         let bind_b = || RoleBinding::new("alice", RoleId::new("admin"), tid(TENANT_B));
         let user = |t: Option<&str>| {
@@ -392,13 +415,13 @@ mod tests {
             Scenario::RoleLacksPerm => (
                 user(Some(TENANT_A)),
                 vec![bind_a()],
-                vec![role("admin", &["docs:write"])], // 不含 docs:read
+                vec![role("admin", &["identity:policy:update"])], // 不含 identity:policy:read
                 target,
             ),
             Scenario::BindingRoleNotFound => (
                 user(Some(TENANT_A)),
                 vec![bind_a()],
-                vec![role("other", &["docs:read"])], // role_id 不匹配 binding
+                vec![role("other", &["identity:policy:read"])], // role_id 不匹配 binding
                 target,
             ),
             // 同 tenant A、但 binding.subject="bob" ≠ principal.subject="alice"：subject 不匹配 → Deny。
@@ -468,14 +491,14 @@ mod tests {
 
     // 合法 raw 往返：id / name / permissions 经 hydrate 重建后与输入一致；permission_ids 保序。
     #[rstest]
-    #[case::two_perms("admin", "Admin", &["docs:read", "docs:write"][..])]
-    #[case::single_perm("viewer", "Viewer", &["docs:read"][..])]
+    #[case::two_perms("admin", "Admin", &["identity:policy:read", "identity:policy:update"][..])]
+    #[case::single_perm("viewer", "Viewer", &["identity:policy:read"][..])]
     #[case::no_perms("guest", "Guest", &[][..])]
     fn hydrate_roundtrip(#[case] id: &str, #[case] name: &str, #[case] perms: &[&str]) {
         let r = hydrate_ok(id, name, perms);
         assert_eq!(r.id().as_str(), id);
         assert_eq!(r.name(), name);
-        assert_eq!(r.permission_ids().collect::<Vec<_>>(), perms);
+        assert_eq!(r.permission_ids().collect::<Vec<_>>(), perm_ids(perms));
     }
 
     // 损坏持久化值（非法 role id / 非法 permission id）→ Err（fail-closed，归存储错误）。

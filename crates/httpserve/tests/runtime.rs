@@ -61,6 +61,7 @@ async fn panicking_handler() -> axum::response::Response {
 }
 
 const C: &str = "httpserve.test";
+const TEST_PERMISSION: vocab::RoutePermissionId = vocab::RoutePermissionId::IdentityPolicyRead;
 const X_REQUEST_ID: &str = "x-request-id";
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const PRINCIPAL: &str = "11111111-2222-4333-8444-555555555555";
@@ -215,7 +216,7 @@ async fn primary_require_without_credential_is_401() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -247,7 +248,7 @@ async fn primary_require_is_fail_closed_401() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -279,7 +280,7 @@ async fn primary_require_with_authenticated_evidence_allows() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -310,7 +311,7 @@ async fn primary_permission_authorizer_deny_is_403() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -343,7 +344,7 @@ async fn primary_self_scoped_permission_uses_principal_subject_resource() {
                 "/api/v1/me",
                 C,
                 RoutePermission {
-                    permission: "test:self",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::SelfSubject,
                 },
             ),
@@ -380,7 +381,7 @@ async fn primary_path_param_permission_uses_axum_decoded_resource() {
                 "/api/v1/roles/{roleId}",
                 C,
                 RoutePermission {
-                    permission: "test:role",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::PathParam("roleId"),
                 },
             ),
@@ -412,7 +413,7 @@ async fn primary_path_param_noncanonical_resource_denies_before_authorizer() {
                 "/api/v1/roles/{roleId}",
                 C,
                 RoutePermission {
-                    permission: "test:role",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::PathParam("roleId"),
                 },
             ),
@@ -445,7 +446,7 @@ async fn primary_require_with_mismatched_scheme_is_401() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -492,7 +493,7 @@ async fn missing_finalize_auth_is_fail_closed_403() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),
@@ -542,7 +543,7 @@ async fn incoming_request_id_is_echoed_and_in_envelope() {
                 "/api/v1/x",
                 C,
                 RoutePermission {
-                    permission: "test:read",
+                    permission: TEST_PERMISSION,
                     scope: RouteResourceScope::None,
                 },
             ),

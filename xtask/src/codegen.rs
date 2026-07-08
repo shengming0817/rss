@@ -482,7 +482,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ServiceOwned => "ServiceOwned",
     };
     let reason = render_option_str(auth.reason.as_deref(), "reason")?;
-    let permission = render_option_str(auth.permission.as_deref(), "permission")?;
+    let permission = render_option_route_permission_expr(auth.permission.as_deref(), "permission")?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
     let resource_present = http
@@ -549,11 +549,12 @@ pub const CONTRACT: ::vocab::ContractBinding =
                 }
             }
             let variant = field.field.as_vocab_variant();
-            let permission = &field.permission;
+            let permission =
+                render_route_permission_expr(&field.permission, "projection permission")?;
             let obligation_key = &field.obligation_key;
             let response_path = &field.response_path;
             projection_fields.push(format!(
-                "    {sup}HttpProjectionFieldSpec {{ field: ::vocab::ProjectionField::{variant}, permission: \"{permission}\", obligation_key: \"{obligation_key}\", response_path: \"{response_path}\" }}"
+                "    {sup}HttpProjectionFieldSpec {{ field: ::vocab::ProjectionField::{variant}, permission: {permission}, obligation_key: \"{obligation_key}\", response_path: \"{response_path}\" }}"
             ));
         }
     }
@@ -629,6 +630,28 @@ fn render_option_str(value: Option<&str>, field: &str) -> Result<String> {
         }
         None => Ok("None".to_string()),
     }
+}
+
+fn render_option_route_permission_expr(value: Option<&str>, field: &str) -> Result<String> {
+    match value {
+        Some(value) => Ok(format!(
+            "Some({})",
+            render_route_permission_expr(value, field)?
+        )),
+        None => Ok("None".to_string()),
+    }
+}
+
+fn render_route_permission_expr(value: &str, field: &str) -> Result<String> {
+    if !is_safe_codegen_string(value) {
+        bail!("{field} 含不安全字符（防注入生成字面量）: {value:?}");
+    }
+    let variant = vocab::RoutePermissionId::parse(value)
+        .map_err(|_| {
+            anyhow::anyhow!("{field} 未注册到 vocab::RoutePermissionId 闭值集: {value:?}")
+        })?
+        .variant_name();
+    Ok(format!("::vocab::RoutePermissionId::{variant}"))
 }
 
 /// command kind 派生 glue：CONTRACT / CONTRACT_ID / TOPIC 常量 + per-command typed `emit_async` / `register_handler`
@@ -1157,7 +1180,7 @@ pub struct HttpSpec {
 pub struct HttpAuthSpec {
     pub mode: HttpAuthMode,
     pub reason: Option<&'static str>,
-    pub permission: Option<&'static str>,
+    pub permission: Option<::vocab::RoutePermissionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1184,7 +1207,7 @@ pub enum HttpResourceSharingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpProjectionFieldSpec {
     pub field: ::vocab::ProjectionField,
-    pub permission: &'static str,
+    pub permission: ::vocab::RoutePermissionId,
     pub obligation_key: &'static str,
     pub response_path: &'static str,
 }
@@ -2214,7 +2237,7 @@ mod tests {
                 "resource = \"resourceId\"\n",
                 "[endpoints.http.auth]\n",
                 "mode = \"permission\"\n",
-                "permission = \"seed.echo\"\n",
+                "permission = \"identity:policy:read\"\n",
                 "[endpoints.http.resourceSharing]\n",
                 "mode = \"tenantScoped\"\n",
                 "reason = \"tenant-scoped routes must not carry opt-out reasons\"\n",
@@ -2237,7 +2260,7 @@ mod tests {
             concat!(
                 "[endpoints.http.auth]\n",
                 "mode = \"permission\"\n",
-                "permission = \"seed.echo\"\n",
+                "permission = \"identity:policy:read\"\n",
                 "[endpoints.http.resourceSharing]\n",
                 "mode = \"global\"\n",
                 "reason = \"shared route\"\n",
@@ -2266,7 +2289,7 @@ mod tests {
                 "resource = \"resourceId\"\n",
                 "[endpoints.http.auth]\n",
                 "mode = \"permission\"\n",
-                "permission = \"seed.echo\"\n",
+                "permission = \"identity:policy:read\"\n",
                 "[endpoints.http.resourceSharing]\n",
                 "mode = \"global\"\n",
                 "reason = \"shared route\"\n",
@@ -2319,6 +2342,18 @@ mod tests {
     #[test]
     fn module_name_joins_domain_version() {
         assert_eq!(module_name("_seed", "v1"), "_seed_v1");
+    }
+
+    #[test]
+    fn route_permission_expr_accepts_every_vocab_permission() -> anyhow::Result<()> {
+        for permission in vocab::RoutePermissionId::ALL {
+            let expr = render_route_permission_expr(permission.as_str(), "test permission")?;
+            assert_eq!(
+                expr,
+                format!("::vocab::RoutePermissionId::{}", permission.variant_name())
+            );
+        }
+        Ok(())
     }
 
     #[test]

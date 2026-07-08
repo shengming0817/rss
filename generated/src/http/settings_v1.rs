@@ -190,7 +190,7 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
     auth: super::HttpAuthSpec {
         mode: super::HttpAuthMode::Permission,
         reason: None,
-        permission: Some("settings.config-publish"),
+        permission: Some(::vocab::RoutePermissionId::SettingsConfigPublish),
     },
     resource: None,
     self_scoped: false,

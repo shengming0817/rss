@@ -47,5 +47,69 @@ LL |     let _subject_fn: fn(&Authenticated) -> &str = Authenticated::self_scope
    |
    = help: 改为读取 route gate 插入的 AuthorizedSubject；确需在 allowlist 外调用须经治理评审扩 `ALLOWED_CALLER_CRATES`，或 item-level `#[allow(rss_handler_local_principal_authz)] // reason: ...`
 
-warning: 6 warnings emitted
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:36:8
+   |
+LL |     if local.principal_kind() == PrincipalKind::Admin {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:39:8
+   |
+LL |     if PrincipalKind::SuperAdmin != local.principal_kind() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:43:8
+   |
+LL |     if role_name == "Admin" {
+   |        ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:46:8
+   |
+LL |     if "superAdmin" != role_name {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:49:5
+   |
+LL | /     match local.principal_kind() {
+LL | |         PrincipalKind::Admin => {
+LL | |             let _ = "bad match admin branch";
+...  |
+LL | |     }
+   | |_____^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:55:8
+   |
+LL |     if matches!(local.principal_kind(), PrincipalKind::SuperAdmin) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: handler/domain 不得用 PrincipalKind 或 role-name 字面量做本地授权分支
+  --> $DIR/disallowed.rs:58:5
+   |
+LL | /     match role_name {
+LL | |         "service" => {
+LL | |             let _ = "bad role-name match branch";
+...  |
+LL | |     }
+   | |_____^
+   |
+   = help: 改为比较 typed GrantPermission/RoutePermissionId，或把例外集中在 ContractAuthorizer / route gate / authn funnel
+
+warning: 13 warnings emitted
 

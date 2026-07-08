@@ -193,9 +193,13 @@ NOBYPASSRLS` 已 provision，bootstrap serving pool 已由启动期 RLS 能力�
   `httpserve::AuthorizedSubject`，不用 `authn::any_role` / `authn::self_or` /
   `authn::require_any_role` 做授权分支。Admin listener 的 audit read 因保持 Admin
   `Route` 类型语义，读取前用同一 `RouteAuthorizer` 做等价 `audit:read` read gate。
-- `authz::Permission` 是 sealed 闭值集（枚举 / sealed 类型）；业务代码经 accessor 函数
-  （如 `authz::perm_audit_read()`）取得 permission，不传 role 字符串。
-- handler 不手写 `Principal::has_role` 或遍历 `Principal.roles` 做授权。
+- `vocab::RoutePermissionId` 是 active HTTP route permission 与 audit projection permission 的闭值集；
+  `vocab::GrantPermission` 是 role 可持有授权项的闭值集（`Route(target)` /
+  `PolicyManage(target)`）。contract / storage 仍以字符串承载 wire 格式，但进入
+  `httpserve` route gate、`identity::ContractAuthorizer`、`PolicyRouteScope` 或 role hydrate 前必须解析成
+  typed permission；未知值视为损坏数据 fail-closed，不保留字符串授权 fallback。
+- handler 不手写 `Principal::has_role`、遍历 `Principal.roles`、比较 `PrincipalKind::{Admin,SuperAdmin,...}`
+  或比较 role-name 字面量做授权。
 - `Effect::Allow` 规则必须声明至少一个 action；空 action 只允许用于
   `Effect::Deny` 的 deny-all。写侧和读侧都必须 fail-closed。
 - 路由门禁只做 coarse allow/deny；recognized FieldMask obligation 经 sealed
@@ -235,7 +239,8 @@ resource type 的 typed parser/codegen 是后续架构项。
 
 resource ownership 的动态 `resource.*` 属性来自 tenant-scoped durable resource attribute store，而不是
 handler 本地拼接。store key 空间固定为 `(tenant_id, contract_id, permission, resource_id, attribute_key)`；
-`resource.id` 是 route gate synthetic attribute，不能作为动态属性落库。resolver 只返回闭枚举
+其中 `permission` 是 `PolicyRouteScope` 中 `RoutePermissionId::as_str()` 的持久化投影，读侧必须解析回
+`RoutePermissionId` 后才可参与授权。`resource.id` 是 route gate synthetic attribute，不能作为动态属性落库。resolver 只返回闭枚举
 `Known(attrs)` / `Missing(key)` / `Stale(key)`，缺失、过期、store 不可用、reserved key 冲突或非 canonical
 resource id 都在 RBAC/builtin baseline 前 deny，不用空集合表达失败，也不回退跨租户默认值。
 
@@ -274,12 +279,12 @@ serve 前）预解析。生产 Primary active route 通过必填 authorizer fina
 PDP 默认 fail-closed：缺 Authorizer、缺租户或 store 不可用都 deny；无适用 durable permit
 只表示 durable source 不授予权限，若没有独立 baseline allow 则 deny。
 baseline authorization source 是既有 self/RBAC/builtin 路由授权；其中 RBAC baseline 是
-action-scoped + role-conditioned 的 allow 规则，不是 allow-all。租户 durable policy 是独立
+action-scoped + `GrantPermission::Route(permission)` 命中的 allow 规则，不是 allow-all，也不读取 role name。租户 durable policy 是独立
 route-scoped source，可以叠加 allow / deny；deny 与 durable store/load failure 优先于 baseline。
 
 新装环境的 active settings publish API 在 role 管理面完整前有窄兜底：trusted `Admin` 主体对
 generated settings `config-publish` / `secret-publish` 两条无 resource route 内置 Allow；其它权限仍必须经
-role binding 命中，普通 user/device/service 不享有该兜底。
+`GrantPermission::Route` 命中，普通 user/device/service 不享有该兜底。
 
 租户 allow 可以放宽路由门禁，但不能扩大数据访问。读端点的数据可见性由 principal
 派生的 `RowScope` 决定；写端点没有 RowScope 维度，必须依赖 typed tenant 参数和 FORCE
@@ -359,7 +364,7 @@ coarse allow/deny；唯一例外是 recognized FieldMask obligation 可转成 se
 
 HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
 `endpoints.http.auth.permission` overlay 派生。codegen 将契约渲染为 `generated::http::HttpSpec`
-的 `auth.permission` / `resource` / `self_scoped`，域 route 装配只能经
+的 typed `auth.permission: Option<RoutePermissionId>` / `resource` / `self_scoped`，域 route 装配只能经
 `PrimaryRoute::permission(RoutePermission { permission, scope })` 声明进入 primary route gate。
 `httpserve::RouteAuthorizer` 在 handler 前做统一判定，允许后插入 `AuthorizedSubject`；handler 只消费
 该授权主体上下文，不回读 `Authenticated`。owner-scoped（`endpoints.http.resource`）/ self-scoped
@@ -376,6 +381,8 @@ reason-without-opt-out 必须拒绝。permission 与 opt-out mode 互斥。
 HTTP `passwordResetExempt` 不是 AuthZ mode；单独声明仍是 modeless，必须拒绝。
 
 契约 codegen 的 `build_http_spec` 是 codegen 完整性门：modeless route 不得被渲染上线。
+active HTTP contract permission 与 audit projection permission 还必须能解析为 `RoutePermissionId`；
+generated spec 与 route 装配不一致或出现未知 permission 时必须 fail-closed。
 `cargo xtask` / governance 规则只做纵深检查，不能替代 codegen 强制门。
 
 ## Governance reverse self-check

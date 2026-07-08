@@ -74,6 +74,176 @@ impl<T> core::clone::CloneToUninit for vocab::authz::Decision where T: core::clo
 pub unsafe fn vocab::authz::Decision::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::authz::Decision
 pub fn vocab::authz::Decision::from(T) -> T
+pub enum vocab::authz::GrantPermission
+pub vocab::authz::GrantPermission::PolicyManage(vocab::authz::RoutePermissionId)
+pub vocab::authz::GrantPermission::Route(vocab::authz::RoutePermissionId)
+impl vocab::authz::GrantPermission
+pub const fn vocab::authz::GrantPermission::as_route(self) -> core::option::Option<vocab::authz::RoutePermissionId>
+pub const fn vocab::authz::GrantPermission::matches_policy_manage(self, vocab::authz::RoutePermissionId) -> bool
+pub const fn vocab::authz::GrantPermission::matches_route(self, vocab::authz::RoutePermissionId) -> bool
+pub fn vocab::authz::GrantPermission::parse(&str) -> core::result::Result<Self, vocab::authz::PermissionParseError>
+pub const fn vocab::authz::GrantPermission::policy_manage(vocab::authz::RoutePermissionId) -> Self
+pub const fn vocab::authz::GrantPermission::policy_manage_target(self) -> core::option::Option<vocab::authz::RoutePermissionId>
+pub const fn vocab::authz::GrantPermission::route(vocab::authz::RoutePermissionId) -> Self
+pub fn vocab::authz::GrantPermission::to_storage_string(self) -> alloc::string::String
+impl core::clone::Clone for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::clone(&self) -> vocab::authz::GrantPermission
+impl core::cmp::Eq for vocab::authz::GrantPermission
+impl core::cmp::PartialEq for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::eq(&self, &vocab::authz::GrantPermission) -> bool
+impl core::fmt::Debug for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::authz::GrantPermission
+impl core::marker::StructuralPartialEq for vocab::authz::GrantPermission
+impl core::marker::Freeze for vocab::authz::GrantPermission
+impl core::marker::Send for vocab::authz::GrantPermission
+impl core::marker::Sync for vocab::authz::GrantPermission
+impl core::marker::Unpin for vocab::authz::GrantPermission
+impl core::marker::UnsafeUnpin for vocab::authz::GrantPermission
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::GrantPermission
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::GrantPermission
+impl<T, U> core::convert::Into<U> for vocab::authz::GrantPermission where U: core::convert::From<T>
+pub fn vocab::authz::GrantPermission::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::GrantPermission where U: core::convert::Into<T>
+pub type vocab::authz::GrantPermission::Error = core::convert::Infallible
+pub fn vocab::authz::GrantPermission::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::GrantPermission where U: core::convert::TryFrom<T>
+pub type vocab::authz::GrantPermission::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::GrantPermission::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::GrantPermission where T: core::clone::Clone
+pub type vocab::authz::GrantPermission::Owned = T
+pub fn vocab::authz::GrantPermission::clone_into(&self, &mut T)
+pub fn vocab::authz::GrantPermission::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::authz::GrantPermission where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::GrantPermission where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::GrantPermission where T: core::clone::Clone
+pub unsafe fn vocab::authz::GrantPermission::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::from(T) -> T
+#[non_exhaustive] pub enum vocab::authz::PermissionParseError
+pub vocab::authz::PermissionParseError::Unknown
+impl core::clone::Clone for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::clone(&self) -> vocab::authz::PermissionParseError
+impl core::cmp::Eq for vocab::authz::PermissionParseError
+impl core::cmp::PartialEq for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::eq(&self, &vocab::authz::PermissionParseError) -> bool
+impl core::error::Error for vocab::authz::PermissionParseError
+impl core::fmt::Debug for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::authz::PermissionParseError
+impl core::marker::StructuralPartialEq for vocab::authz::PermissionParseError
+impl core::marker::Freeze for vocab::authz::PermissionParseError
+impl core::marker::Send for vocab::authz::PermissionParseError
+impl core::marker::Sync for vocab::authz::PermissionParseError
+impl core::marker::Unpin for vocab::authz::PermissionParseError
+impl core::marker::UnsafeUnpin for vocab::authz::PermissionParseError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::PermissionParseError
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::PermissionParseError
+impl<T, U> core::convert::Into<U> for vocab::authz::PermissionParseError where U: core::convert::From<T>
+pub fn vocab::authz::PermissionParseError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::PermissionParseError where U: core::convert::Into<T>
+pub type vocab::authz::PermissionParseError::Error = core::convert::Infallible
+pub fn vocab::authz::PermissionParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::PermissionParseError where U: core::convert::TryFrom<T>
+pub type vocab::authz::PermissionParseError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::PermissionParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::PermissionParseError where T: core::clone::Clone
+pub type vocab::authz::PermissionParseError::Owned = T
+pub fn vocab::authz::PermissionParseError::clone_into(&self, &mut T)
+pub fn vocab::authz::PermissionParseError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::authz::PermissionParseError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::PermissionParseError where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::PermissionParseError where T: core::clone::Clone
+pub unsafe fn vocab::authz::PermissionParseError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::from(T) -> T
+pub enum vocab::authz::RoutePermissionId
+pub vocab::authz::RoutePermissionId::AuditFieldActor
+pub vocab::authz::RoutePermissionId::AuditFieldResourceId
+pub vocab::authz::RoutePermissionId::AuditFieldTenantId
+pub vocab::authz::RoutePermissionId::AuditRead
+pub vocab::authz::RoutePermissionId::IdentityPolicyCreate
+pub vocab::authz::RoutePermissionId::IdentityPolicyDeactivate
+pub vocab::authz::RoutePermissionId::IdentityPolicyRead
+pub vocab::authz::RoutePermissionId::IdentityPolicyUpdate
+pub vocab::authz::RoutePermissionId::IdentityProfileFieldSubject
+pub vocab::authz::RoutePermissionId::IdentityProfileFieldTenantId
+pub vocab::authz::RoutePermissionId::IdentityProfileRead
+pub vocab::authz::RoutePermissionId::IdentityProfileWrite
+pub vocab::authz::RoutePermissionId::IdentityRoleAssign
+pub vocab::authz::RoutePermissionId::IdentityRoleRead
+pub vocab::authz::RoutePermissionId::IdentityRoleRevoke
+pub vocab::authz::RoutePermissionId::IdentitySessionWrite
+pub vocab::authz::RoutePermissionId::MtlsInvoke
+pub vocab::authz::RoutePermissionId::SettingsConfigPublish
+pub vocab::authz::RoutePermissionId::SettingsSecretPublish
+impl vocab::authz::RoutePermissionId
+pub const vocab::authz::RoutePermissionId::ALL: &'static [Self]
+pub const fn vocab::authz::RoutePermissionId::as_str(self) -> &'static str
+pub fn vocab::authz::RoutePermissionId::parse(&str) -> core::result::Result<Self, vocab::authz::PermissionParseError>
+pub const fn vocab::authz::RoutePermissionId::variant_name(self) -> &'static str
+impl core::clone::Clone for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::clone(&self) -> vocab::authz::RoutePermissionId
+impl core::cmp::Eq for vocab::authz::RoutePermissionId
+impl core::cmp::PartialEq for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::eq(&self, &vocab::authz::RoutePermissionId) -> bool
+impl core::fmt::Debug for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::authz::RoutePermissionId
+impl core::marker::StructuralPartialEq for vocab::authz::RoutePermissionId
+impl core::marker::Freeze for vocab::authz::RoutePermissionId
+impl core::marker::Send for vocab::authz::RoutePermissionId
+impl core::marker::Sync for vocab::authz::RoutePermissionId
+impl core::marker::Unpin for vocab::authz::RoutePermissionId
+impl core::marker::UnsafeUnpin for vocab::authz::RoutePermissionId
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::RoutePermissionId
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::RoutePermissionId
+impl<T, U> core::convert::Into<U> for vocab::authz::RoutePermissionId where U: core::convert::From<T>
+pub fn vocab::authz::RoutePermissionId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::RoutePermissionId where U: core::convert::Into<T>
+pub type vocab::authz::RoutePermissionId::Error = core::convert::Infallible
+pub fn vocab::authz::RoutePermissionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::RoutePermissionId where U: core::convert::TryFrom<T>
+pub type vocab::authz::RoutePermissionId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::RoutePermissionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::RoutePermissionId where T: core::clone::Clone
+pub type vocab::authz::RoutePermissionId::Owned = T
+pub fn vocab::authz::RoutePermissionId::clone_into(&self, &mut T)
+pub fn vocab::authz::RoutePermissionId::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::authz::RoutePermissionId where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::RoutePermissionId where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::RoutePermissionId where T: core::clone::Clone
+pub unsafe fn vocab::authz::RoutePermissionId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::from(T) -> T
 pub struct vocab::authz::Action(_)
 impl vocab::authz::Action
 pub fn vocab::authz::Action::as_str(&self) -> &str
@@ -115,6 +285,7 @@ impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone
 pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::authz::Action
 pub fn vocab::authz::Action::from(T) -> T
+pub const vocab::authz::POLICY_MANAGE_PERMISSION_PREFIX: &str
 pub mod vocab::contract
 pub mod vocab::contract::binding
 pub struct vocab::contract::binding::ContractBinding
@@ -693,7 +864,7 @@ pub vocab::projection::ProjectionField::IdentityProfileTenantId
 impl vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::from_obligation_key(&str) -> core::option::Option<Self>
 pub fn vocab::projection::ProjectionField::obligation_key(self) -> &'static str
-pub fn vocab::projection::ProjectionField::permission(self) -> &'static str
+pub fn vocab::projection::ProjectionField::permission(self) -> vocab::authz::RoutePermissionId
 impl core::clone::Clone for vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::clone(&self) -> vocab::projection::ProjectionField
 impl core::cmp::Eq for vocab::projection::ProjectionField
@@ -735,14 +906,14 @@ pub unsafe fn vocab::projection::ProjectionField::clone_to_uninit(&self, *mut u8
 impl<T> core::convert::From<T> for vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::from(T) -> T
 pub const vocab::projection::AUDIT_ACTOR_FIELD_OBLIGATION: &str
-pub const vocab::projection::AUDIT_FIELD_ACTOR_PERMISSION: &str
-pub const vocab::projection::AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str
-pub const vocab::projection::AUDIT_FIELD_TENANT_ID_PERMISSION: &str
-pub const vocab::projection::AUDIT_READ_PERMISSION: &str
+pub const vocab::projection::AUDIT_FIELD_ACTOR_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::projection::AUDIT_FIELD_RESOURCE_ID_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::projection::AUDIT_FIELD_TENANT_ID_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::projection::AUDIT_READ_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::projection::AUDIT_RESOURCE_ID_FIELD_OBLIGATION: &str
 pub const vocab::projection::AUDIT_TENANT_ID_FIELD_OBLIGATION: &str
-pub const vocab::projection::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: &str
-pub const vocab::projection::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: &str
+pub const vocab::projection::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::projection::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::projection::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
 pub const vocab::projection::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub mod vocab::query
@@ -1348,6 +1519,62 @@ impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError w
 pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
 pub fn vocab::contract::owner::DomainNameError::from(T) -> T
+pub enum vocab::GrantPermission
+pub vocab::GrantPermission::PolicyManage(vocab::authz::RoutePermissionId)
+pub vocab::GrantPermission::Route(vocab::authz::RoutePermissionId)
+impl vocab::authz::GrantPermission
+pub const fn vocab::authz::GrantPermission::as_route(self) -> core::option::Option<vocab::authz::RoutePermissionId>
+pub const fn vocab::authz::GrantPermission::matches_policy_manage(self, vocab::authz::RoutePermissionId) -> bool
+pub const fn vocab::authz::GrantPermission::matches_route(self, vocab::authz::RoutePermissionId) -> bool
+pub fn vocab::authz::GrantPermission::parse(&str) -> core::result::Result<Self, vocab::authz::PermissionParseError>
+pub const fn vocab::authz::GrantPermission::policy_manage(vocab::authz::RoutePermissionId) -> Self
+pub const fn vocab::authz::GrantPermission::policy_manage_target(self) -> core::option::Option<vocab::authz::RoutePermissionId>
+pub const fn vocab::authz::GrantPermission::route(vocab::authz::RoutePermissionId) -> Self
+pub fn vocab::authz::GrantPermission::to_storage_string(self) -> alloc::string::String
+impl core::clone::Clone for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::clone(&self) -> vocab::authz::GrantPermission
+impl core::cmp::Eq for vocab::authz::GrantPermission
+impl core::cmp::PartialEq for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::eq(&self, &vocab::authz::GrantPermission) -> bool
+impl core::fmt::Debug for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::authz::GrantPermission
+impl core::marker::StructuralPartialEq for vocab::authz::GrantPermission
+impl core::marker::Freeze for vocab::authz::GrantPermission
+impl core::marker::Send for vocab::authz::GrantPermission
+impl core::marker::Sync for vocab::authz::GrantPermission
+impl core::marker::Unpin for vocab::authz::GrantPermission
+impl core::marker::UnsafeUnpin for vocab::authz::GrantPermission
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::GrantPermission
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::GrantPermission
+impl<T, U> core::convert::Into<U> for vocab::authz::GrantPermission where U: core::convert::From<T>
+pub fn vocab::authz::GrantPermission::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::GrantPermission where U: core::convert::Into<T>
+pub type vocab::authz::GrantPermission::Error = core::convert::Infallible
+pub fn vocab::authz::GrantPermission::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::GrantPermission where U: core::convert::TryFrom<T>
+pub type vocab::authz::GrantPermission::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::GrantPermission::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::GrantPermission where T: core::clone::Clone
+pub type vocab::authz::GrantPermission::Owned = T
+pub fn vocab::authz::GrantPermission::clone_into(&self, &mut T)
+pub fn vocab::authz::GrantPermission::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::authz::GrantPermission where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::GrantPermission where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
+pub fn vocab::authz::GrantPermission::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::GrantPermission where T: core::clone::Clone
+pub unsafe fn vocab::authz::GrantPermission::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::GrantPermission
+pub fn vocab::authz::GrantPermission::from(T) -> T
 #[non_exhaustive] pub enum vocab::InternalAttr
 pub vocab::InternalAttr::Int(&'static str, i64)
 pub vocab::InternalAttr::Str(&'static str, alloc::string::String)
@@ -1416,6 +1643,51 @@ impl<T> core::borrow::BorrowMut<T> for vocab::query::LimitError where T: ?core::
 pub fn vocab::query::LimitError::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for vocab::query::LimitError
 pub fn vocab::query::LimitError::from(T) -> T
+#[non_exhaustive] pub enum vocab::PermissionParseError
+pub vocab::PermissionParseError::Unknown
+impl core::clone::Clone for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::clone(&self) -> vocab::authz::PermissionParseError
+impl core::cmp::Eq for vocab::authz::PermissionParseError
+impl core::cmp::PartialEq for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::eq(&self, &vocab::authz::PermissionParseError) -> bool
+impl core::error::Error for vocab::authz::PermissionParseError
+impl core::fmt::Debug for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::authz::PermissionParseError
+impl core::marker::StructuralPartialEq for vocab::authz::PermissionParseError
+impl core::marker::Freeze for vocab::authz::PermissionParseError
+impl core::marker::Send for vocab::authz::PermissionParseError
+impl core::marker::Sync for vocab::authz::PermissionParseError
+impl core::marker::Unpin for vocab::authz::PermissionParseError
+impl core::marker::UnsafeUnpin for vocab::authz::PermissionParseError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::PermissionParseError
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::PermissionParseError
+impl<T, U> core::convert::Into<U> for vocab::authz::PermissionParseError where U: core::convert::From<T>
+pub fn vocab::authz::PermissionParseError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::PermissionParseError where U: core::convert::Into<T>
+pub type vocab::authz::PermissionParseError::Error = core::convert::Infallible
+pub fn vocab::authz::PermissionParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::PermissionParseError where U: core::convert::TryFrom<T>
+pub type vocab::authz::PermissionParseError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::PermissionParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::PermissionParseError where T: core::clone::Clone
+pub type vocab::authz::PermissionParseError::Owned = T
+pub fn vocab::authz::PermissionParseError::clone_into(&self, &mut T)
+pub fn vocab::authz::PermissionParseError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::authz::PermissionParseError where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::PermissionParseError where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
+pub fn vocab::authz::PermissionParseError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::PermissionParseError where T: core::clone::Clone
+pub unsafe fn vocab::authz::PermissionParseError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::PermissionParseError
+pub fn vocab::authz::PermissionParseError::from(T) -> T
 #[non_exhaustive] pub enum vocab::PrincipalKind
 pub vocab::PrincipalKind::Admin
 pub vocab::PrincipalKind::Anonymous
@@ -1472,7 +1744,7 @@ pub vocab::ProjectionField::IdentityProfileTenantId
 impl vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::from_obligation_key(&str) -> core::option::Option<Self>
 pub fn vocab::projection::ProjectionField::obligation_key(self) -> &'static str
-pub fn vocab::projection::ProjectionField::permission(self) -> &'static str
+pub fn vocab::projection::ProjectionField::permission(self) -> vocab::authz::RoutePermissionId
 impl core::clone::Clone for vocab::projection::ProjectionField
 pub fn vocab::projection::ProjectionField::clone(&self) -> vocab::projection::ProjectionField
 impl core::cmp::Eq for vocab::projection::ProjectionField
@@ -1555,6 +1827,75 @@ impl<T> core::clone::CloneToUninit for vocab::error::PublicDetail where T: core:
 pub unsafe fn vocab::error::PublicDetail::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::error::PublicDetail
 pub fn vocab::error::PublicDetail::from(T) -> T
+pub enum vocab::RoutePermissionId
+pub vocab::RoutePermissionId::AuditFieldActor
+pub vocab::RoutePermissionId::AuditFieldResourceId
+pub vocab::RoutePermissionId::AuditFieldTenantId
+pub vocab::RoutePermissionId::AuditRead
+pub vocab::RoutePermissionId::IdentityPolicyCreate
+pub vocab::RoutePermissionId::IdentityPolicyDeactivate
+pub vocab::RoutePermissionId::IdentityPolicyRead
+pub vocab::RoutePermissionId::IdentityPolicyUpdate
+pub vocab::RoutePermissionId::IdentityProfileFieldSubject
+pub vocab::RoutePermissionId::IdentityProfileFieldTenantId
+pub vocab::RoutePermissionId::IdentityProfileRead
+pub vocab::RoutePermissionId::IdentityProfileWrite
+pub vocab::RoutePermissionId::IdentityRoleAssign
+pub vocab::RoutePermissionId::IdentityRoleRead
+pub vocab::RoutePermissionId::IdentityRoleRevoke
+pub vocab::RoutePermissionId::IdentitySessionWrite
+pub vocab::RoutePermissionId::MtlsInvoke
+pub vocab::RoutePermissionId::SettingsConfigPublish
+pub vocab::RoutePermissionId::SettingsSecretPublish
+impl vocab::authz::RoutePermissionId
+pub const vocab::authz::RoutePermissionId::ALL: &'static [Self]
+pub const fn vocab::authz::RoutePermissionId::as_str(self) -> &'static str
+pub fn vocab::authz::RoutePermissionId::parse(&str) -> core::result::Result<Self, vocab::authz::PermissionParseError>
+pub const fn vocab::authz::RoutePermissionId::variant_name(self) -> &'static str
+impl core::clone::Clone for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::clone(&self) -> vocab::authz::RoutePermissionId
+impl core::cmp::Eq for vocab::authz::RoutePermissionId
+impl core::cmp::PartialEq for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::eq(&self, &vocab::authz::RoutePermissionId) -> bool
+impl core::fmt::Debug for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for vocab::authz::RoutePermissionId
+impl core::marker::StructuralPartialEq for vocab::authz::RoutePermissionId
+impl core::marker::Freeze for vocab::authz::RoutePermissionId
+impl core::marker::Send for vocab::authz::RoutePermissionId
+impl core::marker::Sync for vocab::authz::RoutePermissionId
+impl core::marker::Unpin for vocab::authz::RoutePermissionId
+impl core::marker::UnsafeUnpin for vocab::authz::RoutePermissionId
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::RoutePermissionId
+impl core::panic::unwind_safe::UnwindSafe for vocab::authz::RoutePermissionId
+impl<T, U> core::convert::Into<U> for vocab::authz::RoutePermissionId where U: core::convert::From<T>
+pub fn vocab::authz::RoutePermissionId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::authz::RoutePermissionId where U: core::convert::Into<T>
+pub type vocab::authz::RoutePermissionId::Error = core::convert::Infallible
+pub fn vocab::authz::RoutePermissionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::authz::RoutePermissionId where U: core::convert::TryFrom<T>
+pub type vocab::authz::RoutePermissionId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::authz::RoutePermissionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::authz::RoutePermissionId where T: core::clone::Clone
+pub type vocab::authz::RoutePermissionId::Owned = T
+pub fn vocab::authz::RoutePermissionId::clone_into(&self, &mut T)
+pub fn vocab::authz::RoutePermissionId::to_owned(&self) -> T
+impl<T> alloc::string::ToString for vocab::authz::RoutePermissionId where T: core::fmt::Display + ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for vocab::authz::RoutePermissionId where T: 'static + ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
+pub fn vocab::authz::RoutePermissionId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::authz::RoutePermissionId where T: core::clone::Clone
+pub unsafe fn vocab::authz::RoutePermissionId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::authz::RoutePermissionId
+pub fn vocab::authz::RoutePermissionId::from(T) -> T
 #[non_exhaustive] pub enum vocab::RowScope
 pub vocab::RowScope::All
 pub vocab::RowScope::Device
@@ -2271,13 +2612,14 @@ pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::from(T) -> T
 pub const vocab::AUDIT_ACTOR_FIELD_OBLIGATION: &str
-pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: &str
-pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: &str
-pub const vocab::AUDIT_FIELD_TENANT_ID_PERMISSION: &str
-pub const vocab::AUDIT_READ_PERMISSION: &str
+pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::AUDIT_FIELD_TENANT_ID_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::AUDIT_READ_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::AUDIT_RESOURCE_ID_FIELD_OBLIGATION: &str
 pub const vocab::AUDIT_TENANT_ID_FIELD_OBLIGATION: &str
-pub const vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: &str
-pub const vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: &str
+pub const vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION: vocab::authz::RoutePermissionId
+pub const vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
 pub const vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
+pub const vocab::POLICY_MANAGE_PERMISSION_PREFIX: &str

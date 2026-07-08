@@ -22,7 +22,10 @@ pub(crate) fn is_crate_name(s: &str) -> bool {
     }
 }
 
-pub use authz::{Action, ActionError, Decision};
+pub use authz::{
+    Action, ActionError, Decision, GrantPermission, POLICY_MANAGE_PERMISSION_PREFIX,
+    PermissionParseError, RoutePermissionId,
+};
 pub use contract::binding::{
     ContractBinding, ProjectionInputBinding, SagaContractBinding, SagaRuntimePolicySpec,
 };

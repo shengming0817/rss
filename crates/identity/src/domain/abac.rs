@@ -15,6 +15,7 @@
 use std::time::SystemTime;
 
 use super::{AttributeKey, AttributeValue, IdentityError, PolicyId};
+use vocab::RoutePermissionId;
 
 const GLOB_MAX_LEN: usize = 256;
 const ROUTE_SCOPE_MAX_LEN: usize = 256;
@@ -68,27 +69,28 @@ impl AbacAttribute {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PolicyRouteScope {
     contract_id: String,
-    permission: String,
+    permission: RoutePermissionId,
 }
 
 impl PolicyRouteScope {
     pub fn parse(contract_id: &str, permission: &str) -> Result<Self, IdentityError> {
         validate_route_token(contract_id)?;
-        validate_route_token(permission)?;
+        let permission =
+            RoutePermissionId::parse(permission).map_err(|_| IdentityError::InvalidPolicy)?;
         Ok(Self {
             contract_id: contract_id.to_string(),
-            permission: permission.to_string(),
+            permission,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn new_unchecked(
         contract_id: impl Into<String>,
-        permission: impl Into<String>,
+        permission: RoutePermissionId,
     ) -> Self {
         Self {
             contract_id: contract_id.into(),
-            permission: permission.into(),
+            permission,
         }
     }
 
@@ -96,11 +98,11 @@ impl PolicyRouteScope {
         &self.contract_id
     }
 
-    pub fn permission(&self) -> &str {
-        &self.permission
+    pub fn permission(&self) -> RoutePermissionId {
+        self.permission
     }
 
-    pub fn matches(&self, contract_id: &str, permission: &str) -> bool {
+    pub fn matches(&self, contract_id: &str, permission: RoutePermissionId) -> bool {
         self.contract_id == contract_id && self.permission == permission
     }
 }
@@ -342,7 +344,10 @@ impl Policy {
         Self {
             id,
             tenant,
-            route_scope: PolicyRouteScope::new_unchecked("test.contract", "test:permission"),
+            route_scope: PolicyRouteScope::new_unchecked(
+                "test.contract",
+                RoutePermissionId::IdentityPolicyRead,
+            ),
             version: PolicyVersion::first(),
             effective_from: SystemTime::UNIX_EPOCH,
             effective_until: None,

@@ -11838,7 +11838,7 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
     // 未保存 → None（fail-closed，anti-vacuity 的负例基线）。
-    let admin = Role::hydrate("role-admin", "Admin", &["docs:read".to_string()])?;
+    let admin = Role::hydrate("role-admin", "Admin", &["identity:policy:read".to_string()])?;
     let admin_id = admin.id().clone();
     assert!(
         repo.find(tenant, admin_id.clone()).await?.is_none(),
@@ -11853,13 +11853,19 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
         .expect("saved role visible");
     assert_eq!(got.id().as_str(), "role-admin");
     assert_eq!(got.name(), "Admin");
-    assert_eq!(got.permission_ids().collect::<Vec<_>>(), vec!["docs:read"]);
+    assert_eq!(
+        got.permission_ids().collect::<Vec<_>>(),
+        vec!["identity:policy:read"]
+    );
 
     // 同 id 二次 save → upsert 覆盖 name + permissions。
     let admin_v2 = Role::hydrate(
         "role-admin",
         "Administrator",
-        &["docs:read".to_string(), "docs:write".to_string()],
+        &[
+            "identity:policy:read".to_string(),
+            "identity:policy:update".to_string(),
+        ],
     )?;
     repo.save(tenant, admin_v2).await?;
     let got2 = repo
@@ -11869,7 +11875,7 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
     assert_eq!(got2.name(), "Administrator", "upsert 覆盖 name");
     assert_eq!(
         got2.permission_ids().collect::<Vec<_>>(),
-        vec!["docs:read", "docs:write"],
+        vec!["identity:policy:read", "identity:policy:update"],
         "upsert 覆盖 permissions"
     );
     // upsert 不新增行（DO UPDATE，非 INSERT）。
@@ -11896,7 +11902,11 @@ async fn role_repo_tenant_row_isolation() -> TestResult {
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
 
-    let role = Role::hydrate("shared-id", "OnlyInA", &["docs:read".to_string()])?;
+    let role = Role::hydrate(
+        "shared-id",
+        "OnlyInA",
+        &["identity:policy:read".to_string()],
+    )?;
     let id = role.id().clone();
     repo.save(tenant_a, role).await?;
 
@@ -11936,7 +11946,11 @@ async fn role_repo_tenant_conformance() -> TestResult {
             async move {
                 repo.save(
                     tenant,
-                    Role::hydrate("tenant-conf-role", "TenantConf", &["conf:read".to_string()])?,
+                    Role::hydrate(
+                        "tenant-conf-role",
+                        "TenantConf",
+                        &["identity:policy:read".to_string()],
+                    )?,
                 )
                 .await
             }
@@ -13173,7 +13187,12 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
     for i in 0..8 {
         let repo = Arc::clone(&repo);
         handles.push(tokio::spawn(async move {
-            let role = Role::hydrate("contended", "C", &[format!("perm:{i}")])?;
+            let permission = if i % 2 == 0 {
+                "identity:policy:read"
+            } else {
+                "identity:policy:update"
+            };
+            let role = Role::hydrate("contended", "C", &[permission.to_string()])?;
             repo.save(tenant, role).await
         }));
     }
@@ -13188,7 +13207,7 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
         .await?
         .expect("contended role converged");
     assert_eq!(got.id().as_str(), "contended");
-    // name 在所有 writer 间确定（恒 "C"）→ 终态 name 一致；permissions 因 writer 非确定（perm:0..7）不断言具体值。
+    // name 在所有 writer 间确定（恒 "C"）→ 终态 name 一致；permissions 因 writer 非确定（read/update）不断言具体值。
     assert_eq!(got.name(), "C", "并发收敛终态 name 一致");
     let n: (i64,) =
         sqlx::query_as("SELECT count(*) FROM roles WHERE tenant_id = $1::uuid AND id = $2")
@@ -13233,12 +13252,15 @@ async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
 
     for (id, name) in [("role-a", "A"), ("role-b", "B"), ("role-c", "C")] {
-        repo.save(tenant_a, Role::hydrate(id, name, &[format!("perm:{id}")])?)
-            .await?;
+        repo.save(
+            tenant_a,
+            Role::hydrate(id, name, &["identity:policy:read".to_string()])?,
+        )
+        .await?;
     }
     repo.save(
         tenant_b,
-        Role::hydrate("role-aa", "TenantB", &["perm:b".to_string()])?,
+        Role::hydrate("role-aa", "TenantB", &["identity:policy:read".to_string()])?,
     )
     .await?;
 
@@ -13811,7 +13833,7 @@ async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
         .bind(&tenant_a)
         .bind(&role_id)
         .bind("RlsTestRole")
-        .bind(vec!["docs:read".to_string()])
+        .bind(vec!["identity:policy:read".to_string()])
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Tx1 INSERT tenant_a role failed (should succeed): {e}"))?;
@@ -13879,7 +13901,7 @@ async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
         .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
         .bind(format!("{role_id}-cross"))
         .bind("CrossTenantRole")
-        .bind(vec!["docs:read".to_string()])
+        .bind(vec!["identity:policy:read".to_string()])
         .execute(&mut *tx)
         .await;
         assert!(

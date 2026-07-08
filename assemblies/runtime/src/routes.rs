@@ -633,7 +633,7 @@ mod tests {
                         "/private",
                         "runtime.smoke.primary",
                         RoutePermission {
-                            permission: "runtime:read",
+                            permission: vocab::RoutePermissionId::AuditRead,
                             scope: RouteResourceScope::None,
                         },
                     ),

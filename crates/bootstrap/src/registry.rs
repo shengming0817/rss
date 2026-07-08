@@ -1078,7 +1078,7 @@ mod finalize {
                     "/primary-only",
                     "test.primary",
                     RoutePermission {
-                        permission: "test:read",
+                        permission: vocab::RoutePermissionId::IdentityPolicyRead,
                         scope: RouteResourceScope::None,
                     },
                 ),

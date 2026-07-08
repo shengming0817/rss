@@ -99,7 +99,7 @@ impl RoleRepo for PgRoleRepo {
 
     async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError> {
         let tenant_uuid = tenant_param(tenant);
-        let permissions: Vec<String> = role.permission_ids().map(str::to_owned).collect();
+        let permissions: Vec<String> = role.permission_ids().collect();
         // tenant-scoped 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert。
         // save 是本 adapter **唯一**写路径（find 为 plain read）⇒ 不抽 `tenant_scoped` helper，直接 inline。
         self.pool

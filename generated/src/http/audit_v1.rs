@@ -305,19 +305,19 @@ pub const PATH: &str = "/api/v1/audit/entries";
 pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
     super::HttpProjectionFieldSpec {
         field: ::vocab::ProjectionField::AuditTenantId,
-        permission: "audit:field:tenant_id",
+        permission: ::vocab::RoutePermissionId::AuditFieldTenantId,
         obligation_key: "audit.tenant_id",
         response_path: "data[].tenantId",
     },
     super::HttpProjectionFieldSpec {
         field: ::vocab::ProjectionField::AuditActor,
-        permission: "audit:field:actor",
+        permission: ::vocab::RoutePermissionId::AuditFieldActor,
         obligation_key: "audit.actor",
         response_path: "data[].actor",
     },
     super::HttpProjectionFieldSpec {
         field: ::vocab::ProjectionField::AuditResourceId,
-        permission: "audit:field:resource_id",
+        permission: ::vocab::RoutePermissionId::AuditFieldResourceId,
         obligation_key: "audit.resource_id",
         response_path: "data[].resourceId",
     },
@@ -332,7 +332,7 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
     auth: super::HttpAuthSpec {
         mode: super::HttpAuthMode::Permission,
         reason: None,
-        permission: Some("audit:read"),
+        permission: Some(::vocab::RoutePermissionId::AuditRead),
     },
     resource: None,
     self_scoped: false,
