@@ -597,7 +597,7 @@ async fn wire_durable(
     security: EventSecurity,
     settings_service: Arc<SettingsService>,
 ) -> anyhow::Result<EventRuntime> {
-    // saga/projection 投影重建 defer → 见 #1251 follow-up issue（executor body 仍 todo!()，#1121/#1122）
+    // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
 
     let mut infra_guards: Vec<Box<DynManagedResource<'static>>> = Vec::new();
     let mut module = DomainModuleResult::default();
@@ -1225,7 +1225,7 @@ fn build_tenant_authority_from(
     ))
 }
 
-fn build_dlx_payload_protector_from(
+pub(crate) fn build_dlx_payload_protector_from(
     get: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<DlxPayloadProtector> {
     let addr = get(VAULT_ADDR_ENV)

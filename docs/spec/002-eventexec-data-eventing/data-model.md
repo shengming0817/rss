@@ -152,7 +152,8 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 - **pre-GA breaking migration**：0040 启用前要求旧 `projection_events` 为空，不 backfill。
 - **projection DLQ**：Permanent / Invariant / OutOfOrder 写统一 `dead_letter(source_kind='projection')`
   后停止当前 projection，不自动 skip checkpoint；projection DLQ message id 为
-  `projection:<owner>:<projection_id>:<lsn>`，replay/redrive 不支持。
+  `projection:<owner>:<projection_id>:<lsn>`。Projection DLQ 行只作审计与诊断，不 redrive 成 outbox；
+  read-model shadow replay 走 `rss projections replay`，输入源仍是 `projection_events`。
 - **checkpoint monotonicity**：`checkpoint.offset_lsn` SQL update path 拒绝 regression，避免把 checkpoint 推过 poison/乱序 LSN。
 - **append-only**：migration 内 `REVOKE UPDATE, DELETE`；代码侧 dylint `rss_projection_append_only` 拒 DELETE/TRUNCATE 字面量（PROJECTION-APPEND-ONLY-01）。
 - Index: `(domain, aggregate_id)`。

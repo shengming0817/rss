@@ -67,9 +67,10 @@ use crate::{
     PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
     PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance, PgPolicyRepo,
-    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore,
-    PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo,
-    PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard,
+    PgProjectionControl, PgProjectionEvents, PgReadinessSampler, PgReconcileStore,
+    PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal,
+    PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
+    PgStoreGuard, ProjectionMaintenanceCapability,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -324,9 +325,9 @@ impl PgMaintenanceDeps {
         PgConfigValueMaintenance::new(Arc::clone(&self.store), protection, capability)
     }
 
-    /// Durable audit record for settings ConfigValue maintenance jobs.
-    pub async fn record_config_value_maintenance_audit(
+    async fn record_maintenance_audit(
         &self,
+        resource_kind: &str,
         operator_subject: &str,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -349,12 +350,13 @@ impl PgMaintenanceDeps {
                 occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, tenant_context,
                 resource_kind, resource_id, action, outcome, failure_reason, request_id, correlation_id
             )
-            VALUES ($1, $2, $3, 'service', NULL, 'settings.config-values.maintenance', $4, $5, $6, $7, NULL, NULL)
+            VALUES ($1, $2, $3, 'service', NULL, $4, $5, $6, $7, $8, NULL, NULL)
             "#,
         )
         .bind(secs)
         .bind(nanos)
         .bind(operator_subject)
+        .bind(resource_kind)
         .bind(resource_id)
         .bind(action)
         .bind(outcome)
@@ -363,6 +365,60 @@ impl PgMaintenanceDeps {
         .await
         .map_err(PgError::MaintenanceAudit)?;
         Ok(())
+    }
+
+    /// Durable audit record for settings ConfigValue maintenance jobs.
+    pub async fn record_config_value_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        self.record_maintenance_audit(
+            "settings.config-values.maintenance",
+            operator_subject,
+            action,
+            outcome,
+            resource_id,
+        )
+        .await
+    }
+
+    /// Durable audit record for projection replay / shadow-swap jobs.
+    pub async fn record_projection_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        self.record_maintenance_audit(
+            "projection.maintenance",
+            operator_subject,
+            action,
+            outcome,
+            resource_id,
+        )
+        .await
+    }
+
+    /// Projection replay / shadow-swap control store.
+    #[must_use]
+    pub fn projection_control(
+        &self,
+        capability: ProjectionMaintenanceCapability,
+    ) -> PgProjectionControl {
+        PgStore::projection_control(Arc::clone(&self.store), capability)
+    }
+
+    /// Framework/global stores for offline maintenance commands.
+    #[must_use]
+    pub fn infra(&self) -> PgInfraDeps {
+        PgInfraDeps {
+            store: Arc::clone(&self.store),
+            projection_registry: ProjectionWriteRegistry::empty(),
+        }
     }
 
     /// 关闭维护连接池。

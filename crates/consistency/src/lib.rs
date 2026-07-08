@@ -50,10 +50,10 @@ pub use outbox::{
     PermanentErrorKind, RetentionSweeper, Topic, TopicError,
 };
 pub use projection::{
-    Lsn, PartitionSerialDelivery, ProjectionBatchLimit, ProjectionBatchLimitError,
-    ProjectionCheckpoint, ProjectionCheckpointError, ProjectionDeadLetter,
-    ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
-    ProjectionEventSource, Projector, SerialInOrder, SerialInOrderGuarantor,
+    Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionBatchLimit,
+    ProjectionBatchLimitError, ProjectionCheckpoint, ProjectionCheckpointError,
+    ProjectionDeadLetter, ProjectionDeadLetterReason, ProjectionEvent, ProjectionEventMetadata,
+    ProjectionEventRecord, ProjectionEventSource, Projector, SerialInOrder, SerialInOrderGuarantor,
 };
 pub use reconcile::{
     ActualState, Context, ConvergeAction, DesiredState, DriftKind, EntityId, EntityIdError,

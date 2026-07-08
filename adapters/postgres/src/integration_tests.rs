@@ -124,6 +124,39 @@ fn config_contract() -> vocab::ContractBinding {
     )
 }
 
+#[allow(clippy::unwrap_used)]
+fn projection_control_selector(
+    raw_projection: &str,
+    version: &str,
+) -> eventexec::ProjectionSelector {
+    eventexec::ProjectionSelector::new(
+        test_tenant(),
+        eventexec::ProjectionId::parse(raw_projection).unwrap(),
+        eventexec::ProjectionVersion::parse(version).unwrap(),
+    )
+}
+
+async fn insert_projection_shadow_checkpoint(
+    store: &PgStore,
+    selector: &eventexec::ProjectionSelector,
+    offset: u64,
+) -> TestResult {
+    sqlx::query(
+        r#"
+        INSERT INTO checkpoint (owner, checkpoint_id, offset_lsn, version)
+        VALUES ($1, $2, $3, 1)
+        ON CONFLICT (owner, checkpoint_id)
+        DO UPDATE SET offset_lsn = EXCLUDED.offset_lsn, version = checkpoint.version + 1
+        "#,
+    )
+    .bind(selector.shadow_checkpoint_owner().as_str())
+    .bind(selector.shadow_checkpoint_id().as_str())
+    .bind(i64::try_from(offset)?)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 /// 固定时钟时刻（`Duration::from_secs` 取 `u64`）。
 fn fixed_clock_time() -> std::time::SystemTime {
     std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(TEST_OCCURRED_SECS)
@@ -3188,6 +3221,86 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     }
 
     app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_active_pointer_promote_requires_exact_precondition_and_supports_rollback()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let raw_projection = format!("audit.session-projection-{}", uuid::Uuid::new_v4().simple());
+    let v1 = projection_control_selector(&raw_projection, "v1");
+    let v2 = projection_control_selector(&raw_projection, "v2");
+
+    let store = std::sync::Arc::new(store);
+    let capability = crate::ProjectionMaintenanceCapability::new("test-operator")?;
+    let control = crate::PgStore::projection_control(std::sync::Arc::clone(&store), capability);
+    let source_high_water = control
+        .status(&v1)
+        .await?
+        .source_high_water_lsn()
+        .map(|lsn| lsn.get())
+        .unwrap_or(0);
+    let v1_high_water = source_high_water.max(10);
+    let v2_high_water = source_high_water.max(20);
+    insert_projection_shadow_checkpoint(&store, &v1, v1_high_water).await?;
+    insert_projection_shadow_checkpoint(&store, &v2, v2_high_water).await?;
+    assert!(control.status(&v1).await?.pointer().is_none());
+
+    let first = control
+        .promote(&v1, crate::ProjectionPointerPrecondition::ExpectUnset)
+        .await?;
+    assert!(first.previous().is_none());
+    assert_eq!(first.active().version().as_str(), "v1");
+    assert_eq!(
+        first.active().high_water_lsn(),
+        Some(consistency::Lsn::new(v1_high_water))
+    );
+
+    let stale = control
+        .promote(&v2, crate::ProjectionPointerPrecondition::ExpectUnset)
+        .await;
+    assert!(matches!(
+        stale,
+        Err(crate::ProjectionControlError::PreconditionFailed)
+    ));
+
+    let second = control
+        .promote(
+            &v2,
+            crate::ProjectionPointerPrecondition::ExpectedActiveVersion(
+                eventexec::ProjectionVersion::parse("v1")?,
+            ),
+        )
+        .await?;
+    assert_eq!(second.previous().map(|p| p.version().as_str()), Some("v1"));
+    assert_eq!(second.active().version().as_str(), "v2");
+    assert_eq!(
+        second.active().high_water_lsn(),
+        Some(consistency::Lsn::new(v2_high_water))
+    );
+
+    let rollback = control
+        .promote(
+            &v1,
+            crate::ProjectionPointerPrecondition::ExpectedActiveVersion(
+                eventexec::ProjectionVersion::parse("v2")?,
+            ),
+        )
+        .await?;
+    assert_eq!(rollback.active().version().as_str(), "v1");
+    assert_eq!(
+        control
+            .status(&v1)
+            .await?
+            .pointer()
+            .map(|p| p.version().as_str()),
+        Some("v1")
+    );
+
     store.shutdown().await?;
     Ok(())
 }

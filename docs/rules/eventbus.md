@@ -319,7 +319,8 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   `OperatorDlqCapability`，只恢复原 outbox 行为 `pending`；outbox DLX payload 副本保留在 `dead_letter`
   用于审计，不参与 redrive。Saga 与 projection `dead_letter` 只作审计与诊断，不支持 replay 成 outbox；
   projection poison `message_id` 固定为 `projection:<owner>:<projection_id>:<lsn>`，重复写入必须幂等。
-  生产 saga/projection DLQ 当前没有可安全重放的 outbox contract source，强行 replay 会绕过 schema 列权威性。
+  Projection read-model shadow replay 不从 DLQ 恢复，必须走 `rss projections replay`，输入源是
+  `projection_events` 的 generated projection input binding 镜像。
   `OperatorDlqCapability::issue_for_authorized_operator()`
   只能在 admin/PDP 边界签发，调用点由 dylint `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；
   replay decrypt 只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与

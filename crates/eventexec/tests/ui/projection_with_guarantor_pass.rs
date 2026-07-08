@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
-use consistency::{EngineError, Lsn, PartitionSerialDelivery, ProjectionEvent, Projector, SerialInOrder};
+use consistency::{
+    EngineError, Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionEvent, Projector,
+    SerialInOrder,
+};
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, OwnerCheckpointStore, SaveOutcome,
@@ -16,8 +19,8 @@ use eventexec::projection::ProjectionHarness;
 struct NoopProjector;
 
 impl Projector for NoopProjector {
-    async fn apply<E: ProjectionEvent>(&self, _: &E) -> Result<(), EngineError> {
-        Ok(())
+    async fn apply<E: ProjectionEvent>(&self, _: &E) -> Result<ProjectionApplyOutcome, EngineError> {
+        Ok(ProjectionApplyOutcome::Applied)
     }
 }
 
