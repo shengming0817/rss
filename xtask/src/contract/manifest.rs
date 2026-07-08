@@ -25,13 +25,14 @@ pub(crate) const SCHEMA_KEY_REQUEST: &str = "request";
 pub(crate) const SCHEMA_KEY_RESPONSE: &str = "response";
 pub(crate) const SCHEMA_KEY_PAYLOAD: &str = "payload";
 
-/// per-kind 字段名常量（#1035）——DRY 于 validate R8/R9 + finding 文案（对齐 SCHEMA_KEY_* 范式，
-/// 防裸串拼写漂移）。`FIELD_SAGA` 用 `[saga]` 形态指代 TOML 表，与文案一致。
+/// per-kind / governance block 字段名常量（#1035）——DRY 于 validate R8/R9/R22 + finding 文案（对齐
+/// SCHEMA_KEY_* 范式，防裸串拼写漂移）。`FIELD_*` block 常量用 TOML 表形态指代，与文案一致。
 pub(crate) const FIELD_PATH: &str = "path";
 pub(crate) const FIELD_METHOD: &str = "method";
 pub(crate) const FIELD_TOPIC: &str = "topic";
 pub(crate) const FIELD_DELIVERY: &str = "delivery";
 pub(crate) const FIELD_SAGA: &str = "[saga]";
+pub(crate) const FIELD_RECONCILE: &str = "[reconcile]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_PROJECTION: &str = "[endpoints.http.projection]";
@@ -72,6 +73,9 @@ pub(crate) struct ContractManifest {
     /// saga per-kind：`[saga]` 专属 block。active saga 必填（R8）；内部良构由 R10 守。
     #[serde(default)]
     pub(crate) saga: Option<SagaBlock>,
+    /// L4 reconcile 结构语义：`[reconcile]` 顶层 block。DeviceLatent 必填（R22）；字段闭值由类型层守。
+    #[serde(default)]
+    pub(crate) reconcile: Option<ReconcileBlock>,
     /// event 订阅声明（#1120）：`[[subscriptions]]` 数组，每项声明一个消费者域 + consumer group。
     /// `#[serde(default)]` ⇒ 无 subscriptions 字段的既有契约仍解析（空 vec，不破坏 CONTRACT-FREEZE-01）。
     /// active event 必须非空（EVENT-ACTIVE-SUB-01，R14）；draft/deprecated 豁免。
@@ -224,10 +228,6 @@ pub(crate) enum WorkflowRequirement {
 pub(crate) struct DeviceLatentCapability {
     #[serde(rename = "loop")]
     pub(crate) loop_kind: DeviceLatentLoop,
-    pub(crate) tenancy: DeviceLatentTenancy,
-    pub(crate) trigger: DeviceLatentTrigger,
-    pub(crate) fencing: DeviceLatentFencing,
-    pub(crate) late_message_policy: DeviceLatentLateMessagePolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -260,6 +260,20 @@ pub(crate) enum DeviceLatentFencing {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DeviceLatentLateMessagePolicy {
     Idempotent,
+}
+
+/// L4 reconcile block（TOML `[reconcile]` 表）。
+///
+/// 与 `[capabilities.deviceLatent]` 分工：capability block 证明 `DeviceLatent` 使用 reconcile loop；本 block
+/// 声明该 loop 的 tenancy / trigger / fencing / late-message policy。字段全为闭枚举且非 `Option`，缺字段、
+/// 未知字段或坏值均解析即拒（Hard）。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct ReconcileBlock {
+    pub(crate) tenancy: DeviceLatentTenancy,
+    pub(crate) trigger: DeviceLatentTrigger,
+    pub(crate) fencing: DeviceLatentFencing,
+    pub(crate) late_message_policy: DeviceLatentLateMessagePolicy,
 }
 
 /// 契约生命周期。`active` 才需 assembly 接线（见 contract-fanout.md §契约归属）。
@@ -711,6 +725,8 @@ mod tests {
 
             [capabilities.deviceLatent]
             loop = "reconcile"
+
+            [reconcile]
             tenancy = "tenant-scoped"
             trigger = "interval"
             fencing = "required"
@@ -745,11 +761,15 @@ mod tests {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("deviceLatent capability should parse"))?;
         assert_eq!(device.loop_kind, DeviceLatentLoop::Reconcile);
-        assert_eq!(device.tenancy, DeviceLatentTenancy::TenantScoped);
-        assert_eq!(device.trigger, DeviceLatentTrigger::Interval);
-        assert_eq!(device.fencing, DeviceLatentFencing::Required);
+        let reconcile = m
+            .reconcile
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("reconcile block should parse"))?;
+        assert_eq!(reconcile.tenancy, DeviceLatentTenancy::TenantScoped);
+        assert_eq!(reconcile.trigger, DeviceLatentTrigger::Interval);
+        assert_eq!(reconcile.fencing, DeviceLatentFencing::Required);
         assert_eq!(
-            device.late_message_policy,
+            reconcile.late_message_policy,
             DeviceLatentLateMessagePolicy::Idempotent
         );
         Ok(())
@@ -786,15 +806,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_incomplete_device_latent_capability() {
+    fn rejects_incomplete_reconcile_block() {
+        for missing_line in [
+            r#"tenancy = "tenant-scoped""#,
+            r#"trigger = "interval""#,
+            r#"fencing = "required""#,
+            r#"lateMessagePolicy = "idempotent""#,
+        ] {
+            let toml = format!(
+                r#"{VALID_HTTP}
+
+                [capabilities.deviceLatent]
+                loop = "reconcile"
+
+                [reconcile]
+                tenancy = "tenant-scoped"
+                trigger = "interval"
+                fencing = "required"
+                lateMessagePolicy = "idempotent"
+            "#
+            )
+            .replace(missing_line, "");
+            assert!(
+                ContractManifest::from_toml_str(&toml).is_err(),
+                "missing reconcile field should fail parse: {missing_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_reconcile_field() {
         let toml = format!(
             r#"{VALID_HTTP}
 
             [capabilities.deviceLatent]
             loop = "reconcile"
+
+            [reconcile]
             tenancy = "tenant-scoped"
             trigger = "interval"
             fencing = "required"
+            lateMessagePolicy = "idempotent"
+            debounceMillis = 1000
         "#
         );
         assert!(ContractManifest::from_toml_str(&toml).is_err());

@@ -33,7 +33,8 @@
 //! 是 target tenant，非 ambient tenant source，按窄例外放行。
 //! INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— `consistencyLevel`
 //! 必须有 typed `[capabilities.*]` 证据，且能力块不得跨等级漂移（R22）。HTTP L2 producer 的 `emits`
-//! 须引用存在的 L2 active event contract，L3/L4 只接受当前 manifest 能表达的 workflow / device-latent 证据。
+//! 须引用存在的 L2 active event contract，L3 只接受当前 manifest 能表达的 workflow 证据；L4 还要求
+//! device-latent evidence + `[reconcile]` block。
 //! Medium（CI 门）；每条规则配 synthetic red case（见 `#[cfg(test)]`），
 //! anti-vacuity：全合法绿用例必过、各红用例必失。
 //! Hard 类型层部分（字段集冻结、枚举解析拒绝、`u64` 非负、嵌套 `deny_unknown_fields`）见 `manifest.rs`
@@ -61,10 +62,10 @@ use super::manifest::{
     Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
     FIELD_DELIVERY, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
     FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
-    FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint,
-    HttpHeaderMode, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, OutboxAtomicity,
-    OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, WorkflowMode,
-    WorkflowOrdering, WorkflowRequirement,
+    FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth,
+    HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpResourceSharingMode, Lifecycle,
+    LocalTxBoundary, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST,
+    SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -186,7 +187,8 @@ pub(crate) enum Rule {
     /// INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 { level = "Medium", exec = "verify", source = "code" }— 一个 `{domain}/{version}` 模块要么全扁平（恰一契约）、要么全嵌套
     /// （≥1 子契约），不得既含直接 `contract.toml` 又含子目录契约（Medium，CI 门）。跨契约规则（需 group 视图）。
     SlugMixing,
-    /// R22：`consistencyLevel` 须匹配 typed `[capabilities.*]` 证据；HTTP L2 producer 的 emits 引用须存在且为 L2 event。
+    /// R22：`consistencyLevel` 须匹配 typed `[capabilities.*]` 证据；HTTP L2 producer 的 emits 引用须存在且为 L2 event；
+    /// L4 DeviceLatent 须声明 `[reconcile]` block。
     ///
     /// INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— 一致性等级不能只停留在字符串枚举；
     /// 必须有闭值 typed 能力证据，禁止跨等级 stray capability，防 L2/L3/L4 语义虚开。
@@ -454,24 +456,17 @@ fn rule_consistency_capability_one(
             out.extend(unexpected_capabilities(m, label, &[CAP_WORKFLOW]));
         }
         ConsistencyLevel::DeviceLatent => {
-            if m.kind != ContractKind::Http {
-                out.push(consistency_capability_finding(
-                    m,
-                    label,
-                    CAP_DEVICE_LATENT,
-                    "DeviceLatent 当前须由 kind=http + [capabilities.deviceLatent] 声明设备长延迟收敛入口",
-                ));
-            }
-            if m.capabilities.device_latent.is_none() {
-                out.push(consistency_capability_finding(
-                    m,
-                    label,
-                    CAP_DEVICE_LATENT,
-                    "DeviceLatent 须声明 reconcile/tenancy/trigger/fencing/lateMessagePolicy",
-                ));
-            }
+            out.extend(rule_device_latent_capability(c, label));
             out.extend(unexpected_capabilities(m, label, &[CAP_DEVICE_LATENT]));
         }
+    }
+    if m.consistency_level != ConsistencyLevel::DeviceLatent && m.reconcile.is_some() {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_CAPABILITY_SCOPE,
+            "[reconcile] 仅允许用于 consistencyLevel=DeviceLatent",
+        ));
     }
     out
 }
@@ -679,6 +674,36 @@ fn rule_workflow_capability(
                 ));
             }
         }
+    }
+    out
+}
+
+fn rule_device_latent_capability(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+    let m = &c.manifest;
+    let mut out = Vec::new();
+    if m.kind != ContractKind::Http {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_DEVICE_LATENT,
+            "DeviceLatent 当前须由 kind=http + [capabilities.deviceLatent] 声明设备长延迟收敛入口",
+        ));
+    }
+    if m.capabilities.device_latent.is_none() {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_DEVICE_LATENT,
+            "DeviceLatent 须声明 [capabilities.deviceLatent] 且 loop=\"reconcile\"",
+        ));
+    }
+    if m.reconcile.is_none() {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            FIELD_RECONCILE,
+            "DeviceLatent 须声明 [reconcile] tenancy/trigger/fencing/lateMessagePolicy",
+        ));
     }
     out
 }
@@ -1910,8 +1935,8 @@ mod tests {
         Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod,
         HttpProjection, HttpProjectionField, HttpProjectionFieldName, HttpResourceSharing,
         HttpResourceSharingMode, Lifecycle, LocalTxCapability, OutboxCapability,
-        PartitionKeyStrategy, SagaBlock, SagaStep, Schemas, SubscriberReadiness, Subscription,
-        SubscriptionTopology, WorkflowCapability,
+        PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas, SubscriberReadiness,
+        Subscription, SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -1938,6 +1963,7 @@ mod tests {
             topic: None,
             delivery: None,
             saga: None,
+            reconcile: None,
             subscriptions: Vec::new(),
             capabilities: Capabilities::default(),
         }
@@ -2065,12 +2091,17 @@ mod tests {
         Capabilities {
             device_latent: Some(DeviceLatentCapability {
                 loop_kind: DeviceLatentLoop::Reconcile,
-                tenancy: DeviceLatentTenancy::TenantScoped,
-                trigger: DeviceLatentTrigger::Interval,
-                fencing: DeviceLatentFencing::Required,
-                late_message_policy: DeviceLatentLateMessagePolicy::Idempotent,
             }),
             ..Capabilities::default()
+        }
+    }
+
+    fn valid_reconcile_block() -> ReconcileBlock {
+        ReconcileBlock {
+            tenancy: DeviceLatentTenancy::TenantScoped,
+            trigger: DeviceLatentTrigger::Interval,
+            fencing: DeviceLatentFencing::Required,
+            late_message_policy: DeviceLatentLateMessagePolicy::Idempotent,
         }
     }
 
@@ -4469,6 +4500,51 @@ mod tests {
     }
 
     #[test]
+    fn r22_consistency_workflow_eventual_does_not_require_reconcile() {
+        let mut saga = saga_manifest(Some(valid_saga_block()));
+        saga.capabilities = workflow_saga_capability();
+
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        event.id = "identity.session-created".to_string();
+        event.capabilities = outbox_fact_capability();
+
+        let mut projection = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::WorkflowEventual,
+            ContractOwner::Domain("audit".to_string()),
+            http_schemas(),
+        );
+        projection.id = "audit.session-projection".to_string();
+        projection.capabilities = workflow_projection_capability();
+
+        let findings = rule_consistency_capability(&[
+            discovered(saga, PathBuf::from("/saga")),
+            discovered(event, PathBuf::from("/event")),
+            discovered(projection, PathBuf::from("/projection")),
+        ]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn r22_consistency_non_device_latent_reconcile_block_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.id = "seed.local".to_string();
+        m.reconcile = Some(valid_reconcile_block());
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "seed.local", CAP_CAPABILITY_SCOPE);
+    }
+
+    #[test]
     fn r22_consistency_device_latent_missing_capability_rejected() {
         let mut m = manifest(
             ContractKind::Http,
@@ -4497,6 +4573,20 @@ mod tests {
         m.capabilities = device_latent_capability();
         let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
         assert_r22_detail(&findings, "device.cert-reconcile", CAP_DEVICE_LATENT);
+    }
+
+    #[test]
+    fn r22_consistency_device_latent_missing_reconcile_block_rejected() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::DeviceLatent,
+            ContractOwner::Domain("device".to_string()),
+            http_schemas(),
+        );
+        m.id = "device.cert-reconcile".to_string();
+        m.capabilities = device_latent_capability();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "device.cert-reconcile", "[reconcile]");
     }
 
     #[test]
@@ -4559,6 +4649,7 @@ mod tests {
         );
         device.id = "device.cert-reconcile".to_string();
         device.capabilities = device_latent_capability();
+        device.reconcile = Some(valid_reconcile_block());
 
         let contracts = vec![
             discovered(local, PathBuf::from("/x")),

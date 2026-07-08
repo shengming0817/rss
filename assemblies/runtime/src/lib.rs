@@ -33,8 +33,8 @@ pub use infra::pg::{build_pg_audit_admin_config, build_pg_config, build_pg_migra
 pub use infra::redis::build_redis_runtime_deps;
 pub use infra::s3::build_s3_runtime_deps_from;
 pub use infra::vault::{
-    build_settings_config_value_key_name_from, build_vault_runtime_deps,
-    is_oidc_jwks_export_command, run_oidc_jwks_export_command,
+    KEYPROVIDER_READY_PROBE_NAME, build_settings_config_value_key_name_from,
+    build_vault_runtime_deps, is_oidc_jwks_export_command, run_oidc_jwks_export_command,
 };
 pub use module::SharedRuntimeDeps;
 
@@ -47,7 +47,7 @@ use infra::redis::{
 };
 use infra::s3::{build_s3_canary_config_from, wire_s3_canary};
 use infra::vault::{
-    KEYPROVIDER_READY_PROBE_NAME, KeyProviderReadyProbe, build_keyprovider_readiness_interval,
+    KeyProviderReadyProbe, build_keyprovider_readiness_interval,
     spawn_keyprovider_readiness_sampler, verify_keyprovider_ready,
 };
 use infra::vault::{build_vault_key_provider_from, build_vault_signer_with};

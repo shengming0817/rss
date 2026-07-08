@@ -15,6 +15,26 @@ reconcile 是 L4 desired-state 收敛控制环：周期观察一个域 crate **�
 reconcile **不是业务编排器**（那是 saga），**不是 CQRS 读模型构建器**（那是 projection
 harness）。三者正交，边界见下。
 
+## Contract 声明
+
+L4 device-latent 契约必须同时声明 `consistencyLevel = "DeviceLatent"`、`[capabilities.deviceLatent]`
+和顶层 `[reconcile]` block：
+
+```toml
+[capabilities.deviceLatent]
+loop = "reconcile"
+
+[reconcile]
+tenancy = "tenant-scoped"
+trigger = "interval"
+fencing = "required"
+lateMessagePolicy = "idempotent"
+```
+
+`[capabilities.deviceLatent]` 是 L4 typed capability evidence；`[reconcile]` 是该能力的治理参数面，由
+`cargo xtask contract validate` R22 强制。L3 `WorkflowEventual` contract（saga / projection）不得声明
+`[reconcile]`，也不需要 reconcile block。
+
 ## Desired / Actual / Diff / Converge 模型
 
 L4 模型边界冻结在 `consistency::reconcile` 的纯类型：`DesiredState<T>` / `ActualState<T>` /
