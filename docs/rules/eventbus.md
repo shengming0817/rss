@@ -79,7 +79,9 @@ PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback /
 - **CDC mode**：显式 opt-in `PgInfraDeps::cdc_emitter(clock)` 写 `outbox_log` append-only ledger。该表面向
   logical decoding / CDC adapter，字段包含 `event_id`、`aggregate_type`、`aggregate_id`、contract
   id/version、`schema_hash`、`payload bytea`、`metadata jsonb`、`tenant_id` 与 `causation_id`。`aggregate_id`
-  取 envelope `subject_id`；`partition_key` 只保留 relay 排序语义，不暴露到 CDC aggregate id。
+  取 envelope `subject_id`；`partition_key` 只保留 relay 排序语义，不暴露到 CDC aggregate id。Debezium
+  connector skeleton 由 `cargo xtask cdc-config debezium` 输出，操作步骤见
+  `docs/runbooks/202607081921-1633-cdc-outbox.md`。
 
 `outbox_log` 是 tenant-scoped append-only 表：迁移必须同时落 `ENABLE/FORCE RLS`、标准 `rss.tenant_id`
 policy、`rss_app` 最小 `SELECT/INSERT` 授权与 `UPDATE/DELETE` revoke。tenant、contract version 与

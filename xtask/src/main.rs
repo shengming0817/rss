@@ -2,6 +2,7 @@
 //!
 //! 子命令：
 //!   `cargo xtask codegen [--check]`     契约 schema → committed `generated/`（--check 为 CI 漂移门）
+//!   `cargo xtask cdc-config debezium`   输出 Debezium PostgreSQL outbox_log CDC connector JSON skeleton（只读）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
 //!   `cargo xtask archrules list|verify` ArchRules 派生索引（从真实 carrier 的 `INVARIANT:` 反向索引 rule
@@ -49,6 +50,7 @@
 //!                                      **已接入 GitHub Actions PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
 mod archrules;
 mod assembly;
+mod cdc_config;
 mod cmd;
 mod codegen;
 mod command_symmetry;
@@ -94,6 +96,7 @@ enum Command {
     Codegen {
         check: bool,
     },
+    CdcConfigDebezium,
     ContractValidate,
     AssemblyValidate,
     ArchRulesList,
@@ -152,6 +155,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
     match argv.as_slice() {
         ["codegen"] => Ok(Command::Codegen { check: false }),
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
+        ["cdc-config", rest @ ..] => parse_cdc_config(rest),
         ["archrules", rest @ ..] => parse_archrules(rest),
         ["runtime-baseline", rest @ ..] => parse_runtime_baseline(rest),
         ["contract", rest @ ..] => parse_contract(rest),
@@ -175,9 +179,17 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | runtime-baseline <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify> | runtime-baseline <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
+    }
+}
+
+/// 解析 `cdc-config <provider>` 子命令（fail-closed：当前只接受 `debezium`）。
+fn parse_cdc_config(args: &[&str]) -> Result<Command> {
+    match args {
+        ["debezium"] => Ok(Command::CdcConfigDebezium),
+        other => bail!("未知 cdc-config 子命令: {other:?}；用法: cargo xtask cdc-config debezium"),
     }
 }
 
@@ -351,6 +363,7 @@ fn parse_public_api(args: &[&str]) -> Result<Command> {
 fn dispatch(args: &[String]) -> Result<()> {
     match parse_command(args)? {
         Command::Codegen { check } => codegen::run(check),
+        Command::CdcConfigDebezium => cdc_config::run_debezium(),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
         Command::ArchRulesList => archrules::list(),
@@ -439,6 +452,22 @@ mod tests {
             Command::Codegen { check: true }
         );
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_cdc_config_debezium() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["cdc-config", "debezium"]))?,
+            Command::CdcConfigDebezium
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_cdc_config_rejects_bad_args() {
+        assert!(parse_command(&s(&["cdc-config"])).is_err());
+        assert!(parse_command(&s(&["cdc-config", "kafka"])).is_err());
+        assert!(parse_command(&s(&["cdc-config", "debezium", "--bogus"])).is_err());
     }
 
     #[test]
