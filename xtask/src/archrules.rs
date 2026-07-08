@@ -1123,6 +1123,7 @@ fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
         | "xtask/src/migrations.rs"
         | "xtask/src/pdpallow.rs"
         | "xtask/src/pg_tenant_tx_guard.rs"
+        | "xtask/src/reconcile_outbox_command_guard.rs"
         | "xtask/src/schema_rls.rs"
         | "xtask/src/setlocal_funnel.rs"
         | "xtask/src/src_scan.rs"

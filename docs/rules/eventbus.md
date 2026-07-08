@@ -391,6 +391,23 @@ xtask` `syn` AST 扫描——含 `command::emit_async` 路径 / use-import / whi
 `consistencyLevel = OutboxFact`（R15 机器锁定）；command topic = `<domain>.commands.<name>`（稳定
 dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx）。
 
+### Reconcile transactional command seam
+
+durable reconcile scheduler 有一条专用 sanctioned path：domain reconciler 不拿 `OutboxEmitter` / publisher，
+只拿 `AttemptScope`，并通过 `AttemptScope::record_action_and_enqueue_command(action, ReviewedCommand)` 请求
+同事务写入。`ReviewedCommand` 必须由 `StableDispatchKey` 构造，没有随机 dispatch key fallback；最终 outbox
+`event_id` 由 `tenant + topic + StableDispatchKey` 规范编码，避免跨租户 raw key 共享 durable identity。Postgres
+adapter 是唯一持久化实现：在同一 tenant-scoped transaction 内用 target-local `lease_token + epoch` CAS，
+append action-local `reconcile_actions(result_label='recorded')`，再 append outbox row；outbox conflict 只在同
+tenant/topic/contract/payload 一致时视为幂等。terminal attempt outcome 只写 `reconcile_attempt_results`。该路径不经过
+production `generated::command::CommandEmit` bridge，也不新增真实 active command contract；首个真实 command contract
+与 bridge 接线另行落地。
+
+守卫：`RECONCILE-COMMAND-OUTBOX-SEAM-01` / `cargo xtask reconcile-outbox-command-guard` 禁止
+`eventexec::reconcile` direct publisher/emitter/broker/裸 outbox append，并限制 postgres reconcile adapter 的
+`append_outbox` 只能出现在 `record_action_and_enqueue_command` seam 的同一个 `PgTenantPool::write` transaction
+closure 内，且顺序为 lease CAS → action insert → outbox append。
+
 ## Projection
 
 projection consumer 必须 wire durable projection harness。投影事件载体使用

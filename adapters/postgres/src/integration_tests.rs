@@ -11,10 +11,14 @@
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use consistency::{
-    ConsumerGroup, IdemKey, InboxBacklog, InboxBacklogScope, InboxReceiptContext, InboxStore,
-    LeaseToken, OutboxPayload, SeenState,
+    ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope, InboxReceiptContext,
+    InboxStore, LeaseToken, OutboxPayload, Outcome, SeenState,
 };
 use diport::ManagedResource;
+use eventexec::{
+    AttemptResult, AttemptTrigger, ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome,
+    StableDispatchKey,
+};
 use futures::future::BoxFuture;
 
 use crate::{
@@ -95,6 +99,16 @@ static TEST_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
 
 fn test_contract() -> vocab::ContractBinding {
     vocab::ContractBinding::from_static("test", "test.contract", "v1", TEST_SCHEMA_HASH)
+}
+
+fn scoped_reconcile_dispatch_id(tenant: vocab::TenantId, topic: &str, stable_key: &str) -> String {
+    let tenant = tenant.to_string();
+    format!(
+        "reconcile:v1:t{}:{tenant}:p{}:{topic}:k{}:{stable_key}",
+        tenant.len(),
+        topic.len(),
+        stable_key.len()
+    )
 }
 
 fn session_contract() -> vocab::ContractBinding {
@@ -1483,7 +1497,7 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
          WHERE table_schema = 'public' \
            AND table_name IN ( \
              'reconcile_targets', 'reconcile_leases', \
-             'reconcile_attempts', 'reconcile_actions' \
+             'reconcile_attempts', 'reconcile_actions', 'reconcile_attempt_results' \
            ) \
          ORDER BY table_name",
     )
@@ -1493,6 +1507,7 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
         tables,
         vec![
             ("reconcile_actions".to_string(),),
+            ("reconcile_attempt_results".to_string(),),
             ("reconcile_attempts".to_string(),),
             ("reconcile_leases".to_string(),),
             ("reconcile_targets".to_string(),),
@@ -1521,7 +1536,8 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
          WHERE conrelid IN ( \
              'reconcile_leases'::regclass, \
              'reconcile_attempts'::regclass, \
-             'reconcile_actions'::regclass \
+             'reconcile_actions'::regclass, \
+             'reconcile_attempt_results'::regclass \
            ) \
            AND contype = 'f' \
          ORDER BY conname",
@@ -1550,7 +1566,8 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
              'reconcile_targets'::regclass, \
              'reconcile_leases'::regclass, \
              'reconcile_attempts'::regclass, \
-             'reconcile_actions'::regclass \
+             'reconcile_actions'::regclass, \
+             'reconcile_attempt_results'::regclass \
            ) \
          ORDER BY conname",
     )
@@ -1568,12 +1585,34 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
         "reconcile_attempts_trigger_kind_valid",
         "reconcile_actions_action_kind_valid",
         "reconcile_actions_result_label_valid",
+        "reconcile_attempt_results_result_label_valid",
+        "reconcile_attempt_results_error_consistent",
     ] {
         assert!(
             constraint_text.contains(name),
             "missing reconcile CHECK `{name}` in:\n{constraint_text}"
         );
     }
+
+    let index_text: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname, indexdef \
+         FROM pg_indexes \
+         WHERE schemaname = 'public' \
+           AND tablename = 'reconcile_attempt_results' \
+         ORDER BY indexname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let index_text = index_text
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        index_text.contains("idx_reconcile_attempt_results_latest_target")
+            && index_text.contains("(tenant_id, target_id, completed_at DESC, attempt_id DESC)"),
+        "missing latest-result target covering index:\n{index_text}"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -1642,13 +1681,13 @@ async fn reconcile_rls_grants_and_tenant_isolation() -> TestResult {
          WHERE n.nspname = 'public' \
            AND c.relname IN ( \
              'reconcile_targets', 'reconcile_leases', \
-             'reconcile_attempts', 'reconcile_actions' \
+             'reconcile_attempts', 'reconcile_actions', 'reconcile_attempt_results' \
            ) \
          ORDER BY c.relname",
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(grants.len(), 4, "all reconcile tables must be inspected");
+    assert_eq!(grants.len(), 5, "all reconcile tables must be inspected");
     for (table, rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete) in grants {
         assert!(rls_enabled, "{table} must ENABLE RLS");
         assert!(rls_forced, "{table} must FORCE RLS");
@@ -1659,7 +1698,7 @@ async fn reconcile_rls_grants_and_tenant_isolation() -> TestResult {
                 assert!(can_update, "rss_app must UPDATE mutable {table}");
                 assert!(!can_delete, "rss_app must not DELETE mutable {table}");
             }
-            "reconcile_attempts" | "reconcile_actions" => {
+            "reconcile_attempts" | "reconcile_actions" | "reconcile_attempt_results" => {
                 assert!(!can_update, "rss_app must not UPDATE append-only {table}");
                 assert!(!can_delete, "rss_app must not DELETE append-only {table}");
             }
@@ -1673,14 +1712,14 @@ async fn reconcile_rls_grants_and_tenant_isolation() -> TestResult {
          WHERE schemaname = 'public' \
            AND tablename IN ( \
              'reconcile_targets', 'reconcile_leases', \
-             'reconcile_attempts', 'reconcile_actions' \
+             'reconcile_attempts', 'reconcile_actions', 'reconcile_attempt_results' \
            ) \
            AND policyname = 'tenant_isolation' \
          ORDER BY tablename",
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(policies.len(), 4, "all reconcile tables need tenant policy");
+    assert_eq!(policies.len(), 5, "all reconcile tables need tenant policy");
     for (table, qual, with_check) in policies {
         for body in [qual.as_deref(), with_check.as_deref()] {
             let body = body.ok_or_else(|| {
@@ -1928,8 +1967,19 @@ async fn reconcile_attempts_and_actions_are_append_only_for_rss_app() -> TestRes
     let action_id: (String,) = sqlx::query_as(
         "INSERT INTO reconcile_actions \
          (tenant_id, attempt_id, target_id, action_kind, result_label) \
-         VALUES ($1::uuid, $2::uuid, $3::uuid, 'noop', 'settled') \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'noop', 'recorded') \
          RETURNING action_id::text",
+    )
+    .bind(&tenant)
+    .bind(&attempt_id.0)
+    .bind(&target_id.0)
+    .fetch_one(&store.pool)
+    .await?;
+    let result_id: (String,) = sqlx::query_as(
+        "INSERT INTO reconcile_attempt_results \
+         (tenant_id, attempt_id, target_id, result_label, error_kind) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'transient', 'transient') \
+         RETURNING attempt_id::text",
     )
     .bind(&tenant)
     .bind(&attempt_id.0)
@@ -1954,6 +2004,14 @@ async fn reconcile_attempts_and_actions_are_append_only_for_rss_app() -> TestRes
              WHERE tenant_id = $1::uuid AND action_id = $2::uuid",
             &action_id.0,
         ),
+        (
+            "reconcile_attempt_results",
+            "UPDATE reconcile_attempt_results SET result_label = 'settled' \
+             WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+            "DELETE FROM reconcile_attempt_results \
+             WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+            &result_id.0,
+        ),
     ] {
         let mut tx = store.pool.begin().await?;
         sqlx::query("SET LOCAL ROLE rss_app")
@@ -1977,6 +2035,527 @@ async fn reconcile_attempts_and_actions_are_append_only_for_rss_app() -> TestRes
         assert!(delete.is_err(), "rss_app must not DELETE {table}");
         tx.rollback().await?;
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let resource = format!("scheduler-device-{}", uuid::Uuid::new_v4());
+    let key = ReconcileTargetKey::parse("scheduler-reconciler", "device", &resource)?;
+    let reconcile = store.reconcile();
+    let target = reconcile.upsert_target(tenant, &key).await?;
+
+    ReconcileScheduleStore::pause_target(&reconcile, tenant, target.target_id()).await?;
+    let paused = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "scheduler-reconciler",
+        "holder-a",
+        4,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert!(paused.is_empty(), "disabled target must not be claimed");
+
+    ReconcileScheduleStore::resume_target(&reconcile, tenant, target.target_id()).await?;
+    let claimed = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "scheduler-reconciler",
+        "holder-a",
+        4,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert_eq!(claimed.len(), 1, "resumed due target should be claimed");
+    let claimed = &claimed[0];
+    assert_eq!(claimed.target_id(), target.target_id());
+    assert_eq!(claimed.trigger(), AttemptTrigger::Resync);
+
+    let attempt = match ReconcileScheduleStore::append_attempt(&reconcile, claimed, "holder-a")
+        .await?
+    {
+        ScheduleAttemptOutcome::Started(attempt) => attempt,
+        ScheduleAttemptOutcome::Lost => {
+            return Err(std::io::Error::other("fresh claim should allow append_attempt").into());
+        }
+    };
+    let dispatch_key = format!("reconcile-command-{}", uuid::Uuid::new_v4());
+    let scoped_dispatch_key = scoped_reconcile_dispatch_id(tenant, "test.command", &dispatch_key);
+    let command = ReviewedCommand::new(
+        StableDispatchKey::parse(&dispatch_key)?,
+        "test.command",
+        test_contract(),
+        tenant,
+        b"{\"op\":\"create\"}".to_vec(),
+        subject_id("scheduler-device"),
+        actor_for(tenant),
+    )?;
+    assert_eq!(
+        ReconcileScheduleStore::record_action_and_enqueue_command(
+            &reconcile,
+            &attempt,
+            ConvergeAction::Create,
+            command,
+        )
+        .await?,
+        eventexec::ScheduleLeaseOutcome::Held,
+        "current lease should atomically record action and outbox row"
+    );
+    assert_eq!(
+        ReconcileScheduleStore::record_attempt_result(
+            &reconcile,
+            &attempt,
+            AttemptResult::from_outcome(
+                &Outcome::requeue_after(std::time::Duration::from_millis(250)),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .await?,
+        eventexec::ScheduleLeaseOutcome::Held,
+        "current lease should record terminal attempt result"
+    );
+    assert_eq!(
+        ReconcileScheduleStore::release_lease(&reconcile, claimed).await?,
+        eventexec::ScheduleLeaseOutcome::Held
+    );
+
+    let action: (String, String) = sqlx::query_as(
+        "SELECT action_kind, result_label \
+         FROM reconcile_actions \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(action, ("create".to_string(), "recorded".to_string()));
+
+    let result: (String, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT result_label, requeue_after_ms, error_kind \
+         FROM reconcile_attempt_results \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        result,
+        ("requeue_after".to_string(), Some(250), None),
+        "terminal result should live outside reconcile_actions"
+    );
+
+    let outbox_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM outbox \
+         WHERE tenant_id = $1::uuid \
+           AND event_id = $2 \
+           AND topic = 'test.command' \
+           AND status = 'pending'",
+    )
+    .bind(tenant.to_string())
+    .bind(&scoped_dispatch_key)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        outbox_count.0, 1,
+        "stable dispatch key must enqueue one outbox row"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let reconcile = store.reconcile();
+    let raw_key = format!("shared-reconcile-command-{}", uuid::Uuid::new_v4());
+    for (tenant, resource) in [
+        (
+            vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?,
+            format!("scoped-device-a-{}", uuid::Uuid::new_v4()),
+        ),
+        (
+            vocab::TenantId::parse("22222222-2222-2222-2222-222222222222")?,
+            format!("scoped-device-b-{}", uuid::Uuid::new_v4()),
+        ),
+    ] {
+        let key = ReconcileTargetKey::parse("scoped-command-reconciler", "device", &resource)?;
+        let target = reconcile.upsert_target(tenant, &key).await?;
+        let claimed = ReconcileScheduleStore::claim_due_targets(
+            &reconcile,
+            tenant,
+            "scoped-command-reconciler",
+            "holder-a",
+            1,
+            std::time::Duration::from_secs(30),
+        )
+        .await?;
+        assert_eq!(claimed.len(), 1);
+        let attempt =
+            match ReconcileScheduleStore::append_attempt(&reconcile, &claimed[0], "holder-a")
+                .await?
+            {
+                ScheduleAttemptOutcome::Started(attempt) => attempt,
+                ScheduleAttemptOutcome::Lost => {
+                    return Err(std::io::Error::other("fresh claim should append attempt").into());
+                }
+            };
+        let command = ReviewedCommand::new(
+            StableDispatchKey::parse(&raw_key)?,
+            "test.command",
+            test_contract(),
+            tenant,
+            format!(r#"{{"resource":"{}"}}"#, target.target_id()).into_bytes(),
+            subject_id(target.target_id()),
+            actor_for(tenant),
+        )?;
+        assert_eq!(
+            ReconcileScheduleStore::record_action_and_enqueue_command(
+                &reconcile,
+                &attempt,
+                ConvergeAction::Create,
+                command,
+            )
+            .await?,
+            eventexec::ScheduleLeaseOutcome::Held
+        );
+    }
+
+    for tenant in [
+        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?,
+        vocab::TenantId::parse("22222222-2222-2222-2222-222222222222")?,
+    ] {
+        let scoped_key = scoped_reconcile_dispatch_id(tenant, "test.command", &raw_key);
+        let count: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM outbox \
+             WHERE tenant_id = $1::uuid AND event_id = $2 AND topic = 'test.command'",
+        )
+        .bind(tenant.to_string())
+        .bind(scoped_key)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            count.0, 1,
+            "same raw reconcile command key must enqueue once per tenant"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let resource = format!("conflict-device-{}", uuid::Uuid::new_v4());
+    let key = ReconcileTargetKey::parse("conflict-reconciler", "device", &resource)?;
+    let reconcile = store.reconcile();
+    let _target = reconcile.upsert_target(tenant, &key).await?;
+    let claimed = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "conflict-reconciler",
+        "holder-a",
+        1,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert_eq!(claimed.len(), 1);
+    let attempt =
+        match ReconcileScheduleStore::append_attempt(&reconcile, &claimed[0], "holder-a").await? {
+            ScheduleAttemptOutcome::Started(attempt) => attempt,
+            ScheduleAttemptOutcome::Lost => {
+                return Err(std::io::Error::other("fresh claim should append attempt").into());
+            }
+        };
+    let raw_key = format!("conflicting-command-{}", uuid::Uuid::new_v4());
+
+    for (payload, expected_ok) in [
+        (br#"{"op":"first"}"#.as_slice(), true),
+        (br#"{"op":"second"}"#, false),
+    ] {
+        let command = ReviewedCommand::new(
+            StableDispatchKey::parse(&raw_key)?,
+            "test.command",
+            test_contract(),
+            tenant,
+            payload.to_vec(),
+            subject_id("conflict-device"),
+            actor_for(tenant),
+        )?;
+        let result = ReconcileScheduleStore::record_action_and_enqueue_command(
+            &reconcile,
+            &attempt,
+            ConvergeAction::Create,
+            command,
+        )
+        .await;
+        assert_eq!(
+            result.is_ok(),
+            expected_ok,
+            "same scoped dispatch key with different payload must fail closed"
+        );
+    }
+
+    let action_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM reconcile_actions \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        action_count.0, 1,
+        "failed command conflict must roll back the action insert"
+    );
+
+    let scoped_key = scoped_reconcile_dispatch_id(tenant, "test.command", &raw_key);
+    let outbox: (Vec<u8>,) =
+        sqlx::query_as("SELECT payload FROM outbox WHERE tenant_id = $1::uuid AND event_id = $2")
+            .bind(tenant.to_string())
+            .bind(scoped_key)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(outbox.0, br#"{"op":"first"}"#);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let resource = format!("stale-lease-device-{}", uuid::Uuid::new_v4());
+    let key = ReconcileTargetKey::parse("stale-lease-reconciler", "device", &resource)?;
+    let reconcile = store.reconcile();
+    let target = reconcile.upsert_target(tenant, &key).await?;
+
+    let first_claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "stale-lease-reconciler",
+        "holder-a",
+        1,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert_eq!(first_claim.len(), 1);
+    let stale_claim = &first_claim[0];
+    let stale_attempt =
+        match ReconcileScheduleStore::append_attempt(&reconcile, stale_claim, "holder-a").await? {
+            ScheduleAttemptOutcome::Started(attempt) => attempt,
+            ScheduleAttemptOutcome::Lost => {
+                return Err(std::io::Error::other("fresh claim should append attempt").into());
+            }
+        };
+
+    sqlx::query(
+        "UPDATE reconcile_leases \
+         SET expires_at = now() - interval '1 second' \
+         WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(target.target_id())
+    .execute(&store.pool)
+    .await?;
+
+    let second_claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "stale-lease-reconciler",
+        "holder-b",
+        1,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert_eq!(second_claim.len(), 1);
+    assert_eq!(second_claim[0].trigger(), AttemptTrigger::LeaseReclaim);
+    assert!(
+        second_claim[0].epoch() > stale_claim.epoch(),
+        "lease reclaim must advance target-local epoch"
+    );
+
+    let dispatch_key = format!("stale-reconcile-command-{}", uuid::Uuid::new_v4());
+    let scoped_dispatch_key = scoped_reconcile_dispatch_id(tenant, "test.command", &dispatch_key);
+    let stale_command = ReviewedCommand::new(
+        StableDispatchKey::parse(&dispatch_key)?,
+        "test.command",
+        test_contract(),
+        tenant,
+        b"{\"op\":\"stale\"}".to_vec(),
+        subject_id("stale-device"),
+        actor_for(tenant),
+    )?;
+
+    assert_eq!(
+        ReconcileScheduleStore::record_action_and_enqueue_command(
+            &reconcile,
+            &stale_attempt,
+            ConvergeAction::Update,
+            stale_command,
+        )
+        .await?,
+        eventexec::ScheduleLeaseOutcome::Lost,
+        "stale token+epoch must not record action or outbox"
+    );
+    assert_eq!(
+        ReconcileScheduleStore::record_attempt_result(
+            &reconcile,
+            &stale_attempt,
+            AttemptResult::from_error(
+                &consistency::ReconcileError::new(consistency::EngineErrorKind::Transient),
+                std::time::Duration::from_secs(1),
+            ),
+        )
+        .await?,
+        eventexec::ScheduleLeaseOutcome::Lost,
+        "stale token+epoch must not record terminal result"
+    );
+
+    let action_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM reconcile_actions \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(stale_attempt.attempt_id())
+    .fetch_one(&store.pool)
+    .await?;
+    let result_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM reconcile_attempt_results \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(stale_attempt.attempt_id())
+    .fetch_one(&store.pool)
+    .await?;
+    let outbox_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM outbox \
+         WHERE tenant_id = $1::uuid AND event_id = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&scoped_dispatch_key)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(action_count.0, 0);
+    assert_eq!(result_count.0, 0);
+    assert_eq!(outbox_count.0, 0);
+
+    assert_eq!(
+        ReconcileScheduleStore::release_lease(&reconcile, &second_claim[0]).await?,
+        eventexec::ScheduleLeaseOutcome::Held
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_scheduler_claims_requeue_after_attempt_as_requeue_trigger() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let resource = format!("requeue-device-{}", uuid::Uuid::new_v4());
+    let key = ReconcileTargetKey::parse("requeue-reconciler", "device", &resource)?;
+    let reconcile = store.reconcile();
+    let target = reconcile.upsert_target(tenant, &key).await?;
+
+    let first_claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "requeue-reconciler",
+        "holder-a",
+        1,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert_eq!(first_claim.len(), 1);
+    let attempt =
+        match ReconcileScheduleStore::append_attempt(&reconcile, &first_claim[0], "holder-a")
+            .await?
+        {
+            ScheduleAttemptOutcome::Started(attempt) => attempt,
+            ScheduleAttemptOutcome::Lost => {
+                return Err(std::io::Error::other("fresh claim should append attempt").into());
+            }
+        };
+    assert_eq!(
+        ReconcileScheduleStore::record_attempt_result(
+            &reconcile,
+            &attempt,
+            AttemptResult::from_outcome(
+                &Outcome::requeue_after(std::time::Duration::ZERO),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .await?,
+        eventexec::ScheduleLeaseOutcome::Held
+    );
+    assert_eq!(
+        ReconcileScheduleStore::release_lease(&reconcile, &first_claim[0]).await?,
+        eventexec::ScheduleLeaseOutcome::Held
+    );
+
+    let requeue_claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "requeue-reconciler",
+        "holder-b",
+        1,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    assert_eq!(requeue_claim.len(), 1);
+    assert_eq!(requeue_claim[0].target_id(), target.target_id());
+    assert_eq!(requeue_claim[0].trigger(), AttemptTrigger::Requeue);
+
+    assert_eq!(
+        ReconcileScheduleStore::release_lease(&reconcile, &requeue_claim[0]).await?,
+        eventexec::ScheduleLeaseOutcome::Held
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_scheduler_target_pause_resume_missing_target_fails_closed() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let missing_target = uuid::Uuid::new_v4().to_string();
+    let reconcile = store.reconcile();
+
+    assert!(
+        ReconcileScheduleStore::pause_target(&reconcile, tenant, &missing_target)
+            .await
+            .is_err(),
+        "pause must fail when the target row is missing"
+    );
+    assert!(
+        ReconcileScheduleStore::resume_target(&reconcile, tenant, &missing_target)
+            .await
+            .is_err(),
+        "resume must fail when the target row is missing"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -7230,6 +7809,88 @@ async fn migration_0040_rejects_non_empty_legacy_projection_events() -> TestResu
             .contains("projection_events must be empty before enabling projection writer funnel"),
         "unexpected migration error: {rendered}"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0045：legacy reconcile_actions 的 terminal result 必须先 backfill 到 reconcile_attempt_results。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0045_backfills_legacy_reconcile_action_results() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    create_rss_app_role_for_migration_test(&store).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0041_create_reconcile_schema.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    let tenant = vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?;
+    let target_id: (String,) = sqlx::query_as(
+        "INSERT INTO reconcile_targets (tenant_id, reconciler_id, resource_kind, resource_id) \
+         VALUES ($1::uuid, 'migration-reconciler', 'device', 'migration-device') \
+         RETURNING target_id::text",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    let attempt_id: (String,) = sqlx::query_as(
+        "INSERT INTO reconcile_attempts \
+         (tenant_id, target_id, lease_token, epoch, holder_id, trigger_kind) \
+         VALUES ($1::uuid, $2::uuid, gen_random_uuid(), 1, 'holder-a', 'resync') \
+         RETURNING attempt_id::text",
+    )
+    .bind(tenant.to_string())
+    .bind(&target_id.0)
+    .fetch_one(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO reconcile_actions \
+         (tenant_id, attempt_id, target_id, action_kind, result_label, requeue_after_ms, error_kind) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, 'update', 'transient', NULL, NULL)",
+    )
+    .bind(tenant.to_string())
+    .bind(&attempt_id.0)
+    .bind(&target_id.0)
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0044_create_reconcile_attempt_results.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/0045_reconcile_actions_recorded_label.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    let result: (String, Option<String>) = sqlx::query_as(
+        "SELECT result_label, error_kind \
+         FROM reconcile_attempt_results \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&attempt_id.0)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        result,
+        ("transient".to_string(), Some("transient".to_string())),
+        "0045 must preserve legacy terminal result before action rows become recorded"
+    );
+
+    let action: (String, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT result_label, requeue_after_ms, error_kind \
+         FROM reconcile_actions \
+         WHERE tenant_id = $1::uuid AND attempt_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&attempt_id.0)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(action, ("recorded".to_string(), None, None));
 
     store.shutdown().await?;
     Ok(())

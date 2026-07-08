@@ -78,9 +78,10 @@ pub use policy_repo::PgPolicyRepo;
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
 pub use reconcile::{
-    PgReconcileStore, ReconcileActionErrorKind, ReconcileActionInsert, ReconcileAttemptInsert,
-    ReconcileAttemptTrigger, ReconcileKeyError, ReconcileLease, ReconcileLeaseOutcome,
-    ReconcileLedgerId, ReconcileStoreError, ReconcileTarget, ReconcileTargetKey,
+    PgReconcileStore, ReconcileActionErrorKind, ReconcileAttemptInsert,
+    ReconcileAttemptResultInsert, ReconcileAttemptTrigger, ReconcileKeyError, ReconcileLease,
+    ReconcileLeaseOutcome, ReconcileLedgerId, ReconcileStoreError, ReconcileTarget,
+    ReconcileTargetKey,
 };
 pub use refresh_token_store::PgRefreshTokenStore;
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;

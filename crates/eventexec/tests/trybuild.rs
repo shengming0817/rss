@@ -12,6 +12,8 @@ fn reconcile_ui() {
     let t = trybuild::TestCases::new();
     // 三参齐全 → 编译通过。
     t.pass("tests/ui/reconcile_builder_pass.rs");
+    // durable scheduler + command seam API 齐全 → 编译通过。
+    t.pass("tests/ui/reconcile_durable_scheduler_pass.rs");
     // 漏 tenancy（第二参）→ 编译错。
     t.compile_fail("tests/ui/reconcile_missing_tenancy_fail.rs");
     // 漏 trigger（第三参）→ 编译错。

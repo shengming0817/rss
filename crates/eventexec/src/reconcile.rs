@@ -24,12 +24,18 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use consistency::{Context, EntityId, Reconciler, Request};
-use diport::LeaderElector;
+use consistency::outbox::{Entry, OutboxPayload, Topic};
+use consistency::{
+    Context, ConvergeAction, EntityId, Outcome, ReconcileError, ReconcileResultLabel, Reconciler,
+    Request,
+};
+use diport::{EnvelopeSubjectId, LeaderElector, OutboxActor, OutboxEnvelopeParts, RedactedSource};
 use futures::FutureExt;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::WorkerHealth;
+use crate::command::{CommandEmitError, DispatchId};
 
 /// readyz probe 名（无 `_ready` 后缀，对齐 relay probe 约定）。
 pub const RECONCILE_PROBE: &str = "reconcile";
@@ -38,6 +44,1074 @@ pub const RECONCILE_PROBE: &str = "reconcile";
 const LEASE_TTL: Duration = Duration::from_secs(15);
 /// 续租轮询间隔（< `LEASE_TTL`，留续租裕度）。
 const RENEW_INTERVAL: Duration = Duration::from_secs(5);
+
+// ── Durable scheduler API（PG-backed scheduler + command outbox seam）────────
+
+/// Durable reconcile scheduler storage failure.
+///
+/// Display is intentionally constant; provider errors stay redacted behind [`RedactedSource`].
+#[derive(Debug, thiserror::Error)]
+#[error("reconcile schedule store operation failed")]
+pub struct ReconcileScheduleError {
+    #[source]
+    source: RedactedSource,
+}
+
+impl ReconcileScheduleError {
+    /// Wrap a provider/storage error without exposing its Display text to callers.
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: RedactedSource::new(source),
+        }
+    }
+}
+
+/// Durable scheduler configuration error.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReconcileConfigError {
+    /// Lease TTL must be at least one second because durable providers persist it at second granularity.
+    #[error("reconcile lease ttl must be at least one second")]
+    LeaseTtlTooShort,
+    /// Lease TTL must not contain subsecond precision because durable providers persist it at second granularity.
+    #[error("reconcile lease ttl must be whole seconds")]
+    LeaseTtlSubsecond,
+    /// Lease TTL exceeded the durable provider seconds range.
+    #[error("reconcile lease ttl is too large")]
+    LeaseTtlTooLarge,
+    /// Claim batch size must be positive.
+    #[error("reconcile claim batch size must be positive")]
+    BatchSizeZero,
+}
+
+/// Target-local lease CAS result for durable reconcile writes.
+#[must_use = "lease CAS outcomes must be matched so Lost is handled explicitly"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleLeaseOutcome {
+    /// The target lease token + epoch still matched.
+    Held,
+    /// The target lease was reclaimed or expired before the write.
+    Lost,
+}
+
+/// Attempt append result under the claimed target lease.
+#[must_use = "attempt append outcomes must be matched so Lost is handled explicitly"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleAttemptOutcome {
+    /// Attempt row was appended and can be reconciled.
+    Started(ReconcileAttempt),
+    /// The target lease was no longer held before the attempt could start.
+    Lost,
+}
+
+/// Trigger reason for an append-only reconcile attempt row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptTrigger {
+    /// Periodic due-target scheduler tick.
+    Resync,
+    /// Targeted event dispatch.
+    Targeted,
+    /// Requeue requested by prior outcome.
+    Requeue,
+    /// Expired lease was reclaimed.
+    LeaseReclaim,
+}
+
+impl AttemptTrigger {
+    /// Stable DB/log label.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Resync => "resync",
+            Self::Targeted => "targeted",
+            Self::Requeue => "requeue",
+            Self::LeaseReclaim => "lease_reclaim",
+        }
+    }
+}
+
+/// Error classification persisted with an attempt result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptErrorKind {
+    /// Retryable failure.
+    Transient,
+    /// Non-retryable failure.
+    Permanent,
+    /// Invariant violation.
+    Invariant,
+}
+
+impl AttemptErrorKind {
+    /// Stable DB/log label.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+            Self::Invariant => "invariant",
+        }
+    }
+
+    fn from_error(error: &ReconcileError) -> Self {
+        if error.is_transient() {
+            Self::Transient
+        } else if error.is_permanent() {
+            Self::Permanent
+        } else {
+            Self::Invariant
+        }
+    }
+}
+
+/// Durable target claimed by the scheduler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedTarget {
+    tenant: vocab::TenantId,
+    target_id: String,
+    lease_token: String,
+    epoch: u64,
+    reconciler_id: String,
+    resource_kind: String,
+    resource_id: String,
+    trigger: AttemptTrigger,
+}
+
+impl ClaimedTarget {
+    /// Build a claimed target from a provider claim row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tenant: vocab::TenantId,
+        target_id: impl Into<String>,
+        lease_token: impl Into<String>,
+        epoch: u64,
+        reconciler_id: impl Into<String>,
+        resource_kind: impl Into<String>,
+        resource_id: impl Into<String>,
+        trigger: AttemptTrigger,
+    ) -> Self {
+        Self {
+            tenant,
+            target_id: target_id.into(),
+            lease_token: lease_token.into(),
+            epoch,
+            reconciler_id: reconciler_id.into(),
+            resource_kind: resource_kind.into(),
+            resource_id: resource_id.into(),
+            trigger,
+        }
+    }
+
+    /// Target tenant.
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// Target id as provider UUID text.
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    /// Current target lease token.
+    pub fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+
+    /// Target-local lease epoch.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Reconciler namespace.
+    pub fn reconciler_id(&self) -> &str {
+        &self.reconciler_id
+    }
+
+    /// Resource kind within the reconciler.
+    pub fn resource_kind(&self) -> &str {
+        &self.resource_kind
+    }
+
+    /// Opaque resource id.
+    pub fn resource_id(&self) -> &str {
+        &self.resource_id
+    }
+
+    /// Attempt trigger associated with the claim.
+    pub fn trigger(&self) -> AttemptTrigger {
+        self.trigger
+    }
+}
+
+/// Append-only attempt identity tied to the target lease that created it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileAttempt {
+    attempt_id: String,
+    target: ClaimedTarget,
+}
+
+impl ReconcileAttempt {
+    /// Build an attempt handle from a store-generated id and its claimed target.
+    pub fn new(attempt_id: impl Into<String>, target: ClaimedTarget) -> Self {
+        Self {
+            attempt_id: attempt_id.into(),
+            target,
+        }
+    }
+
+    /// Attempt id as provider UUID text.
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+
+    /// Claimed target protected by this attempt.
+    pub fn target(&self) -> &ClaimedTarget {
+        &self.target
+    }
+}
+
+/// Terminal attempt result persisted separately from action ledger rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptResult {
+    result: ReconcileResultLabel,
+    error_kind: Option<AttemptErrorKind>,
+    requeue_after: Option<Duration>,
+    next_run_after: Duration,
+}
+
+impl AttemptResult {
+    /// Successful outcome result.
+    pub fn from_outcome(outcome: &Outcome, default_next_run_after: Duration) -> Self {
+        let requeue_after = outcome.requeue_interval();
+        Self {
+            result: ReconcileResultLabel::from_outcome(outcome),
+            error_kind: None,
+            requeue_after,
+            next_run_after: requeue_after.unwrap_or(default_next_run_after),
+        }
+    }
+
+    /// Error result.
+    pub fn from_error(error: &ReconcileError, next_run_after: Duration) -> Self {
+        Self {
+            result: ReconcileResultLabel::from_error(error),
+            error_kind: Some(AttemptErrorKind::from_error(error)),
+            requeue_after: None,
+            next_run_after,
+        }
+    }
+
+    /// Panic is mapped to transient by the reconcile harness contract.
+    pub fn from_panic(next_run_after: Duration) -> Self {
+        Self {
+            result: ReconcileResultLabel::from_panic(),
+            error_kind: Some(AttemptErrorKind::Transient),
+            requeue_after: None,
+            next_run_after,
+        }
+    }
+
+    /// Stable result label.
+    pub fn result(&self) -> ReconcileResultLabel {
+        self.result
+    }
+
+    /// Optional error classification.
+    pub fn error_kind(&self) -> Option<AttemptErrorKind> {
+        self.error_kind
+    }
+
+    /// Optional successful requeue delay.
+    pub fn requeue_after(&self) -> Option<Duration> {
+        self.requeue_after
+    }
+
+    /// Delay before this target is due again.
+    pub fn next_run_after(&self) -> Duration {
+        self.next_run_after
+    }
+}
+
+/// Stable dispatch key required for reconcile command outbox writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StableDispatchKey(String);
+
+impl StableDispatchKey {
+    /// Parse a reviewed stable dispatch key.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, CommandEmitError> {
+        let raw = raw.into();
+        DispatchId::from_idempotency_key(&raw)?;
+        Ok(Self(raw))
+    }
+
+    /// Borrow the stable key.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Reviewed command entry that can only be built with a stable dispatch key.
+///
+/// This is the transactional counterpart of `eventexec::command::emit_async`: it produces the
+/// same command outbox primitives but does not call an emitter, so a provider can append action
+/// ledger + outbox row in one tenant transaction.
+pub struct ReviewedCommand {
+    entry: Entry,
+    envelope: OutboxEnvelopeParts,
+}
+
+impl ReviewedCommand {
+    /// Build a reviewed command outbox write.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        dispatch_key: StableDispatchKey,
+        topic: &str,
+        contract: vocab::ContractBinding,
+        tenant: vocab::TenantId,
+        payload: Vec<u8>,
+        subject_id: EnvelopeSubjectId,
+        actor: OutboxActor,
+    ) -> Result<Self, CommandEmitError> {
+        let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
+        let scoped_key = scoped_dispatch_key(tenant, &parsed_topic, &dispatch_key);
+        let dispatch_id = DispatchId::from_idempotency_key(&scoped_key)?;
+        let entry = Entry::new(
+            parsed_topic,
+            dispatch_id.into_idem_key(),
+            OutboxPayload::from_reviewed_event_bytes(payload),
+        );
+        let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id, actor);
+        Ok(Self { entry, envelope })
+    }
+
+    /// Consume into provider outbox primitives.
+    pub fn into_parts(self) -> (Entry, OutboxEnvelopeParts) {
+        (self.entry, self.envelope)
+    }
+}
+
+fn scoped_dispatch_key(
+    tenant: vocab::TenantId,
+    topic: &Topic,
+    dispatch_key: &StableDispatchKey,
+) -> String {
+    let tenant = tenant.to_string();
+    let topic = topic.as_str();
+    let key = dispatch_key.as_str();
+    format!(
+        "reconcile:v1:t{}:{tenant}:p{}:{topic}:k{}:{key}",
+        tenant.len(),
+        topic.len(),
+        key.len()
+    )
+}
+
+/// Provider-agnostic durable reconcile store.
+#[allow(async_fn_in_trait)]
+pub trait ReconcileScheduleStore {
+    /// Claim due active targets for one tenant and reconciler.
+    async fn claim_due_targets(
+        &self,
+        tenant: vocab::TenantId,
+        reconciler_id: &str,
+        holder_id: &str,
+        limit: u32,
+        lease_ttl: Duration,
+    ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError>;
+
+    /// Append one attempt under the current target lease.
+    async fn append_attempt(
+        &self,
+        target: &ClaimedTarget,
+        holder_id: &str,
+    ) -> Result<ScheduleAttemptOutcome, ReconcileScheduleError>;
+
+    /// Record a terminal attempt result and update target scheduling under lease CAS.
+    async fn record_attempt_result(
+        &self,
+        attempt: &ReconcileAttempt,
+        result: AttemptResult,
+    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>;
+
+    /// Atomically append a converge action and enqueue the reviewed command outbox row.
+    async fn record_action_and_enqueue_command(
+        &self,
+        attempt: &ReconcileAttempt,
+        action: ConvergeAction,
+        command: ReviewedCommand,
+    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>;
+
+    /// Extend a held target lease.
+    async fn extend_lease(
+        &self,
+        target: &ClaimedTarget,
+        lease_ttl: Duration,
+    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>;
+
+    /// Release a held target lease.
+    async fn release_lease(
+        &self,
+        target: &ClaimedTarget,
+    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>;
+
+    /// Disable a target so future due scans skip it.
+    async fn pause_target(
+        &self,
+        tenant: vocab::TenantId,
+        target_id: &str,
+    ) -> Result<(), ReconcileScheduleError>;
+
+    /// Re-enable a target and make it immediately due.
+    async fn resume_target(
+        &self,
+        tenant: vocab::TenantId,
+        target_id: &str,
+    ) -> Result<(), ReconcileScheduleError>;
+}
+
+/// Attempt-scoped recorder handed to durable reconcilers.
+pub struct AttemptScope<'a, S: ReconcileScheduleStore> {
+    store: &'a S,
+    attempt: ReconcileAttempt,
+}
+
+impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
+    fn new(store: &'a S, attempt: ReconcileAttempt) -> Self {
+        Self { store, attempt }
+    }
+
+    /// Current attempt id for correlation.
+    pub fn attempt_id(&self) -> &str {
+        self.attempt.attempt_id()
+    }
+
+    /// Record a converge action and enqueue its command in the same provider transaction.
+    pub async fn record_action_and_enqueue_command(
+        &self,
+        action: ConvergeAction,
+        command: ReviewedCommand,
+    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+        self.store
+            .record_action_and_enqueue_command(&self.attempt, action, command)
+            .await
+    }
+}
+
+/// Durable reconcile strategy.
+#[allow(async_fn_in_trait)]
+pub trait DurableReconciler<S: ReconcileScheduleStore> {
+    /// Reconcile one claimed target.
+    async fn reconcile(
+        &self,
+        ctx: &Context,
+        target: &ClaimedTarget,
+        attempt: &AttemptScope<'_, S>,
+    ) -> Result<Outcome, ReconcileError>;
+}
+
+/// Durable scheduler builder.
+pub struct ReconcileSchedulerBuilder<S, R>
+where
+    S: ReconcileScheduleStore,
+    R: DurableReconciler<S>,
+{
+    store: S,
+    reconciler: R,
+    tenant: vocab::TenantId,
+    reconciler_id: String,
+    holder_id: String,
+    trigger: Trigger,
+    backoff: BackoffPolicy,
+    lease_ttl: Duration,
+    batch_size: u32,
+}
+
+impl<S, R> ReconcileSchedulerBuilder<S, R>
+where
+    S: ReconcileScheduleStore,
+    R: DurableReconciler<S>,
+{
+    /// New durable scheduler builder. Store, tenancy and trigger are required at construction.
+    pub fn new(
+        store: S,
+        reconciler: R,
+        tenant: vocab::TenantId,
+        reconciler_id: impl Into<String>,
+        holder_id: impl Into<String>,
+        _tenancy: Tenancy,
+        trigger: Trigger,
+    ) -> Self {
+        Self {
+            store,
+            reconciler,
+            tenant,
+            reconciler_id: reconciler_id.into(),
+            holder_id: holder_id.into(),
+            trigger,
+            backoff: BackoffPolicy::default(),
+            lease_ttl: LEASE_TTL,
+            batch_size: 16,
+        }
+    }
+
+    /// Override backoff policy.
+    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    /// Override target lease TTL.
+    pub fn with_lease_ttl(mut self, lease_ttl: Duration) -> Result<Self, ReconcileConfigError> {
+        validate_lease_ttl(lease_ttl)?;
+        self.lease_ttl = lease_ttl;
+        Ok(self)
+    }
+
+    /// Override due claim batch size.
+    pub fn with_batch_size(mut self, batch_size: u32) -> Result<Self, ReconcileConfigError> {
+        if batch_size == 0 {
+            return Err(ReconcileConfigError::BatchSizeZero);
+        }
+        self.batch_size = batch_size;
+        Ok(self)
+    }
+
+    /// Build a worker and its control handle.
+    pub fn build(self) -> ReconcileWorker<S, R> {
+        let (paused_tx, paused_rx) = watch::channel(false);
+        ReconcileWorker {
+            store: self.store,
+            reconciler: self.reconciler,
+            tenant: self.tenant,
+            reconciler_id: self.reconciler_id,
+            holder_id: self.holder_id,
+            trigger: self.trigger,
+            backoff: self.backoff,
+            lease_ttl: self.lease_ttl,
+            batch_size: self.batch_size,
+            health: Arc::new(WorkerHealth::healthy()),
+            paused_tx,
+            paused_rx,
+        }
+    }
+}
+
+/// Pause/resume handle for a durable reconcile worker.
+#[derive(Clone)]
+pub struct ReconcileWorkerControl {
+    paused: watch::Sender<bool>,
+}
+
+impl ReconcileWorkerControl {
+    /// Stop new claims after the current in-flight attempt drains.
+    pub fn pause(&self) {
+        let _ = self.paused.send(true);
+    }
+
+    /// Resume due target claims.
+    pub fn resume(&self) {
+        let _ = self.paused.send(false);
+    }
+
+    /// Current local pause flag.
+    pub fn is_paused(&self) -> bool {
+        *self.paused.borrow()
+    }
+}
+
+/// Durable reconcile worker.
+pub struct ReconcileWorker<S, R>
+where
+    S: ReconcileScheduleStore,
+    R: DurableReconciler<S>,
+{
+    store: S,
+    reconciler: R,
+    tenant: vocab::TenantId,
+    reconciler_id: String,
+    holder_id: String,
+    trigger: Trigger,
+    backoff: BackoffPolicy,
+    lease_ttl: Duration,
+    batch_size: u32,
+    health: Arc<WorkerHealth>,
+    paused_tx: watch::Sender<bool>,
+    paused_rx: watch::Receiver<bool>,
+}
+
+enum WorkerLoopEvent {
+    Cancelled,
+    PauseChanged,
+    Tick,
+}
+
+type DurableReconcileOutcome =
+    Result<Result<Outcome, ReconcileError>, Box<dyn std::any::Any + Send>>;
+
+enum TargetRun {
+    Finished(DurableReconcileOutcome),
+    Cancelled,
+    LeaseLost,
+}
+
+impl<S, R> ReconcileWorker<S, R>
+where
+    S: ReconcileScheduleStore + Send + Sync,
+    R: DurableReconciler<S> + Send + Sync,
+{
+    /// Control handle for pausing/resuming new target claims.
+    pub fn control(&self) -> ReconcileWorkerControl {
+        ReconcileWorkerControl {
+            paused: self.paused_tx.clone(),
+        }
+    }
+
+    /// Health handle for readyz.
+    pub fn health(&self) -> Arc<WorkerHealth> {
+        Arc::clone(&self.health)
+    }
+
+    /// Run the durable scheduler loop until cancellation.
+    pub async fn run(mut self, token: CancellationToken) {
+        let _stopped = self.health.stopped_on_exit();
+        let period = self.trigger.period();
+        self.log_durable_start(period);
+        self.run_worker_loop(period, &token).await;
+        tracing::info!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            "reconcile: durable scheduler stopped"
+        );
+    }
+
+    fn log_durable_start(&self, period: Duration) {
+        tracing::info!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            ?period,
+            "reconcile: durable scheduler starting"
+        );
+    }
+
+    async fn run_worker_loop(&mut self, period: Duration, token: &CancellationToken) {
+        let mut ticker = tokio::time::interval(period);
+        let mut attempts: HashMap<String, u32> = HashMap::new();
+        while self.wait_for_active_tick(&mut ticker, token).await {
+            self.run_due_batch(token, &mut attempts).await;
+        }
+    }
+
+    async fn wait_for_active_tick(
+        &mut self,
+        ticker: &mut tokio::time::Interval,
+        token: &CancellationToken,
+    ) -> bool {
+        loop {
+            match next_worker_event(&mut self.paused_rx, ticker, token).await {
+                WorkerLoopEvent::Cancelled => return false,
+                WorkerLoopEvent::PauseChanged => continue,
+                WorkerLoopEvent::Tick if *self.paused_rx.borrow() => {
+                    self.health.mark_healthy();
+                }
+                WorkerLoopEvent::Tick => return true,
+            }
+        }
+    }
+
+    async fn run_due_batch(&self, token: &CancellationToken, attempts: &mut HashMap<String, u32>) {
+        match self
+            .store
+            .claim_due_targets(
+                self.tenant,
+                &self.reconciler_id,
+                &self.holder_id,
+                self.batch_size,
+                self.lease_ttl,
+            )
+            .await
+        {
+            Ok(targets) => self.run_claimed_targets(targets, token, attempts).await,
+            Err(ref e) => {
+                self.health.mark_degraded();
+                tracing::warn!(
+                    tenant_id = %self.tenant,
+                    reconciler_id = self.reconciler_id,
+                    holder_id = self.holder_id,
+                    batch_size = self.batch_size,
+                    error = %e,
+                    "reconcile: claim due targets failed"
+                );
+            }
+        }
+    }
+
+    async fn run_claimed_targets(
+        &self,
+        targets: Vec<ClaimedTarget>,
+        token: &CancellationToken,
+        attempts: &mut HashMap<String, u32>,
+    ) {
+        self.health.mark_healthy();
+        let mut targets = targets.into_iter();
+        while let Some(target) = targets.next() {
+            if self.should_stop_claimed_batch(token) {
+                self.release_target_and_remaining(target, targets).await;
+                break;
+            }
+            self.run_target(target, token, attempts).await;
+        }
+    }
+
+    fn should_stop_claimed_batch(&self, token: &CancellationToken) -> bool {
+        token.is_cancelled() || *self.paused_rx.borrow()
+    }
+
+    async fn release_target_and_remaining(
+        &self,
+        target: ClaimedTarget,
+        remaining: impl Iterator<Item = ClaimedTarget>,
+    ) {
+        self.release_lease_best_effort(&target, "batch_stopped")
+            .await;
+        for target in remaining {
+            self.release_lease_best_effort(&target, "batch_stopped")
+                .await;
+        }
+    }
+
+    async fn run_target(
+        &self,
+        target: ClaimedTarget,
+        token: &CancellationToken,
+        attempts: &mut HashMap<String, u32>,
+    ) {
+        let Some(attempt) = self.append_attempt_or_release(&target).await else {
+            return;
+        };
+        match self
+            .run_reconciler_with_lease(&target, &attempt, token)
+            .await
+        {
+            TargetRun::Finished(result) => self.finish_attempt(attempt, result, attempts).await,
+            TargetRun::Cancelled => {
+                self.release_lease_best_effort(&target, "attempt_cancelled")
+                    .await;
+            }
+            TargetRun::LeaseLost => {
+                self.health.mark_degraded();
+                tracing::warn!(
+                    tenant_id = %target.tenant(),
+                    reconciler_id = target.reconciler_id(),
+                    resource_kind = target.resource_kind(),
+                    resource_id = target.resource_id(),
+                    target_id = target.target_id(),
+                    epoch = target.epoch(),
+                    "reconcile: target lease lost"
+                );
+            }
+        }
+    }
+
+    async fn append_attempt_or_release(&self, target: &ClaimedTarget) -> Option<ReconcileAttempt> {
+        match self.store.append_attempt(target, &self.holder_id).await {
+            Ok(ScheduleAttemptOutcome::Started(attempt)) => Some(attempt),
+            Ok(ScheduleAttemptOutcome::Lost) => {
+                self.observe_attempt_append_lost(target);
+                None
+            }
+            Err(ref e) => {
+                self.observe_attempt_append_error(target, e);
+                self.release_lease_best_effort(target, "append_attempt_failed")
+                    .await;
+                None
+            }
+        }
+    }
+
+    fn observe_attempt_append_lost(&self, target: &ClaimedTarget) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %target.tenant(),
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            target_id = target.target_id(),
+            resource_kind = target.resource_kind(),
+            resource_id = target.resource_id(),
+            trigger = target.trigger().as_label(),
+            "reconcile: target lease lost before attempt append"
+        );
+    }
+
+    fn observe_attempt_append_error(&self, target: &ClaimedTarget, error: &ReconcileScheduleError) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %target.tenant(),
+            reconciler_id = target.reconciler_id(),
+            resource_kind = target.resource_kind(),
+            resource_id = target.resource_id(),
+            target_id = target.target_id(),
+            epoch = target.epoch(),
+            trigger = target.trigger().as_label(),
+            error = %error,
+            "reconcile: append attempt failed"
+        );
+    }
+
+    async fn run_reconciler_with_lease(
+        &self,
+        target: &ClaimedTarget,
+        attempt: &ReconcileAttempt,
+        token: &CancellationToken,
+    ) -> TargetRun {
+        let ctx = Context::for_harness(Some(vocab::Epoch::new(target.epoch())));
+        let scope = AttemptScope::new(&self.store, attempt.clone());
+        tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                TargetRun::Cancelled
+            }
+            () = self.renew_until_lost(target, token) => {
+                TargetRun::LeaseLost
+            }
+            result = AssertUnwindSafe(self.reconciler.reconcile(&ctx, target, &scope)).catch_unwind() => {
+                TargetRun::Finished(result)
+            }
+        }
+    }
+
+    async fn finish_attempt(
+        &self,
+        attempt: ReconcileAttempt,
+        result: DurableReconcileOutcome,
+        attempts: &mut HashMap<String, u32>,
+    ) {
+        let key = attempt.target().target_id().to_string();
+        let attempt_result = self.classify_attempt_result(&key, result, attempts);
+        emit_reconcile_result(attempt_result.result());
+        self.persist_attempt_result(&attempt, attempt_result).await;
+        self.release_lease_best_effort(attempt.target(), "attempt_finished")
+            .await;
+    }
+
+    fn classify_attempt_result(
+        &self,
+        key: &str,
+        result: DurableReconcileOutcome,
+        attempts: &mut HashMap<String, u32>,
+    ) -> AttemptResult {
+        match result {
+            Ok(Ok(outcome)) => self.settled_attempt_result(key, &outcome, attempts),
+            Ok(Err(ref error)) => self.error_attempt_result(key, error, attempts),
+            Err(_panic) => self.panic_attempt_result(key, attempts),
+        }
+    }
+
+    fn settled_attempt_result(
+        &self,
+        key: &str,
+        outcome: &Outcome,
+        attempts: &mut HashMap<String, u32>,
+    ) -> AttemptResult {
+        attempts.remove(key);
+        self.health.mark_healthy();
+        AttemptResult::from_outcome(outcome, self.trigger.period())
+    }
+
+    fn error_attempt_result(
+        &self,
+        key: &str,
+        error: &ReconcileError,
+        attempts: &mut HashMap<String, u32>,
+    ) -> AttemptResult {
+        self.health.mark_degraded();
+        if error.is_transient() {
+            let delay = self.backoff.delay_for(bump_target_attempts(attempts, key));
+            return AttemptResult::from_error(error, delay);
+        }
+        attempts.remove(key);
+        AttemptResult::from_error(error, self.trigger.period())
+    }
+
+    fn panic_attempt_result(
+        &self,
+        key: &str,
+        attempts: &mut HashMap<String, u32>,
+    ) -> AttemptResult {
+        self.health.mark_degraded();
+        let delay = self.backoff.delay_for(bump_target_attempts(attempts, key));
+        AttemptResult::from_panic(delay)
+    }
+
+    async fn persist_attempt_result(
+        &self,
+        attempt: &ReconcileAttempt,
+        attempt_result: AttemptResult,
+    ) {
+        match self
+            .store
+            .record_attempt_result(attempt, attempt_result)
+            .await
+        {
+            Ok(outcome) => self.observe_attempt_result_record_outcome(attempt, outcome),
+            Err(ref e) => self.observe_attempt_result_record_error(attempt, e),
+        }
+    }
+
+    fn observe_attempt_result_record_outcome(
+        &self,
+        attempt: &ReconcileAttempt,
+        outcome: ScheduleLeaseOutcome,
+    ) {
+        if outcome == ScheduleLeaseOutcome::Held {
+            return;
+        }
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %attempt.target().tenant(),
+            reconciler_id = attempt.target().reconciler_id(),
+            resource_kind = attempt.target().resource_kind(),
+            resource_id = attempt.target().resource_id(),
+            target_id = attempt.target().target_id(),
+            epoch = attempt.target().epoch(),
+            attempt_id = attempt.attempt_id(),
+            "reconcile: attempt result lost lease"
+        );
+    }
+
+    fn observe_attempt_result_record_error(
+        &self,
+        attempt: &ReconcileAttempt,
+        error: &ReconcileScheduleError,
+    ) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %attempt.target().tenant(),
+            reconciler_id = attempt.target().reconciler_id(),
+            resource_kind = attempt.target().resource_kind(),
+            resource_id = attempt.target().resource_id(),
+            target_id = attempt.target().target_id(),
+            epoch = attempt.target().epoch(),
+            attempt_id = attempt.attempt_id(),
+            error = %error,
+            "reconcile: record attempt result failed"
+        );
+    }
+
+    async fn release_lease_best_effort(&self, target: &ClaimedTarget, operation: &'static str) {
+        match self.store.release_lease(target).await {
+            Ok(ScheduleLeaseOutcome::Held) => self.observe_lease_release_held(target, operation),
+            Ok(ScheduleLeaseOutcome::Lost) => self.observe_lease_release_lost(target, operation),
+            Err(ref e) => self.observe_lease_release_error(target, operation, e),
+        }
+    }
+
+    fn observe_lease_release_held(&self, target: &ClaimedTarget, operation: &'static str) {
+        tracing::debug!(
+            tenant_id = %target.tenant(),
+            reconciler_id = target.reconciler_id(),
+            resource_kind = target.resource_kind(),
+            resource_id = target.resource_id(),
+            target_id = target.target_id(),
+            epoch = target.epoch(),
+            operation,
+            "reconcile: target lease released"
+        );
+    }
+
+    fn observe_lease_release_lost(&self, target: &ClaimedTarget, operation: &'static str) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %target.tenant(),
+            reconciler_id = target.reconciler_id(),
+            resource_kind = target.resource_kind(),
+            resource_id = target.resource_id(),
+            target_id = target.target_id(),
+            epoch = target.epoch(),
+            operation,
+            "reconcile: target lease release lost lease"
+        );
+    }
+
+    fn observe_lease_release_error(
+        &self,
+        target: &ClaimedTarget,
+        operation: &'static str,
+        error: &ReconcileScheduleError,
+    ) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %target.tenant(),
+            reconciler_id = target.reconciler_id(),
+            resource_kind = target.resource_kind(),
+            resource_id = target.resource_id(),
+            target_id = target.target_id(),
+            epoch = target.epoch(),
+            operation,
+            error = %error,
+            "reconcile: target lease release failed"
+        );
+    }
+
+    async fn renew_until_lost(&self, target: &ClaimedTarget, token: &CancellationToken) {
+        let renew_every = (self.lease_ttl / 3).max(Duration::from_millis(1));
+        let mut ticker = tokio::time::interval(renew_every);
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => return,
+                _ = ticker.tick() => {}
+            }
+            match self.store.extend_lease(target, self.lease_ttl).await {
+                Ok(ScheduleLeaseOutcome::Held) => {}
+                _ => return,
+            }
+        }
+    }
+}
+
+fn bump_target_attempts(attempts: &mut HashMap<String, u32>, key: &str) -> u32 {
+    let n = attempts.entry(key.to_string()).or_insert(0);
+    *n = n.saturating_add(1);
+    *n
+}
+
+fn validate_lease_ttl(lease_ttl: Duration) -> Result<(), ReconcileConfigError> {
+    if lease_ttl.as_secs() == 0 {
+        return Err(ReconcileConfigError::LeaseTtlTooShort);
+    }
+    if lease_ttl.subsec_nanos() != 0 {
+        return Err(ReconcileConfigError::LeaseTtlSubsecond);
+    }
+    if i64::try_from(lease_ttl.as_secs()).is_err() {
+        return Err(ReconcileConfigError::LeaseTtlTooLarge);
+    }
+    Ok(())
+}
+
+async fn next_worker_event(
+    paused_rx: &mut watch::Receiver<bool>,
+    ticker: &mut tokio::time::Interval,
+    token: &CancellationToken,
+) -> WorkerLoopEvent {
+    tokio::select! {
+        biased;
+        () = token.cancelled() => WorkerLoopEvent::Cancelled,
+        changed = paused_rx.changed() => {
+            if changed.is_err() {
+                WorkerLoopEvent::Cancelled
+            } else {
+                WorkerLoopEvent::PauseChanged
+            }
+        }
+        _ = ticker.tick() => WorkerLoopEvent::Tick,
+    }
+}
+
+fn emit_reconcile_result(result: ReconcileResultLabel) {
+    metrics::counter!("reconcile_total", "result" => result.as_label()).increment(1);
+}
 
 // ── Tenancy（必填 sealed 位置参，RECONCILE-TENANCY-REQ-01）───────────────────
 
@@ -558,22 +1632,31 @@ fn bump_attempts(attempts: &mut HashMap<Option<EntityId>, u32>, key: Option<Enti
 #[cfg(test)]
 mod tests {
     use super::{
-        BackoffError, BackoffPolicy, Builder, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
-        ReconcileLoop, Tenancy, Trigger, TriggerError, bump_attempts,
+        AttemptErrorKind, AttemptResult, AttemptScope, BackoffError, BackoffPolicy, Builder,
+        ClaimedTarget, DurableReconciler, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
+        ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileScheduleError,
+        ReconcileScheduleStore, ReconcileSchedulerBuilder, ReviewedCommand, ScheduleAttemptOutcome,
+        ScheduleLeaseOutcome, StableDispatchKey, Tenancy, Trigger, TriggerError, bump_attempts,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use consistency::{
-        Context, EngineErrorKind, EntityId, Outcome, ReconcileError, Reconciler, Request,
+        Context, ConvergeAction, EngineErrorKind, EntityId, Outcome, ReconcileError,
+        ReconcileResultLabel, Reconciler, Request,
     };
-    use diport::{LeaderElector, LeaderElectorError, LeaderId, LeaseToken};
+    use diport::{
+        EnvelopeSubjectId, LeaderElector, LeaderElectorError, LeaderId, LeaseToken, OpaqueActorId,
+        OutboxActor,
+    };
     use primitives::{HealthStatus, ProbeName};
     use tokio_util::sync::CancellationToken;
 
     use crate::WorkerHealth;
+
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     // ── 测试 Reconciler：按行为脚本返回，记录看到的 epoch + 调用次数 ──────────
 
@@ -816,6 +1899,731 @@ mod tests {
         Trigger::interval(Duration::from_secs(secs)).expect("nonzero interval")
     }
 
+    #[allow(clippy::expect_used)]
+    // reason: fixed canonical UUID for tests.
+    fn tenant() -> vocab::TenantId {
+        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant")
+    }
+
+    fn claimed_target() -> ClaimedTarget {
+        claimed_target_with_ids(
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+            "device-1",
+        )
+    }
+
+    fn claimed_target_with_ids(
+        target_id: &str,
+        lease_token: &str,
+        resource_id: &str,
+    ) -> ClaimedTarget {
+        ClaimedTarget::new(
+            tenant(),
+            target_id,
+            lease_token,
+            9,
+            "test-reconciler",
+            "device",
+            resource_id,
+            super::AttemptTrigger::Resync,
+        )
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeScheduleStore {
+        state: Arc<Mutex<FakeScheduleState>>,
+    }
+
+    #[derive(Default)]
+    struct FakeScheduleState {
+        targets: VecDeque<ClaimedTarget>,
+        claims: u32,
+        attempts: u32,
+        results: Vec<AttemptResult>,
+        actions: Vec<ConvergeAction>,
+        command_keys: Vec<String>,
+        releases: u32,
+        cancel_on_record: Option<CancellationToken>,
+        cancel_on_extend_lost: Option<CancellationToken>,
+        append_attempt_lost: bool,
+        extend_outcome: Option<ScheduleLeaseOutcome>,
+        release_outcome: Option<ScheduleLeaseOutcome>,
+        release_error: bool,
+    }
+
+    impl FakeScheduleStore {
+        fn with_target(target: ClaimedTarget) -> Self {
+            Self::with_targets([target])
+        }
+
+        fn with_targets(targets: impl IntoIterator<Item = ClaimedTarget>) -> Self {
+            let store = Self::default();
+            let mut state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.targets.extend(targets);
+            drop(state);
+            store
+        }
+
+        fn cancel_on_record(&self, token: CancellationToken) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cancel_on_record = Some(token);
+        }
+
+        fn lose_append_attempt(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .append_attempt_lost = true;
+        }
+
+        fn lose_extend_and_cancel(&self, token: CancellationToken) {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.extend_outcome = Some(ScheduleLeaseOutcome::Lost);
+            state.cancel_on_extend_lost = Some(token);
+        }
+
+        fn set_release_outcome(&self, outcome: ScheduleLeaseOutcome) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .release_outcome = Some(outcome);
+        }
+
+        fn fail_release(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .release_error = true;
+        }
+    }
+
+    impl ReconcileScheduleStore for FakeScheduleStore {
+        async fn claim_due_targets(
+            &self,
+            _tenant: vocab::TenantId,
+            _reconciler_id: &str,
+            _holder_id: &str,
+            limit: u32,
+            _lease_ttl: Duration,
+        ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError> {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.claims = state.claims.saturating_add(1);
+            let mut targets = Vec::new();
+            for _ in 0..limit {
+                if let Some(target) = state.targets.pop_front() {
+                    targets.push(target);
+                }
+            }
+            Ok(targets)
+        }
+
+        async fn append_attempt(
+            &self,
+            target: &ClaimedTarget,
+            _holder_id: &str,
+        ) -> Result<ScheduleAttemptOutcome, ReconcileScheduleError> {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.attempts = state.attempts.saturating_add(1);
+            if state.append_attempt_lost {
+                return Ok(ScheduleAttemptOutcome::Lost);
+            }
+            Ok(ScheduleAttemptOutcome::Started(ReconcileAttempt::new(
+                format!("attempt-{}", state.attempts),
+                target.clone(),
+            )))
+        }
+
+        async fn record_attempt_result(
+            &self,
+            _attempt: &ReconcileAttempt,
+            result: AttemptResult,
+        ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+            let cancel = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.results.push(result);
+                state.cancel_on_record.clone()
+            };
+            if let Some(token) = cancel {
+                token.cancel();
+            }
+            Ok(ScheduleLeaseOutcome::Held)
+        }
+
+        async fn record_action_and_enqueue_command(
+            &self,
+            _attempt: &ReconcileAttempt,
+            action: ConvergeAction,
+            command: ReviewedCommand,
+        ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+            let (entry, _envelope) = command.into_parts();
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.actions.push(action);
+            state
+                .command_keys
+                .push(entry.idem_key().as_str().to_string());
+            Ok(ScheduleLeaseOutcome::Held)
+        }
+
+        async fn extend_lease(
+            &self,
+            _target: &ClaimedTarget,
+            _lease_ttl: Duration,
+        ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+            let (outcome, cancel) = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                (
+                    state.extend_outcome.unwrap_or(ScheduleLeaseOutcome::Held),
+                    state.cancel_on_extend_lost.clone(),
+                )
+            };
+            if outcome == ScheduleLeaseOutcome::Lost
+                && let Some(token) = cancel
+            {
+                token.cancel();
+            }
+            Ok(outcome)
+        }
+
+        async fn release_lease(
+            &self,
+            _target: &ClaimedTarget,
+        ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.releases = state.releases.saturating_add(1);
+            if state.release_error {
+                return Err(ReconcileScheduleError::new(std::io::Error::other(
+                    "release failed",
+                )));
+            }
+            Ok(state.release_outcome.unwrap_or(ScheduleLeaseOutcome::Held))
+        }
+
+        async fn pause_target(
+            &self,
+            _tenant: vocab::TenantId,
+            _target_id: &str,
+        ) -> Result<(), ReconcileScheduleError> {
+            Ok(())
+        }
+
+        async fn resume_target(
+            &self,
+            _tenant: vocab::TenantId,
+            _target_id: &str,
+        ) -> Result<(), ReconcileScheduleError> {
+            Ok(())
+        }
+    }
+
+    enum DurableBehavior {
+        Settled,
+        Transient,
+    }
+
+    struct DurableScript {
+        behavior: DurableBehavior,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl DurableScript {
+        fn new(behavior: DurableBehavior) -> Self {
+            Self {
+                behavior,
+                calls: Arc::new(AtomicU32::new(0)),
+            }
+        }
+    }
+
+    impl DurableReconciler<FakeScheduleStore> for DurableScript {
+        async fn reconcile(
+            &self,
+            ctx: &Context,
+            _target: &ClaimedTarget,
+            _attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<Outcome, ReconcileError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(ctx.epoch(), Some(vocab::Epoch::new(9)));
+            match self.behavior {
+                DurableBehavior::Settled => Ok(Outcome::settled()),
+                DurableBehavior::Transient => Err(ReconcileError::new(EngineErrorKind::Transient)),
+            }
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn reviewed_command(key: &str) -> ReviewedCommand {
+        ReviewedCommand::new(
+            StableDispatchKey::parse(key).expect("dispatch key"),
+            "test.command",
+            vocab::ContractBinding::from_static(
+                "test",
+                "test.command",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            tenant(),
+            b"{}".to_vec(),
+            EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
+            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
+        )
+        .expect("reviewed command")
+    }
+
+    #[test]
+    fn stable_dispatch_key_rejects_empty_and_reviewed_command_uses_key() -> TestResult {
+        assert!(StableDispatchKey::parse("").is_err());
+
+        let command = reviewed_command("reconcile-device-1-create");
+        let (entry, envelope) = command.into_parts();
+        assert_eq!(
+            entry.idem_key().as_str(),
+            "reconcile:v1:t36:11111111-1111-1111-1111-111111111111:p12:test.command:k25:reconcile-device-1-create"
+        );
+        assert_eq!(entry.topic().as_str(), "test.command");
+        assert_eq!(envelope.tenant(), tenant());
+
+        let same_raw_other_tenant = ReviewedCommand::new(
+            StableDispatchKey::parse("reconcile-device-1-create")?,
+            "test.command",
+            vocab::ContractBinding::from_static(
+                "test",
+                "test.command",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+            b"{}".to_vec(),
+            EnvelopeSubjectId::from_opaque("device-1")?,
+            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
+        )?;
+        let (other_entry, _) = same_raw_other_tenant.into_parts();
+        assert_ne!(
+            entry.idem_key().as_str(),
+            other_entry.idem_key().as_str(),
+            "same raw key must not collide across tenants"
+        );
+
+        let bad_topic = ReviewedCommand::new(
+            StableDispatchKey::parse("reconcile-device-1-update")?,
+            "not canonical topic",
+            vocab::ContractBinding::from_static(
+                "test",
+                "test.command",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            tenant(),
+            Vec::new(),
+            EnvelopeSubjectId::from_opaque("device-1")?,
+            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
+        );
+        assert!(bad_topic.is_err(), "invalid topic must fail closed");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attempt_scope_records_action_and_command_through_single_store_call() -> TestResult {
+        let store = FakeScheduleStore::default();
+        let attempt = ReconcileAttempt::new("attempt-scope", claimed_target());
+        let scope = AttemptScope::new(&store, attempt);
+
+        let outcome = scope
+            .record_action_and_enqueue_command(
+                ConvergeAction::Create,
+                reviewed_command("reconcile-device-1-create"),
+            )
+            .await?;
+
+        assert_eq!(outcome, ScheduleLeaseOutcome::Held);
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.actions, vec![ConvergeAction::Create]);
+        assert_eq!(
+            state.command_keys,
+            vec![
+                "reconcile:v1:t36:11111111-1111-1111-1111-111111111111:p12:test.command:k25:reconcile-device-1-create"
+                    .to_string()
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: spawned worker should exit after fake store records the result.
+    async fn reconcile_worker_pause_stops_claims_until_resume() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.cancel_on_record(token.clone());
+        let reconciler = DurableScript::new(DurableBehavior::Settled);
+        let calls = Arc::clone(&reconciler.calls);
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            reconciler,
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+        let control = worker.control();
+        control.pause();
+        let handle = tokio::spawn(worker.run(token));
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            store.state.lock().unwrap_or_else(|e| e.into_inner()).claims,
+            0,
+            "paused worker must not claim new targets"
+        );
+
+        control.resume();
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        handle.await.expect("worker exits after fake result record");
+
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.claims, 1);
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.releases, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: spawned worker should exit after fake store records the result.
+    async fn reconcile_worker_records_transient_attempt_result() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Transient),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+
+        let handle = tokio::spawn(worker.run(token));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        handle.await.expect("worker exits after fake result record");
+
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.results.len(), 1);
+        let result = state.results[0];
+        assert_eq!(result.result(), ReconcileResultLabel::Transient);
+        assert_eq!(
+            result.error_kind(),
+            Some(super::AttemptErrorKind::Transient)
+        );
+        assert_eq!(result.next_run_after(), Duration::from_secs(1));
+        assert_eq!(state.releases, 1);
+    }
+
+    #[test]
+    fn durable_builder_rejects_zero_lease_ttl() {
+        let result = ReconcileSchedulerBuilder::new(
+            FakeScheduleStore::default(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::ZERO);
+        assert!(matches!(
+            result,
+            Err(ReconcileConfigError::LeaseTtlTooShort)
+        ));
+    }
+
+    #[test]
+    fn durable_builder_rejects_subsecond_lease_ttl() {
+        let result = ReconcileSchedulerBuilder::new(
+            FakeScheduleStore::default(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_millis(500));
+        assert!(matches!(
+            result,
+            Err(ReconcileConfigError::LeaseTtlTooShort)
+        ));
+
+        let result = ReconcileSchedulerBuilder::new(
+            FakeScheduleStore::default(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_millis(1_500));
+        assert!(matches!(
+            result,
+            Err(ReconcileConfigError::LeaseTtlSubsecond)
+        ));
+    }
+
+    #[test]
+    fn durable_builder_rejects_zero_batch_size() {
+        let result = ReconcileSchedulerBuilder::new(
+            FakeScheduleStore::default(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_batch_size(0);
+        assert!(matches!(result, Err(ReconcileConfigError::BatchSizeZero)));
+    }
+
+    #[test]
+    fn durable_attempt_result_classifies_success_labels() {
+        let default_next = Duration::from_secs(60);
+        let settled = AttemptResult::from_outcome(&Outcome::settled(), default_next);
+        assert_eq!(settled.result(), ReconcileResultLabel::Settled);
+        assert_eq!(settled.next_run_after(), default_next);
+        assert_eq!(settled.requeue_after(), None);
+        assert_eq!(settled.error_kind(), None);
+
+        let requeue_after = Duration::from_millis(250);
+        let requeue = AttemptResult::from_outcome(
+            &Outcome::requeue_after(requeue_after),
+            Duration::from_secs(60),
+        );
+        assert_eq!(requeue.result(), ReconcileResultLabel::RequeueAfter);
+        assert_eq!(requeue.next_run_after(), requeue_after);
+        assert_eq!(requeue.requeue_after(), Some(requeue_after));
+        assert_eq!(requeue.error_kind(), None);
+    }
+
+    #[test]
+    fn durable_attempt_result_classifies_error_labels() {
+        let transient = AttemptResult::from_error(
+            &ReconcileError::new(EngineErrorKind::Transient),
+            Duration::from_secs(1),
+        );
+        assert_eq!(transient.result(), ReconcileResultLabel::Transient);
+        assert_eq!(transient.error_kind(), Some(AttemptErrorKind::Transient));
+
+        let permanent = AttemptResult::from_error(
+            &ReconcileError::new(EngineErrorKind::Permanent),
+            Duration::from_secs(60),
+        );
+        assert_eq!(permanent.result(), ReconcileResultLabel::Permanent);
+        assert_eq!(permanent.error_kind(), Some(AttemptErrorKind::Permanent));
+
+        let invariant = AttemptResult::from_error(
+            &ReconcileError::new(EngineErrorKind::Invariant),
+            Duration::from_secs(60),
+        );
+        assert_eq!(invariant.result(), ReconcileResultLabel::Invariant);
+        assert_eq!(invariant.error_kind(), Some(AttemptErrorKind::Invariant));
+
+        let panic = AttemptResult::from_panic(Duration::from_secs(1));
+        assert_eq!(panic.result(), ReconcileResultLabel::Transient);
+        assert_eq!(panic.error_kind(), Some(AttemptErrorKind::Transient));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: spawned worker exits after the test token is cancelled.
+    async fn reconcile_worker_lease_lost_before_attempt_does_not_run_or_release() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.lose_append_attempt();
+        let reconciler = DurableScript::new(DurableBehavior::Settled);
+        let calls = Arc::clone(&reconciler.calls);
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            reconciler,
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+
+        let handle = tokio::spawn(worker.run(token.clone()));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        token.cancel();
+        handle.await.expect("worker exits after cancellation");
+
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.attempts, 1);
+        assert_eq!(
+            state.releases, 0,
+            "lost append must not release stale lease"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fake store cancels the test token when renew returns Lost.
+    async fn reconcile_worker_lease_lost_drops_in_flight_attempt() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.lose_extend_and_cancel(token.clone());
+        let reconciler = PendingReconciler {
+            entered: Arc::new(AtomicBool::new(false)),
+        };
+        let entered = Arc::clone(&reconciler.entered);
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            reconciler,
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+
+        let handle = tokio::spawn(worker.run(token));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        handle.await.expect("worker exits after lease loss");
+
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(entered.load(Ordering::SeqCst), "reconciler should start");
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.releases, 0, "lost lease must not be released again");
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_marks_degraded_when_release_lost() {
+        let store = FakeScheduleStore::default();
+        store.set_release_outcome(ScheduleLeaseOutcome::Lost);
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+        let health = worker.health();
+
+        worker
+            .release_lease_best_effort(&claimed_target(), "unit_test")
+            .await;
+
+        assert_eq!(health.status(), HealthStatus::Degraded);
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .releases,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_marks_degraded_when_release_errors() {
+        let store = FakeScheduleStore::default();
+        store.fail_release();
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+        let health = worker.health();
+
+        worker
+            .release_lease_best_effort(&claimed_target(), "unit_test")
+            .await;
+
+        assert_eq!(health.status(), HealthStatus::Degraded);
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .releases,
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: spawned worker should exit after fake store records the first result.
+    async fn reconcile_worker_cancel_releases_remaining_claimed_batch_targets() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_targets([
+            claimed_target(),
+            claimed_target_with_ids(
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555",
+                "device-2",
+            ),
+            claimed_target_with_ids(
+                "66666666-6666-6666-6666-666666666666",
+                "77777777-7777-7777-7777-777777777777",
+                "device-3",
+            ),
+        ]);
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_batch_size(3)
+        .expect("positive batch size")
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+
+        let handle = tokio::spawn(worker.run(token));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        handle
+            .await
+            .expect("worker exits after first result cancels token");
+
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.claims, 1);
+        assert_eq!(state.attempts, 1);
+        assert_eq!(
+            state.releases, 3,
+            "cancelled worker must release every already claimed target in the batch"
+        );
+    }
+
     /// 永不完成的 reconciler（验证取消/丢 lease 能 drop 在途 dispatch future——否则测试挂死）。
     struct PendingReconciler {
         entered: Arc<AtomicBool>,
@@ -830,6 +2638,19 @@ mod tests {
             self.entered.store(true, Ordering::SeqCst);
             std::future::pending::<()>().await; // 永不返回；只能被 drop（取消）打断
             unreachable!("pending reconciler must be cancelled, never completes")
+        }
+    }
+
+    impl DurableReconciler<FakeScheduleStore> for PendingReconciler {
+        async fn reconcile(
+            &self,
+            _ctx: &Context,
+            _target: &ClaimedTarget,
+            _attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<Outcome, ReconcileError> {
+            self.entered.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            unreachable!("pending durable reconciler must be cancelled, never completes")
         }
     }
 

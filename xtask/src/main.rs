@@ -18,6 +18,8 @@
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
+//!   `cargo xtask reconcile-outbox-command-guard`
+//!                                      reconcile scheduler transactional command outbox seam 守卫（CI 门）
 //!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（GitHub Actions 与本地共用同一门）：fmt + meta（contract
@@ -65,6 +67,7 @@ mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
 mod publicapi;
+mod reconcile_outbox_command_guard;
 mod schema_rls;
 mod setlocal_funnel;
 mod src_scan;
@@ -127,6 +130,8 @@ enum Command {
     SetLocalFunnel,
     /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01）。
     PgTenantTxGuard,
+    /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
+    ReconcileOutboxCommandGuard,
     /// tenancy/AuthZ/projection closeout reverse self-check（TENANCY-CLOSEOUT-REVERSE-01）。
     TenancyCloseout,
     DeferGate,
@@ -158,12 +163,13 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["inbox-cutover-guard"] => Ok(Command::InboxCutoverGuard),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
         ["pg-tenant-tx-guard"] => Ok(Command::PgTenantTxGuard),
+        ["reconcile-outbox-command-guard"] => Ok(Command::ReconcileOutboxCommandGuard),
         ["tenancy-closeout"] => Ok(Command::TenancyCloseout),
         ["defer-gate"] => Ok(Command::DeferGate),
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -372,6 +378,9 @@ fn dispatch(args: &[String]) -> Result<()> {
         }
         Command::SetLocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
         Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
+        Command::ReconcileOutboxCommandGuard => {
+            diagnostic::run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
+        }
         Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
         Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
@@ -516,6 +525,15 @@ mod tests {
     #[test]
     fn parse_command_wsdeps_drift() -> anyhow::Result<()> {
         assert_eq!(parse_command(&s(&["wsdeps-drift"]))?, Command::WsDepsDrift);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_reconcile_outbox_command_guard() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["reconcile-outbox-command-guard"]))?,
+            Command::ReconcileOutboxCommandGuard
+        );
         Ok(())
     }
 

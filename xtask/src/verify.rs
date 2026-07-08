@@ -43,7 +43,8 @@
 use crate::diagnostic::run_check;
 use crate::workspace_root;
 use crate::{
-    archrules, assembly, codegen, consistency_fixtures, contract, doc_contracts, layerdeps, wsdeps,
+    archrules, assembly, codegen, consistency_fixtures, contract, doc_contracts, layerdeps,
+    reconcile_outbox_command_guard, wsdeps,
 };
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -116,6 +117,8 @@ enum InternalCheck {
     MigrationsSerial,
     /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
     CommandSymmetry,
+    /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
+    ReconcileOutboxCommandGuard,
     /// governed scope（docs/rules + docs/architecture + .claude/rules + 根 config）结构化 defer 完整性 + 经典注解门
     /// （DEFER-GATE-01；内容扫描 .md/.toml，no-compile）。
     DeferGate,
@@ -152,6 +155,7 @@ impl InternalCheck {
             Self::TenancyCloseout => "xtask/src/tenancy_closeout.rs",
             Self::MigrationsSerial => "xtask/src/migrations.rs",
             Self::CommandSymmetry => "xtask/src/command_symmetry.rs",
+            Self::ReconcileOutboxCommandGuard => "xtask/src/reconcile_outbox_command_guard.rs",
             Self::DeferGate => "xtask/src/defergate.rs",
             Self::Coverage => "xtask/src/coverage.rs",
             Self::PublicApiCheck => "xtask/src/publicapi.rs",
@@ -400,6 +404,15 @@ fn step_command_symmetry() -> Step {
         label: "command-symmetry",
         args: &[],
         kind: StepKind::Internal(InternalCheck::CommandSymmetry),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_reconcile_outbox_command_guard() -> Step {
+    Step {
+        label: "reconcile-outbox-command-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ReconcileOutboxCommandGuard),
         env: &[],
         needs_compile: false,
     }
@@ -827,6 +840,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_tenancy_closeout(),
         step_migrations_serial(),
         step_command_symmetry(),
+        step_reconcile_outbox_command_guard(),
         step_defer_gate(),
         step_build_workspace(),
         step_integration_compile(),
@@ -865,6 +879,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_tenancy_closeout(),
         step_migrations_serial(),
         step_command_symmetry(),
+        step_reconcile_outbox_command_guard(),
         step_defer_gate(),
         step_build_all_features(),
         step_clippy_all_features(),
@@ -1113,6 +1128,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::TenancyCloseout => run_check(&crate::tenancy_closeout::TenancyCloseout),
         InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
+        InternalCheck::ReconcileOutboxCommandGuard => {
+            run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
+        }
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine+curated extras 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
@@ -1217,6 +1235,7 @@ mod tests {
                 "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
+                "reconcile-outbox-command-guard",
                 "defer-gate",
                 "build",
                 "integration-compile",
@@ -1262,6 +1281,7 @@ mod tests {
                 "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
+                "reconcile-outbox-command-guard",
                 "defer-gate",
                 "deny"
             ]
@@ -1274,7 +1294,8 @@ mod tests {
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
     /// archrules / codegen / pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel /
-    /// pg-tenant-tx-guard / tenancy-closeout / migrations-serial / command-symmetry / defer-gate）在两种模式恒在。
+    /// pg-tenant-tx-guard / tenancy-closeout / migrations-serial / command-symmetry /
+    /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         for fast in [true, false] {
@@ -1306,6 +1327,7 @@ mod tests {
                     "tenancy-closeout",
                     "migrations-serial",
                     "command-symmetry",
+                    "reconcile-outbox-command-guard",
                     "defer-gate"
                 ],
                 "fast={fast}"
@@ -1459,6 +1481,7 @@ mod tests {
                 "tenancy-closeout",
                 "migrations-serial",
                 "command-symmetry",
+                "reconcile-outbox-command-guard",
                 "defer-gate",
                 "build",
                 "clippy",
@@ -1556,6 +1579,7 @@ mod tests {
             "tenancy-closeout",
             "migrations-serial",
             "command-symmetry",
+            "reconcile-outbox-command-guard",
             "defer-gate",
             "deny",
             "dylint",

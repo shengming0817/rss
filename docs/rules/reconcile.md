@@ -50,32 +50,53 @@ Vault/SoftCA/Redis/PG 类型、HTTP / Kubernetes / MQTT 类型、generated contr
 ## Durable PG schema 边界
 
 Postgres adapter 提供 `reconcile_targets` / `reconcile_leases` / `reconcile_attempts` /
-`reconcile_actions` 四表作为 L4 控制环的 durable schema：target 目录、当前 lease、attempt ledger 与
-action/result ledger。该 schema 是 adapter 层持久化能力，不改变 `consistency::Reconciler` trait，也不代表
-runtime worker 已接线；worker 接线仍由后续组合根 / 消费域切片决定。
+`reconcile_attempt_results` / `reconcile_actions` 五表作为 L4 控制环的 durable schema：target 目录、
+当前 lease、attempt ledger、terminal attempt result ledger 与真实 converge action ledger。durable scheduler
+API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWorker` /
+`ReconcileScheduleStore`），但 `eventexec` 不依赖 postgres/sqlx；Postgres 只实现 trait。
 
 - target 唯一性由 DB `UNIQUE (tenant_id, reconciler_id, resource_kind, resource_id)` 承载，避免跨租户或跨
   reconciler 的 resource key 互相阻塞。
+- due claim 只允许 `status='active' AND next_run_at <= now()` 的 target；worker pause 停止新 claim、等待
+  in-flight attempt drain 后 release lease；target pause/resume 由 `disabled`/`active` 状态表达，resume 必须把
+  `next_run_at` 推到 `now()`。
 - lease 是 target-local 当前状态，`epoch` 是单调高水位；release 只清 holder/token/expiry，不重置 epoch。
-  extend / release 类写必须以 `target_id + lease_token + epoch` 做 CAS，0 row 是 lost lease 控制流。
-- attempt / action 是 append-only ledger；运行期 `rss_app` 仅有 SELECT/INSERT，无 UPDATE/DELETE。attempt 不做
-  “start row 再 update finish”，action/result 另追加记录。
-- 四表都是 tenant 表，必须同迁移落 `ENABLE ROW LEVEL SECURITY`、`FORCE ROW LEVEL SECURITY` 与标准
+  claim 产生 `ClaimedTarget` 与 lease token；后续 attempt result、action/outbox、extend、release 必须以
+  `target_id + lease_token + epoch` 做 CAS，0 row 是 lost lease 控制流。durable worker 注入
+  `Context::for_harness(Some(epoch))`，这里的 epoch 是 target-local epoch，不混用 global leader epoch。
+- attempt / attempt result / action 是 append-only ledger；运行期 `rss_app` 仅有 SELECT/INSERT，无 UPDATE/DELETE。
+  attempt 不做 “start row 再 update finish”；terminal success/error/panic 分类进入
+  `reconcile_attempt_results`，`reconcile_actions` 只记录真实 `ConvergeAction`（`action_kind` 保持 NOT NULL，
+  `result_label` 固定为 action-local `recorded`）。
+- 五表都是 tenant 表，必须同迁移落 `ENABLE ROW LEVEL SECURITY`、`FORCE ROW LEVEL SECURITY` 与标准
   `tenant_isolation` policy。普通租户内 CAS 走 `PgTenantPool` 注入 `SET LOCAL rss.tenant_id`，不使用
   `SECURITY DEFINER`。
 
+## Durable command outbox seam
+
+durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope` 只暴露
+`record_action_and_enqueue_command(action, command)`，这是唯一 action + command outbox 写入口。`ReviewedCommand`
+字段私有，构造必须传 `StableDispatchKey`；没有 `Option`/随机 dispatch key 路径。最终 durable dispatch id 由
+`tenant + topic + StableDispatchKey` 规范编码生成，同 raw key 跨 tenant/topic 不共享 outbox `event_id`。Postgres
+实现必须在同一 tenant transaction 内先以 `lease_token + epoch` CAS 确认 lease，再 append
+`reconcile_actions`，再 append outbox entry；若 outbox 行已存在，必须校验同 tenant/topic/contract/payload 后才视为幂等。
+`reconcile_actions` 不保存 terminal attempt result；不得 direct publisher/broker，也不得在 `eventexec` 内裸 `append_outbox`。
+
+该 seam 只提供 durable scheduler 的事务边界；首个真实 active command contract 与生产 `CommandEmit` bridge
+接线仍由独立 follow-up 处理。
+
 ## Builder 强制
 
-`reconcile::Builder::new(r, tenancy, trigger).with_*().build()` 是**唯一**公开构造入口（`ReconcileLoop`
-无公开构造器、Loop config 字段全部 `pub(crate)` / 私有，`build()` infallible）。消费方禁止裸构造 Loop，
+`reconcile::Builder::new(r, tenancy, trigger).with_*()?.build()` 是**唯一**公开构造入口（`ReconcileLoop`
+无公开构造器、Loop config 字段全部 `pub(crate)` / 私有，`with_*` 对 public 配置 fail-fast）。消费方禁止裸构造 Loop，
 禁止旁路 Builder 注入调度逻辑。
 
 `Builder::new` 第二、三参 `tenancy` / `trigger` 是必填位置参（非可漏链的 `with_*`），漏传即编译错（E0061）——
 `tenancy` 是 sealed `Tenancy`（`Tenancy::single_tenant()` / `Tenancy::tenant_scoped()`，仿 `Clock` 位置参约定）：
 reconciler 在 tenantless system 身份下发射命令（Claimer key 落 `_notenant`），故必须显式声明该命名空间是否正确；
 `trigger` 是 `Trigger`（当前仅 `Trigger::interval(period)`，事件驱动 targeted dispatch 后续兑现）：原「`build()` 强制
-一个 Trigger」（运行期 fail-fast）已上移到类型系统（ai-robust：能编译期强制不退化运行期）。TenantScoped reconciler
-须自行在 command-id 编码 tenant 维度（框架不验证 body，残留盲区）。由类型系统（Hard，构造器必填位置参）强制：
+一个 Trigger」（运行期 fail-fast）已上移到类型系统（ai-robust：能编译期强制不退化运行期）。TenantScoped durable command
+dispatch id 的 tenant 维度由 `ReviewedCommand` 构造时注入。由类型系统（Hard，构造器必填位置参）强制：
 INVARIANT RECONCILE-TENANCY-REQ-01，回归见 `crates/eventexec/tests/ui/reconcile_missing_{tenancy,trigger}_fail.rs`
 （trybuild compile_fail）。
 
@@ -110,5 +131,6 @@ L3 最终一致可用 projection / saga；reconcile 用于 L4 跨不可靠边界
   模块级文档 §Enforced invariants；fencing `crates/diport/src/fenced_writer.rs`。
 - Invariants：`RECONCILE-*` 族完整清单、符号与盲区以对应守卫（类型系统 / clippy·dylint lint / `#[test]`·
   `rstest` 纵深，可执行真源）为准——`RECONCILE-TENANCY-REQ-01` 在 `eventexec::reconcile`（Builder + trybuild）、
-  `RECONCILE-FENCE-MONO-01` 在 `diport::fenced_writer` + `adapters/memory` 测试；规则文件不另维护清单。
+  `RECONCILE-FENCE-MONO-01` 在 `diport::fenced_writer` + `adapters/memory` 测试；
+  `RECONCILE-COMMAND-OUTBOX-SEAM-01` 在 `xtask/src/reconcile_outbox_command_guard.rs`；规则文件不另维护清单。
   能编译期强制的不退化成运行期测试。
