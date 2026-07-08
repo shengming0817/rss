@@ -24,6 +24,7 @@ pub mod auth_bridge;
 pub mod distributed_runtime;
 pub mod event_transport;
 pub mod infra;
+pub(crate) mod launch;
 pub mod listeners;
 pub mod module;
 pub mod phase;
@@ -56,7 +57,6 @@ use infra::vault::{build_vault_key_provider_from, build_vault_signer_with};
 use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -64,7 +64,6 @@ use anyhow::Context as _;
 use audit::AuditDomain;
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use base64::Engine as _;
-use bootstrap::shutdown::ShutdownStack;
 use consistency::{EngineErrorKind, ProjectionBatchLimit, SerialInOrder};
 use crypto::RustCryptoMacVerifier;
 use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
@@ -72,7 +71,6 @@ use eventexec::{
     ProjectionHarness, ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
     ProjectionTargetRegistry, ProjectionVersion, projection_runner_once,
 };
-use httpd::HttpServer;
 use identity::{
     IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
     RefreshService,
@@ -87,7 +85,7 @@ use postgres::{
     MaintenanceAuditOutcome, PgAuthAuditSink, PgDbReadiness, PgMaintenanceDeps, PgRuntimeDeps,
     PoolReadiness, ProjectionMaintenanceCapability, ProjectionPointerPrecondition, caps,
 };
-use primitives::{AuthScheme, HealthCheck, HealthStatus, ListenerKind, MacKey, ProbeName};
+use primitives::{HealthCheck, HealthStatus, MacKey, ProbeName};
 use settings::ports::DynSecretRepo;
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
@@ -2329,188 +2327,6 @@ pub fn wire_identity_with(
     }))
 }
 
-// ── per-listener bind + serve + 信号优雅关停 ───────────────────────────────────────────────────
-
-/// 逐 listener bind socket + serve，经 `ShutdownStack` 托管；SIGTERM/SIGINT → LIFO 优雅 drain。
-///
-/// `register_background`：在 bind 循环前注册后台 worker（如 readiness 采样 task）进同一 `ShutdownStack`——
-/// LIFO 下后台 worker 在所有 listener drain 后最后停（注册顺序决定停止顺序逆序）。
-///
-/// 每 listener：解析 bind 地址（fail-fast）→ `HttpServer::bind`（async fail-fast，注册前暴露端口冲突）→
-/// 经 `ShutdownStack::register_with_token` 在同步 funnel 闭包内 `bound.serve(svc, token)` spawn serve task
-/// （SHUTDOWN-TOKEN-FUNNEL-01）。信号到达 → `stack.shutdown()` 阶段 1 广播 cancel 触发各 serve graceful
-/// drain、阶段 2 LIFO await 收敛。任一 listener 关闭失败聚合后非零退出（不静默丢弃）。
-async fn serve_until_signal(
-    listeners: Vec<routes::AssembledListener>,
-    register_background: impl FnOnce(&mut ShutdownStack),
-) -> anyhow::Result<()> {
-    // 生产装配：真实 env 地址解析 + 真实信号 future（薄壳，委托可测核心 [`serve_until`]）。
-    serve_until(
-        listeners,
-        register_background,
-        listeners::listener_addr_for_scheme,
-        wait_for_shutdown_signal(),
-    )
-    .await
-}
-
-/// 可测核心：注入 `addr_resolver`（listener + resolved auth scheme → bind 地址）与 `shutdown` future
-///（关停触发），驱动 bind 各 listener socket → 经 `ShutdownStack` 托管 serve → `shutdown` resolve 后
-/// LIFO 优雅 drain。
-///
-/// `register_background`：bind 循环前注册后台 worker 进 `ShutdownStack`（LIFO：先注册后停——sampler 先注册
-/// 则最后停，确保 listener drain 后 sampler 才停）。
-///
-/// 生产经 [`serve_until_signal`] 注入真实 env 解析 + 信号 future；测试注入
-/// `|_, _| Ok(127.0.0.1:0)` + 立即 resolve 的 future，覆盖 bind 循环 + 多 listener + ensure-非空 +
-/// drain 聚合（serve_until_signal 本身依赖 OS 信号不可 hermetic 测，故抽核心）。任一 listener 关闭失败聚合后
-/// 非零退出（不静默丢弃）。
-// reason: bind 循环 + 启动就绪 / drain 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点；
-// 实际控制流是「bind 各 listener → 等关停 → shutdown」三段——item-level carve-out（error-handling.md §Carve-out）。
-#[allow(clippy::cognitive_complexity)]
-async fn serve_until<B, R, S>(
-    listeners: Vec<routes::AssembledListener>,
-    register_background: B,
-    addr_resolver: R,
-    shutdown: S,
-) -> anyhow::Result<()>
-where
-    B: FnOnce(&mut ShutdownStack),
-    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
-    S: std::future::Future<Output = anyhow::Result<()>>,
-{
-    anyhow::ensure!(
-        !listeners.is_empty(),
-        "no listener has routes to serve (refusing to start with zero bound sockets)"
-    );
-    let listener_count = listeners.len();
-    let mut stack = ShutdownStack::new(CancellationToken::new());
-    // 先注册后台 worker（LIFO：listener 后注册先 drain，sampler 先注册后停——确保 listener drain 后采样停）。
-    register_background(&mut stack);
-    for listener in listeners {
-        bind_and_register(&mut stack, listener, &addr_resolver).await?;
-    }
-    // 启动就绪汇总（operator 一眼确认全部 listener 已绑定 + 服务就绪）。
-    tracing::info!(listener_count, "all listeners bound; server ready");
-
-    // shutdown future resolve（生产 = 信号到达，已记 signal 名）→ 仅记 drain 动作（不重复信号事件）。
-    shutdown.await?;
-    tracing::info!("draining listeners (graceful)");
-    report_shutdown_failures(stack.shutdown().await)
-}
-
-/// bind 单 listener socket（async fail-fast）+ 经 funnel 同步 serve-spawn 注册进 `ShutdownStack`。
-///
-/// async bind 在注册前完成 ⇒ 端口冲突 fail-fast；同步 `bound.serve(svc, token)` 在 `register_with_token`
-/// 闭包内消费注入的 child token（SHUTDOWN-TOKEN-FUNNEL-01）。`addr_resolver` 由 [`serve_until`] 注入
-/// （生产 = env 解析，测试 = `127.0.0.1:0` ephemeral），并消费 route finalize 阶段已解析的 auth scheme。
-// reason: this is the per-listener assembly junction; keeping bind, auth-scheme selection, and
-// plaintext/mTLS ShutdownStack registration together makes fail-fast startup order explicit.
-#[allow(clippy::cognitive_complexity)]
-async fn bind_and_register<R>(
-    stack: &mut ShutdownStack,
-    listener: routes::AssembledListener,
-    addr_resolver: &R,
-) -> anyhow::Result<()>
-where
-    R: Fn(ListenerKind, AuthScheme) -> anyhow::Result<SocketAddr>,
-{
-    let routes::AssembledListener {
-        listener,
-        scheme,
-        routes,
-        mtls_health,
-    } = listener;
-    let name = listeners::listener_name(listener);
-    let addr = addr_resolver(listener, scheme)?;
-    let bound = HttpServer::bind(name, addr)
-        .await
-        .with_context(|| format!("bind {name} listener at {addr}"))?;
-    tracing::info!(listener = ?listener, name, addr = %bound.local_addr(), "listener bound");
-    let svc = routes.into_make_service();
-    match scheme {
-        AuthScheme::Mtls => {
-            let mtls = mtls_config_from_env(listener)
-                .await
-                .with_context(|| format!("build {name} mTLS config"))?;
-            if let Some(slot) = &mtls_health {
-                slot.set(mtls.clone())?;
-            }
-            stack.register_with_token(move |token| {
-                DynManagedResource::new_box(bound.serve_mtls(svc, mtls, token))
-            });
-        }
-        _ => {
-            if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
-                tracing::warn!(
-                    listener = ?listener,
-                    "binding local-test Internal service-token listener; mTLS is the production default"
-                );
-            }
-            stack.register_with_token(move |token| {
-                DynManagedResource::new_box(bound.serve(svc, token))
-            });
-        }
-    }
-    Ok(())
-}
-
-async fn mtls_config_from_env(listener: ListenerKind) -> anyhow::Result<httpd::MtlsServerConfig> {
-    let allow_set = routes::mtls_allow_set_from_env(listener, |name| std::env::var(name).ok())?;
-    let endpoint = std::env::var(SPIFFE_ENDPOINT_SOCKET_ENV).ok();
-    httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref())
-        .await
-        .with_context(|| {
-            format!(
-                "build Internal listener mTLS config ({} optional override)",
-                SPIFFE_ENDPOINT_SOCKET_ENV
-            )
-        })
-}
-
-/// 聚合 `ShutdownStack::shutdown` 的 per-listener 失败：空 = 干净退出 `Ok`；非空 = 记录每条 + 非零退出 `Err`
-/// （不静默丢弃关闭错误，决定进程退出码）。
-fn report_shutdown_failures(
-    failures: Vec<bootstrap::shutdown::ResourceShutdownError>,
-) -> anyhow::Result<()> {
-    if failures.is_empty() {
-        tracing::info!("all listeners drained; exiting");
-        return Ok(());
-    }
-    for f in &failures {
-        tracing::error!(error = %f, "listener shutdown failure");
-    }
-    anyhow::bail!(
-        "graceful shutdown completed with {} listener failure(s)",
-        failures.len()
-    )
-}
-
-/// 阻塞至收到关闭信号：unix SIGTERM / SIGINT（容器编排发 SIGTERM、Ctrl-C 发 SIGINT）；非 unix 退回 Ctrl-C。
-// reason: cfg(unix) 分支内 tokio::select! + 2 条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点；
-// 实际控制流是「装两个 signal stream + select 其一」——item-level carve-out（error-handling.md §Carve-out）。
-#[allow(clippy::cognitive_complexity)]
-async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-        let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-        tokio::select! {
-            _ = term.recv() => tracing::info!(signal = "SIGTERM", "shutdown signal received"),
-            _ = int.recv() => tracing::info!(signal = "SIGINT", "shutdown signal received"),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .context("install ctrl-c handler")?;
-        tracing::info!(signal = "ctrl-c", "shutdown signal received");
-    }
-    Ok(())
-}
-
 /// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
 const OTEL_ENDPOINT_ENV: &str = "RSS_OTEL_ENDPOINT";
 
@@ -2845,38 +2661,29 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 
     let trace_export = runtime_inputs.into_trace_export();
     // Launch phase: listener serving plus LIFO shutdown resource registration.
+    let trace_exporter = trace_export.map(DynManagedResource::new_box);
+    let pg_store_guard = DynManagedResource::new_box(pg.store_guard());
+    let pg_audit_admin_store_guard = pg
+        .audit_admin_store_guard()
+        .map(DynManagedResource::new_box);
+    let pg_readiness_sampler: bootstrap::WorkerSpec = Box::new(move |token| {
+        DynManagedResource::new_box(pg.spawn_readiness_sampler(pg_readiness_period, token))
+    });
+    let launch_plan = launch::LaunchPlan::new(launch::LaunchPlanParts {
+        listeners,
+        trace_exporter,
+        pg_store_guard,
+        pg_audit_admin_store_guard,
+        pg_readiness_sampler,
+        event_infra_guards,
+        domain_resources,
+        domain_workers,
+    });
     phase_result(
         RuntimePhase::Launch,
-        serve_until_signal(listeners, move |stack| {
-            // otel trace 导出 exporter（若已配 RSS_OTEL_ENDPOINT）**最先**注册 → LIFO 最后 drain：span flush 在所有
-            // 组件（listeners → workers → 域 resources → sampler → pool guard）全部静默后执行，不丢失关停期 span。
-            // reason: trace flush 须在不再产生新 span 后做，故注册在最前（=最后关）；未配 endpoint 时 None，无注册。
-            if let Some(exporter) = trace_export {
-                stack.register_detached(DynManagedResource::new_box(exporter));
-            }
-            // 再注册框架 pg infra（非域产物）：pool guard（LIFO 较后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
-            stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
-            if let Some(guard) = pg.audit_admin_store_guard() {
-                stack.register_detached(DynManagedResource::new_box(guard));
-            }
-            // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
-            stack.register_with_token(move |token| {
-                DynManagedResource::new_box(pg.spawn_readiness_sampler(pg_readiness_period, token))
-            });
-            // 事件传输 infra guards（AMQP + Redis）先于 workers 注册 → LIFO 在 workers drain 后才断连接。
-            for g in event_infra_guards {
-                stack.register_detached(g);
-            }
-            // module 产物注册在事件传输 infra 之后 → LIFO 先于 AMQP/Redis 排空（relay/consumer drain 后再断连接）。
-            for r in domain_resources {
-                stack.register_detached(r);
-            }
-            for w in domain_workers {
-                stack.register_with_token(w);
-            }
-        })
-        .await
-        .map(|()| RuntimeOutputs::completed()),
+        launch::launch(launch_plan)
+            .await
+            .map(|()| RuntimeOutputs::completed()),
     )?;
     Ok(())
 }
@@ -2884,12 +2691,12 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::listeners::health_listener;
     use crate::routes::{AssembledListener, assemble_authed_routers};
 
     use axum::http::Method;
     use diport::ServiceTokenReplayGuard;
     use oidc::OidcProvider;
+    use primitives::ListenerKind;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5276,65 +5083,6 @@ mod tests {
         );
     }
 
-    // ── shutdown 失败聚合（report_shutdown_failures）────────────────────────────────────
-
-    /// 空失败列表 → `Ok`（干净退出）；非空 → `Err` 含失败计数（非零退出码不静默丢弃关闭错误）。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn report_shutdown_failures_ok_when_empty_err_when_failures() {
-        use bootstrap::shutdown::{ResourceShutdownError, ShutdownFailureKind};
-
-        assert!(
-            report_shutdown_failures(Vec::new()).is_ok(),
-            "无失败 → Ok 干净退出"
-        );
-
-        let failures = vec![
-            ResourceShutdownError {
-                name: "http-primary".to_owned(),
-                kind: ShutdownFailureKind::Panicked,
-            },
-            ResourceShutdownError {
-                name: "http-health".to_owned(),
-                kind: ShutdownFailureKind::BudgetExhausted,
-            },
-        ];
-        let err = report_shutdown_failures(failures).expect_err("非空失败 → Err");
-        assert!(
-            err.to_string().contains("2 listener failure"),
-            "error 含失败计数: {err}"
-        );
-    }
-
-    // ── serve_until 生产 serve 循环（注入 addr + shutdown future，hermetic）────────────────
-
-    /// 测试 reporter（空探针）。
-    #[allow(clippy::expect_used)]
-    fn test_reporter() -> Arc<bootstrap::HealthReporter> {
-        let mut reg = bootstrap::compose(&[]).expect("compose");
-        Arc::new(reg.take_health_reporter())
-    }
-
-    /// 测试用 `/metrics` 渲染替身（固定 exposition）——不装进程级 global recorder，避免与 `PromExporter::install`
-    /// 进程单例争用。健康/serve 测试只验路由组装与 bind，不验真实指标内容。
-    #[derive(Clone)]
-    struct FixedMetrics(&'static str);
-    impl diport::MetricsExporter for FixedMetrics {
-        fn render(&self) -> String {
-            self.0.to_owned()
-        }
-    }
-    fn noop_metrics() -> Arc<dyn diport::MetricsExporter> {
-        Arc::new(FixedMetrics("# noop\n"))
-    }
-
-    #[allow(clippy::expect_used)]
-    fn test_health_assembled() -> AssembledListener {
-        let (listener, routes) =
-            health_listener(test_reporter(), noop_metrics()).expect("health listener");
-        AssembledListener::plain(listener, routes)
-    }
-
     // ── build_trace_export：otel 导出按需开启 + endpoint typed 安全边界（fail-fast）─────────────
     // get 注入式（不读真实 env），覆盖 None / TLS / loopback-http / 非 loopback 明文 / 非法 scheme 五态。
 
@@ -5394,90 +5142,6 @@ mod tests {
         assert!(
             err.to_string().contains(OTEL_ENDPOINT_ENV),
             "err 应含 env 变量名: {err}"
-        );
-    }
-
-    /// 注入 `127.0.0.1:0` ephemeral 地址解析器（测试用）。
-    fn ephemeral_addr(_l: ListenerKind, _scheme: AuthScheme) -> anyhow::Result<SocketAddr> {
-        "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
-    }
-
-    /// serve_until 核心：注入 ephemeral addr + 立即 resolve 的 shutdown → bind 全部 listener + 干净 drain。
-    /// 覆盖生产 serve loop（serve_until_signal 薄壳依赖 OS 信号不可 hermetic 测）：2 listener bind 循环 + drain。
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn serve_until_binds_all_listeners_and_drains_clean() {
-        let listeners = vec![test_health_assembled(), test_health_assembled()];
-        serve_until(
-            listeners,
-            |_stack| {}, // 无后台 worker（测 serve 循环本身）
-            ephemeral_addr,
-            std::future::ready(anyhow::Ok(())),
-        )
-        .await
-        .expect("serve_until binds 2 listeners + drains clean");
-    }
-
-    /// serve_until 空 listeners → fail-fast Err（拒绝零 socket 启动）。
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn serve_until_empty_listeners_errs() {
-        let err = serve_until(
-            Vec::new(),
-            |_stack| {}, // 无后台 worker（测 serve 循环本身）
-            ephemeral_addr,
-            std::future::ready(anyhow::Ok(())),
-        )
-        .await
-        .expect_err("空 listeners 拒绝启动");
-        assert!(
-            err.to_string().contains("zero bound sockets"),
-            "error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn serve_until_passes_assembled_scheme_to_addr_resolver() {
-        let listener = test_health_assembled();
-        let resolved = Arc::new(std::sync::Mutex::new(None));
-        let seen = Arc::clone(&resolved);
-
-        serve_until(
-            vec![listener],
-            |_stack| {},
-            move |listener, scheme| {
-                assert_eq!(listener, ListenerKind::Health);
-                *seen.lock().expect("scheme lock") = Some(scheme);
-                "127.0.0.1:0".parse::<SocketAddr>().map_err(Into::into)
-            },
-            std::future::ready(anyhow::Ok(())),
-        )
-        .await
-        .expect("serve_until binds listener");
-
-        assert_eq!(
-            *resolved.lock().expect("scheme lock"),
-            Some(AuthScheme::NoAuth)
-        );
-    }
-
-    /// serve_until addr_resolver 失败 → bind 前 fail-fast 冒泡 Err（不静默 ready）。
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn serve_until_addr_resolver_failure_propagates() {
-        let listeners = vec![test_health_assembled()];
-        let err = serve_until(
-            listeners,
-            |_stack| {}, // 无后台 worker（测 serve 循环本身）
-            |_, _| anyhow::bail!("no addr configured for listener"),
-            std::future::ready(anyhow::Ok(())),
-        )
-        .await
-        .expect_err("addr resolver 失败");
-        assert!(
-            err.to_string().contains("no addr configured"),
-            "error: {err}"
         );
     }
 

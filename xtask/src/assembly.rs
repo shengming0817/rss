@@ -1239,6 +1239,59 @@ fn run() {
 }
 "#;
 
+    const SECURITY_CLOSEOUT_RUN_TO_LAUNCH_SOURCE: &str = r#"
+fn build_runtime_oidc_provider() {
+    let jwks = oidc::JwksKeySource::load_and_watch(
+        "primary-idp",
+        "/etc/rss/oidc-jwks.json",
+        std::time::Duration::from_secs(60),
+        tokio_util::sync::CancellationToken::new(),
+    ).unwrap();
+    let readiness = jwks.readiness_handle();
+    let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
+        .keys_jwks(jwks);
+    RuntimeOidcProvider { readiness }
+}
+
+fn wire_domain_transport_from() {
+    let transport = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
+    let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
+    transport
+}
+
+fn run() {
+    let runtime_oidc = build_runtime_oidc_provider();
+    let provider = runtime_oidc.provider();
+    module.resources.push(runtime_oidc.managed_resource());
+    registry.probe(
+        oidc_jwks_probe_name,
+        Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
+    ).unwrap();
+    let domain_transport = wire_domain_transport_from();
+    module.merge(domain_transport.module_result().unwrap());
+    let _ = assemble_authed_routers(provider);
+    launch();
+}
+"#;
+
+    const SECURITY_CLOSEOUT_LAUNCH_SOURCE: &str = r#"
+fn launch() {
+    launch_until();
+}
+
+fn launch_until() {
+    bind_and_register();
+}
+
+fn bind_and_register() {
+    let _ = mtls_config_from_env();
+}
+
+fn mtls_config_from_env() {
+    let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
+}
+"#;
+
     #[test]
     fn manifest_rejects_unknown_fields() {
         let raw = r#"
@@ -1618,6 +1671,22 @@ mod tests {
             CARGO_SECURITY_BACKEND,
         )?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_PATH_SOURCE)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_run_to_launch_fixture_passes() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-run-launch-green");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_TO_LAUNCH_SOURCE)?;
+        write_runtime_src(&root, "launch.rs", SECURITY_CLOSEOUT_LAUNCH_SOURCE)?;
 
         let (_count, findings) = validate_root(&root)?;
         assert!(findings.is_empty(), "{findings:?}");

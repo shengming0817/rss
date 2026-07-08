@@ -216,7 +216,7 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
 /// `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
 /// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
-/// 产出 `AuthenticatedRoutes` 经 `into_make_service` 绑 socket + serve（[`serve_until_signal`]）——bind 点
+/// 产出 `AuthenticatedRoutes` 经 `into_make_service` 交给 launch phase 绑 socket + serve——bind 点
 /// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
 ///
 /// 层序（外→内）：body-limit（httpserve sealed_router，最外防护）→ rate-limit（本函数 verify-bridge 后叠）

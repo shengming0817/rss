@@ -16,6 +16,7 @@ The baseline locks static repository facts only:
 - `assemblies/runtime/src/module.rs` `SharedRuntimeDeps` fields
 - `crates/bootstrap/src/module.rs` `DomainModuleResult` fields plus `merge`
 - ordered anchors inside `assemblies/runtime/src/lib.rs` `runtime::run()`
+- ordered launch anchors inside `assemblies/runtime/src/launch.rs`
 
 Dynamic state is not asserted by this gate: environment variables, live provider health, generated event subscriptions, topology-specific routing, socket bind results, and OS signal behavior remain runtime facts.
 
@@ -47,7 +48,7 @@ The current production runtime assembly has these phases:
 7. Call `wire_distributed`, bridge generated event subscriptions, then call `event_transport::wire_event_transport`.
 8. Drain module probes into `Registry` before `take_health_reporter`.
 9. Assemble authenticated routers and the dedicated health listener.
-10. Serve listeners through `serve_until_signal`.
+10. Build `LaunchPlan` and serve listeners through `launch::launch`.
 
 ## Provider Inventory
 
@@ -90,9 +91,10 @@ The design intent is infrastructure-only input wiring. That intent is documented
 
 ## Listener, Health, And Shutdown Order
 
-Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a dedicated plain listener from `health_listener`, after route groups are drained and before `serve_until_signal`.
+Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a dedicated plain listener from `health_listener`, after route groups are drained and before `run()` hands a `LaunchPlan` to `launch::launch`.
 
-Shutdown is registered in LIFO order:
+`LaunchPlan::register` transfers non-listener resources into `ShutdownStack` before
+`launch_until_observed` binds listener sockets. Shutdown is registered in LIFO order:
 
 1. optional OTEL exporter
 2. Postgres pool guards
@@ -100,7 +102,7 @@ Shutdown is registered in LIFO order:
 4. event infra guards
 5. module resources
 6. module workers
-7. listeners, registered inside `serve_until_signal`
+7. listeners, registered inside `launch_until`
 
 The effective shutdown drain order is the reverse: listeners first, then workers/resources, event infra, sampler, pool guards, and finally OTEL flushing.
 
@@ -111,7 +113,7 @@ The effective shutdown drain order is the reverse: listeners first, then workers
 - `runtime-baseline/runtime.txt` is missing
 - regenerated baseline text differs from the committed file
 - runtime dependencies or assembly providers are empty
-- required `runtime::run()` anchors are missing or out of order
+- required `runtime::run()` or `launch.rs` anchors are missing or out of order
 - `DomainModuleResult::merge` is absent or stops merging a field
 
 `cargo xtask verify --fast` and `cargo xtask ci` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

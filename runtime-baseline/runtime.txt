@@ -8,6 +8,7 @@ assembly = assemblies/runtime/assembly.toml
 sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
 run = assemblies/runtime/src/lib.rs
+launch = assemblies/runtime/src/launch.rs
 
 [runtime.dependencies]
 amqp = path=../../adapters/amqp; features=[backend]
@@ -108,10 +109,13 @@ mergeExtends = probes,resources,workers
 23 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in module.probes | status=ok
 24 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
 25 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
-26 | run.serve | assemblies/runtime/src/lib.rs | serve_until_signal(listeners, move |stack| | status=ok
-27 | run.shutdown.otel | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(exporter)) | status=ok
-28 | run.shutdown.pg | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(pg.store_guard())) | status=ok
-29 | run.shutdown.sampler | assemblies/runtime/src/lib.rs | stack.register_with_token(move |token| | status=ok
-30 | run.shutdown.event-infra | assemblies/runtime/src/lib.rs | stack.register_detached(g); | status=ok
-31 | run.shutdown.resources | assemblies/runtime/src/lib.rs | stack.register_detached(r); | status=ok
-32 | run.shutdown.workers | assemblies/runtime/src/lib.rs | stack.register_with_token(w); | status=ok
+26 | run.launch | assemblies/runtime/src/lib.rs | launch::launch(launch_plan) | status=ok
+27 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
+28 | launch.shutdown.pg-store | assemblies/runtime/src/launch.rs | stack.register_detached(pg_store_guard); | status=ok
+29 | launch.shutdown.pg-audit | assemblies/runtime/src/launch.rs | if let Some(guard) = pg_audit_admin_store_guard | status=ok
+30 | launch.shutdown.pg-sampler | assemblies/runtime/src/launch.rs | stack.register_with_token(pg_readiness_sampler); | status=ok
+31 | launch.shutdown.event-infra | assemblies/runtime/src/launch.rs | for guard in event_infra_guards | status=ok
+32 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in domain_resources | status=ok
+33 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in domain_workers | status=ok
+34 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack); | status=ok
+35 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=ok

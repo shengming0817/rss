@@ -24,6 +24,7 @@ const ASSEMBLY_MANIFEST_PATH: &str = "assemblies/runtime/assembly.toml";
 const SHARED_RUNTIME_DEPS_PATH: &str = "assemblies/runtime/src/module.rs";
 const BOOTSTRAP_MODULE_PATH: &str = "crates/bootstrap/src/module.rs";
 const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
+const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -434,6 +435,13 @@ struct AnchorEntry {
     status: AnchorStatus,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AnchorSearchScope<'a> {
+    body: &'a str,
+    start: usize,
+    end: usize,
+}
+
 const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.oidc",
@@ -561,45 +569,60 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "health_listener(reporter, metrics_exporter)",
     },
     AnchorSpec {
-        id: "run.serve",
+        id: "run.launch",
         path: RUNTIME_LIB_PATH,
-        pattern: "serve_until_signal(listeners, move |stack|",
+        pattern: "launch::launch(launch_plan)",
     },
     AnchorSpec {
-        id: "run.shutdown.otel",
-        path: RUNTIME_LIB_PATH,
-        pattern: "stack.register_detached(DynManagedResource::new_box(exporter))",
+        id: "launch.shutdown.trace",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "if let Some(exporter) = trace_exporter",
     },
     AnchorSpec {
-        id: "run.shutdown.pg",
-        path: RUNTIME_LIB_PATH,
-        pattern: "stack.register_detached(DynManagedResource::new_box(pg.store_guard()))",
+        id: "launch.shutdown.pg-store",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "stack.register_detached(pg_store_guard);",
     },
     AnchorSpec {
-        id: "run.shutdown.sampler",
-        path: RUNTIME_LIB_PATH,
-        pattern: "stack.register_with_token(move |token|",
+        id: "launch.shutdown.pg-audit",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "if let Some(guard) = pg_audit_admin_store_guard",
     },
     AnchorSpec {
-        id: "run.shutdown.event-infra",
-        path: RUNTIME_LIB_PATH,
-        pattern: "stack.register_detached(g);",
+        id: "launch.shutdown.pg-sampler",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "stack.register_with_token(pg_readiness_sampler);",
     },
     AnchorSpec {
-        id: "run.shutdown.resources",
-        path: RUNTIME_LIB_PATH,
-        pattern: "stack.register_detached(r);",
+        id: "launch.shutdown.event-infra",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "for guard in event_infra_guards",
     },
     AnchorSpec {
-        id: "run.shutdown.workers",
-        path: RUNTIME_LIB_PATH,
-        pattern: "stack.register_with_token(w);",
+        id: "launch.shutdown.resources",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "for resource in domain_resources",
+    },
+    AnchorSpec {
+        id: "launch.shutdown.workers",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "for worker in domain_workers",
+    },
+    AnchorSpec {
+        id: "launch.register-plan",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "let listeners = plan.register(&mut stack);",
+    },
+    AnchorSpec {
+        id: "launch.listeners",
+        path: RUNTIME_LAUNCH_PATH,
+        pattern: "bind_and_register(&mut stack, listener, &addr_resolver).await?;",
     },
 ];
 
 fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
     let mut file_cache = BTreeMap::<&str, String>::new();
-    let mut last_pos = BTreeMap::<&str, usize>::new();
+    let mut last_pos = BTreeMap::<(&str, &str), usize>::new();
     let mut entries = Vec::new();
 
     for spec in RUNTIME_ANCHORS {
@@ -613,15 +636,17 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
             }
         };
 
-        let scope = mask_comments_and_strings(anchor_search_scope(spec.path, text));
-        let status = match scope.find(spec.pattern) {
+        let scope = anchor_search_scope(spec, text);
+        let masked_scope = mask_comments_and_strings(scope.body);
+        let status = match masked_scope.find(spec.pattern) {
             None => AnchorStatus::Missing,
             Some(pos) => {
-                let previous = last_pos.entry(spec.path).or_insert(0);
-                if pos < *previous {
+                let absolute_pos = scope.start + pos;
+                let previous = last_pos.entry(anchor_order_key(spec)).or_insert(0);
+                if absolute_pos < *previous {
                     AnchorStatus::OutOfOrder
                 } else {
-                    *previous = pos;
+                    *previous = absolute_pos;
                     AnchorStatus::Ok
                 }
             }
@@ -636,15 +661,52 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
     Ok(entries)
 }
 
-fn anchor_search_scope<'a>(path: &str, text: &'a str) -> &'a str {
-    if path == RUNTIME_LIB_PATH {
-        return extract_braced_body(text, "pub async fn run(").unwrap_or("");
+fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScope<'a> {
+    if spec.path == RUNTIME_LIB_PATH {
+        return extract_braced_body_at(text, 0, "pub async fn run(")
+            .unwrap_or_else(|| empty_scope(text));
     }
-    text
+    if spec.path == RUNTIME_LAUNCH_PATH {
+        if spec.id.starts_with("launch.shutdown.") {
+            return launch_plan_register_scope(text).unwrap_or_else(|| empty_scope(text));
+        }
+        if matches!(spec.id, "launch.register-plan" | "launch.listeners") {
+            return extract_braced_body_at(text, 0, "async fn launch_until_observed")
+                .unwrap_or_else(|| empty_scope(text));
+        }
+    }
+    AnchorSearchScope {
+        body: text,
+        start: 0,
+        end: text.len(),
+    }
+}
+
+fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
+    if spec.path == RUNTIME_LIB_PATH {
+        return (spec.path, "run");
+    }
+    if spec.path == RUNTIME_LAUNCH_PATH && spec.id.starts_with("launch.shutdown.") {
+        return (spec.path, "register");
+    }
+    if spec.path == RUNTIME_LAUNCH_PATH
+        && matches!(spec.id, "launch.register-plan" | "launch.listeners")
+    {
+        return (spec.path, "launch_until_observed");
+    }
+    (spec.path, "file")
 }
 
 fn extract_braced_body<'a>(src: &'a str, needle: &str) -> Option<&'a str> {
-    let start = src.find(needle)?;
+    extract_braced_body_at(src, 0, needle).map(|scope| scope.body)
+}
+
+fn extract_braced_body_at<'a>(
+    src: &'a str,
+    search_from: usize,
+    needle: &str,
+) -> Option<AnchorSearchScope<'a>> {
+    let start = src.get(search_from..)?.find(needle)? + search_from;
     let open = src[start..].find('{')? + start;
     let scan = mask_comments_and_strings(&src[open..]);
     let mut depth = 0usize;
@@ -654,13 +716,42 @@ fn extract_braced_body<'a>(src: &'a str, needle: &str) -> Option<&'a str> {
             b'}' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return Some(&src[open + 1..open + offset]);
+                    return Some(AnchorSearchScope {
+                        body: &src[open + 1..open + offset],
+                        start: open + 1,
+                        end: open + offset,
+                    });
                 }
             }
             _ => {}
         }
     }
     None
+}
+
+fn launch_plan_register_scope(text: &str) -> Option<AnchorSearchScope<'_>> {
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let impl_scope = extract_braced_body_at(text, cursor, "impl LaunchPlan")?;
+        if let Some(method_offset) = impl_scope.body.find("fn register(") {
+            let method_start = impl_scope.start + method_offset;
+            if let Some(method_scope) = extract_braced_body_at(text, method_start, "fn register(")
+                && method_scope.end <= impl_scope.end
+            {
+                return Some(method_scope);
+            }
+        }
+        cursor = impl_scope.end.saturating_add(1);
+    }
+    None
+}
+
+fn empty_scope(text: &str) -> AnchorSearchScope<'_> {
+    AnchorSearchScope {
+        body: &text[..0],
+        start: 0,
+        end: 0,
+    }
 }
 
 fn mask_comments_and_strings(src: &str) -> String {
@@ -822,6 +913,7 @@ fn render_baseline(
         format_args!("domainModuleResult = {BOOTSTRAP_MODULE_PATH}"),
     );
     push_line(&mut out, format_args!("run = {RUNTIME_LIB_PATH}"));
+    push_line(&mut out, format_args!("launch = {RUNTIME_LAUNCH_PATH}"));
     out.push('\n');
 
     out.push_str("[runtime.dependencies]\n");
@@ -989,6 +1081,10 @@ impl DomainModuleResult {
 "#,
         )?;
         write(&root.join(RUNTIME_LIB_PATH), &runtime_lib_fixture(None))?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            &runtime_launch_fixture(None),
+        )?;
         Ok(root)
     }
 
@@ -1001,7 +1097,10 @@ impl DomainModuleResult {
 
     fn runtime_anchor_lines(omit: Option<&str>) -> String {
         let mut lines = Vec::new();
-        for anchor in RUNTIME_ANCHORS {
+        for anchor in RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+        {
             if omit == Some(anchor.id) {
                 continue;
             }
@@ -1013,6 +1112,38 @@ impl DomainModuleResult {
         lines.join("\n")
     }
 
+    fn runtime_launch_fixture(omit: Option<&str>) -> String {
+        format!(
+            "impl LaunchPlan {{ fn register() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
+            launch_register_anchor_lines(omit),
+            launch_until_anchor_lines(omit)
+        )
+    }
+
+    fn launch_register_anchor_lines(omit: Option<&str>) -> String {
+        RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| {
+                anchor.path == RUNTIME_LAUNCH_PATH && anchor.id.starts_with("launch.shutdown.")
+            })
+            .filter(|anchor| omit != Some(anchor.id))
+            .map(|anchor| anchor.pattern)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn launch_until_anchor_lines(omit: Option<&str>) -> String {
+        RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| {
+                anchor.path == RUNTIME_LAUNCH_PATH
+                    && matches!(anchor.id, "launch.register-plan" | "launch.listeners")
+            })
+            .filter(|anchor| omit != Some(anchor.id))
+            .map(|anchor| anchor.pattern)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
     #[test]
     fn runtime_baseline_accepts_fixture() -> Result<()> {
         let root = fixture_root("runtime-baseline-green")?;
@@ -1062,6 +1193,7 @@ assembly = assemblies/runtime/assembly.toml
 sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
 run = assemblies/runtime/src/lib.rs
+launch = assemblies/runtime/src/launch.rs
 
 [runtime.dependencies]
 bootstrap = path=../../crates/bootstrap
@@ -1081,7 +1213,8 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("32 | run.shutdown.workers"));
+        assert!(report.rendered.contains("34 | launch.register-plan"));
+        assert!(report.rendered.contains("35 | launch.listeners"));
         Ok(())
     }
 
@@ -1157,7 +1290,10 @@ diportProviders = []
     fn runtime_baseline_provider_anchor_requires_real_provider_call() -> Result<()> {
         let root = fixture_root("runtime-baseline-provider-anchor-real-call")?;
         let mut lines = Vec::new();
-        for anchor in RUNTIME_ANCHORS {
+        for anchor in RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+        {
             if anchor.id == "run.provider.oidc" {
                 lines.push("phase_result(RuntimePhase::BuildProvider, Ok::<_, anyhow::Error>(()))");
             } else {
@@ -1177,6 +1313,140 @@ diportProviders = []
                 f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.oidc")
             }),
             "provider phase marker alone must not satisfy the real provider construction anchor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_missing_launch_anchor_fails() -> Result<()> {
+        let root = fixture_root("runtime-baseline-missing-launch-anchor")?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            &runtime_launch_fixture(Some("launch.shutdown.workers")),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.workers")
+            }),
+            "missing launch register anchor must fail: {:?}",
+            report.findings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_launch_anchor_order_is_checked() -> Result<()> {
+        let root = fixture_root("runtime-baseline-launch-out-of-order")?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            r#"
+impl LaunchPlan { fn register() {
+if let Some(exporter) = trace_exporter
+stack.register_detached(pg_store_guard);
+if let Some(guard) = pg_audit_admin_store_guard
+stack.register_with_token(pg_readiness_sampler);
+for guard in event_infra_guards
+for worker in domain_workers
+for resource in domain_resources
+}}
+async fn launch_until_observed() {
+let listeners = plan.register(&mut stack);
+bind_and_register(&mut stack, listener, &addr_resolver).await?;
+}
+"#,
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.workers")
+            }),
+            "out-of-order launch anchor must fail: {:?}",
+            report.findings
+        );
+        assert!(
+            report
+                .rendered
+                .contains("launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in domain_workers | status=out-of-order"),
+            "out-of-order launch anchor must be rendered explicitly: {}",
+            report.rendered
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_ignores_launch_anchor_bait() -> Result<()> {
+        let root = fixture_root("runtime-baseline-launch-bait")?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            &format!(
+                "impl LaunchPlan {{ fn register() {{\n{}\n// {}\nlet _ = {:?};\n}}\n}}\nfn dead_helper() {{ {} }}\nasync fn launch_until_observed() {{\n{}\n}}\n",
+                launch_register_anchor_lines(Some("launch.shutdown.resources")),
+                "for resource in domain_resources",
+                "for resource in domain_resources",
+                "for resource in domain_resources",
+                launch_until_anchor_lines(None)
+            ),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.resources")
+            }),
+            "comment/string/dead helper launch bait must fail: {:?}",
+            report.findings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_ignores_same_name_register_bait_before_launch_plan_impl() -> Result<()> {
+        let root = fixture_root("runtime-baseline-launch-register-bait")?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            &format!(
+                "fn register() {{\n{}\n}}\n#[cfg(test)] mod tests {{ fn register() {{\n{}\n}} }}\nimpl LaunchPlan {{ fn register() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
+                launch_register_anchor_lines(None),
+                launch_register_anchor_lines(None),
+                launch_register_anchor_lines(Some("launch.shutdown.resources")),
+                launch_until_anchor_lines(None)
+            ),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("launch.shutdown.resources")
+            }),
+            "same-name register bait before LaunchPlan impl must not satisfy launch shutdown anchors: {:?}",
+            report.findings
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_requires_plan_register_before_listener_bind() -> Result<()> {
+        let root = fixture_root("runtime-baseline-launch-plan-before-bind")?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            &format!(
+                "impl LaunchPlan {{ fn register() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nbind_and_register(&mut stack, listener, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack);\n}}\n",
+                launch_register_anchor_lines(None)
+            ),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("launch.listeners")
+            }),
+            "listener bind before plan.register must be out-of-order: {:?}",
+            report.findings
+        );
+        assert!(
+            report
+                .rendered
+                .contains("launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=out-of-order"),
+            "out-of-order listener bind must be rendered explicitly: {}",
+            report.rendered
         );
         Ok(())
     }
