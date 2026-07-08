@@ -45,6 +45,8 @@ Validation: `cargo test -p xtask runtime_baseline`; `cargo test -p xtask parse_c
 - [ ] T015 [US1] Extract launch plan and `ShutdownStack` registration order into `assemblies/runtime/src/launch.rs`.
 - [ ] T016 [US1] Add no-behavior-change runtime harness and phase order golden.
 
+Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test -p runtime runtime_module_output_harness`; `cargo test -p runtime launch_plan`; `cargo test -p runtime`; `cargo xtask runtime-baseline verify`; `cargo xtask verify --fast`. The harness is pure in-memory and must not call `runtime::run()`, require Docker, or depend on live PG/Vault/Redis/S3/AMQP/SPIFFE state.
+
 ## Phase 2: Guard Shared Runtime Dependencies
 
 - [ ] T017 [US2] Add `xtask/src/runtime_deps_guard.rs` to parse `SharedRuntimeDeps` fields.

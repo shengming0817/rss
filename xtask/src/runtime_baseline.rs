@@ -484,6 +484,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "wire_identity(&deps)",
     },
     AnchorSpec {
+        id: "run.module.input.settings",
+        path: RUNTIME_LIB_PATH,
+        pattern: "let (settings_domain, settings_module)",
+    },
+    AnchorSpec {
         id: "run.wire.settings",
         path: RUNTIME_LIB_PATH,
         pattern: "wire_settings(&deps)",
@@ -494,39 +499,34 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])",
     },
     AnchorSpec {
-        id: "run.module.merge.settings",
+        id: "run.module.input.session-sweeper",
         path: RUNTIME_LIB_PATH,
-        pattern: "module.merge(settings_module);",
+        pattern: "let session_sweeper_module =",
     },
     AnchorSpec {
-        id: "run.module.merge.session-sweeper",
+        id: "run.module.input.s3-canary",
         path: RUNTIME_LIB_PATH,
-        pattern: "wire_session_sweeper(&pg)",
-    },
-    AnchorSpec {
-        id: "run.module.merge.s3-canary",
-        path: RUNTIME_LIB_PATH,
-        pattern: "wire_s3_canary(&deps, s3_canary_config)",
+        pattern: "let s3_canary_module =",
     },
     AnchorSpec {
         id: "run.resources.redis",
         path: RUNTIME_LIB_PATH,
-        pattern: "deps.redis.runtime_resources()",
+        pattern: "let redis_resources = deps.redis.runtime_resources()",
     },
     AnchorSpec {
         id: "run.resources.s3",
         path: RUNTIME_LIB_PATH,
-        pattern: "deps.s3.runtime_resources()",
+        pattern: "let s3_resources = deps.s3.runtime_resources()",
     },
     AnchorSpec {
         id: "run.resources.vault",
         path: RUNTIME_LIB_PATH,
-        pattern: "deps.vault.runtime_resources()",
+        pattern: "let vault_resources = deps.vault.runtime_resources()",
     },
     AnchorSpec {
         id: "run.resources.oidc",
         path: RUNTIME_LIB_PATH,
-        pattern: "module.resources.push(runtime_oidc.managed_resource())",
+        pattern: "let oidc_resource = runtime_oidc.managed_resource()",
     },
     AnchorSpec {
         id: "run.probe.oidc-jwks",
@@ -534,9 +534,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness()))",
     },
     AnchorSpec {
-        id: "run.module.merge.domain-transport",
+        id: "run.module.input.domain-transport",
         path: RUNTIME_LIB_PATH,
-        pattern: ".module_result()",
+        pattern: "let domain_transport_module = domain_transport",
     },
     AnchorSpec {
         id: "run.wire.distributed",
@@ -552,6 +552,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         id: "run.event.transport",
         path: RUNTIME_LIB_PATH,
         pattern: "event_transport::wire_event_transport(",
+    },
+    AnchorSpec {
+        id: "run.module.assemble",
+        path: RUNTIME_LIB_PATH,
+        pattern: "assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs",
     },
     AnchorSpec {
         id: "run.probe.drain",
@@ -1213,8 +1218,8 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("34 | launch.register-plan"));
-        assert!(report.rendered.contains("35 | launch.listeners"));
+        assert!(report.rendered.contains("35 | launch.register-plan"));
+        assert!(report.rendered.contains("36 | launch.listeners"));
         Ok(())
     }
 

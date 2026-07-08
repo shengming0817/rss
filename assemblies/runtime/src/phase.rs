@@ -133,6 +133,23 @@ mod tests {
     }
 
     #[test]
+    fn runtime_phase_harness_captures_current_phase_order_golden() {
+        assert_eq!(
+            phase_order_transcript(),
+            "build_provider -> build_infra -> wire_domains -> finalize -> launch"
+        );
+    }
+
+    fn phase_order_transcript() -> String {
+        RuntimePhase::ALL
+            .iter()
+            .copied()
+            .map(RuntimePhase::as_str)
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    }
+
+    #[test]
     fn runtime_inputs_owns_trace_export_without_inspecting_it() {
         let inputs = RuntimeInputs::new(None);
         assert!(inputs.into_trace_export().is_none());

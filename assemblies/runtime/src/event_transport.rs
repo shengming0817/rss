@@ -117,10 +117,10 @@ fn relay_domains_for_test() -> &'static [&'static str] {
     RELAY_DOMAINS
 }
 
-const INBOX_SWEEPER_WORKER_NAME: &str = "inbox-sweeper";
-const INBOX_SWEEPER_PROBE: &str = "inbox_sweeper";
-const DEAD_LETTER_SWEEPER_WORKER_NAME: &str = "dead-letter-sweeper";
-const DEAD_LETTER_SWEEPER_PROBE: &str = "dead_letter_sweeper";
+pub(crate) const INBOX_SWEEPER_WORKER_NAME: &str = "inbox-sweeper";
+pub(crate) const INBOX_SWEEPER_PROBE: &str = "inbox_sweeper";
+pub(crate) const DEAD_LETTER_SWEEPER_WORKER_NAME: &str = "dead-letter-sweeper";
+pub(crate) const DEAD_LETTER_SWEEPER_PROBE: &str = "dead_letter_sweeper";
 const TENANT_AUTHORITY_HMAC_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const TENANT_AUTHORITY_TTL_ENV: &str = "RSS_TENANT_AUTHORITY_TTL_SECS";
 const DEFAULT_TENANT_AUTHORITY_TTL_SECS: u64 = 3600;

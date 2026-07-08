@@ -3285,6 +3285,34 @@ pub async fn shutdown_trace_export(trace_export: Option<otel::OtelExporter>) -> 
     Ok(())
 }
 
+struct RuntimeModuleAssemblyInputs {
+    settings_module: DomainModuleResult,
+    session_sweeper_module: DomainModuleResult,
+    s3_canary_module: DomainModuleResult,
+    redis_resources: Vec<Box<DynManagedResource<'static>>>,
+    s3_resources: Vec<Box<DynManagedResource<'static>>>,
+    vault_resources: Vec<Box<DynManagedResource<'static>>>,
+    oidc_resource: Box<DynManagedResource<'static>>,
+    domain_transport_module: DomainModuleResult,
+    event_module: DomainModuleResult,
+    redis_readiness_worker: bootstrap::WorkerSpec,
+}
+
+fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> DomainModuleResult {
+    let mut module = DomainModuleResult::default();
+    module.merge(inputs.settings_module);
+    module.merge(inputs.session_sweeper_module);
+    module.merge(inputs.s3_canary_module);
+    module.resources.extend(inputs.redis_resources);
+    module.resources.extend(inputs.s3_resources);
+    module.resources.extend(inputs.vault_resources);
+    module.resources.push(inputs.oidc_resource);
+    module.merge(inputs.domain_transport_module);
+    module.merge(inputs.event_module);
+    module.workers.push(inputs.redis_readiness_worker);
+    module
+}
+
 /// 生产组合根入口（运行时入口 Join #1320）：compose 域 → connect pg + migrations → wire_settings
 /// → F8 接线（`PgDbReadiness` 采样 worker + `configs_ready` probe）→ 装配认证接线 → 挂 Health listener
 /// → bind + serve + 信号优雅关停。
@@ -3411,17 +3439,16 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])
                     .context("compose domains")?;
 
-            // 聚合各域 module result（settings configs_ready 探针；后续域只需多一行 module.merge(wire_X(&deps).await?)）。
-            let mut module = DomainModuleResult::default();
-            module.merge(settings_module);
-            module.merge(wire_session_sweeper(&pg).context("wire session sweeper")?);
-            module.merge(wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?);
+            let session_sweeper_module =
+                wire_session_sweeper(&pg).context("wire session sweeper")?;
+            let s3_canary_module =
+                wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
             // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
             // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
-            module.resources.extend(deps.redis.runtime_resources());
-            module.resources.extend(deps.s3.runtime_resources());
-            module.resources.extend(deps.vault.runtime_resources());
-            module.resources.push(runtime_oidc.managed_resource());
+            let redis_resources = deps.redis.runtime_resources();
+            let s3_resources = deps.s3.runtime_resources();
+            let vault_resources = deps.vault.runtime_resources();
+            let oidc_resource = runtime_oidc.managed_resource();
             let pg_readiness_period = build_readiness_interval();
             let redis_readiness_period = build_redis_readiness_interval();
 
@@ -3455,11 +3482,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
 
             // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
             // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
-            module.merge(
-                domain_transport
-                    .module_result()
-                    .context("wire outbound domain transport module")?,
-            );
+            let domain_transport_module = domain_transport
+                .module_result()
+                .context("wire outbound domain transport module")?;
             let distributed = wire_distributed(&deps).context("wire distributed")?;
             let event_subscribers =
                 event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
@@ -3474,7 +3499,29 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             .await
             .context("wire event transport")?;
             let event_infra_guards = event_runtime.infra_guards;
-            module.merge(event_runtime.module);
+
+            // 聚合各域 module result / provider capability guards / event transport outputs。
+            let redis_for_sampler = deps.redis.clone();
+            let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
+                DynManagedResource::new_box(spawn_redis_readiness_sampler(
+                    redis_for_sampler.clone(),
+                    redis_readiness_period,
+                    token,
+                    Arc::clone(&redis_ready),
+                ))
+            });
+            let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+                settings_module,
+                session_sweeper_module,
+                s3_canary_module,
+                redis_resources,
+                s3_resources,
+                vault_resources,
+                oidc_resource,
+                domain_transport_module,
+                event_module: event_runtime.module,
+                redis_readiness_worker,
+            });
 
             // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
             for (name, probe) in module.probes {
@@ -3485,15 +3532,6 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             }
 
             // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
-            let redis_for_sampler = deps.redis.clone();
-            module.workers.push(Box::new(move |token| {
-                DynManagedResource::new_box(spawn_redis_readiness_sampler(
-                    redis_for_sampler.clone(),
-                    redis_readiness_period,
-                    token,
-                    Arc::clone(&redis_ready),
-                ))
-            }));
             let domain_resources = module.resources;
             let domain_workers = module.workers;
             tracing::info!(
@@ -3585,7 +3623,10 @@ mod tests {
 
     use axum::http::Method;
     use diport::ServiceTokenReplayGuard;
-    use eventexec::DlqError;
+    use eventexec::{
+        DlqError, EVENT_CONSUMER_PROBE, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE,
+        OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
+    };
     use oidc::OidcProvider;
     use primitives::ListenerKind;
     use std::future::Future;
@@ -3594,6 +3635,258 @@ mod tests {
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[test]
+    fn runtime_module_output_harness_captures_merge_and_probe_drain_order() {
+        assert_eq!(
+            runtime_module_harness_transcript(),
+            [
+                "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
+                "module-probes: configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, dead_letter_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper",
+                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport",
+                "module-workers: keyprovider-readiness-sampler, session-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, dead-letter-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, redis-readiness-sampler",
+                "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, dead_letter_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper",
+                "reporter-probe-count: 19",
+                "registry-probe-count-after-take: 0",
+            ]
+            .join("\n")
+        );
+    }
+
+    fn runtime_module_harness_transcript() -> String {
+        let mut module = runtime_module_output_harness();
+        let module_probes = probe_names(&module.probes);
+        let module_resources = resource_names(&module.resources);
+        let module_workers = worker_names(module.workers);
+
+        let mut registry = bootstrap::Registry::new();
+        for name in [
+            RLS_READY_PROBE_NAME,
+            REDIS_READY_PROBE_NAME,
+            OIDC_JWKS_READY_PROBE_NAME,
+        ] {
+            register_probe(&mut registry, name);
+        }
+        for (name, probe) in module.probes.drain(..) {
+            let result = registry.probe(name, probe);
+            assert!(result.is_ok(), "module probe drains");
+        }
+        let readyz_probe_names = registry
+            .readyz_report()
+            .checks()
+            .iter()
+            .map(|check| check.name().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let reporter = registry.take_health_reporter();
+
+        [
+            format!("phase-order: {}", phase_order_transcript_for_harness()),
+            format!("module-probes: {}", module_probes.join(", ")),
+            format!("module-resources: {}", module_resources.join(", ")),
+            format!("module-workers: {}", module_workers.join(", ")),
+            format!(
+                "readyz-probes-before-reporter: {}",
+                readyz_probe_names.join(", ")
+            ),
+            format!("reporter-probe-count: {}", reporter.probe_count()),
+            format!(
+                "registry-probe-count-after-take: {}",
+                registry.probe_count()
+            ),
+        ]
+        .join("\n")
+    }
+
+    fn runtime_module_output_harness() -> DomainModuleResult {
+        assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+            settings_module: harness_module(
+                &[CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME],
+                &[],
+                &["keyprovider-readiness-sampler"],
+            ),
+            session_sweeper_module: harness_module(
+                &[SESSION_SWEEPER_PROBE_NAME],
+                &[],
+                &["session-sweeper"],
+            ),
+            s3_canary_module: harness_module(
+                &[crate::infra::s3::S3_READY_PROBE_NAME],
+                &[],
+                &["s3-canary-sampler"],
+            ),
+            redis_resources: vec![harness_resource("redis")],
+            s3_resources: vec![harness_resource("s3")],
+            vault_resources: vec![
+                harness_resource("vault-secret-resolver"),
+                harness_resource("vault-key-provider"),
+            ],
+            oidc_resource: harness_resource("oidc-jwks"),
+            domain_transport_module: harness_module(
+                &[DOMAIN_TRANSPORT_READY_PROBE_NAME],
+                &["domain-http-transport"],
+                &[],
+            ),
+            event_module: event_transport_harness_module(),
+            redis_readiness_worker: harness_worker("redis-readiness-sampler"),
+        })
+    }
+
+    fn event_transport_harness_module() -> DomainModuleResult {
+        let mut module = DomainModuleResult::default();
+        for domain in ["identity", "settings"] {
+            module.probes.push(harness_probe_owned(format!(
+                "{OUTBOX_RELAY_PROBE}_{domain}"
+            )));
+            module
+                .workers
+                .push(harness_worker_owned(format!("outbox-relay-{domain}")));
+        }
+        module.probes.push(harness_probe(OUTBOX_SAMPLER_PROBE));
+        module.workers.push(harness_worker("outbox-sampler"));
+        module.probes.push(harness_probe(OUTBOX_SWEEPER_PROBE));
+        module.workers.push(harness_worker(SWEEPER_WORKER_NAME));
+        module.probes.push(harness_probe(
+            crate::event_transport::DEAD_LETTER_SWEEPER_PROBE,
+        ));
+        module.workers.push(harness_worker(
+            crate::event_transport::DEAD_LETTER_SWEEPER_WORKER_NAME,
+        ));
+        for (topic, consumer, group) in [
+            (
+                "settings.config-version-changed",
+                "settings",
+                "settings.config-version-changed",
+            ),
+            ("identity.session-created", "audit", "audit.session-created"),
+            ("identity.role-assigned", "audit", "audit.role-assigned"),
+            ("identity.role-revoked", "audit", "audit.role-revoked"),
+            ("identity.policy-updated", "audit", "audit.policy-updated"),
+        ] {
+            module.probes.push(harness_probe_owned(format!(
+                "{EVENT_CONSUMER_PROBE}:{}__{}__{}",
+                topic.replace('.', "_"),
+                consumer.replace('.', "_"),
+                group.replace('.', "_")
+            )));
+            module.workers.push(harness_worker_owned(format!(
+                "event-consumer:{consumer}:{topic}"
+            )));
+        }
+        module
+            .probes
+            .push(harness_probe(crate::event_transport::INBOX_SWEEPER_PROBE));
+        module.workers.push(harness_worker(
+            crate::event_transport::INBOX_SWEEPER_WORKER_NAME,
+        ));
+        module
+    }
+
+    fn harness_module(
+        probes: &[&'static str],
+        resources: &[&'static str],
+        workers: &[&'static str],
+    ) -> DomainModuleResult {
+        DomainModuleResult {
+            probes: probes.iter().copied().map(harness_probe).collect(),
+            resources: resources.iter().copied().map(harness_resource).collect(),
+            workers: workers.iter().copied().map(harness_worker).collect(),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn harness_probe(name: &'static str) -> (ProbeName, Box<dyn bootstrap::HealthProbe>) {
+        harness_probe_owned(name.to_owned())
+    }
+
+    #[allow(clippy::expect_used)]
+    fn harness_probe_owned(name: String) -> (ProbeName, Box<dyn bootstrap::HealthProbe>) {
+        let name = ProbeName::parse(&name).expect("harness probe names are valid");
+        (
+            name.clone(),
+            Box::new(HarnessProbe {
+                name,
+                status: HealthStatus::Healthy,
+            }),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn register_probe(registry: &mut bootstrap::Registry, name: &'static str) {
+        let (name, probe) = harness_probe(name);
+        registry.probe(name, probe).expect("direct probe registers");
+    }
+
+    fn probe_names(probes: &[(ProbeName, Box<dyn bootstrap::HealthProbe>)]) -> Vec<String> {
+        probes
+            .iter()
+            .map(|(name, _)| name.as_str().to_owned())
+            .collect()
+    }
+
+    fn resource_names(resources: &[Box<DynManagedResource<'static>>]) -> Vec<String> {
+        resources
+            .iter()
+            .map(|resource| resource.name().to_owned())
+            .collect()
+    }
+
+    fn worker_names(workers: Vec<bootstrap::WorkerSpec>) -> Vec<String> {
+        let token = CancellationToken::new();
+        workers
+            .into_iter()
+            .map(|worker| worker(token.clone()).name().to_owned())
+            .collect()
+    }
+
+    fn harness_resource(name: &'static str) -> Box<DynManagedResource<'static>> {
+        harness_resource_owned(name.to_owned())
+    }
+
+    fn harness_resource_owned(name: String) -> Box<DynManagedResource<'static>> {
+        DynManagedResource::new_box(HarnessResource { name })
+    }
+
+    fn harness_worker(name: &'static str) -> bootstrap::WorkerSpec {
+        harness_worker_owned(name.to_owned())
+    }
+
+    fn harness_worker_owned(name: String) -> bootstrap::WorkerSpec {
+        Box::new(move |_token| harness_resource_owned(name.clone()))
+    }
+
+    fn phase_order_transcript_for_harness() -> String {
+        RuntimePhase::ALL
+            .iter()
+            .copied()
+            .map(RuntimePhase::as_str)
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    }
+
+    struct HarnessProbe {
+        name: ProbeName,
+        status: HealthStatus,
+    }
+
+    impl bootstrap::HealthProbe for HarnessProbe {
+        fn check(&self) -> HealthCheck {
+            HealthCheck::new(self.name.clone(), self.status, "ready")
+        }
+    }
+
+    struct HarnessResource {
+        name: String,
+    }
+
+    impl diport::ManagedResource for HarnessResource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+            Ok(())
+        }
+    }
 
     fn identity_storage_error(message: &'static str) -> identity::ports::IdentityError {
         identity::ports::IdentityError::Storage(Box::new(std::io::Error::other(message)))
