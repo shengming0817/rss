@@ -134,6 +134,70 @@ impl<T> tracing::instrument::Instrument for authn::CrossTenantError
 impl<T> tracing::instrument::WithSubscriber for authn::CrossTenantError
 impl<T> typenum::type_operators::Same for authn::CrossTenantError
 pub type authn::CrossTenantError::Output = T
+pub enum authn::JwtAccessPrincipal<'a>
+pub authn::JwtAccessPrincipal::Admin
+pub authn::JwtAccessPrincipal::Admin::subject: &'a str
+pub authn::JwtAccessPrincipal::Admin::tenant: vocab::tenant::TenantId
+pub authn::JwtAccessPrincipal::Device
+pub authn::JwtAccessPrincipal::Device::subject: &'a str
+pub authn::JwtAccessPrincipal::Device::tenant: vocab::tenant::TenantId
+pub authn::JwtAccessPrincipal::SuperAdmin
+pub authn::JwtAccessPrincipal::SuperAdmin::subject: &'a str
+pub authn::JwtAccessPrincipal::User
+pub authn::JwtAccessPrincipal::User::subject: &'a str
+pub authn::JwtAccessPrincipal::User::tenant: vocab::tenant::TenantId
+impl core::fmt::Debug for authn::JwtAccessPrincipal<'_>
+pub fn authn::JwtAccessPrincipal<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::clone::Clone for authn::JwtAccessPrincipal<'a>
+pub fn authn::JwtAccessPrincipal<'a>::clone(&self) -> authn::JwtAccessPrincipal<'a>
+impl<'a> core::cmp::Eq for authn::JwtAccessPrincipal<'a>
+impl<'a> core::cmp::PartialEq for authn::JwtAccessPrincipal<'a>
+pub fn authn::JwtAccessPrincipal<'a>::eq(&self, &authn::JwtAccessPrincipal<'a>) -> bool
+impl<'a> core::marker::Copy for authn::JwtAccessPrincipal<'a>
+impl<'a> core::marker::StructuralPartialEq for authn::JwtAccessPrincipal<'a>
+impl<'a> core::marker::Freeze for authn::JwtAccessPrincipal<'a>
+impl<'a> core::marker::Send for authn::JwtAccessPrincipal<'a>
+impl<'a> core::marker::Sync for authn::JwtAccessPrincipal<'a>
+impl<'a> core::marker::Unpin for authn::JwtAccessPrincipal<'a>
+impl<'a> core::marker::UnsafeUnpin for authn::JwtAccessPrincipal<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for authn::JwtAccessPrincipal<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for authn::JwtAccessPrincipal<'a>
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::JwtAccessPrincipal<'a> where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::JwtAccessPrincipal<'a> where T: 'a
+impl<L> tonic::service::layered::LayerExt<L> for authn::JwtAccessPrincipal<'a>
+pub fn authn::JwtAccessPrincipal<'a>::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
+impl<Q, K> equivalent::Equivalent<K> for authn::JwtAccessPrincipal<'a> where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn authn::JwtAccessPrincipal<'a>::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for authn::JwtAccessPrincipal<'a> where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn authn::JwtAccessPrincipal<'a>::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for authn::JwtAccessPrincipal<'a> where U: core::convert::From<T>
+pub fn authn::JwtAccessPrincipal<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::JwtAccessPrincipal<'a> where U: core::convert::Into<T>
+pub type authn::JwtAccessPrincipal<'a>::Error = core::convert::Infallible
+pub fn authn::JwtAccessPrincipal<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::JwtAccessPrincipal<'a> where U: core::convert::TryFrom<T>
+pub type authn::JwtAccessPrincipal<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::JwtAccessPrincipal<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for authn::JwtAccessPrincipal<'a> where T: core::clone::Clone
+pub type authn::JwtAccessPrincipal<'a>::Owned = T
+pub fn authn::JwtAccessPrincipal<'a>::clone_into(&self, &mut T)
+pub fn authn::JwtAccessPrincipal<'a>::to_owned(&self) -> T
+impl<T> core::any::Any for authn::JwtAccessPrincipal<'a> where T: 'static + ?core::marker::Sized
+pub fn authn::JwtAccessPrincipal<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::JwtAccessPrincipal<'a> where T: ?core::marker::Sized
+pub fn authn::JwtAccessPrincipal<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::JwtAccessPrincipal<'a> where T: ?core::marker::Sized
+pub fn authn::JwtAccessPrincipal<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for authn::JwtAccessPrincipal<'a> where T: core::clone::Clone
+pub unsafe fn authn::JwtAccessPrincipal<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for authn::JwtAccessPrincipal<'a>
+pub fn authn::JwtAccessPrincipal<'a>::from(T) -> T
+impl<T> tonic::request::IntoRequest<T> for authn::JwtAccessPrincipal<'a>
+pub fn authn::JwtAccessPrincipal<'a>::into_request(self) -> tonic::request::Request<T>
+impl<T> tracing::instrument::Instrument for authn::JwtAccessPrincipal<'a>
+impl<T> tracing::instrument::WithSubscriber for authn::JwtAccessPrincipal<'a>
+impl<T> typenum::type_operators::Same for authn::JwtAccessPrincipal<'a>
+pub type authn::JwtAccessPrincipal<'a>::Output = T
 pub enum authn::JwtAlg
 pub authn::JwtAlg::Es256
 pub authn::JwtAlg::Hs256
@@ -198,7 +262,6 @@ pub authn::JwtIssueError::ExpiryOverflow
 pub authn::JwtIssueError::InvalidConfig
 pub authn::JwtIssueError::KindNotIssuable
 pub authn::JwtIssueError::MissingServiceTokenTenantBinding
-pub authn::JwtIssueError::MissingTenant
 pub authn::JwtIssueError::Sign(diport::signer::SignerError)
 impl core::error::Error for authn::JwtIssueError
 pub fn authn::JwtIssueError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
@@ -417,7 +480,7 @@ impl<T> typenum::type_operators::Same for authn::Jwt
 pub type authn::Jwt::Output = T
 pub struct authn::JwtIssuer<S>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<S>
-pub async fn authn::JwtIssuer<S>::issue(&self, &str, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub async fn authn::JwtIssuer<S>::issue_access(&self, authn::JwtAccessPrincipal<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub async fn authn::JwtIssuer<S>::issue_service_token(&self, &str, diport::pdp::ServiceTokenTenantBinding) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig) -> core::result::Result<Self, authn::JwtIssueError>
 impl<S> core::marker::Freeze for authn::JwtIssuer<S>

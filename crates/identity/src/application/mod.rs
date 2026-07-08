@@ -343,10 +343,13 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         //    有生产消费方。先于 co-tx 执行：mint 失败 ⇒ clean failure（无 session/outbox）。
         //    residual window：mint 成功但步骤 6 co-tx 失败 ⇒ orphan refresh token（无 session/outbox；
         //    随 TTL 自然过期）——完全消除「co-tx 先、mint 失败 ⇒ session 已建但无 token」的半成功窗口。
-        //    `subject` = canonical user uuid（JWT `sub`），kind = User（ES256 路径，alg↔kind 一致）。
+        //    `subject` = canonical user uuid（JWT `sub`），typed User（ES256 路径，alg↔kind 一致）。
         let bundle = self
             .refresh
-            .issue_initial(tenant, &subject, vocab::PrincipalKind::User)
+            .issue_initial(RefreshPrincipal::User {
+                subject: &subject,
+                tenant,
+            })
             .await
             .map_err(LoginError::TokenIssue)?;
 
@@ -478,6 +481,123 @@ pub struct RefreshBundle {
     pub refresh: authn::RefreshToken,
 }
 
+/// 可进入 refresh/session issuance 的主体。
+///
+/// 该类型把“哪些 principal kind 能获得 access+refresh bundle”收紧到编译期：User/Device/Admin 必须携带
+/// tenant；SuperAdmin 只携带 refresh record 的存储/查找 tenant，转换为 access JWT 时不会携带 ambient
+/// tenant。Service/Anonymous 不可构造，因而不能经 session issuance 冒充生产主体。
+///
+/// INVARIANT: REFRESH-PRINCIPAL-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed function choice / input struct field exclusion" }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RefreshPrincipal<'a> {
+    /// 租户内用户主体。
+    User {
+        subject: &'a str,
+        tenant: vocab::TenantId,
+    },
+    /// 租户内设备主体。
+    Device {
+        subject: &'a str,
+        tenant: vocab::TenantId,
+    },
+    /// 租户内管理员主体。
+    Admin {
+        subject: &'a str,
+        tenant: vocab::TenantId,
+    },
+    /// 跨租户 super-admin；`refresh_tenant` 仅用于 refresh record 存储/查找，不写入 access JWT。
+    SuperAdmin {
+        subject: &'a str,
+        refresh_tenant: vocab::TenantId,
+    },
+}
+
+impl std::fmt::Debug for RefreshPrincipal<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::User { tenant, .. } => f
+                .debug_struct("User")
+                .field("subject", &"<redacted>")
+                .field("tenant", tenant)
+                .finish(),
+            Self::Device { tenant, .. } => f
+                .debug_struct("Device")
+                .field("subject", &"<redacted>")
+                .field("tenant", tenant)
+                .finish(),
+            Self::Admin { tenant, .. } => f
+                .debug_struct("Admin")
+                .field("subject", &"<redacted>")
+                .field("tenant", tenant)
+                .finish(),
+            Self::SuperAdmin { refresh_tenant, .. } => f
+                .debug_struct("SuperAdmin")
+                .field("subject", &"<redacted>")
+                .field("refresh_tenant", refresh_tenant)
+                .finish(),
+        }
+    }
+}
+
+impl<'a> RefreshPrincipal<'a> {
+    fn tenant(self) -> vocab::TenantId {
+        match self {
+            Self::User { tenant, .. }
+            | Self::Device { tenant, .. }
+            | Self::Admin { tenant, .. } => tenant,
+            Self::SuperAdmin { refresh_tenant, .. } => refresh_tenant,
+        }
+    }
+
+    fn subject(self) -> &'a str {
+        match self {
+            Self::User { subject, .. }
+            | Self::Device { subject, .. }
+            | Self::Admin { subject, .. }
+            | Self::SuperAdmin { subject, .. } => subject,
+        }
+    }
+
+    fn kind(self) -> vocab::PrincipalKind {
+        match self {
+            Self::User { .. } => vocab::PrincipalKind::User,
+            Self::Device { .. } => vocab::PrincipalKind::Device,
+            Self::Admin { .. } => vocab::PrincipalKind::Admin,
+            Self::SuperAdmin { .. } => vocab::PrincipalKind::SuperAdmin,
+        }
+    }
+
+    fn access_principal(self) -> authn::JwtAccessPrincipal<'a> {
+        match self {
+            Self::User { subject, tenant } => authn::JwtAccessPrincipal::User { subject, tenant },
+            Self::Device { subject, tenant } => {
+                authn::JwtAccessPrincipal::Device { subject, tenant }
+            }
+            Self::Admin { subject, tenant } => authn::JwtAccessPrincipal::Admin { subject, tenant },
+            Self::SuperAdmin { subject, .. } => authn::JwtAccessPrincipal::SuperAdmin { subject },
+        }
+    }
+}
+
+#[allow(unknown_lints)]
+#[allow(rss_handler_local_principal_authz)] // reason: refresh rotation maps persisted issuer claim kind into typed JwtAccessPrincipal; it is not an authorization branch.
+fn access_principal_from_refresh_record<'a>(
+    subject: &'a str,
+    tenant: vocab::TenantId,
+    kind: vocab::PrincipalKind,
+) -> Result<authn::JwtAccessPrincipal<'a>, authn::JwtIssueError> {
+    match kind {
+        vocab::PrincipalKind::User => Ok(authn::JwtAccessPrincipal::User { subject, tenant }),
+        vocab::PrincipalKind::Device => Ok(authn::JwtAccessPrincipal::Device { subject, tenant }),
+        vocab::PrincipalKind::Admin => Ok(authn::JwtAccessPrincipal::Admin { subject, tenant }),
+        vocab::PrincipalKind::SuperAdmin => Ok(authn::JwtAccessPrincipal::SuperAdmin { subject }),
+        vocab::PrincipalKind::Service | vocab::PrincipalKind::Anonymous => {
+            Err(authn::JwtIssueError::KindNotIssuable)
+        }
+        _ => Err(authn::JwtIssueError::KindNotIssuable),
+    }
+}
+
 /// Refresh token 应用服务：签发 / 轮换 / 撤销。必填依赖走构造器位置参（缺失即编译错误）。
 ///
 /// ## rotate 设计决策：mint 先于 CAS（#284 F1）
@@ -514,28 +634,27 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
 
     /// 签发新 refresh token（CSPRNG secret，存摘要）。返回 bearer secret（仅此时暴露一次）。
     ///
-    /// `tenant` / `subject` / `kind` 作为 rotation 重签 access JWT 的 claim 源持久化至 store。
+    /// [`RefreshPrincipal`] 作为 rotation 重签 access JWT 的 claim 源持久化至 store。
     /// `skip_all`：secret / subject 不入 span（零信任；subject 可含 PII，observability.md §redaction）。
     #[tracing::instrument(
         skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "refresh_issue", tenant_id = %tenant),
+        fields(domain = SESSION_DOMAIN, operation = "refresh_issue", tenant_id = %principal.tenant()),
         err
     )]
     pub async fn issue(
         &self,
-        tenant: vocab::TenantId,
-        subject: &str,
-        kind: vocab::PrincipalKind,
+        principal: RefreshPrincipal<'_>,
     ) -> Result<authn::RefreshToken, RefreshError> {
         let secret = secure::OpaqueToken::generate();
         let hash = RefreshTokenHash::new(secure::digest(secret.expose()));
         let now = self.clock.now();
         let id = RefreshTokenId::generate();
+        let tenant = principal.tenant();
         let record = RefreshTokenRecord::new(
             id.clone(),
             tenant,
-            subject,
-            kind,
+            principal.subject(),
+            principal.kind(),
             hash,
             None,
             id,
@@ -554,27 +673,25 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     /// token，组成 [`RefreshBundle`]。供 [`LoginService`] 登录成功后调用——令 minted JWT 有生产消费方（#1252）。
     ///
     /// 顺序同 `rotate` 的「mint 先于持久副作用」：先 mint access（失败 ⇒ 无 refresh 记录残留、客户端重登即可），
-    /// 成功后 `issue` 落库 refresh token。`subject` / `kind` 是 access JWT 与 refresh 记录的同源 claim。
+    /// 成功后 `issue` 落库 refresh token。`RefreshPrincipal` 是 access JWT 与 refresh 记录的同源 claim。
     ///
     /// `skip_all`：subject 不入 span（零信任；可含 PII，observability.md §redaction）。
     #[tracing::instrument(
         skip_all,
-        fields(domain = SESSION_DOMAIN, operation = "refresh_issue_initial", tenant_id = %tenant),
+        fields(domain = SESSION_DOMAIN, operation = "refresh_issue_initial", tenant_id = %principal.tenant()),
         err
     )]
     pub async fn issue_initial(
         &self,
-        tenant: vocab::TenantId,
-        subject: &str,
-        kind: vocab::PrincipalKind,
+        principal: RefreshPrincipal<'_>,
     ) -> Result<RefreshBundle, RefreshError> {
         // mint 先于落库：access mint 失败 ⇒ 未写任何 refresh 记录、客户端重登即可（无悬挂 token）。
         let access = self
             .issuer
-            .issue(subject, Some(tenant), kind)
+            .issue_access(principal.access_principal())
             .await
             .map_err(RefreshError::Mint)?;
-        let refresh = self.issue(tenant, subject, kind).await?;
+        let refresh = self.issue(principal).await?;
         Ok(RefreshBundle { access, refresh })
     }
 
@@ -641,10 +758,18 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
             now + self.refresh_ttl,
         );
 
-        // 5. mint access JWT（先于 CAS，#284 F1）：mint 失败 ⇒ 旧 refresh 未消费、客户端可重试、无锁死
+        // 5. mint access JWT（先于 CAS，#284 F1）：mint 失败 ⇒ 旧 refresh 未消费、客户端可重试、无锁死。
+        //    claim source 必须来自持久化 record；请求 tenant 只作 lookup scope，且需与 record tenant 一致。
+        let record_tenant = rec.tenant();
+        if record_tenant != tenant {
+            return Err(RefreshError::Invalid);
+        }
+        let principal =
+            access_principal_from_refresh_record(rec.subject(), record_tenant, rec.kind())
+                .map_err(RefreshError::Mint)?;
         let access = self
             .issuer
-            .issue(rec.subject(), Some(tenant), rec.kind())
+            .issue_access(principal)
             .await
             .map_err(RefreshError::Mint)?;
 
@@ -2666,6 +2791,15 @@ mod tests {
     fn tid(raw: &str) -> TenantId {
         #[allow(clippy::expect_used)]
         TenantId::parse(raw).expect("canonical tenant")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn access_claims(jwt: &authn::MintedJwt) -> serde_json::Value {
+        let payload = jwt.as_str().split('.').nth(1).expect("jwt payload segment");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url payload");
+        serde_json::from_slice(&bytes).expect("json payload")
     }
 
     fn uid(raw: &str) -> ids::UserId {
@@ -5840,6 +5974,219 @@ mod tests {
         )
     }
 
+    #[test]
+    fn refresh_principal_debug_redacts_subject() {
+        let debug = format!(
+            "{:?}",
+            RefreshPrincipal::SuperAdmin {
+                subject: "root-secret-subject",
+                refresh_tenant: tid(CANON_TENANT),
+            }
+        );
+
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains("root-secret-subject"),
+            "Debug must not leak refresh principal subject"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_issue_initial_device_mints_scoped_access_claims() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let tenant = tid(CANON_TENANT);
+
+        let bundle = svc
+            .issue_initial(RefreshPrincipal::Device {
+                subject: "device-subject",
+                tenant,
+            })
+            .await
+            .expect("device initial issue ok");
+        let claims = access_claims(&bundle.access);
+
+        assert_eq!(claims["sub"], "device-subject");
+        assert_eq!(claims["kind"], "device");
+        assert_eq!(claims["tenant_id"], CANON_TENANT);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_issue_initial_super_admin_mints_unscoped_access_claims() {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let refresh_tenant = tid(CANON_TENANT);
+
+        let bundle = svc
+            .issue_initial(RefreshPrincipal::SuperAdmin {
+                subject: "root-subject",
+                refresh_tenant,
+            })
+            .await
+            .expect("super-admin initial issue ok");
+        let claims = access_claims(&bundle.access);
+
+        assert_eq!(claims["sub"], "root-subject");
+        assert_eq!(claims["kind"], "superAdmin");
+        assert!(
+            claims.get("tenant_id").is_none(),
+            "super-admin access JWT must not carry ambient tenant"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn assert_refresh_rotate_access_claims(
+        principal: RefreshPrincipal<'_>,
+        tenant: TenantId,
+        expected_subject: &str,
+        expected_kind: &str,
+        expected_tenant_claim: Option<&str>,
+    ) {
+        let store = crate::internal::mem::InMemRefreshTokenStore::new();
+        let svc = make_refresh_svc(store, make_clock(1_700_000_000), Duration::from_secs(3_600));
+        let old_refresh = svc.issue(principal).await.expect("issue refresh ok");
+
+        let bundle = svc.rotate(tenant, &old_refresh).await.expect("rotate ok");
+        let claims = access_claims(&bundle.access);
+
+        assert_eq!(claims["sub"], expected_subject);
+        assert_eq!(claims["kind"], expected_kind);
+        match expected_tenant_claim {
+            Some(expected) => assert_eq!(claims["tenant_id"], expected),
+            None => assert!(
+                claims.get("tenant_id").is_none(),
+                "unscoped rotated access JWT must not carry ambient tenant"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_rotate_device_admin_and_super_admin_preserve_record_kind_claims() {
+        let tenant = tid(CANON_TENANT);
+
+        assert_refresh_rotate_access_claims(
+            RefreshPrincipal::Device {
+                subject: "device-subject",
+                tenant,
+            },
+            tenant,
+            "device-subject",
+            "device",
+            Some(CANON_TENANT),
+        )
+        .await;
+        assert_refresh_rotate_access_claims(
+            RefreshPrincipal::Admin {
+                subject: "admin-subject",
+                tenant,
+            },
+            tenant,
+            "admin-subject",
+            "admin",
+            Some(CANON_TENANT),
+        )
+        .await;
+        assert_refresh_rotate_access_claims(
+            RefreshPrincipal::SuperAdmin {
+                subject: "root-subject",
+                refresh_tenant: tenant,
+            },
+            tenant,
+            "root-subject",
+            "superAdmin",
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_rotate_rejects_service_and_anonymous_record_kinds_before_cas() {
+        use crate::ports::DynRefreshTokenStore;
+
+        mockall::mock! {
+            NonIssuableStore {}
+            impl RefreshTokenStore for NonIssuableStore {
+                async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn find_by_hash(
+                    &self,
+                    tenant: TenantId,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+                async fn rotate(
+                    &self,
+                    rotation: crate::ports::RefreshRotation,
+                ) -> Result<bool, IdentityError>;
+                async fn revoke_lineage(
+                    &self,
+                    tenant: TenantId,
+                    lineage_id: RefreshTokenId,
+                ) -> Result<(), IdentityError>;
+            }
+        }
+
+        macro_rules! assert_non_issuable_kind {
+            ($kind:expr, $lineage:literal, $subject:literal, $presented:literal) => {{
+                let tenant = tid(CANON_TENANT);
+                let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+                let active_rec = RefreshTokenRecord::hydrate(
+                    $lineage,
+                    tenant,
+                    $subject,
+                    $kind,
+                    [0xCC; 32],
+                    None,
+                    $lineage,
+                    RefreshStatus::Active,
+                    issued,
+                    issued + Duration::from_secs(3_600),
+                );
+                let mut mock = MockNonIssuableStore::new();
+                mock.expect_find_by_hash()
+                    .times(1)
+                    .returning(move |_tenant, _hash| Ok(Some(active_rec.clone())));
+                mock.expect_rotate().times(0);
+                mock.expect_revoke_lineage().times(0);
+
+                let svc = RefreshService::new(
+                    DynRefreshTokenStore::new_box(mock),
+                    std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+                    make_clock(1_700_000_000),
+                    Duration::from_secs(3_600),
+                );
+                let presented = authn::RefreshToken::new($presented);
+                let err = svc
+                    .rotate(tenant, &presented)
+                    .await
+                    .expect_err("non-access refresh record kind must not rotate");
+
+                assert!(
+                    matches!(
+                        err,
+                        RefreshError::Mint(authn::JwtIssueError::KindNotIssuable)
+                    ),
+                    "non-access kind must fail before CAS: {err:?}"
+                );
+            }};
+        }
+
+        assert_non_issuable_kind!(
+            vocab::PrincipalKind::Service,
+            "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "service-subject",
+            "service-refresh-token"
+        );
+        assert_non_issuable_kind!(
+            vocab::PrincipalKind::Anonymous,
+            "dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "anonymous-subject",
+            "anonymous-refresh-token"
+        );
+    }
+
     // ── 测试 R1：happy rotation — issue → rotate 成功（返回 access JWT 非空 + 新 refresh ≠ 旧）
     //             旧 refresh 再 rotate ⇒ Replayed 且原 lineage 全部不再可用 ─────────────
 
@@ -5852,7 +6199,10 @@ mod tests {
 
         // issue → rotate 成功
         let old_rf = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
         let bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
@@ -5894,7 +6244,10 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         let token_a = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
         let bundle_b = svc.rotate(ta, &token_a).await.expect("A→B ok");
@@ -5921,7 +6274,10 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         let old_rf = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
         let _bundle = svc.rotate(ta, &old_rf).await.expect("rotate ok");
@@ -5941,7 +6297,10 @@ mod tests {
         let ta = tid(CANON_TENANT);
 
         let rf = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
 
@@ -5967,7 +6326,10 @@ mod tests {
         let issue_svc = make_refresh_svc(store.clone(), make_clock(1_000), Duration::from_secs(1));
         let ta = tid(CANON_TENANT);
         let rf = issue_svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
 
@@ -5988,7 +6350,10 @@ mod tests {
         let tb = tid(OTHER_TENANT);
 
         let rf = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
 
@@ -6110,6 +6475,72 @@ mod tests {
         assert!(matches!(err, RefreshError::Replayed), "CAS miss: {err:?}");
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn refresh_rotate_rejects_record_tenant_mismatch_before_mint() {
+        use crate::ports::DynRefreshTokenStore;
+
+        mockall::mock! {
+            TenantMismatchStore {}
+            impl RefreshTokenStore for TenantMismatchStore {
+                async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn find_by_hash(
+                    &self,
+                    tenant: TenantId,
+                    hash: RefreshTokenHash,
+                ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+                async fn rotate(
+                    &self,
+                    rotation: crate::ports::RefreshRotation,
+                ) -> Result<bool, IdentityError>;
+                async fn revoke_lineage(
+                    &self,
+                    tenant: TenantId,
+                    lineage_id: RefreshTokenId,
+                ) -> Result<(), IdentityError>;
+            }
+        }
+
+        let request_tenant = tid(CANON_TENANT);
+        let record_tenant = tid(OTHER_TENANT);
+        let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let lineage_str = "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let active_rec = RefreshTokenRecord::hydrate(
+            lineage_str,
+            record_tenant,
+            "alice-subj",
+            vocab::PrincipalKind::User,
+            [0xBB; 32],
+            None,
+            lineage_str,
+            RefreshStatus::Active,
+            issued,
+            issued + Duration::from_secs(3_600),
+        );
+
+        let mut mock = MockTenantMismatchStore::new();
+        mock.expect_find_by_hash()
+            .withf(move |tenant, _hash| *tenant == request_tenant)
+            .returning(move |_tenant, _hash| Ok(Some(active_rec.clone())));
+
+        let svc = RefreshService::new(
+            DynRefreshTokenStore::new_box(mock),
+            std::sync::Arc::new(make_jwt_issuer(make_clock(1_700_000_000))),
+            make_clock(1_700_000_000),
+            Duration::from_secs(3_600),
+        );
+
+        let fake_token = authn::RefreshToken::new("this-store-returns-wrong-tenant");
+        let err = svc
+            .rotate(request_tenant, &fake_token)
+            .await
+            .expect_err("tenant-mismatched refresh record must fail closed");
+        assert!(
+            matches!(err, RefreshError::Invalid),
+            "tenant mismatch must be Invalid before mint/CAS: {err:?}"
+        );
+    }
+
     // ── 测试 R10：mint 先于 CAS（#284 F1）— signer 失败时旧 refresh 未被消费、仍 Active ──
     //
     // 验证 rotate 步骤 5（mint）先于步骤 6（CAS 提交）：mint 失败 ⇒ 返回 Mint 错误、CAS 从未执行 ⇒
@@ -6160,7 +6591,10 @@ mod tests {
 
         // issue 不 mint（仅 insert）⇒ 成功签发旧 refresh
         let old_rf = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
 
@@ -6285,7 +6719,10 @@ mod tests {
 
         // 先签发一个 refresh token 落库，供 handler 轮换。
         let rf = svc
-            .issue(ta, "alice-subject", vocab::PrincipalKind::User)
+            .issue(RefreshPrincipal::User {
+                subject: "alice-subject",
+                tenant: ta,
+            })
             .await
             .expect("issue ok");
 

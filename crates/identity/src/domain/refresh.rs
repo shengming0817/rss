@@ -120,7 +120,7 @@ impl RefreshStatus {
 /// [`PrincipalKind`] → 持久化文本（`kind` 列单源映射）。
 ///
 /// 未知未来变体（`PrincipalKind` 是 `#[non_exhaustive]`）→ `"anonymous"`（**fail-closed**：anonymous 不可
-/// 签发 JWT，rotate 时 `JwtIssuer::issue` 拒签，绝不静默把未知 kind 当作已知特权 kind 冒充）。
+/// 映射为 `JwtAccessPrincipal`，rotate 时拒签，绝不静默把未知 kind 当作已知特权 kind 冒充）。
 pub fn kind_to_db(kind: PrincipalKind) -> &'static str {
     match kind {
         PrincipalKind::User => "user",
@@ -154,7 +154,7 @@ pub fn kind_from_db(s: &str) -> Option<PrincipalKind> {
 /// refresh token 持久化快照域实体（私有字段；构造经 funnel；不 derive Serialize——域类型）。
 ///
 /// 持久化形态是 flat record。`subject` / `tenant` / `kind` 是 rotation 重签 access JWT 的 claim 源
-/// （`JwtIssuer::issue(subject, Some(tenant), kind)`）；`token_hash` 是查找键；`parent_id` / `lineage_id`
+/// （经 `RefreshService` fail-closed 映射为 `JwtAccessPrincipal`）；`token_hash` 是查找键；`parent_id` / `lineage_id`
 /// 建模轮换谱系（reuse-detection 级联撤销锚点）；`status` + `expires_at` 控一次性 / 过期。
 ///
 /// Debug：`subject`（生产 = canonical user id）防御性脱敏（同 `session::Session`），`token_hash` 经其自身脱敏

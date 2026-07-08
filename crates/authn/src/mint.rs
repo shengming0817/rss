@@ -7,7 +7,7 @@
 //! （ES256 定长 r‖s / HS256 HMAC）+ httpserve 接线留 W（softca 输出 DER ≠ JWS r‖s，不可复用，#1314 计划）。
 //!
 //! ref: RFC 7515 §7.1（JWS Compact Serialization：`base64url(header)."."base64url(payload)` 为 signing
-//! input，签名段 base64url 无填充——[`JwtIssuer::issue`] 直接实现，与 `adapters/oidc/src/jws.rs` 验签侧同
+//! input，签名段 base64url 无填充——[`JwtIssuer::issue_access`] 直接实现，与 `adapters/oidc/src/jws.rs` 验签侧同
 //! RFC 反方向：mint=组装 / verify=解析）；RFC 7519（JWT registered claims：sub/exp/iat/iss/aud）；
 //! Keats/jsonwebtoken `src/encoding.rs`（`encode(&Header,&claims,&EncodingKey)`：serialize→base64url→拼
 //! signing input→签名→拼签名段，同形工业 mint；RSS **不依赖**——手写 base64+serde_json + 委托 `diport::Signer`）。
@@ -74,9 +74,83 @@ pub struct JwtIssuerConfig {
     pub ttl: Duration,
 }
 
+/// 可签发为 JWT access token 的主体。
+///
+/// scoped 主体（user/device/admin）在类型层强制携带 [`TenantId`]；跨租户 super-admin variant 不暴露
+/// tenant 字段，因而「给 super-admin access JWT 签 ambient tenant」在调用点不可表达。service-token 走
+/// [`JwtIssuer::issue_service_token`]，不进入本 enum。
+///
+/// INVARIANT: JWT-ACCESS-PRINCIPAL-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed function choice / input struct field exclusion" }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum JwtAccessPrincipal<'a> {
+    /// 租户内用户主体。
+    User { subject: &'a str, tenant: TenantId },
+    /// 租户内设备主体。
+    Device { subject: &'a str, tenant: TenantId },
+    /// 租户内管理员主体。
+    Admin { subject: &'a str, tenant: TenantId },
+    /// 跨租户 super-admin 主体；JWT 不携带 ambient tenant。
+    SuperAdmin { subject: &'a str },
+}
+
+impl std::fmt::Debug for JwtAccessPrincipal<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::User { tenant, .. } => f
+                .debug_struct("User")
+                .field("subject", &"<redacted>")
+                .field("tenant", tenant)
+                .finish(),
+            Self::Device { tenant, .. } => f
+                .debug_struct("Device")
+                .field("subject", &"<redacted>")
+                .field("tenant", tenant)
+                .finish(),
+            Self::Admin { tenant, .. } => f
+                .debug_struct("Admin")
+                .field("subject", &"<redacted>")
+                .field("tenant", tenant)
+                .finish(),
+            Self::SuperAdmin { .. } => f
+                .debug_struct("SuperAdmin")
+                .field("subject", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+impl<'a> JwtAccessPrincipal<'a> {
+    fn subject(self) -> &'a str {
+        match self {
+            Self::User { subject, .. }
+            | Self::Device { subject, .. }
+            | Self::Admin { subject, .. }
+            | Self::SuperAdmin { subject } => subject,
+        }
+    }
+
+    fn tenant(self) -> Option<TenantId> {
+        match self {
+            Self::User { tenant, .. }
+            | Self::Device { tenant, .. }
+            | Self::Admin { tenant, .. } => Some(tenant),
+            Self::SuperAdmin { .. } => None,
+        }
+    }
+
+    fn kind(self) -> PrincipalKind {
+        match self {
+            Self::User { .. } => PrincipalKind::User,
+            Self::Device { .. } => PrincipalKind::Device,
+            Self::Admin { .. } => PrincipalKind::Admin,
+            Self::SuperAdmin { .. } => PrincipalKind::SuperAdmin,
+        }
+    }
+}
+
 /// 已签发 JWT（typed 输出 newtype；私有内容；`Debug` 脱敏；不 derive `Serialize`）。
 ///
-/// 唯一 mint 点 = [`JwtIssuer::issue`]（`pub(crate)` 构造 funnel）。同 [`crate::AccessToken`] / [`crate::Jwt`]
+/// 唯一 access-token mint 点 = [`JwtIssuer::issue_access`]（`pub(crate)` 构造 funnel）。同 [`crate::AccessToken`] / [`crate::Jwt`]
 /// 脱敏范式：bearer 凭据不进 `Debug` / tracing。携带 `exp`（= JWT `exp` claim，权威单源）供下游 wire 回带
 /// `accessExpiresAt`——与 token 内 claim 同一次时钟计算，杜绝 wire 值与 claim 漂移。
 pub struct MintedJwt {
@@ -91,7 +165,8 @@ impl std::fmt::Debug for MintedJwt {
 }
 
 impl MintedJwt {
-    /// 受控构造（生产唯一调用方 = [`JwtIssuer::issue`]）。`expires_at` = JWT `exp`（epoch 秒）。
+    /// 受控构造（生产唯一调用方 = [`JwtIssuer::issue_access`] / [`JwtIssuer::issue_service_token`]）。
+    /// `expires_at` = JWT `exp`（epoch 秒）。
     pub(crate) fn new(raw: String, expires_at: i64) -> Self {
         Self { raw, expires_at }
     }
@@ -118,9 +193,6 @@ pub enum JwtIssueError {
     /// subject 为空——不签发匿名 token（fail-closed，对称验签侧空 subject 拒绝）。
     #[error("jwt subject must not be empty")]
     EmptySubject,
-    /// scoped 主体（user/device/admin）缺 tenant——无法签发租户内 token（fail-closed）。
-    #[error("scoped principal kind requires a tenant")]
-    MissingTenant,
     /// 该 `PrincipalKind` 不可签发为 JWT（如 `Anonymous` 及未来不可签发 kind）。
     #[error("principal kind is not issuable as a jwt")]
     KindNotIssuable,
@@ -199,14 +271,6 @@ fn kind_claim(kind: PrincipalKind) -> Result<&'static str, JwtIssueError> {
     }
 }
 
-/// scoped 主体（user/device/admin）须带 tenant claim；super-admin / service 跨租户省略（对称验签侧）。
-fn needs_tenant(kind: PrincipalKind) -> bool {
-    matches!(
-        kind,
-        PrincipalKind::User | PrincipalKind::Device | PrincipalKind::Admin
-    )
-}
-
 /// alg↔kind scheme 一致性：ES256 = JWT 路径（user/device/admin/super）、HS256 = service-token 路径（service）。
 /// 对齐验签侧 `verify_credential` 的 scheme→alg 锁（`CredentialScheme::Jwt`→ES256 / `ServiceToken`→HS256）——
 /// 错配（如 HS256 签 user、ES256 签 service）产出签发语义与验签 scheme 分裂的凭据，mint 侧 fail-closed 拒签。
@@ -280,18 +344,22 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
         Ok((iat, exp))
     }
 
-    /// 组装 claims → 紧凑 JWS → 委托签名 → typed [`MintedJwt`]。
+    /// 组装 access-token claims → 紧凑 JWS → 委托签名 → typed [`MintedJwt`]。
     ///
-    /// per-call typed 入参：`subject`（主体标识）/ `tenant`（scoped 主体必填、跨租户省略）/ `kind`。
-    /// **所有 fail-closed 校验（subject/kind/tenant/clock/overflow）在签名之前**——失败短路、signer 不被调用、
-    /// 绝不返回半成品 token。
-    pub async fn issue(
+    /// per-call typed 入参：[`JwtAccessPrincipal`] 把 scoped tenant 必填和 super-admin 无 tenant 上移到类型层。
+    /// **所有 fail-closed 校验（subject/kind/clock/overflow）在签名之前**——失败短路、signer 不被调用、
+    /// 绝不返回半成品 token。service-token 不经本方法，须走 [`Self::issue_service_token`]。
+    pub async fn issue_access(
         &self,
-        subject: &str,
-        tenant: Option<TenantId>,
-        kind: PrincipalKind,
+        principal: JwtAccessPrincipal<'_>,
     ) -> Result<MintedJwt, JwtIssueError> {
-        self.issue_inner(subject, tenant, kind, None).await
+        self.issue_inner(
+            principal.subject(),
+            principal.tenant().map(|tenant| tenant.to_string()),
+            principal.kind(),
+            None,
+        )
+        .await
     }
 
     /// 组装 tenant-bound HS256 service-token。
@@ -307,11 +375,11 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
     async fn issue_inner(
         &self,
         subject: &str,
-        tenant: Option<TenantId>,
+        tenant_claim: Option<String>,
         kind: PrincipalKind,
         service_token_binding: Option<diport::ServiceTokenTenantBinding>,
     ) -> Result<MintedJwt, JwtIssueError> {
-        // 1) 输入 fail-closed（对称验签侧 `derive_from_claims`：空 subject / 不可签发 kind / scoped 缺 tenant）。
+        // 1) 输入 fail-closed（对称验签侧 `derive_from_claims`：空 subject / 不可签发 kind）。
         if subject.is_empty() {
             return Err(JwtIssueError::EmptySubject);
         }
@@ -324,12 +392,6 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<S> {
         if matches!(kind, PrincipalKind::Service) && service_token_binding.is_none() {
             return Err(JwtIssueError::MissingServiceTokenTenantBinding);
         }
-        let tenant_claim = if needs_tenant(kind) {
-            // TenantId Display = canonical lowercase-hyphenated（验签侧 `TenantId::parse` 接受同一形态）。
-            Some(tenant.ok_or(JwtIssueError::MissingTenant)?.to_string())
-        } else {
-            None
-        };
 
         // 2) iat / exp（注入 Clock，fail-closed）。
         let (iat, exp) = self.time_claims()?;
@@ -518,7 +580,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         let jwt = issuer
-            .issue("user-123", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "user-123",
+                tenant: tenant(),
+            })
             .await
             .expect("issue ok");
 
@@ -544,6 +609,71 @@ mod tests {
             parts[2],
             B64_URL.encode(SIG_BYTES),
             "签名段 = base64url(确定字节)"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn issue_access_device_requires_typed_tenant() {
+        let issuer = issuer_with(
+            RecordingSigner::ok(),
+            now_time(),
+            JwtAlg::Es256,
+            "auth.jwt.access",
+            Duration::from_secs(3600),
+        );
+        let jwt = issuer
+            .issue_access(JwtAccessPrincipal::Device {
+                subject: "device-123",
+                tenant: tenant(),
+            })
+            .await
+            .expect("device access issue ok");
+
+        let claims = decode_segment(&segments(&jwt)[1]);
+        assert_eq!(claims["sub"], "device-123");
+        assert_eq!(claims["kind"], "device");
+        assert_eq!(claims["tenant_id"], CANON_TENANT);
+    }
+
+    #[test]
+    fn jwt_access_principal_debug_redacts_subject() {
+        let debug = format!(
+            "{:?}",
+            JwtAccessPrincipal::Device {
+                subject: "device-secret-subject",
+                tenant: tenant(),
+            }
+        );
+
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains("device-secret-subject"),
+            "Debug must not leak JWT subject"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn issue_access_super_admin_cannot_carry_tenant() {
+        let issuer = issuer_with(
+            RecordingSigner::ok(),
+            now_time(),
+            JwtAlg::Es256,
+            "auth.jwt.access",
+            Duration::from_secs(3600),
+        );
+        let jwt = issuer
+            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
+            .await
+            .expect("super-admin access issue ok");
+
+        let claims = decode_segment(&segments(&jwt)[1]);
+        assert_eq!(claims["sub"], "root");
+        assert_eq!(claims["kind"], "superAdmin");
+        assert!(
+            claims.get("tenant_id").is_none(),
+            "typed super-admin access principal has no tenant field to serialize"
         );
     }
 
@@ -585,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn issue_ignores_tenant_for_super_admin() {
+    async fn issue_access_super_admin_omits_tenant_claim() {
         let issuer = issuer_with(
             RecordingSigner::ok(),
             now_time(),
@@ -594,36 +724,14 @@ mod tests {
             Duration::from_secs(3600),
         );
         let jwt = issuer
-            .issue("subject", Some(tenant()), PrincipalKind::SuperAdmin)
+            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "subject" })
             .await
             .expect("issue ok");
         let claims = decode_segment(&segments(&jwt)[1]);
         assert!(
             claims.get("tenant_id").is_none(),
-            "super-admin 跨租户须省略 tenant claim（即便传入 Some）"
+            "super-admin 跨租户须省略 tenant claim"
         );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_service_token_requires_tenant_binding() {
-        let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Hs256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let err = issuer
-            .issue("svc", None, PrincipalKind::Service)
-            .await
-            .expect_err("service-token 不得经 unsigned issue 签出");
-        assert!(matches!(
-            err,
-            JwtIssueError::MissingServiceTokenTenantBinding
-        ));
-        assert!(signer.captured().is_none(), "签名前 fail-closed");
     }
 
     #[tokio::test]
@@ -631,10 +739,21 @@ mod tests {
     async fn issue_rejects_alg_kind_scheme_mismatch() {
         // F2：ES256 限 user/device/admin/super、HS256 限 service；错配 fail-closed、signer 不被调用
         // （验签侧 `verify_credential` 把 Jwt→ES256 / ServiceToken→HS256 锁死）。
-        for (alg, kind) in [
-            (JwtAlg::Es256, PrincipalKind::Service), // ES256 签 service-token kind → 错配
-            (JwtAlg::Hs256, PrincipalKind::User),    // HS256 签 jwt kind → 错配
-            (JwtAlg::Hs256, PrincipalKind::Admin),
+        for (alg, principal) in [
+            (
+                JwtAlg::Hs256,
+                JwtAccessPrincipal::User {
+                    subject: "subject",
+                    tenant: tenant(),
+                },
+            ), // HS256 签 jwt kind → 错配
+            (
+                JwtAlg::Hs256,
+                JwtAccessPrincipal::Admin {
+                    subject: "subject",
+                    tenant: tenant(),
+                },
+            ),
         ] {
             let signer = RecordingSigner::ok();
             let issuer = issuer_with(
@@ -644,25 +763,34 @@ mod tests {
                 "p",
                 Duration::from_secs(3600),
             );
-            // scoped kind 给 tenant 排除 MissingTenant 干扰，确保命中 AlgKindMismatch。
-            let tenant_arg = if needs_tenant(kind) {
-                Some(tenant())
-            } else {
-                None
-            };
             let err = issuer
-                .issue("subject", tenant_arg, kind)
+                .issue_access(principal)
                 .await
                 .expect_err("alg↔kind 错配须 fail-closed");
             assert!(
                 matches!(err, JwtIssueError::AlgKindMismatch),
-                "alg={alg:?} kind={kind:?}"
+                "alg={alg:?} principal={principal:?}"
             );
             assert!(
                 signer.captured().is_none(),
-                "alg={alg:?} kind={kind:?} signer 不被调用"
+                "alg={alg:?} principal={principal:?} signer 不被调用"
             );
         }
+
+        let signer = RecordingSigner::ok();
+        let issuer = issuer_with(
+            signer.clone(),
+            now_time(),
+            JwtAlg::Es256,
+            "p",
+            Duration::from_secs(3600),
+        );
+        let err = issuer
+            .issue_service_token("svc", tenant_binding())
+            .await
+            .expect_err("ES256 签 service-token kind 须错配");
+        assert!(matches!(err, JwtIssueError::AlgKindMismatch));
+        assert!(signer.captured().is_none());
     }
 
     #[test]
@@ -680,7 +808,7 @@ mod tests {
             Duration::from_secs(3600),
         );
         assert_send_sync(&issuer);
-        assert_send(issuer.issue("u", None, PrincipalKind::SuperAdmin));
+        assert_send(issuer.issue_access(JwtAccessPrincipal::SuperAdmin { subject: "u" }));
     }
 
     #[tokio::test]
@@ -695,7 +823,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         let jwt = issuer
-            .issue("user-123", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "user-123",
+                tenant: tenant(),
+            })
             .await
             .expect("issue ok");
 
@@ -720,7 +851,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         let jwt = issuer
-            .issue("u", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "u",
+                tenant: tenant(),
+            })
             .await
             .expect("issue ok");
         let header = decode_segment(&segments(&jwt)[0]);
@@ -773,7 +907,10 @@ mod tests {
             Duration::from_secs(1800),
         );
         let jwt = issuer
-            .issue("u", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "u",
+                tenant: tenant(),
+            })
             .await
             .expect("issue ok");
         let claims = decode_segment(&segments(&jwt)[1]);
@@ -794,7 +931,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         let err = issuer
-            .issue("u", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "u",
+                tenant: tenant(),
+            })
             .await
             .expect_err("clock < epoch 须 fail-closed");
         assert!(matches!(err, JwtIssueError::ClockBeforeEpoch));
@@ -814,7 +954,10 @@ mod tests {
             Duration::from_secs(u64::MAX),
         );
         let err = issuer
-            .issue("u", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "u",
+                tenant: tenant(),
+            })
             .await
             .expect_err("exp 溢出须 fail-closed");
         assert!(matches!(err, JwtIssueError::ExpiryOverflow));
@@ -832,7 +975,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         let err = issuer
-            .issue("u", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "u",
+                tenant: tenant(),
+            })
             .await
             .expect_err("signer 失败须传播");
         assert!(matches!(err, JwtIssueError::Sign(_)));
@@ -850,7 +996,7 @@ mod tests {
         );
         // super-admin 跨租户：无 tenant claim。
         let jwt = issuer
-            .issue("root", None, PrincipalKind::SuperAdmin)
+            .issue_access(JwtAccessPrincipal::SuperAdmin { subject: "root" })
             .await
             .expect("issue ok");
         let claims = decode_segment(&segments(&jwt)[1]);
@@ -864,10 +1010,28 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn issue_scoped_kinds_include_tenant() {
-        for (kind, expected_kind) in [
-            (PrincipalKind::User, "user"),
-            (PrincipalKind::Device, "device"),
-            (PrincipalKind::Admin, "admin"),
+        for (principal, expected_kind) in [
+            (
+                JwtAccessPrincipal::User {
+                    subject: "subject",
+                    tenant: tenant(),
+                },
+                "user",
+            ),
+            (
+                JwtAccessPrincipal::Device {
+                    subject: "subject",
+                    tenant: tenant(),
+                },
+                "device",
+            ),
+            (
+                JwtAccessPrincipal::Admin {
+                    subject: "subject",
+                    tenant: tenant(),
+                },
+                "admin",
+            ),
         ] {
             let issuer = issuer_with(
                 RecordingSigner::ok(),
@@ -876,13 +1040,10 @@ mod tests {
                 "p",
                 Duration::from_secs(3600),
             );
-            let jwt = issuer
-                .issue("subject", Some(tenant()), kind)
-                .await
-                .expect("issue ok");
+            let jwt = issuer.issue_access(principal).await.expect("issue ok");
             let claims = decode_segment(&segments(&jwt)[1]);
-            assert_eq!(claims["tenant_id"], CANON_TENANT, "kind={kind:?}");
-            assert_eq!(claims["kind"], expected_kind, "kind={kind:?}");
+            assert_eq!(claims["tenant_id"], CANON_TENANT, "principal={principal:?}");
+            assert_eq!(claims["kind"], expected_kind, "principal={principal:?}");
         }
     }
 
@@ -898,55 +1059,22 @@ mod tests {
             Duration::from_secs(3600),
         );
         let err = issuer
-            .issue("", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "",
+                tenant: tenant(),
+            })
             .await
             .expect_err("空 subject 须 fail-closed");
         assert!(matches!(err, JwtIssueError::EmptySubject));
         assert!(signer.captured().is_none());
     }
 
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_fails_closed_scoped_kind_without_tenant() {
-        for kind in [
-            PrincipalKind::User,
-            PrincipalKind::Device,
-            PrincipalKind::Admin,
-        ] {
-            let signer = RecordingSigner::ok();
-            let issuer = issuer_with(
-                signer.clone(),
-                now_time(),
-                JwtAlg::Es256,
-                "p",
-                Duration::from_secs(3600),
-            );
-            let err = issuer
-                .issue("subject", None, kind)
-                .await
-                .expect_err("scoped 主体缺 tenant 须 fail-closed");
-            assert!(matches!(err, JwtIssueError::MissingTenant), "kind={kind:?}");
-            assert!(signer.captured().is_none(), "kind={kind:?}");
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn issue_fails_closed_on_anonymous_kind() {
-        let signer = RecordingSigner::ok();
-        let issuer = issuer_with(
-            signer.clone(),
-            now_time(),
-            JwtAlg::Es256,
-            "p",
-            Duration::from_secs(3600),
-        );
-        let err = issuer
-            .issue("subject", None, PrincipalKind::Anonymous)
-            .await
-            .expect_err("anonymous 不可签发");
-        assert!(matches!(err, JwtIssueError::KindNotIssuable));
-        assert!(signer.captured().is_none());
+    #[test]
+    fn kind_claim_fails_closed_on_anonymous_kind() {
+        assert!(matches!(
+            kind_claim(PrincipalKind::Anonymous),
+            Err(JwtIssueError::KindNotIssuable)
+        ));
     }
 
     #[tokio::test]
@@ -960,7 +1088,10 @@ mod tests {
             Duration::from_secs(3600),
         );
         let jwt = issuer
-            .issue("subject-secret", Some(tenant()), PrincipalKind::User)
+            .issue_access(JwtAccessPrincipal::User {
+                subject: "subject-secret",
+                tenant: tenant(),
+            })
             .await
             .expect("issue ok");
         let dbg = format!("{jwt:?}");
@@ -984,10 +1115,6 @@ mod tests {
         assert_eq!(
             JwtIssueError::EmptySubject.to_string(),
             "jwt subject must not be empty"
-        );
-        assert_eq!(
-            JwtIssueError::MissingTenant.to_string(),
-            "scoped principal kind requires a tenant"
         );
         assert_eq!(
             JwtIssueError::KindNotIssuable.to_string(),

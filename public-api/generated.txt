@@ -6613,7 +6613,7 @@ impl<T> typenum::type_operators::Same for generated::http::HttpResourceSharingMo
 pub type generated::http::HttpResourceSharingMode::Output = T
 pub struct generated::http::HttpAuthSpec
 pub generated::http::HttpAuthSpec::mode: generated::http::HttpAuthMode
-pub generated::http::HttpAuthSpec::permission: core::option::Option<&'static str>
+pub generated::http::HttpAuthSpec::permission: core::option::Option<vocab::authz::RoutePermissionId>
 pub generated::http::HttpAuthSpec::reason: core::option::Option<&'static str>
 impl core::clone::Clone for generated::http::HttpAuthSpec
 pub fn generated::http::HttpAuthSpec::clone(&self) -> generated::http::HttpAuthSpec
@@ -6701,7 +6701,7 @@ pub type generated::http::HttpHeaderSpec::Output = T
 pub struct generated::http::HttpProjectionFieldSpec
 pub generated::http::HttpProjectionFieldSpec::field: vocab::projection::ProjectionField
 pub generated::http::HttpProjectionFieldSpec::obligation_key: &'static str
-pub generated::http::HttpProjectionFieldSpec::permission: &'static str
+pub generated::http::HttpProjectionFieldSpec::permission: vocab::authz::RoutePermissionId
 pub generated::http::HttpProjectionFieldSpec::response_path: &'static str
 impl core::clone::Clone for generated::http::HttpProjectionFieldSpec
 pub fn generated::http::HttpProjectionFieldSpec::clone(&self) -> generated::http::HttpProjectionFieldSpec

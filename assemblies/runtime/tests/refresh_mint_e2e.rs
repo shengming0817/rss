@@ -136,14 +136,14 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<VaultSigner> {
     .expect("jwt issuer config")
 }
 
-/// 真 `OidcProvider`（经生产装配路径 `provider_from_b64`），信任 `user` kind + mock 私钥对应的 ES256 公钥。
+/// 真 `OidcProvider`（经生产装配路径 `provider_from_b64`），信任指定 kind + mock 私钥对应的 ES256 公钥。
 #[allow(clippy::expect_used)]
-fn oidc_provider() -> OidcProvider {
+fn oidc_provider(trusted_kinds: &str) -> OidcProvider {
     let es256_b64 = B64_URL.encode(sec1(&sk_jwt()));
     provider_from_b64(
         ISS,
         AUD,
-        "user",
+        trusted_kinds,
         Some(&es256_b64),
         None,
         None,
@@ -154,7 +154,7 @@ fn oidc_provider() -> OidcProvider {
 
 /// 经生产 `apply_verify_bridge` 验 `token`：返回 `/protected`（Require Jwt）的状态码。
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-async fn verify_status(token: &str) -> StatusCode {
+async fn verify_status(token: &str, trusted_kinds: &str) -> StatusCode {
     let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
         rb.mount_primary(
             httpserve::PrimaryRoute::permission(
@@ -172,7 +172,11 @@ async fn verify_status(token: &str) -> StatusCode {
     let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("plan");
     let authed =
         httpserve::finalize_primary_auth(routes, plan, allow_authorizer()).expect("finalize_auth");
-    let app = apply_verify_bridge(authed, Arc::new(oidc_provider()), RequiredScheme::Jwt);
+    let app = apply_verify_bridge(
+        authed,
+        Arc::new(oidc_provider(trusted_kinds)),
+        RequiredScheme::Jwt,
+    );
     let req = axum::http::Request::builder()
         .method(Method::GET)
         .uri("/protected")
@@ -201,33 +205,64 @@ async fn vault_signed_access_jwt_verifies_via_oidc_bridge() {
         .mount(&server)
         .await;
 
-    // 2. 经 vault Signer（mock）铸 user access JWT（user kind 需 tenant；issuer 注 tenant_id claim）。
+    // 2. 经 vault Signer（mock）铸 user/device/superAdmin access JWT。
     let issuer = vault_jwt_issuer(&server.uri());
     let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
-    let minted = issuer
-        .issue("alice", Some(tenant), vocab::PrincipalKind::User)
+    let user = issuer
+        .issue_access(authn::JwtAccessPrincipal::User {
+            subject: "alice",
+            tenant,
+        })
         .await
-        .expect("vault-signed mint ok");
+        .expect("vault-signed user mint ok");
+    let device = issuer
+        .issue_access(authn::JwtAccessPrincipal::Device {
+            subject: "device-a",
+            tenant,
+        })
+        .await
+        .expect("vault-signed device mint ok");
+    let super_admin = issuer
+        .issue_access(authn::JwtAccessPrincipal::SuperAdmin { subject: "root" })
+        .await
+        .expect("vault-signed super-admin mint ok");
 
     // 3. 权威 exp = NOW + ttl（与紧凑串内 exp claim 同源同次计算）。
     assert_eq!(
-        minted.expires_at(),
+        user.expires_at(),
         NOW + TTL_SECS as i64,
         "MintedJwt::expires_at 须 = NOW + ttl"
     );
 
     // 4. vault-签的 access JWT 经真 oidc 桥验签 → 200（sign→verify 闭环成立）。
-    let token = minted.as_str().to_string();
+    for (token, label) in [
+        (user.as_str(), "user"),
+        (device.as_str(), "device"),
+        (super_admin.as_str(), "superAdmin"),
+    ] {
+        assert_eq!(
+            verify_status(token, "user,device,superAdmin").await,
+            StatusCode::OK,
+            "vault Transit 签的 {label} access JWT 须经 oidc 验签放行"
+        );
+    }
+
+    // 5. trusted kind 缺失须 fail-closed。
     assert_eq!(
-        verify_status(&token).await,
-        StatusCode::OK,
-        "vault Transit 签的 access JWT 须经 oidc 验签放行"
+        verify_status(device.as_str(), "user,superAdmin").await,
+        StatusCode::UNAUTHORIZED,
+        "device kind 未被 trust 时须拒绝"
+    );
+    assert_eq!(
+        verify_status(super_admin.as_str(), "user,device").await,
+        StatusCode::UNAUTHORIZED,
+        "superAdmin kind 未被 trust 时须拒绝"
     );
 
-    // 5. anti-vacuity：篡改签名段 → 验签失败 → 401（证验签真实生效、非恒放行）。
-    let tampered = format!("{token}x");
+    // 6. anti-vacuity：篡改签名段 → 验签失败 → 401（证验签真实生效、非恒放行）。
+    let tampered = format!("{}x", user.as_str());
     assert_eq!(
-        verify_status(&tampered).await,
+        verify_status(&tampered, "user,device,superAdmin").await,
         StatusCode::UNAUTHORIZED,
         "篡改签名的 JWT 须 401（验签非恒真）"
     );

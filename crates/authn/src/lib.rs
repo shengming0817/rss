@@ -41,7 +41,7 @@ const _: fn(AuthPlan, Option<RouteAuthOptOut>) -> AuthRequirement = resolve_requ
 // JWT 签发（mint/sign）：组装 claims + 紧凑 JWS，签名委托注入的 `diport::Signer`（#1314）。验签侧对称物在
 // 本 crate 顶部 verify→mint bridge；mint 子模块复用下方 `KIND_*` claim 串单源（杜绝 round-trip 漂移）。
 mod mint;
-pub use mint::{JwtAlg, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
+pub use mint::{JwtAccessPrincipal, JwtAlg, JwtIssueError, JwtIssuer, JwtIssuerConfig, MintedJwt};
 mod mtls;
 pub use mtls::{
     MtlsAllowSet, MtlsIdentityError, MtlsTrustDomain, MtlsTrustDomainAllowSet, OutboundMtlsPolicy,

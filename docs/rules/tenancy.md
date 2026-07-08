@@ -56,6 +56,11 @@ service-token tenant MAC 仍按上一节治理。
 
 ## Principal claim source
 
+生产 access JWT 只能经 `authn::JwtAccessPrincipal` typed issuer 签发。User / Device / Admin variant
+必须携带 `TenantId` 并写入 `tenant_id` claim；SuperAdmin variant 不暴露 tenant 字段，签出的
+`superAdmin` JWT 没有 ambient tenant，也不会直接产生 `RowScope::All`。service-token 不进入 access
+issuer，单独走 tenant-bound HS256 service-token 路径，并把 canonical `X-Tenant-ID` 纳入 MAC 输入。
+
 JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 tenant。
 `Principal::row_visibility(ctx)` 是身份到 row-scope 的框架级派生入口：
 

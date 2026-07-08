@@ -111,6 +111,75 @@ fn sec1(sk: &SigningKey) -> Vec<u8> {
         .as_bytes()
         .to_vec()
 }
+
+#[derive(Clone)]
+struct P256JwtSigner;
+
+impl diport::Signer for P256JwtSigner {
+    async fn sign(
+        &self,
+        request: diport::SignRequest,
+    ) -> Result<diport::Signature, diport::SignerError> {
+        let sig: Signature = sk_jwt().sign(request.message.as_bytes());
+        Ok(diport::Signature::new(sig.to_bytes().to_vec()))
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::SignerError> {
+        Ok(())
+    }
+}
+
+#[allow(clippy::expect_used)]
+fn production_access_jwt(principal: authn::JwtAccessPrincipal<'_>) -> String {
+    let issuer = authn::JwtIssuer::new(
+        Arc::new(P256JwtSigner),
+        Box::new(FixedClock(NOW)),
+        authn::JwtIssuerConfig {
+            key: diport::KeyId::new("runtime-e2e-jwt-key"),
+            alg: authn::JwtAlg::Es256,
+            purpose: diport::SigningPurpose::new("auth.jwt.access"),
+            issuer: ISS.to_string(),
+            audience: AUD.to_string(),
+            ttl: Duration::from_secs(3600),
+        },
+    )
+    .expect("runtime e2e jwt issuer config");
+    futures::executor::block_on(issuer.issue_access(principal))
+        .expect("runtime e2e production jwt")
+        .as_str()
+        .to_string()
+}
+
+#[allow(clippy::expect_used)]
+fn production_tenant() -> vocab::TenantId {
+    vocab::TenantId::parse(TENANT).expect("canonical tenant")
+}
+
+fn production_super_admin_jwt() -> String {
+    production_access_jwt(authn::JwtAccessPrincipal::SuperAdmin { subject: "alice" })
+}
+
+fn production_user_jwt() -> String {
+    production_access_jwt(authn::JwtAccessPrincipal::User {
+        subject: "alice",
+        tenant: production_tenant(),
+    })
+}
+
+fn production_device_jwt() -> String {
+    production_access_jwt(authn::JwtAccessPrincipal::Device {
+        subject: "alice",
+        tenant: production_tenant(),
+    })
+}
+
+fn production_admin_jwt() -> String {
+    production_access_jwt(authn::JwtAccessPrincipal::Admin {
+        subject: "alice",
+        tenant: production_tenant(),
+    })
+}
+
 fn mint_es256(sk: &SigningKey, payload: &str) -> String {
     let header = B64.encode(br#"{"alg":"ES256"}"#);
     let body = B64.encode(payload.as_bytes());
@@ -169,21 +238,6 @@ fn super_admin_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
 fn service_token_payload(exp: i64, sub: &str) -> String {
     format!(
         r#"{{"sub":"{sub}","exp":{exp},"iss":"{ISS}","aud":"{AUD}","jti":"mtls-exact-match-{sub}-{exp}"}}"#
-    )
-}
-
-/// `user` kind JWT（需 tenant claim；默认 claim 名 `tenant_id`）。
-fn user_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str) -> String {
-    scoped_jwt(sk, exp, iss, aud, "user")
-}
-
-/// scoped kind（user/device/admin）JWT（带 tenant claim；sub=alice）——参数化 kind 供多 kind scope e2e 复用。
-fn scoped_jwt(sk: &SigningKey, exp: i64, iss: &str, aud: &str, kind: &str) -> String {
-    mint_es256(
-        sk,
-        &format!(
-            r#"{{"sub":"alice","exp":{exp},"iss":"{iss}","aud":"{aud}","kind":"{kind}","tenant_id":"{TENANT}"}}"#
-        ),
     )
 }
 
@@ -521,7 +575,7 @@ async fn rate_limit_blocks_before_jwt_auth_tripwire() {
 // ── 验收：成功路径 ────────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn valid_jwt_is_200() {
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     assert_eq!(
         status(
             jwt_router(Some(RequiredScheme::Jwt)),
@@ -537,7 +591,7 @@ async fn valid_jwt_is_200() {
 #[tokio::test]
 async fn user_jwt_with_tenant_via_production_builder_is_200() {
     // 评审 F2：经生产 builder（trusted-kind 注入）+ user kind + tenant → 200。若 F1 trusted-kind 缺失则 401 FAIL。
-    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_user_jwt();
     assert_eq!(
         status(
             jwt_router(Some(RequiredScheme::Jwt)),
@@ -554,7 +608,7 @@ async fn user_jwt_with_tenant_via_production_builder_is_200() {
 #[allow(clippy::expect_used)]
 async fn user_jwt_records_auth_audit_principal_kind() {
     let sink = RecordingAuditSink::default();
-    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_user_jwt();
     assert_eq!(
         status(
             jwt_router_with_audit(sink.clone()),
@@ -672,7 +726,7 @@ async fn body_of_with_tenant(
 async fn user_jwt_establishes_runctx_scope_for_downstream() {
     // user JWT 带 tenant claim → 验签桥 runctx::scope 绑定 → 下游 handler 经 try_current() 取到已认证
     // tenant + principal facet（kind=User、受控 subject 匹配 alice）。
-    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_user_jwt();
     let (status, body) = body_of(
         jwt_router_with_scope_probe(),
         "/scope",
@@ -691,7 +745,7 @@ async fn user_jwt_establishes_runctx_scope_for_downstream() {
 async fn super_admin_jwt_without_tenant_leaves_scope_missing() {
     // 跨租户主体（superAdmin，tenant=None）→ 不建 scope → 下游 try_current() = MissingCtx（fail-closed）；
     // 仍放行（有证据）证明「不建 scope」≠「拒绝」。
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     let (status, body) = body_of(
         jwt_router_with_scope_probe(),
         "/scope",
@@ -708,7 +762,7 @@ async fn super_admin_jwt_without_tenant_leaves_scope_missing() {
 #[tokio::test]
 async fn device_jwt_establishes_runctx_scope_for_downstream() {
     // Device kind（scoped，带 tenant）走与 User 同一 allow_evidence 路径 → 建 scope（防 kind 差异化回归）。
-    let token = scoped_jwt(&sk_jwt(), NOW + 3600, ISS, AUD, "device");
+    let token = production_device_jwt();
     let (status, body) = body_of(
         jwt_router_with_scope_probe(),
         "/scope",
@@ -726,7 +780,7 @@ async fn device_jwt_establishes_runctx_scope_for_downstream() {
 #[tokio::test]
 async fn admin_jwt_establishes_runctx_scope_for_downstream() {
     // Admin kind（scoped，带 tenant）同样建 scope——ABAC 最相关的 scoped 角色，确保非 User 的 scoped 路径也覆盖。
-    let token = scoped_jwt(&sk_jwt(), NOW + 3600, ISS, AUD, "admin");
+    let token = production_admin_jwt();
     let (status, body) = body_of(
         jwt_router_with_scope_probe(),
         "/scope",
@@ -754,7 +808,7 @@ async fn public_route_with_valid_bearer_has_no_scope() {
     // #1105 F2（核心回归）：Public 路由即便携**有效** Bearer 也不建 ambient scope。scope 由 enforce 仅在
     // Require-Allow 建立，Public opt-out（requirement=Allow）丢弃 PendingScopeCtx——防「Public handler 因
     // 携 Bearer 误绑 ambient tenant」。修复前（scope 在验签桥建）此用例会取到 tenant 而 FAIL。
-    let token = user_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_user_jwt();
     let (status, body) = body_of(
         jwt_router_with_scope_probe(),
         "/scope-public",
@@ -771,7 +825,7 @@ async fn public_route_with_valid_bearer_has_no_scope() {
 #[tokio::test]
 async fn lowercase_bearer_scheme_is_200() {
     // RFC 6750 §2.1：scheme 名大小写不敏感；bridge 接受 "bearer " 小写前缀。
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     assert_eq!(
         status(
             jwt_router(Some(RequiredScheme::Jwt)),
@@ -787,7 +841,7 @@ async fn lowercase_bearer_scheme_is_200() {
 #[tokio::test]
 async fn uppercase_bearer_scheme_is_200() {
     // 评审 F7：scheme 大小写不敏感——大写 BEARER 仍放行。
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     assert_eq!(
         status(
             jwt_router(Some(RequiredScheme::Jwt)),
@@ -807,7 +861,7 @@ async fn uppercase_bearer_scheme_is_200() {
 async fn verify_jwt_is_synchronous_now_or_never_tripwire() {
     let provider = es256_provider();
     let pdp = diport::DynPdp::from_ref(&provider);
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     assert!(
         authn::verify_jwt(&token, pdp).now_or_never().is_some(),
         "verify_jwt future 须首 poll 即 ready（CPU-only verify 契约；#1197 真 async 化将破此约 → 须改 bridge）"
@@ -909,7 +963,7 @@ async fn hs256_token_on_jwt_listener_is_401() {
 #[tokio::test]
 async fn jwt_evidence_cannot_satisfy_require_mtls() {
     // RequiredScheme::Mtls 不读取 bearer token；JWT 不能跨 scheme 放行。
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     assert_eq!(
         status(
             mtls_router(),
@@ -1014,7 +1068,7 @@ async fn internal_mtls_route_authorizer_allows_verified_peer() {
 // ── 安全同批门回归（ADR-006 §5 / tasks.md:14）：无注入方 ⇒ 即便有效 JWT，Require 仍 401 ──
 #[tokio::test]
 async fn no_bridge_require_still_401_even_with_valid_jwt() {
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     assert_eq!(
         status(
             jwt_router(None),
@@ -1284,7 +1338,7 @@ fn tracing_allow_logs_decision_and_kind_no_pii() {
     let _capture_guard = tracing_capture_lock().lock().unwrap();
     ensure_global_trace_capture();
 
-    let token = super_admin_jwt(&sk_jwt(), NOW + 3600, ISS, AUD);
+    let token = production_super_admin_jwt();
     let request_id = "trace-allow-super-admin";
     let start = trace_len();
     let st = block_on_current_thread(status_with_request_id(
