@@ -15,6 +15,8 @@
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
 //!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
+//!   `cargo xtask runtime-baseline list|verify`
+//!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
@@ -68,6 +70,7 @@ mod pdpallow;
 mod pg_tenant_tx_guard;
 mod publicapi;
 mod reconcile_outbox_command_guard;
+mod runtime_baseline;
 mod schema_rls;
 mod setlocal_funnel;
 mod src_scan;
@@ -95,6 +98,8 @@ enum Command {
     AssemblyValidate,
     ArchRulesList,
     ArchRulesVerify,
+    RuntimeBaselineList,
+    RuntimeBaselineVerify,
     ContractBreaking {
         /// base git-ref（缺省 = `contract::breaking::DEFAULT_AGAINST`）。
         against: Option<String>,
@@ -148,6 +153,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["codegen"] => Ok(Command::Codegen { check: false }),
         ["codegen", "--check"] => Ok(Command::Codegen { check: true }),
         ["archrules", rest @ ..] => parse_archrules(rest),
+        ["runtime-baseline", rest @ ..] => parse_runtime_baseline(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
         ["layer-deps"] => Ok(Command::LayerDeps),
@@ -169,7 +175,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | archrules <list | verify> | runtime-baseline <list | verify> | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -183,6 +189,17 @@ fn parse_archrules(args: &[&str]) -> Result<Command> {
         other => {
             bail!("未知 archrules 子命令: {other:?}；用法: cargo xtask archrules <list | verify>")
         }
+    }
+}
+
+/// 解析 `runtime-baseline <sub>` 子命令（fail-closed：只接受 positional list/verify，不提供兼容别名）。
+fn parse_runtime_baseline(args: &[&str]) -> Result<Command> {
+    match args {
+        ["list"] => Ok(Command::RuntimeBaselineList),
+        ["verify"] => Ok(Command::RuntimeBaselineVerify),
+        other => bail!(
+            "未知 runtime-baseline 子命令: {other:?}；用法: cargo xtask runtime-baseline <list | verify>"
+        ),
     }
 }
 
@@ -338,6 +355,8 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
+        Command::RuntimeBaselineList => runtime_baseline::list(),
+        Command::RuntimeBaselineVerify => diagnostic::run_check(&runtime_baseline::RuntimeBaseline),
         Command::ContractBreaking { against, deny } => {
             let mode = if deny {
                 contract::breaking::EnforcementMode::Deny
@@ -459,6 +478,23 @@ mod tests {
         assert!(parse_command(&s(&["archrules", "--list"])).is_err());
         assert!(parse_command(&s(&["archrules", "list", "extra"])).is_err());
         assert!(parse_command(&s(&["archrules", "bogus"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_runtime_baseline() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["runtime-baseline", "list"]))?,
+            Command::RuntimeBaselineList
+        );
+        assert_eq!(
+            parse_command(&s(&["runtime-baseline", "verify"]))?,
+            Command::RuntimeBaselineVerify
+        );
+        assert!(parse_command(&s(&["runtime-baseline"])).is_err());
+        assert!(parse_command(&s(&["runtime-baseline", "--list"])).is_err());
+        assert!(parse_command(&s(&["runtime-baseline", "list", "extra"])).is_err());
+        assert!(parse_command(&s(&["runtime-baseline", "bogus"])).is_err());
+        Ok(())
     }
 
     #[test]
