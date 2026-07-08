@@ -438,7 +438,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.oidc",
         path: RUNTIME_LIB_PATH,
-        pattern: "phase_result(RuntimePhase::BuildProvider, build_provider())",
+        pattern: "build_runtime_oidc_provider().context(",
     },
     AnchorSpec {
         id: "run.provider.pg",
@@ -514,6 +514,16 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         id: "run.resources.vault",
         path: RUNTIME_LIB_PATH,
         pattern: "deps.vault.runtime_resources()",
+    },
+    AnchorSpec {
+        id: "run.resources.oidc",
+        path: RUNTIME_LIB_PATH,
+        pattern: "module.resources.push(runtime_oidc.managed_resource())",
+    },
+    AnchorSpec {
+        id: "run.probe.oidc-jwks",
+        path: RUNTIME_LIB_PATH,
+        pattern: "Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness()))",
     },
     AnchorSpec {
         id: "run.module.merge.domain-transport",
@@ -1071,7 +1081,7 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("30 | run.shutdown.workers"));
+        assert!(report.rendered.contains("32 | run.shutdown.workers"));
         Ok(())
     }
 

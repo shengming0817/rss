@@ -16,6 +16,11 @@ async fn main() -> anyhow::Result<()> {
         runtime::shutdown_trace_export(trace_export).await?;
         return result;
     }
+    if runtime::is_oidc_jwks_export_command(&args) {
+        let result = runtime::run_oidc_jwks_export_command(&args).await;
+        runtime::shutdown_trace_export(trace_export).await?;
+        return result;
+    }
     anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
     runtime::run(trace_export).await
 }

@@ -6,9 +6,9 @@
 //! → F8 接线（`PgDbReadiness` 采样 worker + `configs_ready` probe 注册）→ `assemble_authed_routers`
 //! → 组合根挂 Health listener（healthz/readyz）→ 逐 listener bind socket + serve（经 `httpd::HttpServer`
 //! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。各域业务 handler ↔ service 接线 = #1309
-//!   及后续域 PR（本 PR 仅打通 async runtime、wire_X call-site 与 readiness probe）。live JWKS 远程拉取
-//! + 轮转 = **T003/#1197**（本 PR 用 `StaticKeySource` 构造期注入 key，构造器签名已为其留稳）。
-//!   Internal listener 默认走 SPIFFE/mTLS；service-token 仅在显式迁移配置下绑定。
+//!   及后续域 PR（本 PR 仅打通 async runtime、wire_X call-site 与 readiness probe）。JWT 验签 key 经本地
+//!   JWKS 文件源 + 外部 agent 轮转注入；Internal listener 默认走 SPIFFE/mTLS，service-token 仅保留 loopback
+//!   本地测试路径。
 //!
 //! 安全同批门（ADR-006 §5）：依赖图引真 verifier（`oidc` backend）、不引 stub Pdp（`memory` 经 deny.toml 禁
 //! server/rss/runtime；bins 生产 `src/` 无内联 `impl diport::Pdp`，`rss_pdp_impl_adapter_only` dylint 守 +
@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -66,7 +66,7 @@ use identity::{
         DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
     },
 };
-use oidc::OidcProvider;
+use oidc::{JwksReadinessHandle, OidcProvider};
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
@@ -89,7 +89,7 @@ use vault::{
     caps as vault_caps,
 };
 
-/// Internal listener auth mode. Default is mTLS; `service-token` is a transitional opt-in.
+/// Internal listener auth mode. Default is mTLS; `service-token` is loopback local-test only.
 const INTERNAL_AUTH_SCHEME_ENV: &str = "RSS_INTERNAL_AUTH_SCHEME";
 const INTERNAL_AUTH_SCHEME_MTLS: &str = "mtls";
 const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
@@ -97,6 +97,13 @@ const INTERNAL_AUTH_SCHEME_SERVICE_TOKEN: &str = "service-token";
 const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
 const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
+const OIDC_JWKS_PATH_ENV: &str = "RSS_OIDC_JWKS_PATH";
+const OIDC_JWKS_REFRESH_INTERVAL_ENV: &str = "RSS_OIDC_JWKS_REFRESH_INTERVAL_SECS";
+const OIDC_JWKS_READY_PROBE_NAME: &str = "oidc_jwks_ready";
+const OIDC_JWKS_SOURCE_ID: &str = "primary-idp";
+const DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 60;
+const MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 5;
+const MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS: u64 = 3600;
 /// Comma-separated remote domains that must have outbound domain transport configured.
 const DOMAIN_TRANSPORT_REQUIRED_DOMAINS_ENV: &str = "RSS_DOMAIN_TRANSPORT_REQUIRED_DOMAINS";
 /// Shared remote domain transport endpoint fallback (`durable-shared` only).
@@ -106,12 +113,6 @@ const DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV: &str = "RSS_DOMAIN_TRANSPORT_MTLS_LO
 const DOMAIN_TRANSPORT_URL_ENV_SUFFIX: &str = "DOMAIN_TRANSPORT_URL";
 const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
     "DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET";
-/// Explicit migration ticket required for non-loopback Internal service-token listeners.
-const INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV: &str =
-    "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET";
-/// Unix timestamp after which the transitional Internal service-token listener must fail startup.
-const INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV: &str =
-    "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX";
 
 /// 生产系统时钟（组合根注入 `OidcProvider`）。
 ///
@@ -184,13 +185,147 @@ impl diport::AuditSink for TracingAuthAuditSink {
     }
 }
 
-/// 从 env 构造生产验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
+struct RuntimeOidcProvider {
+    provider: Arc<OidcProvider>,
+    jwks_readiness: JwksReadinessHandle,
+}
+
+impl RuntimeOidcProvider {
+    fn provider(&self) -> Arc<OidcProvider> {
+        Arc::clone(&self.provider)
+    }
+
+    fn jwks_readiness(&self) -> JwksReadinessHandle {
+        self.jwks_readiness.clone()
+    }
+
+    fn managed_resource(&self) -> Box<DynManagedResource<'static>> {
+        DynManagedResource::new_box(OidcProviderGuard(Arc::clone(&self.provider)))
+    }
+}
+
+struct OidcProviderGuard(Arc<OidcProvider>);
+
+impl ManagedResource for OidcProviderGuard {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    async fn shutdown(&self) -> Result<(), ShutdownError> {
+        ManagedResource::shutdown(&*self.0).await
+    }
+}
+
+struct OidcJwksReadyProbe {
+    name: ProbeName,
+    handle: JwksReadinessHandle,
+}
+
+impl OidcJwksReadyProbe {
+    #[allow(clippy::expect_used)]
+    fn new(handle: JwksReadinessHandle) -> Self {
+        Self {
+            name: ProbeName::parse(OIDC_JWKS_READY_PROBE_NAME).expect("valid probe name const"),
+            handle,
+        }
+    }
+}
+
+impl bootstrap::HealthProbe for OidcJwksReadyProbe {
+    fn check(&self) -> HealthCheck {
+        let (status, detail) = if self.handle.is_ready() {
+            (HealthStatus::Healthy, "ready")
+        } else {
+            (HealthStatus::Unhealthy, "degraded")
+        };
+        HealthCheck::new(self.name.clone(), status, detail)
+    }
+}
+
+/// 从 env 构造 serving 验签 `OidcProvider`（issuer / audience / 本地 JWKS 文件源）。
+///
+/// HTTP listener 的生产 key-source 必须是本地 JWKS 文件（外部 agent / init-container 经 TLS 拉取后写入只读挂载）；
+/// 静态 ES256 env 只保留给 operator CLI / 单测路径，不再作为 serving production fallback。
+fn build_runtime_oidc_provider() -> anyhow::Result<RuntimeOidcProvider> {
+    build_runtime_oidc_provider_from(|name| std::env::var(name).ok(), Box::new(SystemClock))
+}
+
+fn build_runtime_oidc_provider_from(
+    get: impl Fn(&str) -> Option<String>,
+    clock: Box<dyn diport::Clock>,
+) -> anyhow::Result<RuntimeOidcProvider> {
+    let issuer = get("RSS_OIDC_ISSUER")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
+    let audience = get("RSS_OIDC_AUDIENCE")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
+    let trusted_kinds = get("RSS_OIDC_TRUSTED_KINDS")
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
+    let jwks_path = get(OIDC_JWKS_PATH_ENV)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {OIDC_JWKS_PATH_ENV}"))?;
+    let refresh_interval =
+        oidc_jwks_refresh_interval_from(get(OIDC_JWKS_REFRESH_INTERVAL_ENV).as_deref())?;
+    let jwks = oidc::JwksKeySource::load_and_watch(
+        OIDC_JWKS_SOURCE_ID,
+        PathBuf::from(jwks_path.trim()),
+        refresh_interval,
+        CancellationToken::new(),
+    )
+    .with_context(|| format!("load OIDC JWKS source from {OIDC_JWKS_PATH_ENV}"))?;
+    let jwks_readiness = jwks.readiness_handle();
+
+    let mut builder = oidc::VerifierConfigBuilder::new(&issuer, &audience)
+        .keys_jwks(jwks)
+        .service_token_replay_guard(Arc::new(RuntimeServiceTokenReplayGuard::default()));
+    let mut trusted = 0usize;
+    for kind in trusted_kinds
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        builder = builder.trust_kind(kind);
+        trusted += 1;
+    }
+    if trusted == 0 {
+        anyhow::bail!(
+            "RSS_OIDC_TRUSTED_KINDS must list ≥1 trusted principal kind (else all JWTs 401)"
+        );
+    }
+    let config = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("invalid verifier config: {e}"))?;
+    Ok(RuntimeOidcProvider {
+        provider: Arc::new(OidcProvider::new(config, clock)),
+        jwks_readiness,
+    })
+}
+
+fn oidc_jwks_refresh_interval_from(raw: Option<&str>) -> anyhow::Result<Duration> {
+    let Some(raw) = raw else {
+        return Ok(Duration::from_secs(DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS));
+    };
+    let trimmed = raw.trim();
+    anyhow::ensure!(
+        !trimmed.is_empty(),
+        "{OIDC_JWKS_REFRESH_INTERVAL_ENV} must not be empty"
+    );
+    let secs = trimmed
+        .parse::<u64>()
+        .with_context(|| format!("{OIDC_JWKS_REFRESH_INTERVAL_ENV} must be seconds"))?;
+    anyhow::ensure!(
+        (MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS..=MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS).contains(&secs),
+        "{OIDC_JWKS_REFRESH_INTERVAL_ENV} must be in {MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS}..={MAX_OIDC_JWKS_REFRESH_INTERVAL_SECS} seconds"
+    );
+    Ok(Duration::from_secs(secs))
+}
+
+/// 从 env 构造 operator CLI 验签 `OidcProvider`（issuer / audience / ES256·HS256 静态 key）。
 ///
 /// - `RSS_OIDC_ISSUER` / `RSS_OIDC_AUDIENCE`：必填。
 /// - `RSS_OIDC_TRUSTED_KINDS`：**必填**——本 IdP 可 assert 的 principal kind 逗号分隔白名单（如 `user,admin,device`）。
 ///   secure-by-default（OIDC-KIND-ALLOWLIST-01）：未配置则验签器剥离所有 kind → `Principal` 派生恒 `TokenInvalid`
 ///   → JWT **全 401**（评审 F1 修复的生产失效根因），故构造期 fail-fast 拒空。
-/// - `RSS_OIDC_ES256_SEC1_B64URL`：JWT 路径 ES256 公钥，base64url(SEC1 未压缩点)，逗号分隔可多把（可选）。
+/// - `RSS_OIDC_ES256_SEC1_B64URL`：operator JWT 路径 ES256 公钥，base64url(SEC1 未压缩点)，逗号分隔可多把（可选）。
 /// - `RSS_OIDC_HS256_SECRET_B64URL`：service-token 路径 HS256 密钥，base64url（可选）。
 /// - `RSS_OIDC_HS256_KID`：service-token 路径 key id；配置 HS256 secret 时必填。
 ///
@@ -318,7 +453,7 @@ fn internal_auth_scheme_from(get: impl Fn(&str) -> Option<String>) -> anyhow::Re
         INTERNAL_AUTH_SCHEME_SERVICE_TOKEN => {
             tracing::warn!(
                 env = INTERNAL_AUTH_SCHEME_ENV,
-                "internal listener using transitional service-token auth; mTLS is the default"
+                "internal listener using local-test service-token auth; mTLS is the production default"
             );
             Ok(AuthScheme::ServiceToken)
         }
@@ -3731,6 +3866,215 @@ fn build_vault_signer_with(
     .map_err(|e| anyhow::anyhow!("vault signer config error: {e}"))
 }
 
+const OIDC_JWKS_CLI: &str = "oidc-jwks";
+const OIDC_JWKS_EXPORT_VAULT_TRANSIT_CLI: &str = "export-vault-transit";
+
+pub fn is_oidc_jwks_export_command(args: &[String]) -> bool {
+    matches!(
+        args,
+        [cmd, sub, ..] if cmd == OIDC_JWKS_CLI && sub == OIDC_JWKS_EXPORT_VAULT_TRANSIT_CLI
+    )
+}
+
+pub async fn run_oidc_jwks_export_command(args: &[String]) -> anyhow::Result<()> {
+    run_oidc_jwks_export_command_from(args, |name| std::env::var(name).ok(), false).await
+}
+
+async fn run_oidc_jwks_export_command_from(
+    args: &[String],
+    get: impl Fn(&str) -> Option<String>,
+    allow_http: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        is_oidc_jwks_export_command(args),
+        "usage: rss oidc-jwks export-vault-transit [--out <path>]"
+    );
+    let out = oidc_jwks_export_output_path(args, &get)?;
+    let addr = get(VAULT_ADDR_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
+    let token = get(VAULT_TOKEN_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TOKEN_ENV}"))?;
+    let mount = get(VAULT_TRANSIT_MOUNT_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
+    let key_id = get(JWT_KEY_ID_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_KEY_ID_ENV}"))?;
+    let client = build_vault_tls_client_from(&get)?;
+    let url = vault_transit_key_metadata_url(&addr, &mount, &key_id, allow_http)?;
+    let response = client
+        .get(url)
+        .header("X-Vault-Token", token.trim())
+        .timeout(DEFAULT_VAULT_TIMEOUT)
+        .send()
+        .await
+        .context("read Vault Transit key metadata")?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .context("read Vault Transit key metadata response")?;
+    anyhow::ensure!(
+        status.is_success(),
+        "Vault Transit key metadata request returned non-success status"
+    );
+    let jwks = vault_transit_key_response_to_oidc_jwks(key_id.trim(), &body)?;
+    write_jwks_atomic(&out, &jwks).with_context(|| format!("write OIDC JWKS to {}", out.display()))
+}
+
+fn oidc_jwks_export_output_path(
+    args: &[String],
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<PathBuf> {
+    let mut out = None;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--out" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("--out requires a path"))?;
+                anyhow::ensure!(!value.trim().is_empty(), "--out requires a non-empty path");
+                out = Some(PathBuf::from(value.trim()));
+            }
+            other => anyhow::bail!("unknown oidc-jwks export-vault-transit argument: {other}"),
+        }
+        index += 1;
+    }
+    if let Some(out) = out {
+        return Ok(out);
+    }
+    let path = get(OIDC_JWKS_PATH_ENV)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {OIDC_JWKS_PATH_ENV}"))?;
+    Ok(PathBuf::from(path.trim()))
+}
+
+fn vault_transit_key_metadata_url(
+    addr: &str,
+    mount: &str,
+    key_id: &str,
+    allow_http: bool,
+) -> anyhow::Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(addr.trim()).context("parse Vault base URL")?;
+    match url.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
+        _ => anyhow::bail!("Vault base URL must use https"),
+    }
+    let mount_segments = vault_path_segments(mount, VAULT_TRANSIT_MOUNT_ENV)?;
+    let key_segments = vault_path_segments(key_id, JWT_KEY_ID_ENV)?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("Vault base URL cannot be a base for path segments"))?;
+        segments
+            .pop_if_empty()
+            .push("v1")
+            .extend(mount_segments.iter().map(String::as_str))
+            .push("keys")
+            .extend(key_segments.iter().map(String::as_str));
+    }
+    Ok(url)
+}
+
+fn vault_path_segments(raw: &str, label: &str) -> anyhow::Result<Vec<String>> {
+    let trimmed = raw.trim().trim_matches('/');
+    anyhow::ensure!(!trimmed.is_empty(), "{label} must not be empty");
+    let mut segments = Vec::new();
+    for segment in trimmed.split('/') {
+        anyhow::ensure!(
+            !segment.is_empty() && segment != "." && segment != "..",
+            "{label} contains an invalid path segment"
+        );
+        segments.push(segment.to_owned());
+    }
+    Ok(segments)
+}
+
+#[derive(serde::Deserialize)]
+struct VaultTransitKeyResponse {
+    data: VaultTransitKeyData,
+}
+
+#[derive(serde::Deserialize)]
+struct VaultTransitKeyData {
+    latest_version: Option<u64>,
+    keys: BTreeMap<String, VaultTransitKeyVersion>,
+}
+
+#[derive(serde::Deserialize)]
+struct VaultTransitKeyVersion {
+    public_key: Option<String>,
+}
+
+fn vault_transit_key_response_to_oidc_jwks(kid: &str, body: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let response: VaultTransitKeyResponse =
+        serde_json::from_slice(body).context("parse Vault Transit key metadata response")?;
+    let public_key_pem = current_vault_public_key(&response.data)?;
+    es256_public_key_pem_to_jwks(kid, public_key_pem)
+}
+
+fn current_vault_public_key(data: &VaultTransitKeyData) -> anyhow::Result<&str> {
+    let version = match data.latest_version {
+        Some(version) => version.to_string(),
+        None => data
+            .keys
+            .keys()
+            .filter_map(|raw| raw.parse::<u64>().ok().map(|version| (version, raw)))
+            .max_by_key(|(version, _)| *version)
+            .map(|(_, raw)| raw.to_owned())
+            .ok_or_else(|| anyhow::anyhow!("Vault Transit key metadata has no key versions"))?,
+    };
+    data.keys
+        .get(&version)
+        .and_then(|entry| entry.public_key.as_deref())
+        .filter(|pem| !pem.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Vault Transit current key version is missing public_key"))
+}
+
+fn es256_public_key_pem_to_jwks(kid: &str, public_key_pem: &str) -> anyhow::Result<Vec<u8>> {
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+    use p256::pkcs8::DecodePublicKey as _;
+
+    let public_key = p256::PublicKey::from_public_key_pem(public_key_pem)
+        .map_err(|_| anyhow::anyhow!("decode P-256 public key"))?;
+    let point = public_key.to_encoded_point(false);
+    let x = point
+        .x()
+        .ok_or_else(|| anyhow::anyhow!("P-256 public key missing x coordinate"))?;
+    let y = point
+        .y()
+        .ok_or_else(|| anyhow::anyhow!("P-256 public key missing y coordinate"))?;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let jwks = serde_json::json!({
+        "keys": [{
+            "kty": "EC",
+            "crv": "P-256",
+            "kid": kid,
+            "alg": "ES256",
+            "use": "sig",
+            "x": b64.encode(x),
+            "y": b64.encode(y)
+        }]
+    });
+    serde_json::to_vec_pretty(&jwks).context("serialize OIDC JWKS")
+}
+
+fn write_jwks_atomic(path: &Path, jwks: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("OIDC JWKS output path must have a parent directory"))?;
+    fs::create_dir_all(parent).context("create OIDC JWKS output directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("OIDC JWKS output path must end in a file name"))?;
+    let tmp = parent.join(format!(".{file_name}.tmp"));
+    fs::write(&tmp, jwks).context("write temporary OIDC JWKS")?;
+    fs::rename(&tmp, path).context("rename temporary OIDC JWKS into place")
+}
+
 /// 从 env 构造 access JWT 签发配置（ES256；issuer/audience/key-id/ttl 必填 fail-fast，对称
 /// `JwtIssuer::new` 构造期校验）。`key` = vault Transit sign key 名 = JOSE `kid`（验签侧据此选公钥）。
 fn build_jwt_issuer_config(
@@ -3958,8 +4302,8 @@ fn listener_addr_from(
     listener: ListenerKind,
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<SocketAddr> {
-    // reason: composition-root startup policy compares operator-provided migration expiry with the
-    // process clock. Domain logic still receives clocks by DI; this is env guard evaluation.
+    // reason: listener env guard evaluation is a composition-root startup concern; tests inject
+    // `now` through listener_addr_from_at while production reads the process clock once here.
     #[allow(clippy::disallowed_methods)]
     let now = SystemTime::now();
     listener_addr_from_at(listener, get, now)
@@ -3987,7 +4331,7 @@ fn enforce_listener_plaintext_policy(
     scheme: AuthScheme,
     addr: SocketAddr,
     get: impl Fn(&str) -> Option<String>,
-    now: SystemTime,
+    _now: SystemTime,
 ) -> anyhow::Result<()> {
     if scheme == AuthScheme::Mtls {
         return Ok(());
@@ -4010,54 +4354,22 @@ fn enforce_listener_plaintext_policy(
             );
         }
     }
-    enforce_internal_service_token_migration_guard(listener, scheme, addr, &get, now)
+    enforce_internal_service_token_loopback_only(listener, scheme, addr)
 }
 
-fn enforce_internal_service_token_migration_guard(
+fn enforce_internal_service_token_loopback_only(
     listener: ListenerKind,
     scheme: AuthScheme,
     addr: SocketAddr,
-    get: impl Fn(&str) -> Option<String>,
-    now: SystemTime,
 ) -> anyhow::Result<()> {
     if listener != ListenerKind::Internal || scheme != AuthScheme::ServiceToken {
         return Ok(());
     }
-    if addr.ip().is_loopback() {
-        return Ok(());
-    }
-    let ticket = get(INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV).ok_or_else(|| {
-        anyhow::anyhow!("missing required env var: {INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV}")
-    })?;
     anyhow::ensure!(
-        !ticket.trim().is_empty(),
-        "{INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV} must not be empty"
-    );
-    let raw_expires =
-        get(INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV).ok_or_else(|| {
-            anyhow::anyhow!(
-                "missing required env var: {INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV}"
-            )
-        })?;
-    let expires_at = service_token_migration_expiry(raw_expires.trim())?;
-    anyhow::ensure!(
-        expires_at > now,
-        "{INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV} has expired"
+        addr.ip().is_loopback(),
+        "Internal service-token listener is local-test only; non-loopback Internal listener must use mTLS"
     );
     Ok(())
-}
-
-fn service_token_migration_expiry(raw: &str) -> anyhow::Result<SystemTime> {
-    let seconds = raw.parse::<u64>().with_context(|| {
-        format!("{INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV} must be unix seconds")
-    })?;
-    SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_secs(seconds))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV} is out of range"
-            )
-        })
 }
 
 /// 从 `std::env` 解析 listener bind 地址（薄壳，委托 [`listener_addr_from`]）。
@@ -4178,7 +4490,7 @@ where
             if listener == ListenerKind::Internal && scheme == AuthScheme::ServiceToken {
                 tracing::warn!(
                     listener = ?listener,
-                    "binding transitional Internal service-token listener; mTLS is the default"
+                    "binding local-test Internal service-token listener; mTLS is the production default"
                 );
             }
             stack.register_with_token(move |token| {
@@ -4355,7 +4667,11 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let runtime_inputs = RuntimeInputs::new(trace_export);
 
     // BuildProvider phase: production credential verifier provider.
-    let provider = Arc::new(phase_result(RuntimePhase::BuildProvider, build_provider())?);
+    let runtime_oidc = phase_result(
+        RuntimePhase::BuildProvider,
+        build_runtime_oidc_provider().context("build runtime OIDC provider"),
+    )?;
+    let provider = runtime_oidc.provider();
 
     // BuildInfra phase: provider bundles, topology config, shared deps, and metrics exporter.
     let (pg, deps, s3_canary_config, event_cfg, domain_transport, metrics_exporter) = phase_result(
@@ -4473,6 +4789,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             module.resources.extend(deps.redis.runtime_resources());
             module.resources.extend(deps.s3.runtime_resources());
             module.resources.extend(deps.vault.runtime_resources());
+            module.resources.push(runtime_oidc.managed_resource());
             let pg_readiness_period = build_readiness_interval();
             let redis_readiness_period = build_redis_readiness_interval();
 
@@ -4495,6 +4812,14 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                     Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
                 )
                 .context("register redis_ready probe")?;
+            let oidc_jwks_probe_name = ProbeName::parse(OIDC_JWKS_READY_PROBE_NAME)
+                .context("parse oidc_jwks_ready probe name")?;
+            registry
+                .probe(
+                    oidc_jwks_probe_name,
+                    Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
+                )
+                .context("register oidc_jwks_ready probe")?;
 
             // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
             // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
@@ -4675,6 +5000,58 @@ mod tests {
     /// 测试时钟（这些测试只验构造成功/失败，不验 token exp，故 SystemClock 即可）。
     fn clk() -> Box<dyn diport::Clock> {
         Box::new(SystemClock)
+    }
+
+    fn hs256_jwks(secret: &[u8], kid: &str) -> String {
+        let key = B64.encode(secret);
+        format!(r#"{{"keys":[{{"kty":"oct","kid":"{kid}","alg":"HS256","k":"{key}"}}]}}"#)
+    }
+
+    fn runtime_oidc_get(
+        jwks_path: &std::path::Path,
+        refresh_interval: Option<&str>,
+        name: &str,
+    ) -> Option<String> {
+        match name {
+            "RSS_OIDC_ISSUER" => Some("https://issuer.test".to_string()),
+            "RSS_OIDC_AUDIENCE" => Some("rss-test".to_string()),
+            "RSS_OIDC_TRUSTED_KINDS" => Some("service,user,admin".to_string()),
+            OIDC_JWKS_PATH_ENV => Some(jwks_path.display().to_string()),
+            OIDC_JWKS_REFRESH_INTERVAL_ENV => refresh_interval.map(str::to_owned),
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant_binding(raw: &str) -> diport::ServiceTokenTenantBinding {
+        diport::ServiceTokenTenantBinding::new(vocab::TenantId::parse(raw).expect("tenant"))
+    }
+
+    fn service_token_payload(jti: &str) -> String {
+        format!(
+            r#"{{"sub":"runtime-service","exp":4102444800,"iss":"https://issuer.test","aud":"rss-test","kind":"service","jti":"{jti}"}}"#
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn mint_hs256_bound_with_kid(
+        secret: &[u8],
+        kid: &str,
+        payload_json: &str,
+        tenant: &str,
+    ) -> String {
+        use hmac::{Hmac, Mac as _};
+        use sha2::Sha256;
+
+        let header = B64.encode(format!(r#"{{"alg":"HS256","kid":"{kid}"}}"#));
+        let body = B64.encode(payload_json.as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let binding = tenant_binding(tenant);
+        let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+        mac.update(&mac_input);
+        let tag = mac.finalize().into_bytes();
+        format!("{signing_input}.{}", B64.encode(tag))
     }
 
     #[derive(Clone)]
@@ -7473,6 +7850,139 @@ mod tests {
     }
 
     #[test]
+    fn build_runtime_oidc_provider_from_missing_jwks_path_fails_fast() {
+        let result = build_runtime_oidc_provider_from(
+            |name| match name {
+                "RSS_OIDC_ISSUER" => Some("https://issuer.test".to_string()),
+                "RSS_OIDC_AUDIENCE" => Some("rss-test".to_string()),
+                "RSS_OIDC_TRUSTED_KINDS" => Some("service".to_string()),
+                _ => None,
+            },
+            clk(),
+        );
+        assert!(
+            matches!(&result, Err(err) if err.to_string().contains(OIDC_JWKS_PATH_ENV)),
+            "runtime listener OIDC provider must require JWKS path"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_runtime_oidc_provider_from_invalid_jwks_path_fails_fast() {
+        let missing = unique_temp_path("missing-runtime-jwks.json");
+        let result =
+            build_runtime_oidc_provider_from(|name| runtime_oidc_get(&missing, None, name), clk());
+        assert!(
+            matches!(&result, Err(err) if format!("{err:#}").contains(OIDC_JWKS_PATH_ENV)),
+            "bad JWKS path should fail during runtime OIDC provider construction"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn oidc_jwks_refresh_interval_is_range_checked() {
+        assert_eq!(
+            oidc_jwks_refresh_interval_from(None).expect("default"),
+            Duration::from_secs(DEFAULT_OIDC_JWKS_REFRESH_INTERVAL_SECS)
+        );
+        for raw in ["", "4", "3601", "not-seconds"] {
+            assert!(
+                oidc_jwks_refresh_interval_from(Some(raw)).is_err(),
+                "invalid refresh interval {raw:?} must fail"
+            );
+        }
+        assert_eq!(
+            oidc_jwks_refresh_interval_from(Some("5")).expect("min"),
+            Duration::from_secs(MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn build_runtime_oidc_provider_from_valid_jwks_registers_ready_probe() {
+        let secret = [0x33u8; 32];
+        let jwks_path = write_temp_file(
+            "runtime-oidc-jwks.json",
+            hs256_jwks(&secret, "svc-1").as_bytes(),
+        );
+        let runtime = build_runtime_oidc_provider_from(
+            |name| runtime_oidc_get(&jwks_path, None, name),
+            clk(),
+        )
+        .expect("valid runtime OIDC provider");
+
+        let probe = OidcJwksReadyProbe::new(runtime.jwks_readiness());
+        let check = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(check.name().as_str(), OIDC_JWKS_READY_PROBE_NAME);
+        assert_eq!(check.status(), HealthStatus::Healthy);
+        assert_eq!(check.detail(), "ready");
+
+        let resource = runtime.managed_resource();
+        resource.shutdown().await.expect("shutdown oidc provider");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    async fn oidc_jwks_refresh_failure_marks_probe_unhealthy_and_keeps_last_good() {
+        const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        let secret = [0x44u8; 32];
+        let jwks_path = write_temp_file(
+            "runtime-oidc-jwks.json",
+            hs256_jwks(&secret, "svc-1").as_bytes(),
+        );
+        let runtime = build_runtime_oidc_provider_from(
+            |name| runtime_oidc_get(&jwks_path, Some("5"), name),
+            clk(),
+        )
+        .expect("valid runtime OIDC provider");
+
+        let before = mint_hs256_bound_with_kid(
+            &secret,
+            "svc-1",
+            &service_token_payload("nonce-before-degraded"),
+            TENANT,
+        );
+        diport::Pdp::verify(
+            runtime.provider.as_ref(),
+            &diport::RawCredential::service_token(before, tenant_binding(TENANT)),
+        )
+        .await
+        .expect("initial last-good key verifies service token");
+
+        std::fs::write(&jwks_path, b"not a jwks document").expect("corrupt jwks");
+        let mut degraded = false;
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(MIN_OIDC_JWKS_REFRESH_INTERVAL_SECS)).await;
+            tokio::task::yield_now().await;
+            if !runtime.jwks_readiness().is_ready() {
+                degraded = true;
+                break;
+            }
+        }
+        assert!(degraded, "refresh failure should mark readiness degraded");
+
+        let probe = OidcJwksReadyProbe::new(runtime.jwks_readiness());
+        let check = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(check.status(), HealthStatus::Unhealthy);
+        assert_eq!(check.detail(), "degraded");
+
+        let after = mint_hs256_bound_with_kid(
+            &secret,
+            "svc-1",
+            &service_token_payload("nonce-after-degraded"),
+            TENANT,
+        );
+        diport::Pdp::verify(
+            runtime.provider.as_ref(),
+            &diport::RawCredential::service_token(after, tenant_binding(TENANT)),
+        )
+        .await
+        .expect("refresh failure retains last-good keyset");
+
+        let resource = runtime.managed_resource();
+        resource.shutdown().await.expect("shutdown oidc provider");
+    }
+
+    #[test]
     fn system_clock_now_is_after_epoch() {
         use diport::Clock as _;
         // 覆盖组合根生产时钟读点（disallowed_methods item-level 解禁线）。
@@ -8493,7 +9003,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn internal_service_token_non_loopback_requires_migration_ticket() {
+    fn internal_service_token_non_loopback_rejects_even_with_legacy_migration_envs() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
         let err = listener_addr_from_at(
             ListenerKind::Internal,
@@ -8501,63 +9011,22 @@ mod tests {
                 "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
                 INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
                 LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
+                "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET" => Some("SEC-1500".to_string()),
+                "RSS_INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX" => Some("3000".to_string()),
                 _ => None,
             },
             now,
         )
-        .expect_err("wildcard Internal service-token listener needs a migration ticket");
+        .expect_err("non-loopback Internal service-token is no longer a migration path");
         assert!(
-            format!("{err:#}").contains(INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV),
-            "error should name migration ticket env: {err:#}"
+            format!("{err:#}").contains("mTLS"),
+            "error should require mTLS instead of migration envs: {err:#}"
         );
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn internal_service_token_migration_ticket_must_not_be_expired() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
-        let err = listener_addr_from_at(
-            ListenerKind::Internal,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-                INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV => Some("SEC-1500".to_string()),
-                INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV => Some("1000".to_string()),
-                _ => None,
-            },
-            now,
-        )
-        .expect_err("expired migration ticket must fail startup");
-        assert!(
-            format!("{err:#}").contains(INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV),
-            "error should name migration expiry env: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_non_loopback_accepts_unexpired_migration_ticket() {
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
-        let addr = listener_addr_from_at(
-            ListenerKind::Internal,
-            |name| match name {
-                "RSS_INTERNAL_LISTEN_ADDR" => Some("0.0.0.0:8081".to_string()),
-                INTERNAL_AUTH_SCHEME_ENV => Some(INTERNAL_AUTH_SCHEME_SERVICE_TOKEN.to_string()),
-                LISTENER_ALLOW_PLAINTEXT_ENV => Some("dev-container".to_string()),
-                INTERNAL_SERVICE_TOKEN_MIGRATION_TICKET_ENV => Some("SEC-1500".to_string()),
-                INTERNAL_SERVICE_TOKEN_MIGRATION_EXPIRES_AT_UNIX_ENV => Some("3000".to_string()),
-                _ => None,
-            },
-            now,
-        )
-        .expect("unexpired migration ticket allows explicit transition");
-        assert!(addr.ip().is_unspecified());
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn internal_service_token_loopback_does_not_require_migration_ticket() {
+    fn internal_service_token_loopback_remains_local_test_path() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
         let addr = listener_addr_from_at(
             ListenerKind::Internal,
@@ -8569,7 +9038,7 @@ mod tests {
             },
             now,
         )
-        .expect("loopback service-token listener remains a local test migration path");
+        .expect("loopback service-token listener remains a local test path");
         assert!(addr.ip().is_loopback());
     }
 
@@ -8943,6 +9412,58 @@ mod tests {
             matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_TRANSIT_MOUNT_ENV)),
             "缺 vault transit mount 须 fail-fast 且错误含变量名"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn vault_transit_public_key_exports_es256_jwks_with_signing_kid() {
+        use p256::ecdsa::SigningKey;
+        use p256::pkcs8::{EncodePublicKey, LineEnding};
+
+        let key = SigningKey::from_slice(&[11u8; 32]).expect("valid P-256 scalar");
+        let pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("encode public key pem");
+        let raw = serde_json::json!({
+            "data": {
+                "latest_version": 1,
+                "keys": {
+                    "1": { "public_key": pem }
+                }
+            }
+        });
+
+        let jwks = vault_transit_key_response_to_oidc_jwks(
+            "rss-jwt-es256",
+            serde_json::to_vec(&raw).expect("json bytes").as_slice(),
+        )
+        .expect("vault public key exports to JWKS");
+        let doc: serde_json::Value = serde_json::from_slice(&jwks).expect("valid jwks json");
+        let key = &doc["keys"][0];
+        assert_eq!(key["kid"], "rss-jwt-es256");
+        assert_eq!(key["kty"], "EC");
+        assert_eq!(key["crv"], "P-256");
+        assert_eq!(key["alg"], "ES256");
+        assert!(key.get("x").is_some(), "ES256 JWK must include x");
+        assert!(key.get("y").is_some(), "ES256 JWK must include y");
+        assert!(
+            key.get("k").is_none(),
+            "access JWT verifier JWKS must not fall back to HS256 oct key"
+        );
+    }
+
+    #[test]
+    fn vault_transit_public_key_export_rejects_missing_current_public_key() -> anyhow::Result<()> {
+        let raw = br#"{"data":{"latest_version":1,"keys":{"1":{}}}}"#;
+        let Err(err) = vault_transit_key_response_to_oidc_jwks("rss-jwt-es256", raw) else {
+            anyhow::bail!("missing current public key must fail");
+        };
+        assert!(
+            format!("{err:#}").contains("public_key"),
+            "error should identify missing public_key: {err:#}"
+        );
+        Ok(())
     }
 
     #[test]

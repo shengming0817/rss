@@ -32,6 +32,7 @@ httpserve = path=../../crates/httpserve
 identity = path=../../crates/identity
 oidc = path=../../adapters/oidc; features=[backend]
 otel = path=../../adapters/otel; features=[backend]
+p256 = workspace=true; features=[ecdsa,pem]
 postgres = path=../../adapters/postgres
 primitives = path=../../crates/primitives
 prometheus-adapter = path=../../adapters/prometheus; features=[backend]
@@ -42,6 +43,7 @@ runctx = path=../../crates/runctx
 s3 = path=../../adapters/s3; features=[backend]
 secure = path=../../crates/secure
 serde = workspace=true; features=[derive]
+serde_json = workspace=true
 settings = path=../../crates/settings; features=[seed-data]
 thiserror = workspace=true
 tokio = workspace=true; features=[rt-multi-thread,macros,net,signal,time,sync]
@@ -81,7 +83,7 @@ merge = present
 mergeExtends = probes,resources,workers
 
 [runtime.run.orderedAnchors]
-01 | run.provider.oidc | assemblies/runtime/src/lib.rs | phase_result(RuntimePhase::BuildProvider, build_provider()) | status=ok
+01 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_runtime_oidc_provider().context( | status=ok
 02 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
 03 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(|name| std::env::var(name).ok()) | status=ok
 04 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(|name| std::env::var(name).ok()) | status=ok
@@ -97,17 +99,19 @@ mergeExtends = probes,resources,workers
 14 | run.resources.redis | assemblies/runtime/src/lib.rs | deps.redis.runtime_resources() | status=ok
 15 | run.resources.s3 | assemblies/runtime/src/lib.rs | deps.s3.runtime_resources() | status=ok
 16 | run.resources.vault | assemblies/runtime/src/lib.rs | deps.vault.runtime_resources() | status=ok
-17 | run.module.merge.domain-transport | assemblies/runtime/src/lib.rs | .module_result() | status=ok
-18 | run.wire.distributed | assemblies/runtime/src/lib.rs | wire_distributed(&deps) | status=ok
-19 | run.event.bridge | assemblies/runtime/src/lib.rs | event_transport::bridge_generated_subscriptions(registry.drain_subscribers()) | status=ok
-20 | run.event.transport | assemblies/runtime/src/lib.rs | event_transport::wire_event_transport( | status=ok
-21 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in module.probes | status=ok
-22 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
-23 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
-24 | run.serve | assemblies/runtime/src/lib.rs | serve_until_signal(listeners, move |stack| | status=ok
-25 | run.shutdown.otel | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(exporter)) | status=ok
-26 | run.shutdown.pg | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(pg.store_guard())) | status=ok
-27 | run.shutdown.sampler | assemblies/runtime/src/lib.rs | stack.register_with_token(move |token| | status=ok
-28 | run.shutdown.event-infra | assemblies/runtime/src/lib.rs | stack.register_detached(g); | status=ok
-29 | run.shutdown.resources | assemblies/runtime/src/lib.rs | stack.register_detached(r); | status=ok
-30 | run.shutdown.workers | assemblies/runtime/src/lib.rs | stack.register_with_token(w); | status=ok
+17 | run.resources.oidc | assemblies/runtime/src/lib.rs | module.resources.push(runtime_oidc.managed_resource()) | status=ok
+18 | run.probe.oidc-jwks | assemblies/runtime/src/lib.rs | Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())) | status=ok
+19 | run.module.merge.domain-transport | assemblies/runtime/src/lib.rs | .module_result() | status=ok
+20 | run.wire.distributed | assemblies/runtime/src/lib.rs | wire_distributed(&deps) | status=ok
+21 | run.event.bridge | assemblies/runtime/src/lib.rs | event_transport::bridge_generated_subscriptions(registry.drain_subscribers()) | status=ok
+22 | run.event.transport | assemblies/runtime/src/lib.rs | event_transport::wire_event_transport( | status=ok
+23 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in module.probes | status=ok
+24 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
+25 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
+26 | run.serve | assemblies/runtime/src/lib.rs | serve_until_signal(listeners, move |stack| | status=ok
+27 | run.shutdown.otel | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(exporter)) | status=ok
+28 | run.shutdown.pg | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(pg.store_guard())) | status=ok
+29 | run.shutdown.sampler | assemblies/runtime/src/lib.rs | stack.register_with_token(move |token| | status=ok
+30 | run.shutdown.event-infra | assemblies/runtime/src/lib.rs | stack.register_detached(g); | status=ok
+31 | run.shutdown.resources | assemblies/runtime/src/lib.rs | stack.register_detached(r); | status=ok
+32 | run.shutdown.workers | assemblies/runtime/src/lib.rs | stack.register_with_token(w); | status=ok

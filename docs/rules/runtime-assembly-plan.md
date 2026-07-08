@@ -52,6 +52,16 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - Every new Medium gate must include an anti-vacuity red case or fixture.
 - Every generated artifact must have a drift check before later PRs depend on it.
 
+## Security Production Closeout Gate
+
+INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "verify", source = "code" }.
+
+- For `profile = "production"`, `assembly validate` must require active persistent backend providers for `oidc::OidcProvider`, `vault::VaultSigner`, and `vault::VaultKeyProvider`.
+- For `profile = "production"`, `assembly validate` must find `run()`-reachable Rust AST evidence for local JWKS file source wiring, `oidc_jwks_ready`, and OIDC managed-resource wiring.
+- For `profile = "production"`, `assembly validate` must find `run()`-reachable Rust AST evidence for SPIFFE/mTLS Internal/domain transport wiring and must reject legacy Internal service-token migration constants.
+- Comment, string, dead-helper, and `#[cfg(test)]` bait are not evidence. The xtask fixture suite must keep red cases for missing critical providers, missing JWKS evidence, missing SPIFFE evidence, bait-only sources, and evidence outside the `run()` call chain.
+- `profile = "demo"` assemblies are not blocked by this production-only closeout gate.
+
 ## Runtime Baseline Policy
 
 - Baseline inventory must lock stable current facts before runtime root decomposition.

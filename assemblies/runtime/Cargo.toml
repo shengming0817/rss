@@ -64,12 +64,15 @@ axum = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 # verify_jwt(&DynPdp) future 为 !Send（DynPdp !Sync，DIPORT-ASYNC-ARC-SEND-01）；OidcProvider::verify 纯 CPU 无真
 # await ⇒ future 首 poll 即 ready。验签桥经 now_or_never() 同步驱动该 ready future，使中间件 future 保持 Send。
 futures = { workspace = true }
 # 从配置（env）解 ES256 SEC1 公钥（base64url）。
 base64 = { workspace = true }
+# OIDC JWKS 维护命令：解 Vault Transit P-256 public key PEM 并输出 ES256 JWK。
+p256 = { workspace = true, features = ["ecdsa", "pem"] }
 uuid = { workspace = true, features = ["v4"] }
 # 运行时入口（#1320）：tokio 多线程运行时（#[tokio::main]）+ net（PgStore/serve）+ signal（SIGTERM/SIGINT 优雅关停）
 # + time（ShutdownStack 超时）+ macros（测试）+ rt-multi-thread。
@@ -97,11 +100,10 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
-# tokio 已是生产 dep（#1320 `#[tokio::main]`）——其 macros + rt-multi-thread feature 同时供 `#[tokio::test]`，不再单列 dev-dep。
+# dev-only 虚拟时间（JWKS poll 测试）；生产 tokio feature set 不引 `test-util`。
+tokio = { workspace = true, features = ["test-util"] }
 # oneshot 驱动已组装 router（health/auth e2e 单元级断言；真实 socket serve 由 httpd + 冒烟 e2e 覆盖）。
 tower = { workspace = true, features = ["util"] }
-# e2e 铸 ES256/HS256 测试 JWT（dev-only；生产依赖图无签发能力）。
-p256 = { workspace = true, features = ["ecdsa"] }
 hmac = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
 # 集成测试 postgres fixture（testcontainers，仅 integration feature 激活）。
@@ -115,7 +117,6 @@ sqlx = { workspace = true }
 # refresh/login mint→verify e2e（#1252）：wiremock 模拟 vault Transit `/sign`（动态 ES256 签）+ serde_json 编解
 # mock 请求/响应；vocab::{TenantId,PrincipalKind} 构造 JwtIssuer::issue 入参（hermetic，无 live vault）。
 wiremock = { workspace = true }
-serde_json = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rcgen = { workspace = true }

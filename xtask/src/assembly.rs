@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +49,12 @@ pub(crate) enum Rule {
     ProviderCrateMismatch,
     /// active distributed provider 必须有组合根 consumer 接线证据。
     ActiveDistributedProviderConsumer,
+    /// production security closeout 必须声明 active critical provider。
+    ProductionSecurityCriticalProvider,
+    /// production security closeout 必须有本地 JWKS 文件源与 readiness 证据。
+    ProductionSecurityJwksCloseout,
+    /// production security closeout 必须有 SPIFFE/mTLS 证据且不得保留 service-token 迁移口。
+    ProductionSecuritySpiffeCloseout,
 }
 
 pub(crate) struct AssemblyValidate;
@@ -368,7 +374,91 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
             }
         }
     }
+    if a.manifest.profile == AssemblyProfile::Production {
+        validate_production_security_closeout(a, &mut findings);
+    }
     findings
+}
+
+struct CriticalProviderSpec {
+    gate: &'static str,
+    port: DiportPort,
+    provider: &'static str,
+    provider_crate: &'static str,
+}
+
+fn validate_production_security_closeout(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+    // INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "verify", source = "code" } —
+    // production assembly 必须同时具备 active persistent OIDC/Vault provider、JWKS 文件源 ready probe 证据、
+    // SPIFFE/mTLS 证据，且拒绝 legacy Internal service-token migration env 常量；red/green fixture 见本模块测试。
+    const CRITICAL_PROVIDERS: &[CriticalProviderSpec] = &[
+        CriticalProviderSpec {
+            gate: "oidc-pdp",
+            port: DiportPort::Pdp,
+            provider: "oidc::OidcProvider",
+            provider_crate: "oidc",
+        },
+        CriticalProviderSpec {
+            gate: "vault-signer",
+            port: DiportPort::Signer,
+            provider: "vault::VaultSigner",
+            provider_crate: "vault",
+        },
+        CriticalProviderSpec {
+            gate: "vault-keyprovider",
+            port: DiportPort::KeyProvider,
+            provider: "vault::VaultKeyProvider",
+            provider_crate: "vault",
+        },
+    ];
+
+    for spec in CRITICAL_PROVIDERS {
+        if !has_active_persistent_backend_provider(a, spec) {
+            findings.push(finding(
+                Rule::ProductionSecurityCriticalProvider,
+                &a.manifest_label,
+                format!(
+                    "field=diportProviders profile=production gate={} 必须声明 active persistent `{}` for `{}`，且 {} [dependencies].{} 必须启用 backend feature",
+                    spec.gate,
+                    spec.provider,
+                    spec.port,
+                    a.cargo_label,
+                    spec.provider_crate
+                ),
+            ));
+        }
+    }
+
+    let evidence = security_closeout_evidence_from_sources(&a.dir).unwrap_or_default();
+    if !evidence.has_jwks_closeout() {
+        findings.push(finding(
+            Rule::ProductionSecurityJwksCloseout,
+            &a.manifest_label,
+            "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 可达路径有 JwksKeySource::load_and_watch + VerifierConfigBuilder::keys_jwks + runtime_oidc.managed_resource + oidc_jwks_ready probe 注册证据",
+        ));
+    }
+    if !evidence.has_spiffe_closeout() {
+        findings.push(finding(
+            Rule::ProductionSecuritySpiffeCloseout,
+            &a.manifest_label,
+            "source=rust-ast-run-reachable profile=production gate=spiffe-mtls 必须在 run() 可达路径有 MtlsServerConfig::from_spire + DomainHttpTransport::from_spire + domain_transport_ready probe 证据，且不得保留 Internal service-token migration env 常量",
+        ));
+    }
+}
+
+fn has_active_persistent_backend_provider(
+    a: &DiscoveredAssembly,
+    spec: &CriticalProviderSpec,
+) -> bool {
+    a.manifest.diport_providers.iter().any(|provider| {
+        provider.lifecycle == ProviderLifecycle::Active
+            && provider.durability == ProviderDurability::Persistent
+            && provider.port == spec.port
+            && provider.provider == spec.provider
+            && provider.provider_crate == spec.provider_crate
+            && dependency_features(&a.cargo_toml, spec.provider_crate)
+                .is_some_and(|features| features.contains("backend"))
+    })
 }
 
 fn is_active_distributed_provider(provider: &DiportProvider) -> bool {
@@ -505,6 +595,253 @@ fn expr_contains_wire_distributed(expr: &syn::Expr) -> bool {
     visitor.found
 }
 
+#[derive(Clone, Default)]
+struct SecurityCloseoutEvidence {
+    runtime_oidc_provider_build: bool,
+    runtime_oidc_provider_handle: bool,
+    runtime_oidc_managed_resource: bool,
+    jwks_load_and_watch: bool,
+    jwks_keys_jwks: bool,
+    jwks_ready_probe: bool,
+    jwks_probe_registered: bool,
+    mtls_server_from_spire: bool,
+    domain_transport_from_spire: bool,
+    domain_transport_ready_probe: bool,
+    legacy_service_token_migration: bool,
+}
+
+impl SecurityCloseoutEvidence {
+    fn merge(&mut self, other: Self) {
+        self.runtime_oidc_provider_build |= other.runtime_oidc_provider_build;
+        self.runtime_oidc_provider_handle |= other.runtime_oidc_provider_handle;
+        self.runtime_oidc_managed_resource |= other.runtime_oidc_managed_resource;
+        self.jwks_load_and_watch |= other.jwks_load_and_watch;
+        self.jwks_keys_jwks |= other.jwks_keys_jwks;
+        self.jwks_ready_probe |= other.jwks_ready_probe;
+        self.jwks_probe_registered |= other.jwks_probe_registered;
+        self.mtls_server_from_spire |= other.mtls_server_from_spire;
+        self.domain_transport_from_spire |= other.domain_transport_from_spire;
+        self.domain_transport_ready_probe |= other.domain_transport_ready_probe;
+        self.legacy_service_token_migration |= other.legacy_service_token_migration;
+    }
+
+    fn has_jwks_closeout(&self) -> bool {
+        self.runtime_oidc_provider_build
+            && self.runtime_oidc_provider_handle
+            && self.runtime_oidc_managed_resource
+            && self.jwks_load_and_watch
+            && self.jwks_keys_jwks
+            && self.jwks_ready_probe
+            && self.jwks_probe_registered
+    }
+
+    fn has_spiffe_closeout(&self) -> bool {
+        self.mtls_server_from_spire
+            && self.domain_transport_from_spire
+            && self.domain_transport_ready_probe
+            && !self.legacy_service_token_migration
+    }
+}
+
+fn security_closeout_evidence_from_sources(dir: &Path) -> Result<SecurityCloseoutEvidence> {
+    let src_dir = dir.join("src");
+    if !src_dir.exists() {
+        return Ok(SecurityCloseoutEvidence::default());
+    }
+    let mut files = Vec::new();
+    collect_rust_sources(&src_dir, &mut files)?;
+    files.sort();
+    let mut program = SecurityCloseoutProgram::default();
+    for path in files {
+        let content = std::fs::read_to_string(&path)?;
+        let file = syn::parse_file(&content)
+            .with_context(|| format!("parse rust source {}", path.display()))?;
+        program.merge(file_security_closeout_program(&file));
+    }
+    Ok(program.reachable_evidence_from_run())
+}
+
+#[derive(Default)]
+struct SecurityCloseoutProgram {
+    functions: BTreeMap<String, SecurityFunctionEvidence>,
+    legacy_service_token_migration: bool,
+}
+
+impl SecurityCloseoutProgram {
+    fn merge(&mut self, other: Self) {
+        self.legacy_service_token_migration |= other.legacy_service_token_migration;
+        for (name, info) in other.functions {
+            self.functions.entry(name).or_default().merge(info);
+        }
+    }
+
+    fn reachable_evidence_from_run(&self) -> SecurityCloseoutEvidence {
+        let mut out = SecurityCloseoutEvidence {
+            legacy_service_token_migration: self.legacy_service_token_migration,
+            ..SecurityCloseoutEvidence::default()
+        };
+        let mut seen = BTreeSet::new();
+        let mut stack = vec!["run".to_string()];
+        while let Some(name) = stack.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(info) = self.functions.get(&name) else {
+                continue;
+            };
+            out.merge(info.evidence.clone());
+            stack.extend(info.calls.iter().cloned());
+        }
+        out.legacy_service_token_migration = self.legacy_service_token_migration;
+        out
+    }
+}
+
+#[derive(Clone, Default)]
+struct SecurityFunctionEvidence {
+    evidence: SecurityCloseoutEvidence,
+    calls: BTreeSet<String>,
+}
+
+impl SecurityFunctionEvidence {
+    fn merge(&mut self, other: Self) {
+        self.evidence.merge(other.evidence);
+        self.calls.extend(other.calls);
+    }
+}
+
+fn file_security_closeout_program(file: &syn::File) -> SecurityCloseoutProgram {
+    let mut visitor = SecurityCloseoutVisitor::default();
+    syn::visit::Visit::visit_file(&mut visitor, file);
+    visitor.program
+}
+
+#[derive(Default)]
+struct SecurityCloseoutVisitor {
+    program: SecurityCloseoutProgram,
+    function_stack: Vec<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if has_cfg_test(&node.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if has_cfg_test(&node.attrs) {
+            return;
+        }
+        self.function_stack.push(node.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, node);
+        self.function_stack.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if has_cfg_test(&node.attrs) {
+            return;
+        }
+        self.function_stack.push(node.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, node);
+        self.function_stack.pop();
+    }
+
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if has_cfg_test(&node.attrs) {
+            return;
+        }
+        if ident_contains(&node.ident, "INTERNAL_SERVICE_TOKEN_MIGRATION") {
+            self.program.legacy_service_token_migration = true;
+        }
+        syn::visit::visit_item_const(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Some(call) = call_path_last_segment(node.func.as_ref()) {
+            self.record_call(&call);
+            if call == "build_runtime_oidc_provider" {
+                self.record_evidence(|e| e.runtime_oidc_provider_build = true);
+            }
+        }
+        if call_path_ends_with(node.func.as_ref(), "load_and_watch")
+            && call_path_contains_segment(node.func.as_ref(), "JwksKeySource")
+        {
+            self.record_evidence(|e| e.jwks_load_and_watch = true);
+        }
+        if call_path_ends_with(node.func.as_ref(), "new")
+            && call_path_contains_segment(node.func.as_ref(), "OidcJwksReadyProbe")
+        {
+            self.record_evidence(|e| e.jwks_ready_probe = true);
+        }
+        if call_path_ends_with(node.func.as_ref(), "from_spire")
+            && call_path_contains_segment(node.func.as_ref(), "MtlsServerConfig")
+        {
+            self.record_evidence(|e| e.mtls_server_from_spire = true);
+        }
+        if call_path_ends_with(node.func.as_ref(), "from_spire")
+            && call_path_contains_segment(node.func.as_ref(), "DomainHttpTransport")
+        {
+            self.record_evidence(|e| e.domain_transport_from_spire = true);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        self.record_call(&method);
+        if node.method == "keys_jwks" {
+            self.record_evidence(|e| e.jwks_keys_jwks = true);
+        }
+        if node.method == "provider" {
+            self.record_evidence(|e| e.runtime_oidc_provider_handle = true);
+        }
+        if node.method == "managed_resource" {
+            self.record_evidence(|e| e.runtime_oidc_managed_resource = true);
+        }
+        if node.method == "probe" {
+            self.record_evidence(|e| e.jwks_probe_registered = true);
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if path_contains_segment(&node.path, "DOMAIN_TRANSPORT_READY_PROBE_NAME") {
+            self.record_evidence(|e| e.domain_transport_ready_probe = true);
+        }
+        if path_contains_segment_matching(&node.path, |segment| {
+            segment.contains("INTERNAL_SERVICE_TOKEN_MIGRATION")
+        }) {
+            self.program.legacy_service_token_migration = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
+
+impl SecurityCloseoutVisitor {
+    fn current_function(&self) -> Option<&str> {
+        self.function_stack.last().map(String::as_str)
+    }
+
+    fn current_info_mut(&mut self) -> Option<&mut SecurityFunctionEvidence> {
+        let name = self.current_function()?.to_owned();
+        Some(self.program.functions.entry(name).or_default())
+    }
+
+    fn record_call(&mut self, call: &str) {
+        if let Some(info) = self.current_info_mut() {
+            info.calls.insert(call.to_owned());
+        }
+    }
+
+    fn record_evidence(&mut self, f: impl FnOnce(&mut SecurityCloseoutEvidence)) {
+        if let Some(info) = self.current_info_mut() {
+            f(&mut info.evidence);
+        }
+    }
+}
+
 fn call_path_ends_with(func: &syn::Expr, segment: &str) -> bool {
     matches!(
         func,
@@ -515,6 +852,51 @@ fn call_path_ends_with(func: &syn::Expr, segment: &str) -> bool {
                 .last()
                 .is_some_and(|last| last.ident == segment)
     )
+}
+
+fn call_path_last_segment(func: &syn::Expr) -> Option<String> {
+    match func {
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn call_path_contains_segment(func: &syn::Expr, segment: &str) -> bool {
+    matches!(func, syn::Expr::Path(path) if path_contains_segment(&path.path, segment))
+}
+
+fn path_contains_segment(path: &syn::Path, segment: &str) -> bool {
+    path_contains_segment_matching(path, |actual| actual == segment)
+}
+
+fn path_contains_segment_matching(path: &syn::Path, f: impl Fn(&str) -> bool) -> bool {
+    path.segments
+        .iter()
+        .any(|segment| f(&segment.ident.to_string()))
+}
+
+fn ident_contains(ident: &syn::Ident, needle: &str) -> bool {
+    ident.to_string().contains(needle)
+}
+
+fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -703,6 +1085,160 @@ purpose = "device-certificate-revocation"
         valid_manifest_with_profile("production", provider_extra)
     }
 
+    fn production_security_manifest(
+        profile: &str,
+        include_oidc: bool,
+        include_vault_signer: bool,
+        include_vault_keyprovider: bool,
+    ) -> String {
+        let mut manifest = format!(
+            r#"
+name = "runtime"
+profile = "{profile}"
+"#
+        );
+        if include_oidc {
+            manifest.push_str(
+                r#"
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+"#,
+            );
+        }
+        if include_vault_signer {
+            manifest.push_str(
+                r#"
+[[diportProviders]]
+port = "diport::Signer"
+provider = "vault::VaultSigner"
+providerCrate = "vault"
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-access-token-signing"
+"#,
+            );
+        }
+        if include_vault_keyprovider {
+            manifest.push_str(
+                r#"
+[[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-configvalue-at-rest-encryption"
+"#,
+            );
+        }
+        manifest
+    }
+
+    const CARGO_SECURITY_BACKEND: &str = r#"[package]
+name = "runtime"
+
+[dependencies]
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+"#;
+
+    const SECURITY_CLOSEOUT_FULL_SOURCE: &str = r#"
+fn build_runtime_oidc_provider() {
+    let jwks = oidc::JwksKeySource::load_and_watch(
+        "primary-idp",
+        "/etc/rss/oidc-jwks.json",
+        std::time::Duration::from_secs(60),
+        tokio_util::sync::CancellationToken::new(),
+    ).unwrap();
+    let readiness = jwks.readiness_handle();
+    let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
+        .keys_jwks(jwks);
+    let _probe = OidcJwksReadyProbe::new(readiness);
+}
+
+fn mtls_config_from_env() {
+    let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
+}
+
+fn wire_domain_transport_from() {
+    let _ = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
+    let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
+}
+"#;
+
+    const SECURITY_CLOSEOUT_JWKS_ONLY_SOURCE: &str = r#"
+fn build_runtime_oidc_provider() {
+    let jwks = oidc::JwksKeySource::load_and_watch(
+        "primary-idp",
+        "/etc/rss/oidc-jwks.json",
+        std::time::Duration::from_secs(60),
+        tokio_util::sync::CancellationToken::new(),
+    ).unwrap();
+    let readiness = jwks.readiness_handle();
+    let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
+        .keys_jwks(jwks);
+    let _probe = OidcJwksReadyProbe::new(readiness);
+}
+"#;
+
+    const SECURITY_CLOSEOUT_SPIFFE_ONLY_SOURCE: &str = r#"
+fn mtls_config_from_env() {
+    let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
+}
+
+fn wire_domain_transport_from() {
+    let _ = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
+    let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
+}
+"#;
+
+    const SECURITY_CLOSEOUT_RUN_PATH_SOURCE: &str = r#"
+fn build_runtime_oidc_provider() {
+    let jwks = oidc::JwksKeySource::load_and_watch(
+        "primary-idp",
+        "/etc/rss/oidc-jwks.json",
+        std::time::Duration::from_secs(60),
+        tokio_util::sync::CancellationToken::new(),
+    ).unwrap();
+    let readiness = jwks.readiness_handle();
+    let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
+        .keys_jwks(jwks);
+    RuntimeOidcProvider { readiness }
+}
+
+fn mtls_config_from_env() {
+    let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
+}
+
+fn wire_domain_transport_from() {
+    let transport = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
+    let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
+    transport
+}
+
+fn run() {
+    let runtime_oidc = build_runtime_oidc_provider();
+    let provider = runtime_oidc.provider();
+    module.resources.push(runtime_oidc.managed_resource());
+    registry.probe(
+        oidc_jwks_probe_name,
+        Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
+    ).unwrap();
+    let domain_transport = wire_domain_transport_from();
+    module.merge(domain_transport.module_result().unwrap());
+    let _ = mtls_config_from_env();
+    let _ = assemble_authed_routers(provider);
+}
+"#;
+
     #[test]
     fn manifest_rejects_unknown_fields() {
         let raw = r#"
@@ -854,6 +1390,251 @@ name = "runtime"
             "{finding:?}"
         );
         assert!(finding.detail.contains("field=durability"), "{finding:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_requires_critical_providers() -> anyhow::Result<()> {
+        for (name, manifest, gate) in [
+            (
+                "assembly-production-security-missing-oidc",
+                production_security_manifest("production", false, true, true),
+                "gate=oidc-pdp",
+            ),
+            (
+                "assembly-production-security-missing-vault-signer",
+                production_security_manifest("production", true, false, true),
+                "gate=vault-signer",
+            ),
+            (
+                "assembly-production-security-missing-vault-keyprovider",
+                production_security_manifest("production", true, true, false),
+                "gate=vault-keyprovider",
+            ),
+        ] {
+            let root = unique_tmp(name);
+            write_assembly(&root, &manifest, CARGO_SECURITY_BACKEND)?;
+            write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
+
+            let (_count, findings) = validate_root(&root)?;
+            assert!(
+                findings.iter().any(|f| {
+                    f.rule == Rule::ProductionSecurityCriticalProvider && f.detail.contains(gate)
+                }),
+                "{gate} must be required for production security closeout: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_requires_jwks_runtime_evidence() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-missing-jwks");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_SPIFFE_ONLY_SOURCE)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
+            "production assembly without JWKS runtime evidence must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_requires_spiffe_mtls_evidence() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-missing-spiffe");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_JWKS_ONLY_SOURCE)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecuritySpiffeCloseout),
+            "production assembly without SPIFFE/mTLS evidence must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_ignores_comment_and_string_bait() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-bait");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            r#"
+// oidc::JwksKeySource::load_and_watch(...).keys_jwks(...) OidcJwksReadyProbe::new(...)
+// httpd::MtlsServerConfig::from_spire(...) httpd::DomainHttpTransport::from_spire(...)
+const BAIT: &str = "JwksKeySource::load_and_watch keys_jwks OidcJwksReadyProbe::new DOMAIN_TRANSPORT_READY_PROBE_NAME MtlsServerConfig::from_spire DomainHttpTransport::from_spire";
+
+#[cfg(test)]
+mod tests {
+    fn test_bait() {
+        let jwks = oidc::JwksKeySource::load_and_watch("id", "path", interval, token).unwrap();
+        let _ = oidc::VerifierConfigBuilder::new("iss", "aud").keys_jwks(jwks);
+        let _ = OidcJwksReadyProbe::new(handle);
+        let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
+        let _ = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
+        let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
+    }
+}
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
+            "comment/string/cfg(test) JWKS bait must not satisfy production evidence: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecuritySpiffeCloseout),
+            "comment/string/cfg(test) SPIFFE bait must not satisfy production evidence: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_ignores_cfg_test_run_bait() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-cfg-test-run-bait");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            r#"
+#[cfg(test)]
+mod tests {
+    fn build_runtime_oidc_provider() {
+        let jwks = oidc::JwksKeySource::load_and_watch(
+            "primary-idp",
+            "/etc/rss/oidc-jwks.json",
+            std::time::Duration::from_secs(60),
+            tokio_util::sync::CancellationToken::new(),
+        ).unwrap();
+        let readiness = jwks.readiness_handle();
+        let _config = oidc::VerifierConfigBuilder::new("https://issuer", "rss")
+            .keys_jwks(jwks);
+        RuntimeOidcProvider { readiness }
+    }
+
+    fn mtls_config_from_env() {
+        let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
+    }
+
+    fn wire_domain_transport_from() {
+        let transport = httpd::DomainHttpTransport::from_spire(targets, endpoint.as_deref());
+        let _ = DOMAIN_TRANSPORT_READY_PROBE_NAME;
+        transport
+    }
+
+    fn run() {
+        let runtime_oidc = build_runtime_oidc_provider();
+        let provider = runtime_oidc.provider();
+        module.resources.push(runtime_oidc.managed_resource());
+        registry.probe(
+            oidc_jwks_probe_name,
+            Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
+        ).unwrap();
+        let domain_transport = wire_domain_transport_from();
+        module.merge(domain_transport.module_result().unwrap());
+        let _ = mtls_config_from_env();
+        let _ = assemble_authed_routers(provider);
+    }
+}
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
+            "cfg(test) run() JWKS bait must not satisfy production evidence: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecuritySpiffeCloseout),
+            "cfg(test) run() SPIFFE bait must not satisfy production evidence: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_dead_helper_evidence() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-dead-helper");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
+            "dead helper JWKS evidence must not satisfy production closeout: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ProductionSecuritySpiffeCloseout),
+            "dead helper SPIFFE evidence must not satisfy production closeout: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_full_fixture_passes() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-green");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_PATH_SOURCE)?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn demo_security_closeout_allows_missing_runtime_evidence() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-demo-security-no-evidence");
+        write_assembly(
+            &root,
+            &production_security_manifest("demo", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(findings.is_empty(), "{findings:?}");
         Ok(())
     }
 
