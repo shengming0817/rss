@@ -66,6 +66,7 @@ const INSTALL_HINT_AUDIT: &str = "cargo install cargo-audit@0.22.2 --locked";
 const INSTALL_HINT_DYLINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
 const INSTALL_HINT_NEXTEST: &str = "cargo install cargo-nextest@0.9.137 --locked";
 const INSTALL_HINT_INTEGRATION: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker 或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 等 env URL）";
+const INSTALL_HINT_FAULT_MATRIX: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker，或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + RSS_AMQP_TEST_URL；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权）";
 const INSTALL_HINT_LLVM_COV: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
 const INSTALL_HINT_PUBLIC_API: &str =
     "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
@@ -567,7 +568,8 @@ fn step_integration_compile() -> Step {
 }
 
 /// #1137：真集成 lane 实跑步——nextest 跑 postgres/redis/amqp 的 `integration` 测试（self-provision
-/// 容器 / 对接 env URL）。专用 `--profile integration`（放宽 slow-timeout，容器冷启动；见 .config/nextest.toml）。
+/// 容器 / 对接 env URL），N-028 fault matrix 由独立 [`step_consistency_fault_matrix_run`] 显式承载。
+/// 专用 `--profile integration`（放宽 slow-timeout，容器冷启动；见 .config/nextest.toml）。
 /// **仅** [`integration_plan`]（opt-in `cargo xtask integration`）——不入 verify/ci（默认门只 `--no-run` 编译，
 /// 须无 docker 可跑；实跑需 docker / 长存后端，由 [`run_integration`] 的 docker 门把守）。
 fn step_integration_run() -> Step {
@@ -592,10 +594,36 @@ fn step_integration_run() -> Step {
             "runtime",
             "--features",
             "integration",
+            "-E",
+            "not test(consistency_fault_matrix)",
         ],
         kind: StepKind::Tool {
             probe: "nextest",
             install_hint: INSTALL_HINT_INTEGRATION,
+        },
+        env: &[],
+        needs_compile: true,
+    }
+}
+
+fn step_consistency_fault_matrix_run() -> Step {
+    Step {
+        label: "consistency-fault-matrix",
+        args: &[
+            "nextest",
+            "run",
+            "--profile",
+            "integration",
+            "-p",
+            "journeys",
+            "--features",
+            "integration",
+            "-E",
+            "test(consistency_fault_matrix)",
+        ],
+        kind: StepKind::Tool {
+            probe: "nextest",
+            install_hint: INSTALL_HINT_FAULT_MATRIX,
         },
         env: &[],
         needs_compile: true,
@@ -918,10 +946,15 @@ fn audit_plan() -> Vec<Step> {
     vec![step_deny_advisories(), step_cargo_audit()]
 }
 
-/// #1137：真集成 lane 门步计划（opt-in `cargo xtask integration`）。当前单步 nextest 跑三 adapter 的
-/// `integration` 测试；与 verify/ci 完全隔离（默认门只编译 integration 代码、不实跑——见 [`step_integration_compile`]）。
+/// #1137：真集成 lane 门步计划（opt-in `cargo xtask integration`）。先跑常规 integration tests，再显式跑
+/// N-028 consistency fault matrix；与 verify/ci 完全隔离（默认门只编译 integration 代码、不实跑——见
+/// [`step_integration_compile`]）。
 fn integration_plan() -> Vec<Step> {
-    vec![step_integration_run()]
+    vec![step_integration_run(), step_consistency_fault_matrix_run()]
+}
+
+fn consistency_fault_matrix_plan() -> Vec<Step> {
+    vec![step_consistency_fault_matrix_run()]
 }
 
 /// 四资源 env URL 全在 ⇒ 对接长存外部 pg/redis/rabbitmq/mosquitto，无需 docker self-provision（testkit 的
@@ -945,6 +978,16 @@ fn all_integration_env_urls_present() -> bool {
     let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
     let mqtt = std::env::var_os("RSS_MQTT_TEST_URL").is_some();
     pg_all && redis && amqp && mqtt
+}
+
+fn fault_matrix_env_urls_present() -> bool {
+    let pg_opt_in = std::env::var_os("RSS_TEST_ALLOW_EXTERNAL_POSTGRES").is_some();
+    let pg_five_tuple = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]
+        .iter()
+        .all(|k| std::env::var_os(k).is_some());
+    let pg_all = pg_opt_in && pg_five_tuple;
+    let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
+    pg_all && amqp
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::clean_cmd`]
@@ -1001,6 +1044,42 @@ pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
         run_one("integration", step, &opts, &root)?;
     }
     eprintln!("integration：全部通过");
+    Ok(())
+}
+
+/// N-028 consistency fault matrix runner（opt-in）：Postgres + RabbitMQ only.
+pub(crate) fn run_consistency_fault_matrix(allow_missing_tools: bool) -> Result<()> {
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools,
+    };
+    let root = workspace_root()?;
+    if !fault_matrix_env_urls_present() {
+        match resolve_tool(docker_available(), allow_missing_tools) {
+            ToolAction::Run => {}
+            ToolAction::SkipWarn => {
+                eprintln!(
+                    "consistency-fault-matrix: [跳过] docker daemon 不可达（--allow-missing-tools 宽限）。\
+                     外部路径需同时设置：RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD；\
+                     + RSS_AMQP_TEST_URL 指向长存 RabbitMQ base broker URL；并预建 vhost rss_fault_matrix 且授权该 URL 用户。"
+                );
+                return Ok(());
+            }
+            ToolAction::Fail => bail!(
+                "consistency-fault-matrix: docker daemon 不可达（容器 self-provision 需 docker）。\
+                 启动 Docker，或同时设置 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD \
+                 + RSS_AMQP_TEST_URL 指向运行中的 Postgres/RabbitMQ；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权；\
+                 确需跳过用 --allow-missing-tools。"
+            ),
+        }
+    }
+    let plan = consistency_fault_matrix_plan();
+    eprintln!(
+        "consistency-fault-matrix：{} 步（N-028 real-backend crash matrix）",
+        plan.len()
+    );
+    run_labeled_plan("consistency-fault-matrix", &plan, &opts, &root)?;
+    eprintln!("consistency-fault-matrix：全部通过");
     Ok(())
 }
 
@@ -1647,13 +1726,57 @@ mod tests {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
     }
 
-    /// #1137：integration lane 与 verify/ci **完全隔离**——单步 `integration-tests`，不出现在 verify/ci
-    /// （默认门只 `--no-run` 编译 integration 代码、不实跑；实跑需 docker，由 run_integration 门把守）。
+    /// #1137：integration lane 与 verify/ci **完全隔离**——常规 integration-tests + N-028 fault matrix 都不出现在
+    /// verify/ci（默认门只 `--no-run` 编译 integration 代码、不实跑；实跑需 docker，由 run_integration 门把守）。
     #[test]
     fn integration_plan_isolated_from_verify_and_ci() {
-        assert_eq!(labels(&integration_plan()), vec!["integration-tests"]);
+        assert_eq!(
+            labels(&integration_plan()),
+            vec!["integration-tests", "consistency-fault-matrix"]
+        );
         assert!(!labels(&verify_plan(&opts(false, false))).contains(&"integration-tests"));
         assert!(!labels(&ci_plan()).contains(&"integration-tests"));
+        assert!(!labels(&verify_plan(&opts(false, false))).contains(&"consistency-fault-matrix"));
+        assert!(!labels(&ci_plan()).contains(&"consistency-fault-matrix"));
+    }
+
+    #[test]
+    fn consistency_fault_matrix_plan_isolated_from_verify_and_ci() {
+        assert_eq!(
+            labels(&consistency_fault_matrix_plan()),
+            vec!["consistency-fault-matrix"]
+        );
+        assert!(!labels(&verify_plan(&opts(false, false))).contains(&"consistency-fault-matrix"));
+        assert!(!labels(&ci_plan()).contains(&"consistency-fault-matrix"));
+    }
+
+    #[test]
+    fn consistency_fault_matrix_step_targets_journeys_matrix_test() {
+        let step = step_consistency_fault_matrix_run();
+        assert_eq!(step.label, "consistency-fault-matrix");
+        assert!(matches!(
+            step.kind,
+            StepKind::Tool {
+                probe: "nextest",
+                ..
+            }
+        ));
+        assert!(
+            step.args
+                .windows(2)
+                .any(|w| w == ["--profile", "integration"]),
+            "须 --profile integration，实际 {:?}",
+            step.args
+        );
+        assert!(step.args.contains(&"-p") && step.args.contains(&"journeys"));
+        assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
+        assert!(
+            step.args
+                .windows(2)
+                .any(|w| w == ["-E", "test(consistency_fault_matrix)"]),
+            "须只跑 consistency fault matrix targeted test，实际 {:?}",
+            step.args
+        );
     }
 
     /// integration 实跑步：`--profile integration`（放宽 timeout）+ `--features integration` + 全包覆盖
@@ -1677,6 +1800,13 @@ mod tests {
             step.args
         );
         assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
+        assert!(
+            step.args
+                .windows(2)
+                .any(|w| w == ["-E", "not test(consistency_fault_matrix)"]),
+            "常规 integration step 须排除独立 fault matrix，实际 {:?}",
+            step.args
+        );
         for p in [
             "postgres",
             "redis-adapter",

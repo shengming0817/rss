@@ -1,23 +1,28 @@
 //! Consistency crash fixture gate.
 //!
-//! Scans `fixtures/consistency/**/fixture-*.toml` and keeps the N-003 crash
-//! matrix skeleton machine-visible. This is a no-compile governance gate: it
-//! validates data shape and redaction boundaries, but does not execute runtime
-//! crash recovery.
+//! Scans `fixtures/consistency/**/fixture-*.toml` and keeps the N-028 crash
+//! matrix machine-visible. This is a no-compile governance gate: it validates
+//! fixture shape, redaction boundaries, ready-case coverage, and journey runner
+//! mappings. Real backend recovery is executed by the opt-in
+//! `consistency-fault-matrix` lane.
 //!
-//! INVARIANT: CONSISTENCY-CRASH-FIXTURE-01 { level = "Medium", exec = "verify", source = "code" } -- consistency crash fixture ids must be unique, fixtures must parse as the closed TOML DSL, and N-003 must keep at least five pending cases.
+//! INVARIANT: CONSISTENCY-CRASH-FIXTURE-01 { level = "Medium", exec = "verify", source = "code" } -- consistency crash fixture ids must be unique and fixtures must parse as the closed TOML DSL.
+//! INVARIANT: CONSISTENCY-FAULT-MATRIX-01 { level = "Medium", exec = "verify", source = "code" } -- N-028 ready cases must cover all consistency mechanisms and each ready fixture must have a real journey runner mapping.
 
-use crate::contract::manifest::{ContractManifest, ContractOwner};
+use crate::contract::manifest::{ConsistencyLevel, ContractManifest, ContractOwner};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use syn::{Expr, ExprArray, Item, Lit};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-const MIN_PENDING_CASES: usize = 5;
+const MIN_READY_CASES: usize = 12;
+const MIN_READY_PER_MECHANISM: usize = 2;
 const MAX_ALIAS_LEN: usize = 128;
 const LONG_MATERIAL_MIN: usize = 32;
+const JOURNEY_RUNNER_SOURCE: &str = "journeys/tests/consistency_fault_matrix_journey.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -27,7 +32,10 @@ pub(crate) enum Rule {
     Parse,
     InvalidFixture,
     DuplicateId,
-    PendingCount,
+    ReadyCount,
+    MechanismCoverage,
+    MissingRunnerMapping,
+    RunnerMismatch,
 }
 
 pub(crate) struct ConsistencyFixtures;
@@ -59,7 +67,7 @@ enum CrashLevel {
     L4,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum CrashMechanism {
     Outbox,
@@ -74,6 +82,25 @@ enum CrashMechanism {
 enum CrashStatus {
     Pending,
     Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CrashRunner {
+    Postgres,
+    Rabbitmq,
+    PostgresRabbitmq,
+}
+
+impl CrashRunner {
+    fn from_rust_variant(value: &str) -> Option<Self> {
+        match value {
+            "Postgres" => Some(Self::Postgres),
+            "Rabbitmq" => Some(Self::Rabbitmq),
+            "PostgresRabbitmq" => Some(Self::PostgresRabbitmq),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -111,13 +138,32 @@ struct Fixture {
     tenant_authority: TenantAuthorityState,
     #[serde(rename = "crashPoint")]
     crash_point: String,
-    #[serde(rename = "expectedRecovery")]
-    expected_recovery: String,
+    #[serde(rename = "expectedInvariant")]
+    expected_invariant: String,
+    runner: CrashRunner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerContract {
+    domain: String,
+    contract_id: String,
+    crash_point: String,
+    expected_invariant: String,
+    runner: CrashRunner,
 }
 
 #[derive(Debug, Clone)]
 struct ContractEntry {
     owner_domain: String,
+    consistency_level: ConsistencyLevel,
+}
+
+#[derive(Debug, Default)]
+struct FixtureScan {
+    ready_ids: BTreeSet<String>,
+    ready_count: usize,
+    ready_by_mechanism: BTreeMap<CrashMechanism, usize>,
+    findings: Vec<Finding>,
 }
 
 fn check_root(root: &Path) -> (String, Vec<Finding>) {
@@ -161,26 +207,64 @@ fn check_root(root: &Path) -> (String, Vec<Finding>) {
             BTreeMap::new()
         }
     };
+    let journey_runners = match journey_runner_mappings(root) {
+        Ok(runners) => runners,
+        Err(detail) => {
+            findings.push(finding(
+                Rule::MissingRunnerMapping,
+                JOURNEY_RUNNER_SOURCE,
+                detail,
+            ));
+            BTreeMap::new()
+        }
+    };
 
+    let scan = scan_fixture_corpus(root, &files, &contracts, &journey_runners);
+    findings.extend(scan.findings);
+    add_orphan_runner_findings(&mut findings, &scan.ready_ids, &journey_runners);
+    add_ready_coverage_findings(
+        &mut findings,
+        root,
+        &dir,
+        scan.ready_count,
+        &scan.ready_by_mechanism,
+    );
+
+    let summary = format!(
+        "{} fixture files scanned, {} ready cases",
+        files.len(),
+        scan.ready_count
+    );
+    (summary, findings)
+}
+
+fn scan_fixture_corpus(
+    root: &Path,
+    files: &[PathBuf],
+    contracts: &BTreeMap<String, ContractEntry>,
+    journey_runners: &BTreeMap<String, RunnerContract>,
+) -> FixtureScan {
+    let mut scan = FixtureScan::default();
     let mut ids = BTreeSet::new();
-    let mut pending = 0usize;
-    for path in &files {
+    for path in files {
         let rel_path = rel(root, path);
         let src = match std::fs::read_to_string(path) {
             Ok(src) => src,
             Err(e) => {
-                findings.push(finding(Rule::Parse, rel_path, e.to_string()));
+                scan.findings
+                    .push(finding(Rule::Parse, rel_path, e.to_string()));
                 continue;
             }
         };
         if let Some(detail) = raw_toml_safety_finding(&src) {
-            findings.push(finding(Rule::InvalidFixture, rel_path, detail));
+            scan.findings
+                .push(finding(Rule::InvalidFixture, rel_path, detail));
             continue;
         }
         let fixture: Fixture = match toml::from_str(&src) {
             Ok(fixture) => fixture,
             Err(_) => {
-                findings.push(finding(
+                scan.findings.push(finding(
                     Rule::Parse,
                     rel_path,
                     "TOML parse failed; check closed fixture fields and enum values",
@@ -188,32 +272,79 @@ fn check_root(root: &Path) -> (String, Vec<Finding>) {
                 continue;
             }
         };
-        if fixture.status == CrashStatus::Pending {
-            pending += 1;
+        if fixture.status == CrashStatus::Ready {
+            scan.ready_count += 1;
+            scan.ready_ids.insert(fixture.id.clone());
+            *scan
+                .ready_by_mechanism
+                .entry(fixture.mechanism)
+                .or_default() += 1;
         }
         if !ids.insert(fixture.id.clone()) {
-            findings.push(finding(
+            scan.findings.push(finding(
                 Rule::DuplicateId,
                 fixture.id.clone(),
                 format!("duplicate id in {rel_path}"),
             ));
         }
-        findings.extend(validate_fixture(&fixture, &rel_path, &contracts));
-    }
-
-    if pending < MIN_PENDING_CASES {
-        findings.push(finding(
-            Rule::PendingCount,
-            rel(root, &dir),
-            format!("expected at least {MIN_PENDING_CASES} pending fixtures, found {pending}"),
+        scan.findings.extend(validate_fixture(
+            &fixture,
+            &rel_path,
+            contracts,
+            journey_runners,
         ));
     }
-    let summary = format!(
-        "{} fixture files scanned, {} pending cases",
-        files.len(),
-        pending
-    );
-    (summary, findings)
+    scan
+}
+
+fn add_orphan_runner_findings(
+    findings: &mut Vec<Finding>,
+    ready_ids: &BTreeSet<String>,
+    journey_runners: &BTreeMap<String, RunnerContract>,
+) {
+    for runner_id in journey_runners.keys() {
+        if !ready_ids.contains(runner_id) {
+            findings.push(finding(
+                Rule::MissingRunnerMapping,
+                JOURNEY_RUNNER_SOURCE,
+                format!("journey runner mapping `{runner_id}` has no ready fixture"),
+            ));
+        }
+    }
+}
+
+fn add_ready_coverage_findings(
+    findings: &mut Vec<Finding>,
+    root: &Path,
+    dir: &Path,
+    ready_count: usize,
+    ready_by_mechanism: &BTreeMap<CrashMechanism, usize>,
+) {
+    if ready_count < MIN_READY_CASES {
+        findings.push(finding(
+            Rule::ReadyCount,
+            rel(root, dir),
+            format!("expected at least {MIN_READY_CASES} ready fixtures, found {ready_count}"),
+        ));
+    }
+    for mechanism in [
+        CrashMechanism::Outbox,
+        CrashMechanism::Inbox,
+        CrashMechanism::Saga,
+        CrashMechanism::Projection,
+        CrashMechanism::Reconcile,
+    ] {
+        let count = ready_by_mechanism.get(&mechanism).copied().unwrap_or(0);
+        if count < MIN_READY_PER_MECHANISM {
+            findings.push(finding(
+                Rule::MechanismCoverage,
+                rel(root, dir),
+                format!(
+                    "expected at least {MIN_READY_PER_MECHANISM} ready {mechanism:?} fixtures, found {count}"
+                ),
+            ));
+        }
+    }
 }
 
 fn collect_fixture_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -254,8 +385,15 @@ fn contract_index(root: &Path) -> Result<BTreeMap<String, ContractEntry>, String
             ContractOwner::Domain(owner) => owner,
             ContractOwner::Framework => "_framework".to_string(),
         };
+        let consistency_level = manifest.consistency_level;
         if contracts
-            .insert(manifest.id.clone(), ContractEntry { owner_domain })
+            .insert(
+                manifest.id.clone(),
+                ContractEntry {
+                    owner_domain,
+                    consistency_level,
+                },
+            )
             .is_some()
         {
             return Err(format!("duplicate contract id `{}`", manifest.id));
@@ -282,6 +420,7 @@ fn validate_fixture(
     fixture: &Fixture,
     rel_path: &str,
     contracts: &BTreeMap<String, ContractEntry>,
+    journey_runners: &BTreeMap<String, RunnerContract>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     if fixture.schema_version != 1 {
@@ -316,8 +455,8 @@ fn validate_fixture(
     validate_slug(
         &mut findings,
         rel_path,
-        "expectedRecovery",
-        &fixture.expected_recovery,
+        "expectedInvariant",
+        &fixture.expected_invariant,
     );
     if fixture.status == CrashStatus::Pending {
         match fixture.pending_reason.as_deref() {
@@ -336,6 +475,19 @@ fn validate_fixture(
             "mechanism and level are inconsistent with consistency-runtime rules",
         ));
     }
+    if fixture.status == CrashStatus::Ready {
+        match journey_runners.get(&fixture.id) {
+            Some(runner) => validate_runner_contract(&mut findings, rel_path, fixture, runner),
+            None => findings.push(finding(
+                Rule::MissingRunnerMapping,
+                rel_path,
+                format!(
+                    "ready fixture `{}` has no consistency_fault_matrix journey runner mapping",
+                    fixture.id
+                ),
+            )),
+        }
+    }
     validate_contract_reference(&mut findings, rel_path, fixture, contracts);
     for (field, value) in fixture_strings(fixture) {
         if looks_sensitive(value) {
@@ -347,6 +499,159 @@ fn validate_fixture(
     }
     let _ = fixture.tenant_authority; // parsed closed enum; validation is structural.
     findings
+}
+
+fn validate_runner_contract(
+    findings: &mut Vec<Finding>,
+    rel_path: &str,
+    fixture: &Fixture,
+    runner: &RunnerContract,
+) {
+    for (field, declared, mapped) in [
+        ("domain", fixture.domain.as_str(), runner.domain.as_str()),
+        (
+            "contractId",
+            fixture.contract_id.as_str(),
+            runner.contract_id.as_str(),
+        ),
+        (
+            "crashPoint",
+            fixture.crash_point.as_str(),
+            runner.crash_point.as_str(),
+        ),
+        (
+            "expectedInvariant",
+            fixture.expected_invariant.as_str(),
+            runner.expected_invariant.as_str(),
+        ),
+    ] {
+        if declared != mapped {
+            findings.push(finding(
+                Rule::RunnerMismatch,
+                rel_path,
+                format!(
+                    "ready fixture `{}` declares {field} `{declared}`, but journey runner contract is `{mapped}`",
+                    fixture.id
+                ),
+            ));
+        }
+    }
+    if fixture.runner != runner.runner {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "ready fixture `{}` declares runner {:?}, but journey runner contract is {:?}",
+                fixture.id, fixture.runner, runner.runner
+            ),
+        ));
+    }
+}
+
+fn journey_runner_mappings(root: &Path) -> Result<BTreeMap<String, RunnerContract>, String> {
+    let path = root.join(JOURNEY_RUNNER_SOURCE);
+    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let syntax = syn::parse_file(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+    let entries = ready_case_runner_array(&syntax)
+        .ok_or_else(|| "READY_CASE_RUNNERS table not found".to_string())?;
+    let mut mappings = BTreeMap::new();
+    for entry in &entries.elems {
+        let (id, runner) = parse_journey_runner_entry(entry)?;
+        if mappings.insert(id.clone(), runner).is_some() {
+            return Err(format!("duplicate journey runner mapping `{id}`"));
+        }
+    }
+    if mappings.is_empty() {
+        return Err("READY_CASE_RUNNERS table is empty".to_string());
+    }
+    Ok(mappings)
+}
+
+fn ready_case_runner_array(file: &syn::File) -> Option<&ExprArray> {
+    file.items.iter().find_map(|item| match item {
+        Item::Const(item) if item.ident == "READY_CASE_RUNNERS" => expr_array(&item.expr),
+        _ => None,
+    })
+}
+
+fn expr_array(expr: &Expr) -> Option<&ExprArray> {
+    match expr {
+        Expr::Reference(reference) => expr_array(&reference.expr),
+        Expr::Array(array) => Some(array),
+        _ => None,
+    }
+}
+
+fn parse_journey_runner_entry(entry: &Expr) -> Result<(String, RunnerContract), String> {
+    let Expr::Call(call) = entry else {
+        return Err("READY_CASE_RUNNERS entry must be ReadyCaseRunner::new(...)".to_string());
+    };
+    if !expr_path_ends_with(&call.func, &["ReadyCaseRunner", "new"]) {
+        return Err("READY_CASE_RUNNERS entry must call ReadyCaseRunner::new".to_string());
+    }
+    if call.args.len() != 7 {
+        return Err(format!(
+            "ReadyCaseRunner::new must have 7 arguments, got {}",
+            call.args.len()
+        ));
+    }
+    let mut args = call.args.iter();
+    let id = string_arg(args.next(), "id")?;
+    let domain = string_arg(args.next(), "domain")?;
+    let contract_id = string_arg(args.next(), "contractId")?;
+    let crash_point = string_arg(args.next(), "crashPoint")?;
+    let expected_invariant = string_arg(args.next(), "expectedInvariant")?;
+    let runner = crash_runner_arg(args.next())?;
+    Ok((
+        id,
+        RunnerContract {
+            domain,
+            contract_id,
+            crash_point,
+            expected_invariant,
+            runner,
+        },
+    ))
+}
+
+fn expr_path_ends_with(expr: &Expr, suffix: &[&str]) -> bool {
+    let Expr::Path(path) = expr else {
+        return false;
+    };
+    let segment_count = path.path.segments.len();
+    if segment_count < suffix.len() {
+        return false;
+    }
+    path.path
+        .segments
+        .iter()
+        .skip(segment_count - suffix.len())
+        .zip(suffix)
+        .all(|(segment, expected)| segment.ident == *expected)
+}
+
+fn string_arg(expr: Option<&Expr>, name: &str) -> Result<String, String> {
+    match expr {
+        Some(Expr::Lit(lit)) => match &lit.lit {
+            Lit::Str(value) => Ok(value.value()),
+            _ => Err(format!("ReadyCaseRunner::{name} must be a string literal")),
+        },
+        _ => Err(format!("ReadyCaseRunner::{name} must be a string literal")),
+    }
+}
+
+fn crash_runner_arg(expr: Option<&Expr>) -> Result<CrashRunner, String> {
+    let Some(Expr::Path(path)) = expr else {
+        return Err("ReadyCaseRunner::runner must be a CrashRunner variant".to_string());
+    };
+    let variant = path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default();
+    CrashRunner::from_rust_variant(&variant)
+        .ok_or_else(|| format!("unknown READY_CASE_RUNNERS runner `{variant}`"))
 }
 
 fn fixture_strings(fixture: &Fixture) -> [(&'static str, &str); 10] {
@@ -363,7 +668,7 @@ fn fixture_strings(fixture: &Fixture) -> [(&'static str, &str); 10] {
         ("messageAlias", fixture.message_alias.as_str()),
         ("partitionKeyAlias", fixture.partition_key_alias.as_str()),
         ("crashPoint", fixture.crash_point.as_str()),
-        ("expectedRecovery", fixture.expected_recovery.as_str()),
+        ("expectedInvariant", fixture.expected_invariant.as_str()),
     ]
 }
 
@@ -444,14 +749,11 @@ fn validate_contract_reference(
     contracts: &BTreeMap<String, ContractEntry>,
 ) {
     match contracts.get(&fixture.contract_id) {
-        Some(contract) if contract.owner_domain == fixture.domain => {}
-        Some(contract) => findings.push(invalid(
-            subject,
-            format!(
-                "contractId `{}` is owned by `{}`, not fixture domain `{}`",
-                fixture.contract_id, contract.owner_domain, fixture.domain
-            ),
-        )),
+        Some(contract) => {
+            if let Some(detail) = contract_reference_finding(fixture, contract) {
+                findings.push(invalid(subject, detail));
+            }
+        }
         None => findings.push(invalid(
             subject,
             format!(
@@ -459,6 +761,33 @@ fn validate_contract_reference(
                 fixture.contract_id
             ),
         )),
+    }
+}
+
+fn contract_reference_finding(fixture: &Fixture, contract: &ContractEntry) -> Option<String> {
+    if contract.owner_domain != fixture.domain {
+        return Some(format!(
+            "contractId `{}` is owned by `{}`, not fixture domain `{}`",
+            fixture.contract_id, contract.owner_domain, fixture.domain
+        ));
+    }
+    let expected = expected_consistency_level(fixture.level);
+    if contract.consistency_level != expected {
+        return Some(format!(
+            "contractId `{}` has consistencyLevel {:?}, but fixture level {:?} requires {:?}",
+            fixture.contract_id, contract.consistency_level, fixture.level, expected
+        ));
+    }
+    None
+}
+
+fn expected_consistency_level(level: CrashLevel) -> ConsistencyLevel {
+    match level {
+        CrashLevel::L0 => ConsistencyLevel::LocalOnly,
+        CrashLevel::L1 => ConsistencyLevel::LocalTx,
+        CrashLevel::L2 => ConsistencyLevel::OutboxFact,
+        CrashLevel::L3 => ConsistencyLevel::WorkflowEventual,
+        CrashLevel::L4 => ConsistencyLevel::DeviceLatent,
     }
 }
 
@@ -517,7 +846,8 @@ fn raw_toml_safety_value_subject(key: &str) -> &'static str {
         "partitionKeyAlias" => "partitionKeyAlias",
         "tenantAuthority" => "tenantAuthority",
         "crashPoint" => "crashPoint",
-        "expectedRecovery" => "expectedRecovery",
+        "expectedInvariant" => "expectedInvariant",
+        "runner" => "runner",
         _ => "fixture value",
     }
 }
@@ -637,8 +967,7 @@ id = "outbox-after-publish-before-settle"
 title = "publish succeeds before settle crash"
 level = "L2"
 mechanism = "outbox"
-status = "pending"
-pendingReason = "N-003 only creates the DSL skeleton"
+status = "ready"
 domain = "identity"
 contractId = "identity.session-created"
 tenantAlias = "tenant-a"
@@ -646,7 +975,8 @@ messageAlias = "message-a"
 partitionKeyAlias = "aggregate-a"
 tenantAuthority = "valid"
 crashPoint = "after-publish-before-settle"
-expectedRecovery = "redeliver-or-settle-idempotently"
+expectedInvariant = "outbox-publish-settled-once"
+runner = "postgres-rabbitmq"
 "#;
 
     const VALID_CONTRACT: &str = r#"
@@ -672,6 +1002,20 @@ partitionKey = "none"
 readiness = "required"
 "#;
 
+    const VALID_JOURNEY_RUNNERS: &str = r#"
+const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
+    ReadyCaseRunner::new(
+        "outbox-after-publish-before-settle",
+        "identity",
+        "identity.session-created",
+        "after-publish-before-settle",
+        "outbox-publish-settled-once",
+        CrashRunner::PostgresRabbitmq,
+        run_outbox_after_publish_before_settle,
+    ),
+];
+"#;
+
     fn temp_root(name: &str) -> Result<PathBuf> {
         let n = NEXT_TMP.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
@@ -688,6 +1032,8 @@ readiness = "required"
             root.join("contracts/event/identity/v1/session-created/contract.toml"),
             VALID_CONTRACT,
         )?;
+        fs::create_dir_all(root.join("journeys/tests"))?;
+        fs::write(root.join(JOURNEY_RUNNER_SOURCE), VALID_JOURNEY_RUNNERS)?;
         Ok(root)
     }
 
@@ -701,7 +1047,7 @@ readiness = "required"
     }
 
     #[test]
-    fn green_real_tree_has_required_pending_fixtures() -> Result<()> {
+    fn green_real_tree_has_required_ready_fixtures() -> Result<()> {
         let root = crate::workspace_root()?;
         let (_, findings) = check_root(&root);
         assert!(
@@ -740,11 +1086,101 @@ readiness = "required"
     }
 
     #[test]
-    fn red_pending_count_floor_is_enforced() -> Result<()> {
+    fn red_ready_count_floor_is_enforced() -> Result<()> {
         let root = temp_root("floor")?;
         write_fixture(&root, "one", VALID)?;
         let (_, findings) = check_root(&root);
-        assert!(findings.iter().any(|f| f.rule == Rule::PendingCount));
+        assert!(findings.iter().any(|f| f.rule == Rule::ReadyCount));
+        assert!(findings.iter().any(|f| f.rule == Rule::MechanismCoverage));
+        Ok(())
+    }
+
+    #[test]
+    fn red_missing_runner_mapping_is_reported() -> Result<()> {
+        let root = temp_root("missing-runner")?;
+        write_fixture(
+            &root,
+            "missing-runner",
+            &VALID
+                .replace(
+                    "outbox-after-publish-before-settle",
+                    "outbox-unmapped-ready-case",
+                )
+                .replace(
+                    "crashPoint = \"after-publish-before-settle\"",
+                    "crashPoint = \"unmapped-ready-case\"",
+                )
+                .replace(
+                    "expectedInvariant = \"outbox-publish-settled-once\"",
+                    "expectedInvariant = \"outbox-unmapped-invariant\"",
+                ),
+        )?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::MissingRunnerMapping
+                    && f.detail.contains("outbox-unmapped-ready-case")
+            }),
+            "missing runner mapping should be reported: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_runner_mismatch_is_reported() -> Result<()> {
+        let root = temp_root("runner-mismatch")?;
+        write_fixture(
+            &root,
+            "runner-mismatch",
+            &VALID.replace("runner = \"postgres-rabbitmq\"", "runner = \"postgres\""),
+        )?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::RunnerMismatch),
+            "runner mismatch should be reported: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_runner_contract_invariant_mismatch_is_reported() -> Result<()> {
+        let root = temp_root("runner-invariant")?;
+        write_fixture(
+            &root,
+            "runner-invariant",
+            &VALID.replace(
+                "expectedInvariant = \"outbox-publish-settled-once\"",
+                "expectedInvariant = \"outbox-drifted-invariant\"",
+            ),
+        )?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::RunnerMismatch && f.detail.contains("expectedInvariant")
+            }),
+            "runner expectedInvariant mismatch should be reported: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_runner_contract_contract_id_mismatch_is_reported() -> Result<()> {
+        let root = temp_root("runner-contract-id")?;
+        write_fixture(
+            &root,
+            "runner-contract-id",
+            &VALID.replace(
+                "contractId = \"identity.session-created\"",
+                "contractId = \"identity.role-assigned\"",
+            ),
+        )?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings
+                .iter()
+                .any(|f| { f.rule == Rule::RunnerMismatch && f.detail.contains("contractId") }),
+            "runner contractId mismatch should be reported: {findings:?}"
+        );
         Ok(())
     }
 
@@ -793,6 +1229,27 @@ readiness = "required"
                 .iter()
                 .any(|f| { f.rule == Rule::InvalidFixture && f.detail.contains("owned by") }),
             "owner/domain mismatch should be reported: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_contract_consistency_level_mismatch_is_reported() -> Result<()> {
+        let root = temp_root("contract-level")?;
+        fs::write(
+            root.join("contracts/event/identity/v1/session-created/contract.toml"),
+            VALID_CONTRACT.replace(
+                "consistencyLevel = \"OutboxFact\"",
+                "consistencyLevel = \"WorkflowEventual\"",
+            ),
+        )?;
+        write_fixture(&root, "level", VALID)?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::InvalidFixture && f.detail.contains("consistencyLevel")
+            }),
+            "contract consistencyLevel mismatch should be reported: {findings:?}"
         );
         Ok(())
     }

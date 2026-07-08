@@ -1,8 +1,8 @@
 //! Consistency crash matrix fixture DSL.
 //!
 //! The DSL is a provider-agnostic description of crash recovery cases. It is
-//! intentionally data-only: pending cases are parsed and validated, but this
-//! module does not start services, inject failpoints, or assert runtime recovery.
+//! intentionally data-only: ready cases are parsed and validated here, while
+//! opt-in journeys execute the real-backend fault scenarios.
 //!
 //! ref: risinglightdb/sqllogictest-rs sqllogictest/src/parser.rs@ebab8dae6d6655e86a4793c70246df6fbaa80ecb
 
@@ -67,10 +67,20 @@ pub enum CrashMechanism {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CrashStatus {
-    /// Parsed and indexed but not executed by this skeleton.
+    /// Parsed and indexed but not executed by the fault matrix runner.
     Pending,
-    /// Reserved for future executable crash cases.
+    /// Executed by the opt-in fault matrix runner.
     Ready,
+}
+
+/// Real backend runner required by a crash fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum CrashRunner {
+    Postgres,
+    Rabbitmq,
+    PostgresRabbitmq,
 }
 
 /// State of broker tenant authority represented by a fixture.
@@ -111,8 +121,9 @@ pub struct CrashCase {
     tenant_authority: TenantAuthorityState,
     #[serde(rename = "crashPoint")]
     crash_point: String,
-    #[serde(rename = "expectedRecovery")]
-    expected_recovery: String,
+    #[serde(rename = "expectedInvariant")]
+    expected_invariant: String,
+    runner: CrashRunner,
 }
 
 impl CrashCase {
@@ -164,7 +175,7 @@ impl CrashCase {
         &self.domain
     }
 
-    /// Contract id used by the case stimulus.
+    /// Contract id whose consistency capability is verified by the case.
     pub fn contract_id(&self) -> &str {
         &self.contract_id
     }
@@ -194,9 +205,14 @@ impl CrashCase {
         &self.crash_point
     }
 
-    /// Expected recovery behavior slug.
-    pub fn expected_recovery(&self) -> &str {
-        &self.expected_recovery
+    /// Expected invariant slug asserted by the real-backend runner.
+    pub fn expected_invariant(&self) -> &str {
+        &self.expected_invariant
+    }
+
+    /// Real backend runner required by this case.
+    pub fn runner(&self) -> CrashRunner {
+        self.runner
     }
 
     fn validate(&self) -> Result<(), CrashFixtureError> {
@@ -214,7 +230,7 @@ impl CrashCase {
         validate_alias("messageAlias", &self.message_alias, &self.id)?;
         validate_alias("partitionKeyAlias", &self.partition_key_alias, &self.id)?;
         validate_slug("crashPoint", &self.crash_point, &self.id)?;
-        validate_slug("expectedRecovery", &self.expected_recovery, &self.id)?;
+        validate_slug("expectedInvariant", &self.expected_invariant, &self.id)?;
         validate_mechanism_level(self)?;
         match self.status {
             CrashStatus::Pending => {
@@ -252,7 +268,7 @@ impl CrashCase {
             ("messageAlias", self.message_alias.as_str()),
             ("partitionKeyAlias", self.partition_key_alias.as_str()),
             ("crashPoint", self.crash_point.as_str()),
-            ("expectedRecovery", self.expected_recovery.as_str()),
+            ("expectedInvariant", self.expected_invariant.as_str()),
         ] {
             if looks_sensitive(value) {
                 return Err(invalid(
@@ -320,6 +336,14 @@ impl CrashMatrix {
         self.cases
             .iter()
             .filter(|case| case.status == CrashStatus::Pending)
+            .count()
+    }
+
+    /// Count executable ready cases.
+    pub fn ready_count(&self) -> usize {
+        self.cases
+            .iter()
+            .filter(|case| case.status == CrashStatus::Ready)
             .count()
     }
 }
@@ -510,7 +534,8 @@ fn raw_toml_safety_value_subject(key: &str) -> &'static str {
         "partitionKeyAlias" => "partitionKeyAlias",
         "tenantAuthority" => "tenantAuthority",
         "crashPoint" => "crashPoint",
-        "expectedRecovery" => "expectedRecovery",
+        "expectedInvariant" => "expectedInvariant",
+        "runner" => "runner",
         _ => "fixture value",
     }
 }

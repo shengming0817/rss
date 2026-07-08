@@ -1,0 +1,19 @@
+# Settings config projection workflow contract used by the consistency fault matrix.
+id = "settings.config-projection"
+kind = "http"
+domain = "settings"
+version = "v3"
+owner = "settings"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[capabilities.workflow]
+mode = "projection"
+inputs = ["settings.config-version-changed"]
+ordering = "serial-in-order"
+checkpoint = "required"
+replay = "required"

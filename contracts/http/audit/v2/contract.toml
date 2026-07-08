@@ -1,0 +1,19 @@
+# Audit session projection workflow contract used by the consistency fault matrix.
+id = "audit.session-projection"
+kind = "http"
+domain = "audit"
+version = "v2"
+owner = "audit"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[capabilities.workflow]
+mode = "projection"
+inputs = ["identity.session-created"]
+ordering = "serial-in-order"
+checkpoint = "required"
+replay = "required"

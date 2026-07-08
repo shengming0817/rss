@@ -55,7 +55,7 @@ serde_json = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 # F9：从 canonical UUID 字符串算 16B 原始字节，断言 tenant/actor 贯穿审计链 canonical 输入。
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 # 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），
 # 经 testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement）。
 testkit = { path = "../crates/testkit" }

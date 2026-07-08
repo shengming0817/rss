@@ -91,4 +91,21 @@ pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[
 ///
 /// Postgres projection writers consume this static registry to decide which outbox facts are also
 /// mirrored into `projection_events`. Runtime code must not enumerate projection topics by hand.
-pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[];
+pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[
+    ::vocab::ProjectionInputBinding::from_static(
+        "audit.session-projection",
+        "identity",
+        "identity.session-created",
+        "v1",
+        "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516",
+        "identity.session-created",
+    ),
+    ::vocab::ProjectionInputBinding::from_static(
+        "settings.config-projection",
+        "settings",
+        "settings.config-version-changed",
+        "v1",
+        "sha256:1e9ad2529beb3a274d37a734a5093847cb8418082f4d04f9cb180d3df181e864",
+        "settings.config-version-changed",
+    ),
+];
