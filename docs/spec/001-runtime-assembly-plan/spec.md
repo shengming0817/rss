@@ -60,7 +60,7 @@ Project maintainers can split runtime assembly optimization into small PRs with 
 
 - `specs/001-runtime-assembly-plan/**` resolves through the existing `specs -> docs/spec` symlink; the canonical repository path remains `docs/spec/001-runtime-assembly-plan/**`.
 - The current `assembly.toml` schema has `name`, `profile`, and `diportProviders`; `domains`, `topology`, and `listeners` are future targets and must not be described as current schema.
-- `SharedRuntimeDeps` currently documents "infra-only" as a convention, not a present `INVARIANT:` carrier. This feature must not claim that constraint is already machine-enforced.
+- `SharedRuntimeDeps` infra-only wiring is now a present `INVARIANT:` carrier via `cargo xtask runtime-deps guard`; future field additions must satisfy that Medium gate.
 - Move-only PRs may re-export existing public symbols only when required to keep tests compiling during file movement; they must not create long-lived compatibility aliases.
 - Generated module output must be committed and drift-checked when the relevant future PR lands; this foundation PR does not generate runtime modules.
 
@@ -83,7 +83,7 @@ Project maintainers can split runtime assembly optimization into small PRs with 
 - **Runtime Assembly Plan**: The ordered series of PR-sized changes that reduces runtime wiring complexity while preserving RSS architecture boundaries.
 - **Assembly Fact Source**: `assemblies/{name}/assembly.toml`, the deployment-level DI provider declaration source for provider crate, features, lifecycle, durability, and consumer.
 - **Runtime Wiring Anchor**: A stable callsite or type boundary in `runtime::run()` used by later baseline and refactor PRs.
-- **SharedRuntimeDeps**: The runtime parameter object that carries shared infrastructure into wiring functions; current infra-only intent is documented but not yet machine-enforced.
+- **SharedRuntimeDeps**: The runtime parameter object that carries shared infrastructure into wiring functions; infra-only intent is enforced by `cargo xtask runtime-deps guard`.
 - **Generated Modules**: Future code generated from assembly declarations to select domain modules without hand-editing `runtime::run()`.
 
 ## Success Criteria

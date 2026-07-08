@@ -4,7 +4,7 @@
 //! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + archrules + layer-deps + codegen --check + tenancy-closeout
+//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + tenancy-closeout
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
@@ -44,7 +44,7 @@ use crate::diagnostic::run_check;
 use crate::workspace_root;
 use crate::{
     archrules, assembly, codegen, consistency_fixtures, contract, doc_contracts, layerdeps,
-    reconcile_outbox_command_guard, runtime_baseline, wsdeps,
+    reconcile_outbox_command_guard, runtime_baseline, runtime_deps_guard, wsdeps,
 };
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -101,6 +101,8 @@ enum InternalCheck {
     InboxCutoverGuard,
     /// runtime assembly baseline 漂移门（RUNTIME-BASELINE-DRIFT-01）。
     RuntimeBaseline,
+    /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
+    RuntimeDepsGuard,
     /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
     ArchRules,
     CodegenCheck,
@@ -149,6 +151,7 @@ impl InternalCheck {
             Self::EventTransportGuard => "xtask/src/event_transport_guard.rs",
             Self::InboxCutoverGuard => "xtask/src/inbox_cutover_guard.rs",
             Self::RuntimeBaseline => "xtask/src/runtime_baseline.rs",
+            Self::RuntimeDepsGuard => "xtask/src/runtime_deps_guard.rs",
             Self::ArchRules => "xtask/src/archrules.rs",
             Self::CodegenCheck => "xtask/src/codegen.rs",
             Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
@@ -327,6 +330,15 @@ fn step_runtime_baseline() -> Step {
         label: "runtime-baseline",
         args: &[],
         kind: StepKind::Internal(InternalCheck::RuntimeBaseline),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_runtime_deps_guard() -> Step {
+    Step {
+        label: "runtime-deps-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::RuntimeDepsGuard),
         env: &[],
         needs_compile: false,
     }
@@ -871,6 +883,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_event_transport_guard(),
         step_inbox_cutover_guard(),
         step_runtime_baseline(),
+        step_runtime_deps_guard(),
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
@@ -911,6 +924,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_event_transport_guard(),
         step_inbox_cutover_guard(),
         step_runtime_baseline(),
+        step_runtime_deps_guard(),
         step_archrules(),
         step_codegen_check(),
         step_pdp_allow_guard(),
@@ -1210,6 +1224,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
             run_check(&crate::inbox_cutover_guard::InboxCutoverGuard)
         }
         InternalCheck::RuntimeBaseline => run_check(&runtime_baseline::RuntimeBaseline),
+        InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
@@ -1320,6 +1335,7 @@ mod tests {
                 "event-transport-guard",
                 "inbox-cutover-guard",
                 "runtime-baseline",
+                "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1367,6 +1383,7 @@ mod tests {
                 "event-transport-guard",
                 "inbox-cutover-guard",
                 "runtime-baseline",
+                "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1389,8 +1406,8 @@ mod tests {
 
     /// meta checks（contract validate / assembly validate / contract breaking / layer-deps / wsdeps-drift /
     /// doc-contracts / consistency-fixtures / event-transport-guard / inbox-cutover-guard /
-    /// runtime-baseline / archrules / codegen / pdp-allow-guard / contract-binding-guard / schema-rls / setlocal-funnel /
-    /// pg-tenant-tx-guard / tenancy-closeout / migrations-serial / command-symmetry /
+    /// runtime-baseline / runtime-deps-guard / archrules / codegen / pdp-allow-guard / contract-binding-guard /
+    /// schema-rls / setlocal-funnel / pg-tenant-tx-guard / tenancy-closeout / migrations-serial / command-symmetry /
     /// reconcile-outbox-command-guard / defer-gate）在两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
@@ -1414,6 +1431,7 @@ mod tests {
                     "event-transport-guard",
                     "inbox-cutover-guard",
                     "runtime-baseline",
+                    "runtime-deps-guard",
                     "archrules",
                     "codegen-check",
                     "pdp-allow-guard",
@@ -1449,26 +1467,34 @@ mod tests {
     }
 
     #[test]
-    fn runtime_baseline_is_no_compile_internal_gate_before_archrules() -> anyhow::Result<()> {
+    fn runtime_deps_guard_is_no_compile_internal_gate_between_baseline_and_archrules()
+    -> anyhow::Result<()> {
         for (name, plan) in [("fast", verify_plan(&opts(true, false))), ("ci", ci_plan())] {
             let labels = labels(&plan);
-            let runtime_pos = labels
+            let baseline_pos = labels
                 .iter()
                 .position(|label| *label == "runtime-baseline")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-baseline 步"))?;
+            let guard_pos = labels
+                .iter()
+                .position(|label| *label == "runtime-deps-guard")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 runtime-deps-guard 步"))?;
             let archrules_pos = labels
                 .iter()
                 .position(|label| *label == "archrules")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
             assert!(
-                runtime_pos < archrules_pos,
-                "runtime-baseline 必须先于 archrules，确保 archrules 能索引 baseline carrier"
+                baseline_pos < guard_pos && guard_pos < archrules_pos,
+                "runtime-deps-guard 必须位于 runtime-baseline 之后、archrules 之前，确保 archrules 能索引 guard carrier"
             );
-            let step = &plan[runtime_pos];
-            assert!(!step.needs_compile, "runtime-baseline 须是 no-compile gate");
+            let step = &plan[guard_pos];
+            assert!(
+                !step.needs_compile,
+                "runtime-deps-guard 须是 no-compile gate"
+            );
             assert!(matches!(
                 step.kind,
-                StepKind::Internal(InternalCheck::RuntimeBaseline)
+                StepKind::Internal(InternalCheck::RuntimeDepsGuard)
             ));
         }
         Ok(())
@@ -1595,6 +1621,7 @@ mod tests {
                 "event-transport-guard",
                 "inbox-cutover-guard",
                 "runtime-baseline",
+                "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
                 "pdp-allow-guard",
@@ -1694,6 +1721,7 @@ mod tests {
             "event-transport-guard",
             "inbox-cutover-guard",
             "runtime-baseline",
+            "runtime-deps-guard",
             "archrules",
             "codegen-check",
             "pdp-allow-guard",

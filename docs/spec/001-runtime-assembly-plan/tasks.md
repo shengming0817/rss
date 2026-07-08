@@ -49,11 +49,11 @@ Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test 
 
 ## Phase 2: Guard Shared Runtime Dependencies
 
-- [ ] T017 [US2] Add `xtask/src/runtime_deps_guard.rs` to parse `SharedRuntimeDeps` fields.
-- [ ] T018 [US2] Define allowed infra/provider crate and type prefixes.
-- [ ] T019 [US2] Add synthetic red fixture rejecting domain service fields.
-- [ ] T020 [US2] Add runtime deps guard to `cargo xtask verify --fast`.
-- [ ] T021 [US2] Document `WIRING-DEPS-INFRA-ONLY-01` only after the Medium carrier exists.
+- [x] T017 [US2] Add `xtask/src/runtime_deps_guard.rs` to parse `SharedRuntimeDeps` fields.
+- [x] T018 [US2] Define allowed infra/provider crate and type prefixes.
+- [x] T019 [US2] Add synthetic red fixture rejecting domain service fields.
+- [x] T020 [US2] Add runtime deps guard to `cargo xtask verify --fast`.
+- [x] T021 [US2] Document `WIRING-DEPS-INFRA-ONLY-01` only after the Medium carrier exists.
 
 ## Phase 3: Assembly Plan Manifest
 

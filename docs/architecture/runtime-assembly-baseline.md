@@ -79,7 +79,9 @@ The committed baseline records the current DI provider declarations from `assemb
 - `KeyName` for settings config-value encryption
 - outbound `DomainTransport`
 
-The design intent is infrastructure-only input wiring. That intent is documented but not claimed as current machine enforcement; a dedicated guard must land before this becomes an `INVARIANT`.
+The infrastructure-only input boundary is enforced by `cargo xtask runtime-deps guard`
+(`WIRING-DEPS-INFRA-ONLY-01`). The baseline remains an inventory drift gate; semantic field
+allowlisting belongs to the runtime deps guard.
 
 `DomainModuleResult` currently carries:
 

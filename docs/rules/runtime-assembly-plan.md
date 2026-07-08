@@ -20,8 +20,8 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 ### Phase 2
 
 - Guard `SharedRuntimeDeps` against becoming a domain service locator.
-- The current infra-only statement is a convention until a Medium or Hard carrier lands.
-- New `INVARIANT:` text for infra-only wiring is allowed only in the PR that adds the carrier and red/green tests.
+- Infra-only wiring is enforced by `WIRING-DEPS-INFRA-ONLY-01` via `cargo xtask runtime-deps guard`.
+- Changes to the guard must keep a Medium or Hard carrier plus red/green tests.
 
 ## PR Size Planning Budget
 

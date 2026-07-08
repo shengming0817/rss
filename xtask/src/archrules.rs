@@ -174,7 +174,10 @@ fn scan_source_invariants(root: &Path, index: &mut Index) -> Result<()> {
             if path_str.contains("/tests/ui/") || path_str.contains("/tests/trybuild") {
                 continue;
             }
-            let gate = if path_str.contains("/tests/") {
+            let gate = if path_str == "assemblies/runtime/src/module.rs" {
+                // Carries both native no-handoff and runtime-deps verify invariants.
+                Some("verify,ci,manual/opt-in,native-compile")
+            } else if path_str.contains("/tests/") {
                 Some("verify,ci")
             } else {
                 Some("manual/opt-in,native-compile")
@@ -1125,6 +1128,7 @@ fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
         | "xtask/src/pg_tenant_tx_guard.rs"
         | "xtask/src/reconcile_outbox_command_guard.rs"
         | "xtask/src/runtime_baseline.rs"
+        | "xtask/src/runtime_deps_guard.rs"
         | "xtask/src/schema_rls.rs"
         | "xtask/src/setlocal_funnel.rs"
         | "xtask/src/src_scan.rs"

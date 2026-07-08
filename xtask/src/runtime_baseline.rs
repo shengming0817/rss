@@ -2,8 +2,8 @@
 //!
 //! The baseline locks static repository facts that later `runtime::run()` split PRs must preserve:
 //! runtime Cargo dependencies, assembly DI providers, the shared dependency/result structs, and
-//! ordered runtime wiring anchors. It intentionally does not claim that `SharedRuntimeDeps`
-//! infra-only intent is machine-enforced yet; that remains a future guard.
+//! ordered runtime wiring anchors. It intentionally keeps field-inventory drift separate from
+//! `SharedRuntimeDeps` infra-only semantics, which are enforced by `runtime-deps-guard`.
 //!
 //! INVARIANT: RUNTIME-BASELINE-DRIFT-01 { level = "Medium", exec = "verify", source = "code" } -- `cargo xtask runtime-baseline verify`
 //! compares the generated runtime assembly baseline with the committed `runtime-baseline/runtime.txt`

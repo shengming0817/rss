@@ -7088,6 +7088,7 @@ dependencies = [
  "consistency",
  "prettyplease",
  "proc-macro2",
+ "quote",
  "rstest",
  "schemars 0.8.22",
  "semver",

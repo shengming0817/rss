@@ -74,7 +74,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 | Area | Current Source | This Series Target | Carrier |
 |------|----------------|-------------------|---------|
 | Runtime root | `assemblies/runtime/src/lib.rs` | Phase skeleton, move-only splits, no-behavior-change harness | Rust tests + future baseline gate |
-| Shared dependencies | `SharedRuntimeDeps` in `assemblies/runtime/src/module.rs` | Keep infra/provider inputs from becoming a service locator | Future Medium xtask guard |
+| Shared dependencies | `SharedRuntimeDeps` in `assemblies/runtime/src/module.rs` | Keep infra/provider inputs from becoming a service locator | `cargo xtask runtime-deps guard` |
 | Module output | `DomainModuleResult` in `crates/bootstrap/src/module.rs` | Standard probes/resources/workers merge and drain | Type system + tests |
 | Provider facts | `assemblies/runtime/assembly.toml` | Expand to domains/topology/listeners and capability closure | `cargo xtask assembly validate` |
 | Domain list | Hand-edited runtime wiring | Generated module list from assembly declaration | Future codegen drift gate |
@@ -91,7 +91,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 | PR-005 | future | Phase 1 | Move listener/auth/health finalization to route modules | PR-003 | route/auth/listener tests |
 | PR-006 | future | Phase 1 | Extract launch plan and shutdown registration order | PR-005 | launch order tests |
 | PR-007 | future | Phase 1 | No-behavior-change runtime harness | PR-004, PR-005, PR-006 | runtime harness snapshot |
-| PR-008 | future | Phase 2 | SharedRuntimeDeps infra-only guard | PR-007 | runtime deps guard |
+| PR-008 | #1663 | Phase 2 | SharedRuntimeDeps infra-only guard | PR-007 | `cargo xtask runtime-deps guard`; `cargo xtask verify --fast` |
 | PR-009 | future | Phase 2 | Configure allowed dependency prefixes and rules | PR-008 | runtime deps guard + archrules |
 | PR-010 | future | Phase 3 | Add domains/topology/listeners to assembly manifest | PR-009 | assembly manifest tests |
 | PR-011 | future | Phase 3 | Validate domain closure against Cargo dependencies | PR-010 | assembly closure tests |
@@ -118,7 +118,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 | Domains cannot depend on sibling domains | Cargo crate graph + `deny.toml` + `cargo xtask layer-deps` | unchanged |
 | Provider declarations match active dependency graph | `assembly.toml` + `cargo xtask assembly validate` | expanded assembly validation |
 | Runtime wiring facts do not drift silently | none for full wiring baseline | `cargo xtask runtime-baseline verify` in #1656 |
-| `SharedRuntimeDeps` stays infra/provider-only | documented convention only | Medium xtask guard in PR-008/009 |
+| `SharedRuntimeDeps` stays infra/provider-only | `cargo xtask runtime-deps guard` | configurable allowlist + rules in PR-009 |
 | Generated domain module list is current | none before generator lands | codegen drift gate in PR-016/017 |
 | PR size and spec drift are visible | review discipline | CI gate in PR-026 |
 

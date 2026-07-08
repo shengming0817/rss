@@ -12,8 +12,9 @@
 //!   `wire_X(deps: &SharedRuntimeDeps) -> anyhow::Result<bootstrap::DomainModuleResult>`——只收
 //!   `&SharedRuntimeDeps`，无参数可塞别域的 `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达
 //!   （type-system 一档载体）。
-//! - 「`SharedRuntimeDeps` 字段仅基础设施」是**约定、非 INVARIANT**（当前无机器门）；升 Medium 机器门见
-//!   follow-up #1448。
+//! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，xtask 字段扫描）**：
+//!   `SharedRuntimeDeps` 字段类型只允许 provider bundle / infra value object 允许列表，以及精确例外
+//!   `Arc<dyn distributed::DomainTransport>`；域 service / repo 类型不得经 deps bag 跨 module handoff。
 //!
 //! # 开源对标
 //!
@@ -35,11 +36,8 @@ use vault::VaultRuntimeDeps;
 /// 共享基础设施依赖，流入每个域的 `wire_X`（parameter object，[`bootstrap::DomainModuleResult`] 的入向配对）。
 ///
 /// 设计意图：每个字段是框架 / 适配器基础设施类型，不放域 service 类型（`settings` / `identity` / …），否则等于
-/// 经 deps bag 重开「跨 module value handoff」。**但这不是 `INVARIANT:`——当前无机器门**：`assemblies/runtime`
-/// 物理可命名域 service 类型，新增 `pub settings: SettingsService` 字段在类型层不会被拒，仅靠 review 约定守（Soft）。
-/// 按 `ai-robust.md` 新增 enforcement 不得停留 Soft，故此处**不**声明为现行 INVARIANT / 架构规则；升 Medium 机器门
-/// （`cargo xtask` / `dylint` 字段类型扫描断言 infra crate 白名单、禁域 crate + synthetic red + 接入 `verify`）见
-/// follow-up #1448，落地后再以 `INVARIANT: WIRING-DEPS-INFRA-ONLY-01` { level = "Medium", exec = "manual/opt-in", source = "code" }收口。
+/// 经 deps bag 重开「跨 module value handoff」。该边界由 `cargo xtask runtime-deps guard` 承载：
+/// 允许 provider bundle / infra value object 类型根，拒绝域 service / repo 类型，并接入 `verify`。
 #[derive(Clone)]
 pub struct SharedRuntimeDeps {
     /// 共享 postgres capability bundle；各域经 `for_domain::<caps::X>()` 投影受控 durable 能力句柄。
