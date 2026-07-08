@@ -14,8 +14,7 @@ use crate::assembly::{AssemblyManifest, ProviderLifecycle};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fs;
 use std::path::Path;
 
@@ -234,7 +233,7 @@ fn render_dependency_spec(value: &toml::Value) -> String {
                 .iter()
                 .filter(|(key, _)| !preferred.contains(&key.as_str()))
                 .collect();
-            extras.sort_by(|(a, _), (b, _)| a.cmp(b));
+            extras.sort_by_key(|(key, _)| *key);
             for (key, value) in extras {
                 parts.push(format!("{key}={}", render_toml_value(value)));
             }
@@ -261,7 +260,7 @@ fn render_toml_value(value: &toml::Value) -> String {
         ),
         toml::Value::Table(table) => {
             let mut entries: Vec<_> = table.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            entries.sort_by_key(|(key, _)| *key);
             format!(
                 "{{{}}}",
                 entries
@@ -594,14 +593,14 @@ fn wiring_anchors(root: &Path) -> Result<Vec<AnchorEntry>> {
     let mut entries = Vec::new();
 
     for spec in RUNTIME_ANCHORS {
-        let text = if let Some(text) = file_cache.get(spec.path) {
-            text
-        } else {
-            let path = root.join(spec.path);
-            let text =
-                fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-            file_cache.insert(spec.path, text);
-            file_cache.get(spec.path).expect("inserted file cache")
+        let text = match file_cache.entry(spec.path) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let path = root.join(spec.path);
+                let text = fs::read_to_string(&path)
+                    .with_context(|| format!("读 {} 失败", path.display()))?;
+                entry.insert(text)
+            }
         };
 
         let scope = mask_comments_and_strings(anchor_search_scope(spec.path, text));
@@ -702,7 +701,7 @@ fn mask_comments_and_strings(src: &str) -> String {
         index += 1;
     }
 
-    String::from_utf8(out).expect("masking preserves UTF-8")
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
@@ -799,75 +798,95 @@ fn render_baseline(
     out.push_str("# static-facts-only: dynamic environment/provider state is documented, not enforced here\n\n");
 
     out.push_str("[sources]\n");
-    writeln!(out, "cargo = {RUNTIME_CARGO_PATH}").expect("write string");
-    writeln!(out, "assembly = {ASSEMBLY_MANIFEST_PATH}").expect("write string");
-    writeln!(out, "sharedRuntimeDeps = {SHARED_RUNTIME_DEPS_PATH}").expect("write string");
-    writeln!(out, "domainModuleResult = {BOOTSTRAP_MODULE_PATH}").expect("write string");
-    writeln!(out, "run = {RUNTIME_LIB_PATH}").expect("write string");
+    push_line(&mut out, format_args!("cargo = {RUNTIME_CARGO_PATH}"));
+    push_line(
+        &mut out,
+        format_args!("assembly = {ASSEMBLY_MANIFEST_PATH}"),
+    );
+    push_line(
+        &mut out,
+        format_args!("sharedRuntimeDeps = {SHARED_RUNTIME_DEPS_PATH}"),
+    );
+    push_line(
+        &mut out,
+        format_args!("domainModuleResult = {BOOTSTRAP_MODULE_PATH}"),
+    );
+    push_line(&mut out, format_args!("run = {RUNTIME_LIB_PATH}"));
     out.push('\n');
 
     out.push_str("[runtime.dependencies]\n");
     for dep in dependencies {
-        writeln!(out, "{} = {}", dep.name, dep.spec).expect("write string");
+        push_line(&mut out, format_args!("{} = {}", dep.name, dep.spec));
     }
     out.push('\n');
 
     out.push_str("[assembly.diportProviders]\n");
     for provider in providers {
-        writeln!(
-            out,
-            "{:02} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | purpose={}",
-            provider.index,
-            provider.port,
-            provider.provider,
-            provider.provider_crate,
-            render_feature_list(&provider.required_features),
-            provider.consumer,
-            provider.lifecycle,
-            provider.durability,
-            provider.purpose
-        )
-        .expect("write string");
+        push_line(
+            &mut out,
+            format_args!(
+                "{:02} | port={} | provider={} | providerCrate={} | requiredFeatures={} | consumer={} | lifecycle={} | durability={} | purpose={}",
+                provider.index,
+                provider.port,
+                provider.provider,
+                provider.provider_crate,
+                render_feature_list(&provider.required_features),
+                provider.consumer,
+                provider.lifecycle,
+                provider.durability,
+                provider.purpose
+            ),
+        );
     }
     out.push('\n');
 
     out.push_str("[sharedRuntimeDeps.fields]\n");
     for field in shared_fields {
-        writeln!(out, "{} = {}", field.name, field.ty).expect("write string");
+        push_line(&mut out, format_args!("{} = {}", field.name, field.ty));
     }
     out.push('\n');
 
     out.push_str("[domainModuleResult.fields]\n");
     for field in &domain.fields {
-        writeln!(out, "{} = {}", field.name, field.ty).expect("write string");
+        push_line(&mut out, format_args!("{} = {}", field.name, field.ty));
     }
-    writeln!(
-        out,
-        "merge = {}",
-        if domain.merge_present {
-            "present"
-        } else {
-            "missing"
-        }
-    )
-    .expect("write string");
-    writeln!(out, "mergeExtends = {}", domain.merge_extends.join(",")).expect("write string");
+    push_line(
+        &mut out,
+        format_args!(
+            "merge = {}",
+            if domain.merge_present {
+                "present"
+            } else {
+                "missing"
+            }
+        ),
+    );
+    push_line(
+        &mut out,
+        format_args!("mergeExtends = {}", domain.merge_extends.join(",")),
+    );
     out.push('\n');
 
     out.push_str("[runtime.run.orderedAnchors]\n");
     for (index, anchor) in anchors.iter().enumerate() {
-        writeln!(
-            out,
-            "{:02} | {} | {} | {} | status={}",
-            index + 1,
-            anchor.id,
-            anchor.path,
-            anchor.pattern,
-            anchor_status(anchor.status)
-        )
-        .expect("write string");
+        push_line(
+            &mut out,
+            format_args!(
+                "{:02} | {} | {} | {} | status={}",
+                index + 1,
+                anchor.id,
+                anchor.path,
+                anchor.pattern,
+                anchor_status(anchor.status)
+            ),
+        );
     }
     out
+}
+
+fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
+    out.push_str(&args.to_string());
+    out.push('\n');
 }
 
 fn render_feature_list(features: &[String]) -> String {
