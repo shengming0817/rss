@@ -330,6 +330,12 @@ pub enum SagaJournalAppendOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SagaInterruption {
+    /// Runtime distributed lock is held by another runner.
+    RuntimeLockBusy,
+    /// Previously acquired runtime distributed lock was lost or expired.
+    RuntimeLockLost,
+    /// Runtime distributed lock provider returned an infrastructure error.
+    RuntimeLockUnavailable,
     /// Another holder owns the instance.
     LeaseBusy,
     /// Previously acquired lease was lost or expired.
@@ -342,6 +348,24 @@ pub enum SagaInterruption {
     AlreadyStarted,
     /// Durable instance status is degraded and requires manual intervention.
     InstanceDegraded,
+}
+
+impl SagaInterruption {
+    /// Closed-set diagnostic label for non-business saga interruptions.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::RuntimeLockBusy => "runtime_lock_busy",
+            Self::RuntimeLockLost => "runtime_lock_lost",
+            Self::RuntimeLockUnavailable => "runtime_lock_unavailable",
+            Self::LeaseBusy => "lease_busy",
+            Self::LeaseLost => "lease_lost",
+            Self::JournalConflict => "journal_conflict",
+            Self::StoreUnavailable => "store_unavailable",
+            Self::AlreadyStarted => "already_started",
+            Self::InstanceDegraded => "instance_degraded",
+        }
+    }
 }
 
 /// saga durable journal 条目状态。label 与 postgres `saga_journal.status` CHECK 集合同源。

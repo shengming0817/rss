@@ -96,19 +96,23 @@ real multi-pod → Redis-backed（client 作 ManagedResource），缺 Redis 配�
 sealed resolver + `pub(crate)` 构造器从类型层封闭（Hard，编译期不可达）。bus / claimer / nonce 三 funnel 合起来确保组合根内每个 in-memory
 单 pod 原语只经 sealed resolver 可达。权威语义见 `bootstrap::replaydeps` 模块的 rustdoc。
 
-## saga 实例资源选型（instance / journal / checkpoint / dead-letter，topology-gated）
+## saga 实例资源选型（instance / journal / checkpoint / dead-letter / runtime lock，topology-gated）
 
 L3 saga runtime 是 direct `run` / `resume` / `status` 调用路径，不提供 background 投影 worker、
-resume-all 扫描器或 leader locker。组合根注入的最小资源集合是 tenant-scoped `SagaInstanceStore` +
-tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterStore`：
+resume-all 扫描器。组合根注入的最小资源集合是 tenant-scoped `SagaInstanceStore` +
+tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterStore` + runtime lock provider：
 
 - demo/memory → paired `MemSagaInstanceStore` / `MemSagaJournal`（共享 lease state）+
-  `MemCheckpointStore` + `MemDeadLetterStore`。
+  `MemCheckpointStore` + `MemDeadLetterStore` + `MemLockStore`。
 - postgres → `PgSagaInstanceStore` / `PgSagaJournal`，两者只经 `PgTenantPool` 访问 tenant 表；
   `saga_instances` 承载 register/claim/extend/release/status CAS，`saga_journal` 承载 durable append-only
-  step facts。
+  step facts；runtime lock provider 必须来自 Redis，作为 `run` / `resume` 进入 Postgres lease 前的 multi-pod
+  外层 gate。
 - fail-closed：tenant scope 缺失、lease token/epoch/expiry 不匹配、或 `(tenant_id, saga_id, seq)` 内容冲突，
   必须返回 typed interrupted outcome，不触发补偿或 app DLX。
+- runtime lock fail-closed：durable 拓扑缺 Redis URL 启动期 fail-closed；执行时 lock busy / lost /
+  unavailable 必须返回 typed interrupted outcome，不注册新 instance、不触发补偿或 app DLX。Redis lock 不是最终
+  fencing，Postgres instance lease + journal CAS 仍是最终写入围栏。
 
 `saga_instances` 与 `saga_journal` 均为 tenant 表：迁移必须同时落 `ENABLE/FORCE RLS`、标准
 `rss.tenant_id` policy 和 serving role 最小权限；`saga_journal` 仅 `SELECT/INSERT`，撤销 `UPDATE/DELETE`。

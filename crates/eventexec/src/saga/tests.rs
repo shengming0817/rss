@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaCommand, SagaExecStatus,
     SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaPolicy,
-    SagaTailer,
+    SagaRuntimeLock, SagaTailer,
 };
 use consistency::{Lsn, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName};
 use consistency::{
@@ -21,12 +21,13 @@ use consistency::{
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, OwnerCheckpointStore,
-    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaJournal,
-    SagaJournalError, SaveOutcome,
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, LockAcquireOutcome, LockRenewOutcome,
+    LockStore, LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaInstanceRegistration,
+    SagaInstanceStore, SagaInstanceStoreError, SagaJournal, SagaJournalError, SaveOutcome,
 };
 use futures::future::BoxFuture;
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 const OWNER: &str = "billing";
 const CONTRACT: &str = "billing.checkout";
@@ -44,6 +45,11 @@ fn saga_id() -> SagaId {
 #[allow(clippy::unwrap_used)]
 fn instance() -> SagaInstanceRef {
     SagaInstanceRef::new(tenant(), saga_id()).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn instance_with_id(raw: u128) -> SagaInstanceRef {
+    SagaInstanceRef::new(tenant(), SagaId::new(uuid::Uuid::from_u128(raw))).unwrap()
 }
 
 fn checkpoint_id_str() -> String {
@@ -545,6 +551,152 @@ impl SagaInstanceStore for FakeInstanceStore {
     }
 }
 
+// ── FakeRuntimeLockStore ─────────────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+struct FakeRuntimeLockStore {
+    held: Arc<AtomicBool>,
+    fail_acquire: Arc<AtomicBool>,
+    lose_on_renew: Arc<AtomicBool>,
+    fail_renew: Arc<AtomicBool>,
+    fail_release: Arc<AtomicBool>,
+    block_first_acquire: Arc<AtomicBool>,
+    first_acquire_entered: Arc<Notify>,
+    release_blocked_acquire: Arc<Notify>,
+    acquisitions: Arc<AtomicU32>,
+    renewals: Arc<AtomicU32>,
+    releases: Arc<AtomicU32>,
+    keys: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeRuntimeLockStore {
+    fn held() -> Self {
+        let store = Self::default();
+        store.held.store(true, Ordering::SeqCst);
+        store
+    }
+
+    fn fail_acquire() -> Self {
+        let store = Self::default();
+        store.fail_acquire.store(true, Ordering::SeqCst);
+        store
+    }
+
+    fn lose_on_renew() -> Self {
+        let store = Self::default();
+        store.lose_on_renew.store(true, Ordering::SeqCst);
+        store
+    }
+
+    fn fail_renew() -> Self {
+        let store = Self::default();
+        store.fail_renew.store(true, Ordering::SeqCst);
+        store
+    }
+
+    fn fail_release() -> Self {
+        let store = Self::default();
+        store.fail_release.store(true, Ordering::SeqCst);
+        store
+    }
+
+    fn block_first_acquire() -> Self {
+        let store = Self::default();
+        store.block_first_acquire.store(true, Ordering::SeqCst);
+        store
+    }
+
+    async fn wait_first_acquire_entered(&self) {
+        self.first_acquire_entered.notified().await;
+    }
+
+    fn unblock_first_acquire(&self) {
+        self.release_blocked_acquire.notify_one();
+    }
+
+    fn acquisition_count(&self) -> u32 {
+        self.acquisitions.load(Ordering::SeqCst)
+    }
+
+    fn renewal_count(&self) -> u32 {
+        self.renewals.load(Ordering::SeqCst)
+    }
+
+    fn release_count(&self) -> u32 {
+        self.releases.load(Ordering::SeqCst)
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn keys(&self) -> Vec<String> {
+        self.keys.lock().unwrap().clone()
+    }
+}
+
+impl LockStore for FakeRuntimeLockStore {
+    #[allow(clippy::unwrap_used)]
+    async fn acquire(
+        &self,
+        key: LockStoreKey,
+        _ttl: Duration,
+    ) -> Result<LockAcquireOutcome, LockStoreError> {
+        self.acquisitions.fetch_add(1, Ordering::SeqCst);
+        self.keys.lock().unwrap().push(key.as_str().to_string());
+        if self.fail_acquire.load(Ordering::SeqCst) {
+            return Err(LockStoreError::new(std::io::Error::other(
+                "runtime lock acquire inject",
+            )));
+        }
+        if self.block_first_acquire.swap(false, Ordering::SeqCst) {
+            self.first_acquire_entered.notify_one();
+            self.release_blocked_acquire.notified().await;
+        }
+        if self.held.load(Ordering::SeqCst) {
+            Ok(LockAcquireOutcome::Held)
+        } else {
+            Ok(LockAcquireOutcome::Acquired {
+                token: vocab::Epoch::new(1),
+            })
+        }
+    }
+
+    async fn renew(
+        &self,
+        _key: LockStoreKey,
+        token: vocab::Epoch,
+        _ttl: Duration,
+    ) -> Result<LockRenewOutcome, LockStoreError> {
+        self.renewals.fetch_add(1, Ordering::SeqCst);
+        if self.fail_renew.load(Ordering::SeqCst) {
+            return Err(LockStoreError::new(std::io::Error::other(
+                "runtime lock renew inject",
+            )));
+        }
+        if self.lose_on_renew.load(Ordering::SeqCst) {
+            Ok(LockRenewOutcome::Lost)
+        } else {
+            Ok(LockRenewOutcome::Renewed { token })
+        }
+    }
+
+    async fn release(
+        &self,
+        _key: LockStoreKey,
+        _token: vocab::Epoch,
+    ) -> Result<(), LockStoreError> {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        if self.fail_release.load(Ordering::SeqCst) {
+            return Err(LockStoreError::new(std::io::Error::other(
+                "runtime lock release inject",
+            )));
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), LockStoreError> {
+        Ok(())
+    }
+}
+
 // ── executor 构造 helper ──────────────────────────────────────────────────────
 
 type Exec =
@@ -574,10 +726,6 @@ fn executor_config_with_policy_and_lease_ttl(
         lease_ttl,
         policy,
     )
-}
-
-fn executor_config_with_policy(policy: SagaPolicy) -> SagaExecutorConfig {
-    executor_config_with_policy_and_lease_ttl(policy, Duration::from_secs(30))
 }
 
 #[test]
@@ -612,6 +760,30 @@ fn ready_instance_store() -> Arc<FakeInstanceStore> {
     store
 }
 
+fn runtime_lock_from(store: FakeRuntimeLockStore) -> SagaRuntimeLock {
+    SagaRuntimeLock::new(store)
+}
+
+fn runtime_lock() -> SagaRuntimeLock {
+    runtime_lock_from(FakeRuntimeLockStore::default())
+}
+
+struct ExecOptions {
+    policy: SagaPolicy,
+    lease_ttl: Duration,
+    runtime_lock: SagaRuntimeLock,
+}
+
+impl ExecOptions {
+    fn new(policy: SagaPolicy, lease_ttl: Duration, runtime_lock: SagaRuntimeLock) -> Self {
+        Self {
+            policy,
+            lease_ttl,
+            runtime_lock,
+        }
+    }
+}
+
 fn executor_with_store_and_policy<J>(
     journal: Arc<J>,
     instance_store: Arc<FakeInstanceStore>,
@@ -623,9 +795,37 @@ fn executor_with_store_and_policy<J>(
 where
     J: SagaJournal + Send + Sync + 'static,
 {
+    executor_with_store_options(
+        journal,
+        instance_store,
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(policy, Duration::from_secs(30), runtime_lock()),
+    )
+}
+
+fn executor_with_store_options<J>(
+    journal: Arc<J>,
+    instance_store: Arc<FakeInstanceStore>,
+    cp: Arc<FakeCheckpointStore>,
+    dlx: Arc<FakeDeadLetterStore>,
+    factory: Arc<dyn SagaActionFactory>,
+    options: ExecOptions,
+) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
+where
+    J: SagaJournal + Send + Sync + 'static,
+{
     SagaExecutorImpl::new(
-        SagaExecutorDeps::new(journal, instance_store, cp, dlx, factory),
-        executor_config_with_policy(policy),
+        SagaExecutorDeps::new(
+            journal,
+            instance_store,
+            cp,
+            dlx,
+            factory,
+            options.runtime_lock,
+        ),
+        executor_config_with_policy_and_lease_ttl(options.policy, options.lease_ttl),
     )
 }
 
@@ -641,9 +841,13 @@ fn executor_with_store_policy_and_lease_ttl<J>(
 where
     J: SagaJournal + Send + Sync + 'static,
 {
-    SagaExecutorImpl::new(
-        SagaExecutorDeps::new(journal, instance_store, cp, dlx, factory),
-        executor_config_with_policy_and_lease_ttl(policy, lease_ttl),
+    executor_with_store_options(
+        journal,
+        instance_store,
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(policy, lease_ttl, runtime_lock()),
     )
 }
 
@@ -680,8 +884,6 @@ fn executor(
 }
 
 // ── FakeJournalFailing（append 注入失败）──────────────────────────────────────────
-
-use std::sync::atomic::AtomicBool;
 
 /// append 可注入失败的 journal（测试 best-effort 降级语义）。
 struct FakeJournalFailing {
@@ -876,6 +1078,355 @@ async fn run_three_steps_all_succeed_journal_order() {
         (0, 0, 0)
     );
     assert!(dlx.records().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_lock_busy_interrupts_before_instance_registration_or_journal() {
+    let lock_store = FakeRuntimeLockStore::held();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let store = Arc::new(FakeInstanceStore::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store_options(
+        journal.clone(),
+        store.clone(),
+        cp,
+        dlx.clone(),
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::RuntimeLockBusy
+            }
+        ),
+        "runtime lock contention must interrupt without side effects: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 0, "action must not start");
+    assert!(
+        store.status(instance()).is_none(),
+        "instance must not register"
+    );
+    assert!(journal.log().is_empty(), "journal must stay empty");
+    assert!(dlx.records().is_empty(), "lock interruption must not DLX");
+    assert_eq!(lock_store.acquisition_count(), 1);
+    assert_eq!(
+        lock_store.keys(),
+        vec![format!("saga/{TENANT}/{}", saga_id().as_uuid())]
+    );
+}
+
+#[tokio::test]
+async fn runtime_lock_acquire_error_interrupts_without_journal() {
+    let lock_store = FakeRuntimeLockStore::fail_acquire();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store_options(
+        journal.clone(),
+        store,
+        cp,
+        dlx.clone(),
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::RuntimeLockUnavailable
+            }
+        ),
+        "runtime lock infra failure must fail closed: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 0, "action must not start");
+    assert!(journal.log().is_empty(), "journal must stay empty");
+    assert!(dlx.records().is_empty(), "lock interruption must not DLX");
+    assert_eq!(lock_store.release_count(), 0, "no grant to release");
+}
+
+#[tokio::test]
+async fn runtime_lock_allows_different_saga_keys_to_enter_provider_concurrently() {
+    let lock_store = FakeRuntimeLockStore::block_first_acquire();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let store = Arc::new(FakeInstanceStore::default());
+    store.seed_status(instance_with_id(0x1121), SagaInstanceStatus::Ready);
+    store.seed_status(instance_with_id(0x1122), SagaInstanceStatus::Ready);
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, _counts) = FakeFactory::linear(&["step1"]);
+    let exec = Arc::new(executor_with_store_options(
+        journal,
+        store,
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+    ));
+
+    let first = {
+        let exec = Arc::clone(&exec);
+        tokio::spawn(async move { exec.run(instance_with_id(0x1121)).await })
+    };
+    lock_store.wait_first_acquire_entered().await;
+    let second = {
+        let exec = Arc::clone(&exec);
+        tokio::spawn(async move { exec.run(instance_with_id(0x1122)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(
+        lock_store.acquisition_count(),
+        2,
+        "different saga keys must not queue behind an executor-global runtime lock mutex"
+    );
+    lock_store.unblock_first_acquire();
+    assert!(matches!(first.await, Ok(SagaOutcome::Succeeded { .. })));
+    assert!(matches!(second.await, Ok(SagaOutcome::Succeeded { .. })));
+}
+
+#[tokio::test]
+async fn runtime_lock_released_after_success() {
+    let lock_store = FakeRuntimeLockStore::default();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, _counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store_options(
+        journal,
+        store,
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(outcome, SagaOutcome::Succeeded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(lock_store.release_count(), 1, "grant must be released");
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing event is the assertion failure
+fn runtime_lock_busy_logs_context_fields() {
+    let events = capture_tracing_events(tracing::Level::WARN, false, || async {
+        let lock_store = FakeRuntimeLockStore::held();
+        let runtime_lock = runtime_lock_from(lock_store);
+        let journal = Arc::new(FakeJournal::default());
+        let store = ready_instance_store();
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, _counts) = FakeFactory::linear(&["step1"]);
+        let exec = executor_with_store_options(
+            journal,
+            store,
+            cp,
+            dlx,
+            factory,
+            ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+        );
+
+        let outcome = exec.run(instance()).await;
+        assert!(matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::RuntimeLockBusy
+            }
+        ));
+    });
+
+    let event = events
+        .iter()
+        .find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: runtime lock interrupted"))
+        })
+        .expect("runtime lock interruption warning must be captured");
+    let saga_id_string = saga_id().as_uuid().to_string();
+    assert_eq!(event.get("tenant_id").map(String::as_str), Some(TENANT));
+    assert_eq!(
+        event.get("saga_id").map(String::as_str),
+        Some(saga_id_string.as_str())
+    );
+    assert_eq!(event.get("contract_id").map(String::as_str), Some(CONTRACT));
+    assert_eq!(event.get("operation").map(String::as_str), Some("run"));
+    assert_eq!(
+        event.get("reason").map(String::as_str),
+        Some("runtime_lock_busy")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::expect_used)] // reason: timeout means runtime lock renewal is not wired
+async fn runtime_lock_lost_interrupts_in_flight_action_and_releases_best_effort() {
+    let lock_store = FakeRuntimeLockStore::lose_on_renew();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) =
+        FakeFactory::behaviors(&[("step1", FakeBehavior::Hang, FakeBehavior::Succeed)]);
+    let exec = executor_with_store_options(
+        journal.clone(),
+        store,
+        cp,
+        dlx.clone(),
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_millis(10), runtime_lock),
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
+        .await
+        .expect("runtime lock loss must interrupt a hanging action");
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::RuntimeLockLost
+            }
+        ),
+        "runtime lock loss must interrupt without compensation: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 1, "forward action should start once");
+    assert!(lock_store.renewal_count() >= 1);
+    assert_eq!(
+        lock_store.release_count(),
+        1,
+        "lost grant still attempts best-effort release"
+    );
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Executing)),
+        "in-flight interrupted action keeps the Executing edge"
+    );
+    assert!(
+        !journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Completed)),
+        "interrupted action must not be marked completed"
+    );
+    assert!(dlx.records().is_empty(), "lock interruption must not DLX");
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: missing event is the assertion failure
+fn runtime_lock_release_failure_logs_context_fields() {
+    let events = capture_tracing_events(tracing::Level::WARN, false, || async {
+        let lock_store = FakeRuntimeLockStore::fail_release();
+        let runtime_lock = runtime_lock_from(lock_store);
+        let journal = Arc::new(FakeJournal::default());
+        let store = ready_instance_store();
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, _counts) = FakeFactory::linear(&["step1"]);
+        let exec = executor_with_store_options(
+            journal,
+            store,
+            cp,
+            dlx,
+            factory,
+            ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+        );
+
+        let outcome = exec.run(instance()).await;
+        assert!(matches!(outcome, SagaOutcome::Succeeded { .. }));
+    });
+
+    let event = events
+        .iter()
+        .find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: runtime lock release failed"))
+        })
+        .expect("runtime lock release warning must be captured");
+    let saga_id_string = saga_id().as_uuid().to_string();
+    assert_eq!(event.get("tenant_id").map(String::as_str), Some(TENANT));
+    assert_eq!(
+        event.get("saga_id").map(String::as_str),
+        Some(saga_id_string.as_str())
+    );
+    assert_eq!(event.get("contract_id").map(String::as_str), Some(CONTRACT));
+    assert_eq!(event.get("operation").map(String::as_str), Some("run"));
+    assert_eq!(
+        event.get("reason").map(String::as_str),
+        Some("runtime_lock_release_failed")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::expect_used)] // reason: timeout means runtime lock renewal error is not wired
+async fn runtime_lock_renew_error_interrupts_as_unavailable_and_releases_best_effort() {
+    let lock_store = FakeRuntimeLockStore::fail_renew();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) =
+        FakeFactory::behaviors(&[("step1", FakeBehavior::Hang, FakeBehavior::Succeed)]);
+    let exec = executor_with_store_options(
+        journal.clone(),
+        store,
+        cp,
+        dlx.clone(),
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_millis(10), runtime_lock),
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_millis(50), exec.run(instance()))
+        .await
+        .expect("runtime lock renewal error must interrupt a hanging action");
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::RuntimeLockUnavailable
+            }
+        ),
+        "runtime lock renewal infra error must fail closed: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 1, "forward action should start once");
+    assert!(lock_store.renewal_count() >= 1);
+    assert_eq!(lock_store.release_count(), 1, "grant release is attempted");
+    assert!(
+        journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Executing)),
+        "in-flight interrupted action keeps the Executing edge"
+    );
+    assert!(
+        !journal
+            .log()
+            .contains(&("step1".to_string(), SagaJournalStatus::Completed)),
+        "interrupted action must not be marked completed"
+    );
+    assert!(dlx.records().is_empty(), "lock interruption must not DLX");
 }
 
 // ── T009.1 #2：step2 失败 → 逆序补偿 step1（step2 未完成不补偿）────────────────
@@ -2307,6 +2858,32 @@ async fn status_reports_none_running_done() {
     // step1 Completed → Done（无在飞）。
     journal.seed(1, "step1", SagaJournalStatus::Completed);
     assert_eq!(exec.status(instance()).await, Some(SagaExecStatus::Done));
+}
+
+#[tokio::test]
+async fn status_does_not_acquire_runtime_lock() {
+    let lock_store = FakeRuntimeLockStore::fail_acquire();
+    let runtime_lock = runtime_lock_from(lock_store.clone());
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, _counts) = FakeFactory::linear(&["step1"]);
+    let store = ready_instance_store();
+    let exec = executor_with_store_options(
+        journal,
+        store,
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock),
+    );
+
+    assert_eq!(exec.status(instance()).await, Some(SagaExecStatus::Ready));
+    assert_eq!(
+        lock_store.acquisition_count(),
+        0,
+        "status must stay a read-only journal/instance query"
+    );
 }
 
 #[tokio::test]

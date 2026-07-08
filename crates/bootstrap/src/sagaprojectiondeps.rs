@@ -2,9 +2,9 @@
 //!
 //! 组合根经 [`resolve`] 按 [`Topology`] 单源选型 saga 执行的 durable 后端（instance store + journal +
 //! checkpoint store）：demo 拓扑用进程内 in-mem 替身（`memory::MemSagaInstanceStore` /
-//! `MemSagaJournal` / `MemCheckpointStore`），durable 拓扑用 postgres（`postgres::PgSagaInstanceStore` /
-//! `PgSagaJournal` / `PgCheckpointStore`，共享 DB）。checkpoint store 由本 resolver 选型、saga（P9）与
-//! projection（P10）**共享**（plan.md 决策 2）。
+//! `MemSagaJournal` / `MemCheckpointStore` / `MemLockStore`），durable 拓扑用 postgres
+//!（`postgres::PgSagaInstanceStore` / `PgSagaJournal` / `PgCheckpointStore`，共享 DB）+ Redis lock provider。
+//! checkpoint store 由本 resolver 选型、saga（P9）与 projection（P10）**共享**（plan.md 决策 2）。
 //!
 //! `Demo` 路径的 in-mem 构造只能在 journeys / xtask 组合根进行（`deny.toml` `memory` wrapper 限定）；
 //! 生产 `bins/server` 的 `Demo` 路径须特殊决策（TOPO-INMEM-SEAL-01）。
@@ -14,29 +14,26 @@
 //! `bootstrap` 是服务层 crate，`deny.toml` + `cargo xtask layer-deps` + cargo 依赖图三道门**禁止
 //! bootstrap 依赖 adapters**（同 [`crate::replaydeps`]）。故本 resolver 是**纯策略函数**：拓扑选型 +
 //! fail-closed 校验 + 凭据 redaction，返回已校验的 [`ResolvedSagaProjection`] 决策；组合根 `match` 该
-//! 决策再构造具体 adapter（`Demo` → in-mem instance+journal+checkpoint；`Durable` → postgres
-//! instance+journal+checkpoint），
+//! 决策再构造具体 adapter（`Demo` → in-mem instance+journal+checkpoint+lock；`Durable` → postgres
+//! instance+journal+checkpoint + Redis lock），
 //! 并在组合根层持有 in-mem sealing。
 //!
-//! 「locker」不在选型层：saga instance store 已用 tenant-scoped lease token + epoch + expiry CAS 保护
-//! direct `run`/`resume`，journal 以 `(tenant_id,saga_id,seq)` PK 区分 idempotent duplicate 与 conflict；
-//! durable 决策只携 postgres URL，不分叉 locker provider。
-//!
-//! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 postgres URL ⇒ [`resolve`] 返 `Err`，组合根 fail-fast
+//! INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— durable 缺 postgres URL 或 Redis URL ⇒ [`resolve`] 返 `Err`，组合根 fail-fast
 //!   拒绝启动，**绝不静默降级回 demo/in-mem**（`Result` + bootstrap fail-fast，Medium；类型层强化：
-//!   `Durable` 路径无「降级回 Demo」可表达变体）。
+//!   `Durable` 路径无「降级回 Demo」可表达变体，且 `Durable` 正例必须携 postgres + redis 两个 URL）。
 //! INVARIANT: TOPO-INMEM-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— in-mem 替身**生产**不可达（生产 bin cargo-deny **Hard**，主守卫）；
 //!   dev root 经决策 `match` 收束（Medium 纪律）。落地在组合根，非本 crate。
 //!
 //! 凭据 redaction（Medium）：postgres URL（含 `user:pass`）经 [`PostgresUrl`] 收口，其 `Debug`/`Display`
 //! 走 URL userinfo 抹除；原文仅 [`PostgresUrl::expose`] 受控可达。
 //!
-//! 注：saga instance/journal + checkpoint 是**单一共享 postgres**（tenant row-scope 隔离），故 `DurableShared` 与
-//! `DurableIsolated` 两 durable 变体都收敛为「需 postgres url」——隔离语义留给 schema / row scope，不在
-//! 本选型层分叉（同 [`crate::replaydeps`] 共享 Redis claimer 的处理）。
+//! 注：saga instance/journal + checkpoint 是**单一共享 postgres**（tenant row-scope 隔离），runtime lock
+//! 是**单一共享 Redis**（key namespace 隔离），故 `DurableShared` 与 `DurableIsolated` 两 durable 变体都
+//! 收敛为「需 postgres url + redis url」——隔离语义留给 schema / row scope / key namespace，不在本选型层分叉。
 //!
 //! ref: docs/rules/eventbus.md §复用层选型（topology-gated）+ specs/002 plan.md 决策 2（checkpoint 共享）
 
+use crate::replaydeps::RedisUrl;
 use crate::topology::Topology;
 
 /// postgres URL（含 `user:pass`）——凭据收口 newtype。
@@ -79,22 +76,29 @@ impl std::fmt::Display for PostgresUrl {
 
 /// sagaprojectiondeps resolver 的 typed 配置。
 ///
-/// 组合根读 env（`RSS_POSTGRES_URL`）后填入；[`resolve`] 是纯函数、不读 env、不 I/O（确定性可测）。
+/// 组合根读 env（`RSS_POSTGRES_URL` / `RSS_REDIS_URL`）后填入；[`resolve`] 是纯函数、不读 env、不 I/O
+/// （确定性可测）。
 #[derive(Debug, Default)]
 pub struct SagaProjectionConfig {
     /// postgres URL（含凭据）。durable 拓扑必填，demo 拓扑忽略。
     postgres_url: Option<PostgresUrl>,
+    /// Redis URL（含凭据）。durable 拓扑必填，demo 拓扑忽略。
+    redis_url: Option<RedisUrl>,
 }
 
 impl SagaProjectionConfig {
-    /// 由可选 postgres URL 构造。
-    pub fn new(postgres_url: Option<PostgresUrl>) -> Self {
-        Self { postgres_url }
+    /// 由可选 postgres / Redis URL 构造。
+    pub fn new(postgres_url: Option<PostgresUrl>, redis_url: Option<RedisUrl>) -> Self {
+        Self {
+            postgres_url,
+            redis_url,
+        }
     }
 }
 
 /// 已校验的 saga instance/journal + checkpoint 选型决策。组合根 `match` 本枚举映射到具体 adapter
-/// （`Demo` → in-mem instance+journal+checkpoint；`Durable` → postgres instance+journal+checkpoint）。bootstrap 自身不持
+/// （`Demo` → in-mem instance+journal+checkpoint+lock；`Durable` → postgres instance/journal/checkpoint +
+/// Redis lock）。bootstrap 自身不持
 /// adapter 类型。
 ///
 /// `#[non_exhaustive]`：加新后端变体不破坏下游。
@@ -103,10 +107,12 @@ impl SagaProjectionConfig {
 pub enum ResolvedSagaProjection {
     /// demo 拓扑：组合根用进程内 in-mem journal + checkpoint。
     Demo,
-    /// durable 拓扑：组合根据此连接 postgres instance/journal + checkpoint（单一共享 DB）。
+    /// durable 拓扑：组合根据此连接 postgres instance/journal/checkpoint + Redis runtime lock。
     Durable {
         /// 已校验的 postgres URL（组合根经 [`PostgresUrl::expose`] 受控取原文）。
         postgres_url: PostgresUrl,
+        /// 已校验的 Redis URL（组合根经 [`RedisUrl::expose`] 受控取原文）。
+        redis_url: RedisUrl,
     },
 }
 
@@ -119,16 +125,19 @@ pub enum SagaProjectionResolveError {
         "durable saga instance/journal/checkpoint requires a postgres url (set RSS_POSTGRES_URL)"
     )]
     MissingPostgresUrl,
+    /// durable 拓扑缺 Redis URL——**绝不**降级回 in-mem。
+    #[error("durable saga runtime lock requires a redis url (set RSS_REDIS_URL)")]
+    MissingRedisUrl,
 }
 
 /// topology-gated saga instance/journal + checkpoint 选型（单源）。**纯函数**：不读 env、不做 I/O、不连 postgres。
 ///
 /// - [`Topology::Demo`] → `Ok(`[`ResolvedSagaProjection::Demo`]`)`。
-/// - [`Topology::DurableShared`] | [`Topology::DurableIsolated`] → 需 postgres URL；缺则
-///   `Err(`[`SagaProjectionResolveError::MissingPostgresUrl`]`)`，**绝不**返回 `Demo`。
+/// - [`Topology::DurableShared`] | [`Topology::DurableIsolated`] → 需 postgres URL + Redis URL；缺则返回
+///   对应 fail-closed 错误，**绝不**返回 `Demo`。
 ///
-/// 注：saga instance/journal + checkpoint 是单一共享 postgres（tenant row-scope 隔离），故两 durable 变体都收敛为
-/// 「需 postgres」。
+/// 注：saga instance/journal + checkpoint 是单一共享 postgres（tenant row-scope 隔离），runtime lock 是
+/// 单一共享 Redis（key namespace 隔离），故两 durable 变体都收敛为「需 postgres + redis」。
 ///
 /// INVARIANT: TOPO-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（见模块 rustdoc）。
 pub fn resolve(
@@ -138,11 +147,19 @@ pub fn resolve(
     match topo {
         // reason: demo 拓扑无外部依赖，恒成立。
         Topology::Demo => Ok(ResolvedSagaProjection::Demo),
-        // 两个 durable 变体均需 postgres——instance+journal+checkpoint 是共享 DB（无 per-domain 分叉）。
-        Topology::DurableShared | Topology::DurableIsolated => cfg
-            .postgres_url
-            .map(|u| ResolvedSagaProjection::Durable { postgres_url: u })
-            .ok_or(SagaProjectionResolveError::MissingPostgresUrl),
+        // 两个 durable 变体均需 postgres + Redis；先报 postgres，避免 Redis 配齐但 DB 缺失时误导。
+        Topology::DurableShared | Topology::DurableIsolated => {
+            let postgres_url = cfg
+                .postgres_url
+                .ok_or(SagaProjectionResolveError::MissingPostgresUrl)?;
+            let redis_url = cfg
+                .redis_url
+                .ok_or(SagaProjectionResolveError::MissingRedisUrl)?;
+            Ok(ResolvedSagaProjection::Durable {
+                postgres_url,
+                redis_url,
+            })
+        }
     }
 }
 
@@ -152,10 +169,20 @@ mod tests {
         PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError,
         resolve,
     };
+    use crate::replaydeps::RedisUrl;
     use crate::topology::Topology;
 
     const URL_WITH_CREDS: &str = "postgres://user:pass@host:5432/rss";
     const URL_NO_CREDS: &str = "postgres://host:5432/rss";
+    const REDIS_URL_WITH_CREDS: &str = "rediss://user:pass@host:6379/0";
+
+    #[allow(clippy::panic)]
+    fn redis_url(url: &str) -> RedisUrl {
+        match RedisUrl::parse(url, secure::PlaintextEndpointPolicy::Deny) {
+            Ok(url) => url,
+            Err(err) => panic!("valid rediss url: {err}"),
+        }
+    }
 
     // expose() 在 clippy.toml disallowed-methods（凭据出口仅组合根受控调用）；本测试是唯一 sanctioned
     // 验证点，item-level carve-out。
@@ -166,9 +193,14 @@ mod tests {
 
     // 取出 Durable 的 postgres_url（碰到非 Durable 即失败）。item-level carve-out。
     #[allow(clippy::unwrap_used, clippy::panic)]
-    fn durable_url(got: Result<ResolvedSagaProjection, SagaProjectionResolveError>) -> PostgresUrl {
+    fn durable_urls(
+        got: Result<ResolvedSagaProjection, SagaProjectionResolveError>,
+    ) -> (PostgresUrl, RedisUrl) {
         match got.unwrap() {
-            ResolvedSagaProjection::Durable { postgres_url } => postgres_url,
+            ResolvedSagaProjection::Durable {
+                postgres_url,
+                redis_url,
+            } => (postgres_url, redis_url),
             other => panic!("expected Durable, got {other:?}"),
         }
     }
@@ -181,7 +213,10 @@ mod tests {
 
     #[test]
     fn demo_with_postgres_url_still_resolves_demo() {
-        let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new(URL_WITH_CREDS)));
+        let cfg = SagaProjectionConfig::new(
+            Some(PostgresUrl::new(URL_WITH_CREDS)),
+            Some(redis_url(REDIS_URL_WITH_CREDS)),
+        );
         let got = resolve(Topology::Demo, cfg);
         assert!(matches!(got, Ok(ResolvedSagaProjection::Demo)));
     }
@@ -206,17 +241,45 @@ mod tests {
     }
 
     #[test]
-    fn durable_shared_with_postgres_url_resolves_durable() {
-        let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new(URL_WITH_CREDS)));
-        let url = durable_url(resolve(Topology::DurableShared, cfg));
-        assert_eq!(url, PostgresUrl::new(URL_WITH_CREDS));
+    fn durable_shared_with_postgres_missing_redis_fails_closed() {
+        let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new(URL_WITH_CREDS)), None);
+        let got = resolve(Topology::DurableShared, cfg);
+        assert!(matches!(
+            got,
+            Err(SagaProjectionResolveError::MissingRedisUrl)
+        ));
     }
 
     #[test]
-    fn durable_isolated_with_postgres_url_resolves_durable() {
-        let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new(URL_WITH_CREDS)));
-        let url = durable_url(resolve(Topology::DurableIsolated, cfg));
-        assert_eq!(url, PostgresUrl::new(URL_WITH_CREDS));
+    fn durable_isolated_with_postgres_missing_redis_fails_closed() {
+        let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new(URL_WITH_CREDS)), None);
+        let got = resolve(Topology::DurableIsolated, cfg);
+        assert!(matches!(
+            got,
+            Err(SagaProjectionResolveError::MissingRedisUrl)
+        ));
+    }
+
+    #[test]
+    fn durable_shared_with_postgres_and_redis_urls_resolves_durable() {
+        let cfg = SagaProjectionConfig::new(
+            Some(PostgresUrl::new(URL_WITH_CREDS)),
+            Some(redis_url(REDIS_URL_WITH_CREDS)),
+        );
+        let (pg, redis) = durable_urls(resolve(Topology::DurableShared, cfg));
+        assert_eq!(pg, PostgresUrl::new(URL_WITH_CREDS));
+        assert_eq!(redis, redis_url(REDIS_URL_WITH_CREDS));
+    }
+
+    #[test]
+    fn durable_isolated_with_postgres_and_redis_urls_resolves_durable() {
+        let cfg = SagaProjectionConfig::new(
+            Some(PostgresUrl::new(URL_WITH_CREDS)),
+            Some(redis_url(REDIS_URL_WITH_CREDS)),
+        );
+        let (pg, redis) = durable_urls(resolve(Topology::DurableIsolated, cfg));
+        assert_eq!(pg, PostgresUrl::new(URL_WITH_CREDS));
+        assert_eq!(redis, redis_url(REDIS_URL_WITH_CREDS));
     }
 
     #[test]
@@ -255,6 +318,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "durable saga instance/journal/checkpoint requires a postgres url (set RSS_POSTGRES_URL)"
+        );
+    }
+
+    #[test]
+    fn missing_redis_url_message() {
+        let err = SagaProjectionResolveError::MissingRedisUrl;
+        assert_eq!(
+            err.to_string(),
+            "durable saga runtime lock requires a redis url (set RSS_REDIS_URL)"
         );
     }
 }

@@ -117,6 +117,15 @@ impl RedisInfraDeps {
         })
     }
 
+    /// Redis distlock provider typed handle for Sync consumers that must not serialize via dyn port
+    /// ownership guards.
+    #[must_use]
+    pub fn lock_store_handle(&self) -> RedisLockStore {
+        RedisLockStore {
+            store: Arc::clone(&self.store),
+        }
+    }
+
     /// Redis state-CAS provider 句柄（DI-ready dyn port）。
     #[must_use]
     pub fn cas_store(&self) -> Box<DynCasStore<'static>> {
@@ -277,7 +286,9 @@ mod tests {
     async fn infra_lock_and_cas_handles_construct() {
         let infra = deps().infra();
         let _lock = infra.lock_store();
+        let lock_handle = infra.lock_store_handle();
         let _cas = infra.cas_store();
+        assert!(Arc::ptr_eq(&infra.store, &lock_handle.store));
     }
 
     #[tokio::test]

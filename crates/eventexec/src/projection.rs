@@ -852,9 +852,21 @@ fn projection_dead_letter_metadata(metadata: &ProjectionEventMetadata) -> Envelo
             }
         }
     }
-    out.insert_wire_pair(KEY_TENANT_ID, metadata.tenant().to_string());
-    out.insert_wire_pair(KEY_SCHEMA_VERSION, metadata.contract_version());
-    out.insert_wire_pair(KEY_SCHEMA_HASH, metadata.schema_hash());
+    insert_projection_dead_letter_reserved_metadata(
+        &mut out,
+        KEY_TENANT_ID,
+        metadata.tenant().to_string(),
+    );
+    insert_projection_dead_letter_reserved_metadata(
+        &mut out,
+        KEY_SCHEMA_VERSION,
+        metadata.contract_version(),
+    );
+    insert_projection_dead_letter_reserved_metadata(
+        &mut out,
+        KEY_SCHEMA_HASH,
+        metadata.schema_hash(),
+    );
     if let Some(partition_key) = metadata.partition_key() {
         insert_projection_dead_letter_metadata(&mut out, "partitionKey", partition_key.to_string());
     }
@@ -867,6 +879,17 @@ fn projection_dead_letter_metadata(metadata: &ProjectionEventMetadata) -> Envelo
 fn insert_projection_dead_letter_metadata(
     metadata: &mut EnvelopeMetadata,
     key: impl Into<String>,
+    value: impl Into<String>,
+) {
+    let _ = metadata.try_insert(key, value);
+}
+
+#[allow(unknown_lints, rss_diport_envelope_reserved_writer)]
+// reason: projection DLX rehydrates typed projection system fields into persisted DLX metadata;
+// the values come from ProjectionEventMetadata typed accessors, not user free-form metadata.
+fn insert_projection_dead_letter_reserved_metadata(
+    metadata: &mut EnvelopeMetadata,
+    key: &'static str,
     value: impl Into<String>,
 ) {
     metadata.insert_wire_pair(key, value);

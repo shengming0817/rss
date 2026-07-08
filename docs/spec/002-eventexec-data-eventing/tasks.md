@@ -108,7 +108,7 @@
 - [ ] T009.2 [US7] `OwnerCheckpointStore`(diport) + postgres checkpoint 表（CAS version）—— **P10 复用**
 - [ ] T009.3 [US7] postgres saga_journal 表 + reader/append
 - [ ] T009.4 [US7] `eventexec/saga.rs`：SagaId/SagaActionCtx body + SagaExecutor run/resume（前向 append + 失败逆序补偿，补偿失败→saga dead-letter）+ SagaTailer status
-- [ ] T009.5 [US7] `bootstrap/sagaprojectiondeps.rs` resolver（demo paired mem instance+journal / durable pg tenant-scoped instance+journal+checkpoint；fail-closed）
+- [ ] T009.5 [US7] `bootstrap/sagaprojectiondeps.rs` resolver（demo paired mem instance+journal+lock / durable pg tenant-scoped instance+journal+checkpoint + Redis runtime lock；fail-closed）
 - [ ] T009.6 [US7] saga dead-letter observability 字段测试：验证补偿失败写 dead-letter 时 `tracing::error!` 含 saga_id / step_name / error_summary 非空，dead-letter 记录的 contract_id / domain 取 saga owner（refs: SC-006）
 - [ ] T009.7 [US7] `contracts/saga/` kind + xtask SAGA-CONTRACT-01 governance（Medium，正/负用例）；clippy/fmt 绿
 

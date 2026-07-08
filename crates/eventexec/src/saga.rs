@@ -1,4 +1,4 @@
-//! saga 执行与编排 —— 接缝类型 + 执行器实现（前向 append journal + 失败逆序补偿 + checkpoint resume）。
+//! saga 执行与编排 —— 接缝类型 + 执行器实现（runtime lock gate + 前向 append journal + 失败逆序补偿 + checkpoint resume）。
 //!
 //! 两个 step 抽象的关系（reviewer 常问）：
 //! - [`SagaAction`]（本模块，object-safe `BoxFuture`）= **erased 运行时动作栈**——执行器
@@ -29,8 +29,9 @@ use consistency::{
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, EnvelopeMetadata, OwnerCheckpointStore, SagaInstanceRegistration,
-    SagaInstanceStore, SagaJournal, SaveOutcome, WritableDeadLetterSource,
+    DeadLetterSummary, EnvelopeMetadata, LockAcquireOutcome, LockRenewOutcome, LockStoreError,
+    LockStoreKey, OwnerCheckpointStore, SagaInstanceRegistration, SagaInstanceStore, SagaJournal,
+    SaveOutcome, WritableDeadLetterSource,
 };
 
 /// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
@@ -258,6 +259,276 @@ pub trait SagaTailer: Send + Sync {
     fn status(&self, instance: SagaInstanceRef) -> BoxFuture<'static, Option<SagaExecStatus>>;
 }
 
+/// Saga runtime lock provider.
+///
+/// The lock is an outer multi-pod gate for `run`/`resume`; Postgres saga instance lease and
+/// journal CAS remain the final fencing layer.
+///
+/// INVARIANT: SAGA-RUNTIME-LOCK-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "constructor required parameter" }——
+/// `SagaExecutorDeps::new` requires this non-optional dependency, so composition roots cannot
+/// construct a saga executor without choosing a memory/demo or Redis/durable lock provider.
+#[derive(Clone)]
+pub struct SagaRuntimeLock {
+    provider: Arc<dyn SagaRuntimeLockProvider>,
+}
+
+impl SagaRuntimeLock {
+    /// Wrap a lock provider chosen by the composition root.
+    pub fn new<L>(provider: L) -> Self
+    where
+        L: diport::LockStore + Send + Sync + 'static,
+    {
+        Self {
+            provider: Arc::new(provider),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        instance: SagaInstanceRef,
+        contract_id: &str,
+        operation: &'static str,
+        ttl: Duration,
+    ) -> Result<SagaRuntimeLockGrant, SagaInterruption> {
+        let key = saga_runtime_lock_key(instance);
+        let outcome = self
+            .provider
+            .acquire_lock(LockStoreKey::new(key.clone()), ttl)
+            .await
+            .map_err(|err| map_runtime_lock_error(instance, contract_id, operation, &err))?;
+        match outcome {
+            LockAcquireOutcome::Acquired { token } => Ok(SagaRuntimeLockGrant {
+                lock: self.clone(),
+                instance,
+                contract_id: contract_id.to_string(),
+                operation,
+                key,
+                token,
+                ttl,
+            }),
+            LockAcquireOutcome::Held => {
+                let reason = SagaInterruption::RuntimeLockBusy;
+                log_runtime_lock_interrupted(instance, contract_id, operation, reason);
+                Err(reason)
+            }
+            _ => {
+                let reason = SagaInterruption::RuntimeLockUnavailable;
+                log_runtime_lock_interrupted(instance, contract_id, operation, reason);
+                Err(reason)
+            }
+        }
+    }
+}
+
+trait SagaRuntimeLockProvider: Send + Sync {
+    fn acquire_lock(
+        &self,
+        key: LockStoreKey,
+        ttl: Duration,
+    ) -> BoxFuture<'_, Result<LockAcquireOutcome, LockStoreError>>;
+
+    fn renew_lock(
+        &self,
+        key: LockStoreKey,
+        token: vocab::Epoch,
+        ttl: Duration,
+    ) -> BoxFuture<'_, Result<LockRenewOutcome, LockStoreError>>;
+
+    fn release_lock(
+        &self,
+        key: LockStoreKey,
+        token: vocab::Epoch,
+    ) -> BoxFuture<'_, Result<(), LockStoreError>>;
+}
+
+impl<L> SagaRuntimeLockProvider for L
+where
+    L: diport::LockStore + Send + Sync + 'static,
+{
+    fn acquire_lock(
+        &self,
+        key: LockStoreKey,
+        ttl: Duration,
+    ) -> BoxFuture<'_, Result<LockAcquireOutcome, LockStoreError>> {
+        Box::pin(diport::LockStore::acquire(self, key, ttl))
+    }
+
+    fn renew_lock(
+        &self,
+        key: LockStoreKey,
+        token: vocab::Epoch,
+        ttl: Duration,
+    ) -> BoxFuture<'_, Result<LockRenewOutcome, LockStoreError>> {
+        Box::pin(diport::LockStore::renew(self, key, token, ttl))
+    }
+
+    fn release_lock(
+        &self,
+        key: LockStoreKey,
+        token: vocab::Epoch,
+    ) -> BoxFuture<'_, Result<(), LockStoreError>> {
+        Box::pin(diport::LockStore::release(self, key, token))
+    }
+}
+
+fn log_runtime_lock_interrupted(
+    instance: SagaInstanceRef,
+    contract_id: &str,
+    operation: &'static str,
+    reason: SagaInterruption,
+) {
+    tracing::warn!(
+        tenant_id = %instance.tenant(),
+        saga_id = %instance.saga_id().as_uuid(),
+        contract_id = %contract_id,
+        operation = operation,
+        reason = reason.as_label(),
+        "saga: runtime lock interrupted"
+    );
+}
+
+fn log_runtime_lock_interrupted_error(
+    instance: SagaInstanceRef,
+    contract_id: &str,
+    operation: &'static str,
+    reason: SagaInterruption,
+    error: &LockStoreError,
+) {
+    tracing::warn!(
+        tenant_id = %instance.tenant(),
+        saga_id = %instance.saga_id().as_uuid(),
+        contract_id = %contract_id,
+        operation = operation,
+        reason = reason.as_label(),
+        error = %error,
+        "saga: runtime lock interrupted"
+    );
+}
+
+fn log_runtime_lock_release_failed(
+    instance: SagaInstanceRef,
+    contract_id: &str,
+    operation: &'static str,
+    error: &LockStoreError,
+) {
+    tracing::warn!(
+        tenant_id = %instance.tenant(),
+        saga_id = %instance.saga_id().as_uuid(),
+        contract_id = %contract_id,
+        operation = operation,
+        reason = "runtime_lock_release_failed",
+        error = %error,
+        "saga: runtime lock release failed"
+    );
+}
+
+fn map_runtime_lock_error(
+    instance: SagaInstanceRef,
+    contract_id: &str,
+    operation: &'static str,
+    error: &LockStoreError,
+) -> SagaInterruption {
+    let reason = SagaInterruption::RuntimeLockUnavailable;
+    log_runtime_lock_interrupted_error(instance, contract_id, operation, reason, error);
+    reason
+}
+
+struct SagaRuntimeLockGrant {
+    lock: SagaRuntimeLock,
+    instance: SagaInstanceRef,
+    contract_id: String,
+    operation: &'static str,
+    key: String,
+    token: vocab::Epoch,
+    ttl: Duration,
+}
+
+impl SagaRuntimeLockGrant {
+    async fn renew(&mut self) -> Result<(), SagaInterruption> {
+        let outcome = self
+            .lock
+            .provider
+            .renew_lock(LockStoreKey::new(self.key.clone()), self.token, self.ttl)
+            .await
+            .map_err(|err| {
+                map_runtime_lock_error(self.instance, &self.contract_id, self.operation, &err)
+            })?;
+        match outcome {
+            LockRenewOutcome::Renewed { token } => {
+                self.token = token;
+                Ok(())
+            }
+            LockRenewOutcome::Lost => {
+                let reason = SagaInterruption::RuntimeLockLost;
+                log_runtime_lock_interrupted(
+                    self.instance,
+                    &self.contract_id,
+                    self.operation,
+                    reason,
+                );
+                Err(reason)
+            }
+            _ => {
+                let reason = SagaInterruption::RuntimeLockUnavailable;
+                log_runtime_lock_interrupted(
+                    self.instance,
+                    &self.contract_id,
+                    self.operation,
+                    reason,
+                );
+                Err(reason)
+            }
+        }
+    }
+
+    async fn release_best_effort(&self) {
+        if let Err(err) = self
+            .lock
+            .provider
+            .release_lock(LockStoreKey::new(self.key.clone()), self.token)
+            .await
+        {
+            log_runtime_lock_release_failed(self.instance, &self.contract_id, self.operation, &err);
+        }
+    }
+}
+
+async fn run_with_runtime_lock<F>(mut grant: SagaRuntimeLockGrant, operation: F) -> SagaOutcome
+where
+    F: Future<Output = SagaOutcome>,
+{
+    tokio::pin!(operation);
+    let mut renew_sleep = Box::pin(tokio::time::sleep(lease_renewal_delay(grant.ttl)));
+    loop {
+        tokio::select! {
+            biased;
+            outcome = &mut operation => {
+                grant.release_best_effort().await;
+                return outcome;
+            }
+            () = &mut renew_sleep => {
+                match grant.renew().await {
+                    Ok(()) => {
+                        renew_sleep = Box::pin(tokio::time::sleep(lease_renewal_delay(grant.ttl)));
+                    }
+                    Err(reason) => {
+                        grant.release_best_effort().await;
+                        return SagaOutcome::Interrupted { reason };
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn saga_runtime_lock_key(instance: SagaInstanceRef) -> String {
+    format!(
+        "saga/{}/{}",
+        instance.tenant(),
+        instance.saga_id().as_uuid()
+    )
+}
+
 /// saga 模板：按声明序产出全部 [`SagaAction`]。resume 用——执行器仅持 `saga_id`，须经此重物化整个
 /// action 序（journal 只存 step 名，无法重建闭包）。对标 steno saga template / dag registry。
 pub trait SagaActionFactory: Send + Sync {
@@ -292,6 +563,7 @@ pub struct SagaExecutorImpl<J, C, D, S> {
     checkpoint: Arc<C>,
     dead_letter: Arc<D>,
     factory: Arc<dyn SagaActionFactory>,
+    runtime_lock: SagaRuntimeLock,
     owner: CheckpointOwner,
     contract_id: String,
     holder_id: String,
@@ -306,6 +578,7 @@ pub struct SagaExecutorDeps<J, C, D, S> {
     checkpoint: Arc<C>,
     dead_letter: Arc<D>,
     factory: Arc<dyn SagaActionFactory>,
+    runtime_lock: SagaRuntimeLock,
 }
 
 impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
@@ -315,6 +588,7 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
         checkpoint: Arc<C>,
         dead_letter: Arc<D>,
         factory: Arc<dyn SagaActionFactory>,
+        runtime_lock: SagaRuntimeLock,
     ) -> Self {
         Self {
             journal,
@@ -322,6 +596,7 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
             checkpoint,
             dead_letter,
             factory,
+            runtime_lock,
         }
     }
 }
@@ -391,6 +666,7 @@ where
             checkpoint: deps.checkpoint,
             dead_letter: deps.dead_letter,
             factory: deps.factory,
+            runtime_lock: deps.runtime_lock,
             owner: config.owner,
             contract_id: config.contract_id,
             holder_id: config.holder_id,
@@ -418,48 +694,59 @@ where
         let lease_ttl = self.lease_ttl;
         let policy = self.policy;
         let factory = self.factory.clone();
+        let runtime_lock = self.runtime_lock.clone();
         Box::pin(async move {
-            let actions = factory.build();
-            if let Err(err) = definition_from_actions(&actions) {
-                let failed_node = model_error_node(&err);
-                tracing::error!(
-                    tenant_id = %instance.tenant(),
-                    saga_id = %instance.saga_id().as_uuid(),
-                    failed_node = %failed_node,
-                    "saga: action definition invalid"
-                );
-                return SagaOutcome::Failed {
-                    failed_node,
-                    error: SagaActionError::SerializeFailed,
-                };
-            }
-            let lease = match acquire_run_lease(
-                &*instance_store,
-                instance,
-                &owner,
-                &contract_id,
-                &holder_id,
-                lease_ttl,
-            )
-            .await
+            let grant = match runtime_lock
+                .acquire(instance, &contract_id, "run", lease_ttl)
+                .await
             {
-                Ok(lease) => lease,
+                Ok(grant) => grant,
                 Err(reason) => return SagaOutcome::Interrupted { reason },
             };
-            let ctx = ExecCtx {
-                journal: &*journal,
-                instance_store: &*instance_store,
-                checkpoint: &*checkpoint,
-                dead_letter: &*dead_letter,
-                owner: &owner,
-                contract_id: &contract_id,
-                instance,
-                lease,
-                lease_ttl,
-                policy,
-                checkpoint_id: saga_checkpoint_id(instance),
-            };
-            ctx.run_forward(&actions, 0, Cursor::new()).await
+            run_with_runtime_lock(grant, async move {
+                let actions = factory.build();
+                if let Err(err) = definition_from_actions(&actions) {
+                    let failed_node = model_error_node(&err);
+                    tracing::error!(
+                        tenant_id = %instance.tenant(),
+                        saga_id = %instance.saga_id().as_uuid(),
+                        failed_node = %failed_node,
+                        "saga: action definition invalid"
+                    );
+                    return SagaOutcome::Failed {
+                        failed_node,
+                        error: SagaActionError::SerializeFailed,
+                    };
+                }
+                let lease = match acquire_run_lease(
+                    &*instance_store,
+                    instance,
+                    &owner,
+                    &contract_id,
+                    &holder_id,
+                    lease_ttl,
+                )
+                .await
+                {
+                    Ok(lease) => lease,
+                    Err(reason) => return SagaOutcome::Interrupted { reason },
+                };
+                let ctx = ExecCtx {
+                    journal: &*journal,
+                    instance_store: &*instance_store,
+                    checkpoint: &*checkpoint,
+                    dead_letter: &*dead_letter,
+                    owner: &owner,
+                    contract_id: &contract_id,
+                    instance,
+                    lease,
+                    lease_ttl,
+                    policy,
+                    checkpoint_id: saga_checkpoint_id(instance),
+                };
+                ctx.run_forward(&actions, 0, Cursor::new()).await
+            })
+            .await
         })
     }
 
@@ -474,34 +761,46 @@ where
         let lease_ttl = self.lease_ttl;
         let policy = self.policy;
         let factory = self.factory.clone();
+        let runtime_lock = self.runtime_lock.clone();
         Box::pin(async move {
-            let actions = factory.build();
-            let lease =
-                match acquire_resume_lease(&*instance_store, instance, &holder_id, lease_ttl).await
-                {
-                    ResumeLeaseDecision::Acquired(lease) => lease,
-                    ResumeLeaseDecision::Unknown => return unknown_saga_outcome(),
-                    ResumeLeaseDecision::Terminal(status) => {
-                        return outcome_from_instance_status(status);
-                    }
-                    ResumeLeaseDecision::Interrupted(reason) => {
-                        return SagaOutcome::Interrupted { reason };
-                    }
-                };
-            let ctx = ExecCtx {
-                journal: &*journal,
-                instance_store: &*instance_store,
-                checkpoint: &*checkpoint,
-                dead_letter: &*dead_letter,
-                owner: &owner,
-                contract_id: &contract_id,
-                instance,
-                lease,
-                lease_ttl,
-                policy,
-                checkpoint_id: saga_checkpoint_id(instance),
+            let grant = match runtime_lock
+                .acquire(instance, &contract_id, "resume", lease_ttl)
+                .await
+            {
+                Ok(grant) => grant,
+                Err(reason) => return SagaOutcome::Interrupted { reason },
             };
-            ctx.resume(&actions).await
+            run_with_runtime_lock(grant, async move {
+                let actions = factory.build();
+                let lease =
+                    match acquire_resume_lease(&*instance_store, instance, &holder_id, lease_ttl)
+                        .await
+                    {
+                        ResumeLeaseDecision::Acquired(lease) => lease,
+                        ResumeLeaseDecision::Unknown => return unknown_saga_outcome(),
+                        ResumeLeaseDecision::Terminal(status) => {
+                            return outcome_from_instance_status(status);
+                        }
+                        ResumeLeaseDecision::Interrupted(reason) => {
+                            return SagaOutcome::Interrupted { reason };
+                        }
+                    };
+                let ctx = ExecCtx {
+                    journal: &*journal,
+                    instance_store: &*instance_store,
+                    checkpoint: &*checkpoint,
+                    dead_letter: &*dead_letter,
+                    owner: &owner,
+                    contract_id: &contract_id,
+                    instance,
+                    lease,
+                    lease_ttl,
+                    policy,
+                    checkpoint_id: saga_checkpoint_id(instance),
+                };
+                ctx.resume(&actions).await
+            })
+            .await
         })
     }
 }

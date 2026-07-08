@@ -68,7 +68,7 @@ pub mod saga;
 pub use saga::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaExecStatus, SagaExecutor,
     SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome,
-    SagaPolicy, SagaPolicyError, SagaTailer,
+    SagaPolicy, SagaPolicyError, SagaRuntimeLock, SagaTailer,
 };
 
 use std::sync::Arc;
