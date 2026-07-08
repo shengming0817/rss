@@ -1,0 +1,113 @@
+# runtime-baseline v1
+# generated-by: cargo xtask runtime-baseline list
+# static-facts-only: dynamic environment/provider state is documented, not enforced here
+
+[sources]
+cargo = assemblies/runtime/Cargo.toml
+assembly = assemblies/runtime/assembly.toml
+sharedRuntimeDeps = assemblies/runtime/src/module.rs
+domainModuleResult = crates/bootstrap/src/module.rs
+run = assemblies/runtime/src/lib.rs
+
+[runtime.dependencies]
+amqp = path=../../adapters/amqp; features=[backend]
+anyhow = workspace=true
+audit = path=../../crates/audit
+authn = path=../../crates/authn
+aws-sdk-s3 = workspace=true
+aws-smithy-http-client = workspace=true
+axum = workspace=true
+base64 = workspace=true
+bootstrap = path=../../crates/bootstrap
+consistency = path=../../crates/consistency
+crypto-adapter = path=../../adapters/crypto
+deadpool-redis = workspace=true
+diport = path=../../crates/diport
+distributed = path=../../crates/distributed
+eventexec = path=../../crates/eventexec
+futures = workspace=true
+generated = path=../../generated
+httpd = path=../../adapters/httpd
+httpserve = path=../../crates/httpserve
+identity = path=../../crates/identity
+oidc = path=../../adapters/oidc; features=[backend]
+otel = path=../../adapters/otel; features=[backend]
+postgres = path=../../adapters/postgres
+primitives = path=../../crates/primitives
+prometheus-adapter = path=../../adapters/prometheus; features=[backend]
+ratelimit = path=../../adapters/ratelimit
+redis = package=redis-adapter; path=../../adapters/redis; features=[backend]
+reqwest = workspace=true; features=[rustls-tls-webpki-roots]
+runctx = path=../../crates/runctx
+s3 = path=../../adapters/s3; features=[backend]
+secure = path=../../crates/secure
+serde = workspace=true; features=[derive]
+settings = path=../../crates/settings; features=[seed-data]
+thiserror = workspace=true
+tokio = workspace=true; features=[rt-multi-thread,macros,net,signal,time,sync]
+tokio-util = workspace=true
+tracing = workspace=true
+tracing-subscriber = workspace=true
+uuid = workspace=true; features=[v4]
+vault = path=../../adapters/vault; features=[backend]
+vocab = path=../../crates/vocab
+
+[assembly.diportProviders]
+01 | port=diport::RevocationStore | provider=softca::InMemRevocationLedger | providerCrate=softca | requiredFeatures=[] | consumer=deviceloop | lifecycle=draft | durability=ephemeral-memory | purpose=device-certificate-revocation
+02 | port=diport::Publisher | provider=amqp::AmqpPublisher | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | purpose=outbox-relay-amqp-publish
+03 | port=diport::AckableSubscriber | provider=amqp::AmqpSubscriber | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | purpose=event-consume-at-least-once
+04 | port=diport::Signer | provider=vault::VaultSigner | providerCrate=vault | requiredFeatures=[backend] | consumer=identity | lifecycle=active | durability=persistent | purpose=jwt-access-token-signing
+05 | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=settings | lifecycle=active | durability=persistent | purpose=settings-configvalue-at-rest-encryption
+06 | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=jwt-credential-verification
+07 | port=diport::RateLimiter | provider=ratelimit::GovernorLimiter | providerCrate=ratelimit | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=ephemeral-memory | purpose=per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)
+08 | port=diport::LockStore | provider=redis::RedisLockStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-lock-fencing
+09 | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-state-cas
+10 | port=diport::CasStore | provider=redis::RedisCasStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=draft | durability=persistent | purpose=distributed-state-cas-redis-alternative
+11 | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | purpose=runtime-s3-readiness-canary
+
+[sharedRuntimeDeps.fields]
+pg = PgRuntimeDeps
+redis = RedisRuntimeDeps
+s3 = S3RuntimeDeps
+vault = VaultRuntimeDeps
+settings_config_value_key_name = KeyName
+domain_transport = Arc<dyn distributed::DomainTransport>
+
+[domainModuleResult.fields]
+probes = Vec<(ProbeName, Box<dyn HealthProbe>)>
+resources = Vec<Box<DynManagedResource<'static>>>
+workers = Vec<WorkerSpec>
+merge = present
+mergeExtends = probes,resources,workers
+
+[runtime.run.orderedAnchors]
+01 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_provider()? | status=ok
+02 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
+03 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(|name| std::env::var(name).ok()) | status=ok
+04 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(|name| std::env::var(name).ok()) | status=ok
+05 | run.provider.s3 | assemblies/runtime/src/lib.rs | build_s3_runtime_deps_from(|name| std::env::var(name).ok()) | status=ok
+06 | run.shared-deps | assemblies/runtime/src/lib.rs | let deps = SharedRuntimeDeps { | status=ok
+07 | run.wire.audit | assemblies/runtime/src/lib.rs | wire_audit(&deps) | status=ok
+08 | run.wire.identity | assemblies/runtime/src/lib.rs | wire_identity(&deps) | status=ok
+09 | run.wire.settings | assemblies/runtime/src/lib.rs | wire_settings(&deps) | status=ok
+10 | run.compose | assemblies/runtime/src/lib.rs | bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain]) | status=ok
+11 | run.module.merge.settings | assemblies/runtime/src/lib.rs | module.merge(settings_module); | status=ok
+12 | run.module.merge.session-sweeper | assemblies/runtime/src/lib.rs | wire_session_sweeper(&pg) | status=ok
+13 | run.module.merge.s3-canary | assemblies/runtime/src/lib.rs | wire_s3_canary(&deps, s3_canary_config) | status=ok
+14 | run.resources.redis | assemblies/runtime/src/lib.rs | deps.redis.runtime_resources() | status=ok
+15 | run.resources.s3 | assemblies/runtime/src/lib.rs | deps.s3.runtime_resources() | status=ok
+16 | run.resources.vault | assemblies/runtime/src/lib.rs | deps.vault.runtime_resources() | status=ok
+17 | run.module.merge.domain-transport | assemblies/runtime/src/lib.rs | .module_result() | status=ok
+18 | run.wire.distributed | assemblies/runtime/src/lib.rs | wire_distributed(&deps) | status=ok
+19 | run.event.bridge | assemblies/runtime/src/lib.rs | event_transport::bridge_generated_subscriptions(registry.drain_subscribers()) | status=ok
+20 | run.event.transport | assemblies/runtime/src/lib.rs | event_transport::wire_event_transport( | status=ok
+21 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in module.probes | status=ok
+22 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
+23 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
+24 | run.serve | assemblies/runtime/src/lib.rs | serve_until_signal(listeners, move |stack| | status=ok
+25 | run.shutdown.otel | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(exporter)) | status=ok
+26 | run.shutdown.pg | assemblies/runtime/src/lib.rs | stack.register_detached(DynManagedResource::new_box(pg.store_guard())) | status=ok
+27 | run.shutdown.sampler | assemblies/runtime/src/lib.rs | stack.register_with_token(move |token| | status=ok
+28 | run.shutdown.event-infra | assemblies/runtime/src/lib.rs | stack.register_detached(g); | status=ok
+29 | run.shutdown.resources | assemblies/runtime/src/lib.rs | stack.register_detached(r); | status=ok
+30 | run.shutdown.workers | assemblies/runtime/src/lib.rs | stack.register_with_token(w); | status=ok
