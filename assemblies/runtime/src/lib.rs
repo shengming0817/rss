@@ -24,11 +24,13 @@ pub mod auth_bridge;
 pub mod distributed_runtime;
 pub mod event_transport;
 pub mod module;
+pub mod phase;
 
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
 pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
+use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -4350,224 +4352,279 @@ pub async fn shutdown_trace_export(trace_export: Option<otel::OtelExporter>) -> 
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()> {
-    let provider = Arc::new(build_provider()?);
+    let runtime_inputs = RuntimeInputs::new(trace_export);
 
-    // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
-    // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
-    let audit_admin_config =
-        build_pg_audit_admin_config().context("build audit admin postgres config")?;
-    let pg = PgRuntimeDeps::setup_with_audit_admin_config(
-        &build_pg_migrator_config()?,
-        &build_pg_config()?,
-        audit_admin_config.as_ref(),
-        legacy_config_plaintext_policy()?,
-        generated::event::PROJECTION_INPUTS,
-    )
-    .await
-    .context("setup postgres deps")?;
+    // BuildProvider phase: production credential verifier provider.
+    let provider = Arc::new(phase_result(RuntimePhase::BuildProvider, build_provider())?);
 
-    // vault capability bundle（#1498）：env → resolver → VaultRuntimeDeps（单源装配出口）。vault env 缺失即
-    // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
-    let vault =
-        build_vault_runtime_deps(|name| std::env::var(name).ok()).context("setup vault deps")?;
-    let settings_config_value_key_name =
-        build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
-            .context("settings config value key name")?;
-    // redis capability bundle（#1571 go-live）：Redis 是 distributed lock provider 的生产硬依赖。
-    // 缺 `RSS_REDIS_URL` 或启动期 PING 失败均 fail-fast，不保留 demo-optional 生产路径。
-    let redis = build_redis_runtime_deps(|name| std::env::var(name).ok())
-        .await
-        .context("setup redis deps")?;
-    // s3 capability bundle（#1164）：生产 object-store 真实接线。缺 S3 env 或 TLS/endpoint 误配均 fail-fast；
-    // readiness 由下方 runtime canary worker 周期执行真实 put/get/delete/get-miss。
-    let s3 =
-        build_s3_runtime_deps_from(|name| std::env::var(name).ok()).context("setup s3 deps")?;
-    let s3_canary_config =
-        build_s3_canary_config_from(|name| std::env::var(name).ok()).context("s3 canary config")?;
-    let event_cfg = build_event_transport_config().context("event transport config")?;
-    if event_cfg.topology == bootstrap::Topology::Demo {
-        anyhow::bail!(
-            "RSS_TOPOLOGY=demo is not supported in the production runtime; \
-             use durable-shared or durable-isolated"
-        );
-    }
-    let domain_transport =
-        wire_domain_transport_from(event_cfg.topology, |name| std::env::var(name).ok())
+    // BuildInfra phase: provider bundles, topology config, shared deps, and metrics exporter.
+    let (pg, deps, s3_canary_config, event_cfg, domain_transport, metrics_exporter) = phase_result(
+        RuntimePhase::BuildInfra,
+        async {
+            // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
+            // 缺配/连不上/迁移失败不静默 ready）。`setup` 是唯一公开构造路径（PG-BUNDLE-FUNNEL-01）。
+            let audit_admin_config =
+                build_pg_audit_admin_config().context("build audit admin postgres config")?;
+            let pg = PgRuntimeDeps::setup_with_audit_admin_config(
+                &build_pg_migrator_config()?,
+                &build_pg_config()?,
+                audit_admin_config.as_ref(),
+                legacy_config_plaintext_policy()?,
+                generated::event::PROJECTION_INPUTS,
+            )
             .await
-            .context("wire outbound domain transport")?;
+            .context("setup postgres deps")?;
 
-    // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
-    let deps = SharedRuntimeDeps {
-        pg: pg.clone(),
-        redis,
-        s3,
-        vault,
-        settings_config_value_key_name,
-        domain_transport: domain_transport.dispatch_handle(),
-    };
+            // vault capability bundle（#1498）：env → resolver → VaultRuntimeDeps（单源装配出口）。vault env 缺失即
+            // fail-fast（不静默装配 vault）；resolver 经 bundle dispatch 注入 settings，guard 经 runtime_resources 单源。
+            let vault = build_vault_runtime_deps(|name| std::env::var(name).ok())
+                .context("setup vault deps")?;
+            let settings_config_value_key_name =
+                build_settings_config_value_key_name_from(|name| std::env::var(name).ok())
+                    .context("settings config value key name")?;
+            // redis capability bundle（#1571 go-live）：Redis 是 distributed lock provider 的生产硬依赖。
+            // 缺 `RSS_REDIS_URL` 或启动期 PING 失败均 fail-fast，不保留 demo-optional 生产路径。
+            let redis = build_redis_runtime_deps(|name| std::env::var(name).ok())
+                .await
+                .context("setup redis deps")?;
+            // s3 capability bundle（#1164）：生产 object-store 真实接线。缺 S3 env 或 TLS/endpoint 误配均 fail-fast；
+            // readiness 由下方 runtime canary worker 周期执行真实 put/get/delete/get-miss。
+            let s3 = build_s3_runtime_deps_from(|name| std::env::var(name).ok())
+                .context("setup s3 deps")?;
+            let s3_canary_config = build_s3_canary_config_from(|name| std::env::var(name).ok())
+                .context("s3 canary config")?;
+            let event_cfg = build_event_transport_config().context("event transport config")?;
+            if event_cfg.topology == bootstrap::Topology::Demo {
+                anyhow::bail!(
+                    "RSS_TOPOLOGY=demo is not supported in the production runtime; \
+                     use durable-shared or durable-isolated"
+                );
+            }
+            let domain_transport =
+                wire_domain_transport_from(event_cfg.topology, |name| std::env::var(name).ok())
+                    .await
+                    .context("wire outbound domain transport")?;
 
-    // Prometheus 指标导出（#1253）：装进程级 `metrics` global recorder（counter!/gauge! 发射点经此写入）+ 持 render 句柄。
-    // **fail-fast**：global recorder 已装（重复 install）即 Err——误配在接线期暴露，不静默 noop。Arc<dyn> 共享给 /metrics handler。
-    // PromExporter 的 ManagedResource::shutdown 是文档化 no-op（pull exporter 无后台任务/连接），故不进 ShutdownStack。
-    //
-    // assembly.toml 治理豁免（与 oidc/vault/postgres 等 adapter 同——均在组合根注入、不在 `[[diportProviders]]` 声明）：
-    // `cargo xtask assembly validate` 的 `DiportPort` 仅 gate `diport::RevocationStore` 的「production 必须 durability=persistent」。
-    // `MetricsExporter` 是无状态 pull port，无 ephemeral/persistent 之分、无 dev/demo vs prod provider 选择，治理无可校验项 ⇒ 不入 enum。
-    let metrics_exporter: Arc<dyn diport::MetricsExporter> =
-        Arc::new(prometheus::PromExporter::install().context("install prometheus recorder")?);
+            // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
+            let deps = SharedRuntimeDeps {
+                pg: pg.clone(),
+                redis,
+                s3,
+                vault,
+                settings_config_value_key_name,
+                domain_transport: domain_transport.dispatch_handle(),
+            };
 
-    // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
-    let audit_domain = wire_audit(&deps).context("wire audit")?;
-    let identity_domain = wire_identity(&deps).context("wire identity")?;
-    // settings durable module（#1430 PERSIST-009）：domain 实例持 config 服务 + secret 仓储端口（挂 config-publish /
-    // secret-publish 业务路由）；module 携 configs_ready 探针。
-    let (settings_domain, settings_module) = wire_settings(&deps).await.context("wire settings")?;
+            // Prometheus 指标导出（#1253）：装进程级 `metrics` global recorder（counter!/gauge! 发射点经此写入）+ 持 render 句柄。
+            // **fail-fast**：global recorder 已装（重复 install）即 Err——误配在接线期暴露，不静默 noop。Arc<dyn> 共享给 /metrics handler。
+            // PromExporter 的 ManagedResource::shutdown 是文档化 no-op（pull exporter 无后台任务/连接），故不进 ShutdownStack。
+            //
+            // assembly.toml 治理豁免（与 oidc/vault/postgres 等 adapter 同——均在组合根注入、不在 `[[diportProviders]]` 声明）：
+            // `cargo xtask assembly validate` 的 `DiportPort` 仅 gate `diport::RevocationStore` 的「production 必须 durability=persistent」。
+            // `MetricsExporter` 是无状态 pull port，无 ephemeral/persistent 之分、无 dev/demo vs prod provider 选择，治理无可校验项 ⇒ 不入 enum。
+            let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
+                prometheus::PromExporter::install().context("install prometheus recorder")?,
+            );
 
-    // settings/identity/audit domain 实例注册（声明 routes/subscribers/probes）。
-    let settings_config_service = settings_domain.config_service();
-    let mut registry = bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])
-        .context("compose domains")?;
-
-    // 聚合各域 module result（settings configs_ready 探针；后续域只需多一行 module.merge(wire_X(&deps).await?)）。
-    let mut module = DomainModuleResult::default();
-    module.merge(settings_module);
-    module.merge(wire_session_sweeper(&pg).context("wire session sweeper")?);
-    module.merge(wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?);
-    // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
-    // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
-    module.resources.extend(deps.redis.runtime_resources());
-    module.resources.extend(deps.s3.runtime_resources());
-    module.resources.extend(deps.vault.runtime_resources());
-    let pg_readiness_period = build_readiness_interval();
-    let redis_readiness_period = build_redis_readiness_interval();
-
-    // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
-    // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
-    let rls_probe_name =
-        ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
-    registry
-        .probe(
-            rls_probe_name,
-            Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
-        )
-        .context("register rls_ready probe")?;
-    let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let redis_probe_name =
-        ProbeName::parse(REDIS_READY_PROBE_NAME).context("parse redis_ready probe name")?;
-    registry
-        .probe(
-            redis_probe_name,
-            Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
-        )
-        .context("register redis_ready probe")?;
-
-    // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
-    // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
-    module.merge(
-        domain_transport
-            .module_result()
-            .context("wire outbound domain transport module")?,
-    );
-    let distributed = wire_distributed(&deps).context("wire distributed")?;
-    let event_subscribers =
-        event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
-            .context("bridge generated event subscriptions")?;
-    let event_runtime = event_transport::wire_event_transport(
-        &pg,
-        distributed,
-        event_subscribers,
-        event_cfg,
-        settings_config_service,
-    )
-    .await
-    .context("wire event transport")?;
-    let event_infra_guards = event_runtime.infra_guards;
-    module.merge(event_runtime.module);
-
-    // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
-    for (name, probe) in module.probes {
-        let probe_label = name.as_str().to_owned();
-        registry
-            .probe(name, probe)
-            .with_context(|| format!("register module probe '{probe_label}'"))?;
-    }
-
-    // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
-    let redis_for_sampler = deps.redis.clone();
-    module.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(spawn_redis_readiness_sampler(
-            redis_for_sampler.clone(),
-            redis_readiness_period,
-            token,
-            Arc::clone(&redis_ready),
-        ))
-    }));
-    let domain_resources = module.resources;
-    let domain_workers = module.workers;
-    tracing::info!(
-        sample_interval_secs = pg_readiness_period.as_secs(),
-        "pg readiness sampler interval configured"
-    );
-    tracing::info!(
-        sample_interval_secs = redis_readiness_period.as_secs(),
-        "redis readiness sampler interval configured"
-    );
-
-    // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
-    // Auth decision audit is a flat durable sink, not the `audit::AuditRepo` hash-chain actor model.
-    let auth_audit_sink =
-        httpserve::AuditSinkHandle::new(pg.for_domain::<caps::Audit>().auth_audit_sink());
-    let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
-    let mut listeners = assemble_authed_routers(
-        &mut registry,
-        provider,
-        auth_audit_sink,
-        auth_audit_clock,
-        identity_domain.primary_authorizer(),
-    )
-    .context("assemble authed routers")?;
-
-    // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
-    // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
-    let reporter = Arc::new(registry.take_health_reporter());
-    let (listener, routes) =
-        health_listener(reporter, metrics_exporter).context("build health listener")?;
-    listeners.push(AssembledListener::plain(listener, routes));
-
-    // LIFO 注册顺序：otel exporter 先注册（最后关，关停期 span flush）→ pg pool guard → sampler →
-    // event infra guards（AMQP+Redis）→ module resources/workers（event + 域）→
-    // listeners 最后注册（最先 drain）。完整关停（LIFO 逆序）：listeners → 域 workers → 域 resources →
-    //   event workers（relay+consumers drain）→ event infra guards（AMQP+Redis 断连）→ sampler → pg pool guard
-    //   → otel exporter（trace flush 在所有组件静默后）。otel 仅在配了 RSS_OTEL_ENDPOINT 时存在。
-    serve_until_signal(listeners, move |stack| {
-        // otel trace 导出 exporter（若已配 RSS_OTEL_ENDPOINT）**最先**注册 → LIFO 最后 drain：span flush 在所有
-        // 组件（listeners → workers → 域 resources → sampler → pool guard）全部静默后执行，不丢失关停期 span。
-        // reason: trace flush 须在不再产生新 span 后做，故注册在最前（=最后关）；未配 endpoint 时 None，无注册。
-        if let Some(exporter) = trace_export {
-            stack.register_detached(DynManagedResource::new_box(exporter));
+            Ok::<_, anyhow::Error>((
+                pg,
+                deps,
+                s3_canary_config,
+                event_cfg,
+                domain_transport,
+                metrics_exporter,
+            ))
         }
-        // 再注册框架 pg infra（非域产物）：pool guard（LIFO 较后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
-        stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
-        if let Some(guard) = pg.audit_admin_store_guard() {
-            stack.register_detached(DynManagedResource::new_box(guard));
+        .await,
+    )?;
+
+    // WireDomains phase: domain roots, registry/module outputs, probes, workers, and event transport.
+    let (
+        mut registry,
+        identity_domain,
+        pg_readiness_period,
+        event_infra_guards,
+        domain_resources,
+        domain_workers,
+    ) = phase_result(
+        RuntimePhase::WireDomains,
+        async {
+            // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
+            let audit_domain = wire_audit(&deps).context("wire audit")?;
+            let identity_domain = wire_identity(&deps).context("wire identity")?;
+            // settings durable module（#1430 PERSIST-009）：domain 实例持 config 服务 + secret 仓储端口（挂 config-publish /
+            // secret-publish 业务路由）；module 携 configs_ready 探针。
+            let (settings_domain, settings_module) =
+                wire_settings(&deps).await.context("wire settings")?;
+
+            // settings/identity/audit domain 实例注册（声明 routes/subscribers/probes）。
+            let settings_config_service = settings_domain.config_service();
+            let mut registry =
+                bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])
+                    .context("compose domains")?;
+
+            // 聚合各域 module result（settings configs_ready 探针；后续域只需多一行 module.merge(wire_X(&deps).await?)）。
+            let mut module = DomainModuleResult::default();
+            module.merge(settings_module);
+            module.merge(wire_session_sweeper(&pg).context("wire session sweeper")?);
+            module.merge(wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?);
+            // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
+            // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
+            module.resources.extend(deps.redis.runtime_resources());
+            module.resources.extend(deps.s3.runtime_resources());
+            module.resources.extend(deps.vault.runtime_resources());
+            let pg_readiness_period = build_readiness_interval();
+            let redis_readiness_period = build_redis_readiness_interval();
+
+            // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
+            // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
+            let rls_probe_name =
+                ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
+            registry
+                .probe(
+                    rls_probe_name,
+                    Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
+                )
+                .context("register rls_ready probe")?;
+            let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let redis_probe_name =
+                ProbeName::parse(REDIS_READY_PROBE_NAME).context("parse redis_ready probe name")?;
+            registry
+                .probe(
+                    redis_probe_name,
+                    Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
+                )
+                .context("register redis_ready probe")?;
+
+            // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
+            // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
+            module.merge(
+                domain_transport
+                    .module_result()
+                    .context("wire outbound domain transport module")?,
+            );
+            let distributed = wire_distributed(&deps).context("wire distributed")?;
+            let event_subscribers =
+                event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
+                    .context("bridge generated event subscriptions")?;
+            let event_runtime = event_transport::wire_event_transport(
+                &pg,
+                distributed,
+                event_subscribers,
+                event_cfg,
+                settings_config_service,
+            )
+            .await
+            .context("wire event transport")?;
+            let event_infra_guards = event_runtime.infra_guards;
+            module.merge(event_runtime.module);
+
+            // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
+            for (name, probe) in module.probes {
+                let probe_label = name.as_str().to_owned();
+                registry
+                    .probe(name, probe)
+                    .with_context(|| format!("register module probe '{probe_label}'"))?;
+            }
+
+            // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
+            let redis_for_sampler = deps.redis.clone();
+            module.workers.push(Box::new(move |token| {
+                DynManagedResource::new_box(spawn_redis_readiness_sampler(
+                    redis_for_sampler.clone(),
+                    redis_readiness_period,
+                    token,
+                    Arc::clone(&redis_ready),
+                ))
+            }));
+            let domain_resources = module.resources;
+            let domain_workers = module.workers;
+            tracing::info!(
+                sample_interval_secs = pg_readiness_period.as_secs(),
+                "pg readiness sampler interval configured"
+            );
+            tracing::info!(
+                sample_interval_secs = redis_readiness_period.as_secs(),
+                "redis readiness sampler interval configured"
+            );
+
+            Ok::<_, anyhow::Error>((
+                registry,
+                identity_domain,
+                pg_readiness_period,
+                event_infra_guards,
+                domain_resources,
+                domain_workers,
+            ))
         }
-        // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
-        stack.register_with_token(move |token| {
-            DynManagedResource::new_box(pg.spawn_readiness_sampler(pg_readiness_period, token))
-        });
-        // 事件传输 infra guards（AMQP + Redis）先于 workers 注册 → LIFO 在 workers drain 后才断连接。
-        for g in event_infra_guards {
-            stack.register_detached(g);
-        }
-        // module 产物注册在事件传输 infra 之后 → LIFO 先于 AMQP/Redis 排空（relay/consumer drain 后再断连接）。
-        for r in domain_resources {
-            stack.register_detached(r);
-        }
-        for w in domain_workers {
-            stack.register_with_token(w);
-        }
-    })
-    .await
+        .await,
+    )?;
+
+    // Finalize phase: authenticated routers and the dedicated health listener.
+    let listeners = phase_result(
+        RuntimePhase::Finalize,
+        (|| {
+            // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
+            // Auth decision audit is a flat durable sink, not the `audit::AuditRepo` hash-chain actor model.
+            let auth_audit_sink =
+                httpserve::AuditSinkHandle::new(pg.for_domain::<caps::Audit>().auth_audit_sink());
+            let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
+            let mut listeners = assemble_authed_routers(
+                &mut registry,
+                provider,
+                auth_audit_sink,
+                auth_audit_clock,
+                identity_domain.primary_authorizer(),
+            )
+            .context("assemble authed routers")?;
+
+            // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
+            // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
+            let reporter = Arc::new(registry.take_health_reporter());
+            let (listener, routes) =
+                health_listener(reporter, metrics_exporter).context("build health listener")?;
+            listeners.push(AssembledListener::plain(listener, routes));
+
+            Ok::<_, anyhow::Error>(listeners)
+        })(),
+    )?;
+
+    let trace_export = runtime_inputs.into_trace_export();
+    // Launch phase: listener serving plus LIFO shutdown resource registration.
+    phase_result(
+        RuntimePhase::Launch,
+        serve_until_signal(listeners, move |stack| {
+            // otel trace 导出 exporter（若已配 RSS_OTEL_ENDPOINT）**最先**注册 → LIFO 最后 drain：span flush 在所有
+            // 组件（listeners → workers → 域 resources → sampler → pool guard）全部静默后执行，不丢失关停期 span。
+            // reason: trace flush 须在不再产生新 span 后做，故注册在最前（=最后关）；未配 endpoint 时 None，无注册。
+            if let Some(exporter) = trace_export {
+                stack.register_detached(DynManagedResource::new_box(exporter));
+            }
+            // 再注册框架 pg infra（非域产物）：pool guard（LIFO 较后关——sampler 停后再关池，避免在已关闭 pool 上发 probe）。
+            stack.register_detached(DynManagedResource::new_box(pg.store_guard()));
+            if let Some(guard) = pg.audit_admin_store_guard() {
+                stack.register_detached(DynManagedResource::new_box(guard));
+            }
+            // 再注册 sampler（spawn+adopt 收口进 bundle；child token 广播取消；LIFO：listener drain → sampler 停 → pool close）。
+            stack.register_with_token(move |token| {
+                DynManagedResource::new_box(pg.spawn_readiness_sampler(pg_readiness_period, token))
+            });
+            // 事件传输 infra guards（AMQP + Redis）先于 workers 注册 → LIFO 在 workers drain 后才断连接。
+            for g in event_infra_guards {
+                stack.register_detached(g);
+            }
+            // module 产物注册在事件传输 infra 之后 → LIFO 先于 AMQP/Redis 排空（relay/consumer drain 后再断连接）。
+            for r in domain_resources {
+                stack.register_detached(r);
+            }
+            for w in domain_workers {
+                stack.register_with_token(w);
+            }
+        })
+        .await
+        .map(|()| RuntimeOutputs::completed()),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

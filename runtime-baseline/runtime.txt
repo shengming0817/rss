@@ -81,7 +81,7 @@ merge = present
 mergeExtends = probes,resources,workers
 
 [runtime.run.orderedAnchors]
-01 | run.provider.oidc | assemblies/runtime/src/lib.rs | build_provider()? | status=ok
+01 | run.provider.oidc | assemblies/runtime/src/lib.rs | phase_result(RuntimePhase::BuildProvider, build_provider()) | status=ok
 02 | run.provider.pg | assemblies/runtime/src/lib.rs | PgRuntimeDeps::setup_with_audit_admin_config | status=ok
 03 | run.provider.vault | assemblies/runtime/src/lib.rs | build_vault_runtime_deps(|name| std::env::var(name).ok()) | status=ok
 04 | run.provider.redis | assemblies/runtime/src/lib.rs | build_redis_runtime_deps(|name| std::env::var(name).ok()) | status=ok

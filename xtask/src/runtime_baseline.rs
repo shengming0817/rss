@@ -438,7 +438,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.provider.oidc",
         path: RUNTIME_LIB_PATH,
-        pattern: "build_provider()?",
+        pattern: "phase_result(RuntimePhase::BuildProvider, build_provider())",
     },
     AnchorSpec {
         id: "run.provider.pg",
@@ -1139,6 +1139,34 @@ diportProviders = []
             report.findings.iter().any(|f| {
                 f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_provider_anchor_requires_real_provider_call() -> Result<()> {
+        let root = fixture_root("runtime-baseline-provider-anchor-real-call")?;
+        let mut lines = Vec::new();
+        for anchor in RUNTIME_ANCHORS {
+            if anchor.id == "run.provider.oidc" {
+                lines.push("phase_result(RuntimePhase::BuildProvider, Ok::<_, anyhow::Error>(()))");
+            } else {
+                lines.push(anchor.pattern);
+            }
+            if anchor.id == "run.shared-deps" {
+                lines.push("}");
+            }
+        }
+        write(
+            &root.join(RUNTIME_LIB_PATH),
+            &format!("pub async fn run() {{\n{}\n}}\n", lines.join("\n")),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.oidc")
+            }),
+            "provider phase marker alone must not satisfy the real provider construction anchor"
         );
         Ok(())
     }
