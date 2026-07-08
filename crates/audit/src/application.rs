@@ -952,6 +952,7 @@ mod tests {
     use crate::domain::AuditChainHasher;
     use crate::domain::test_support::{TestKeyedHasher, keyed_hasher};
     use crate::internal::mem::InMemAuditRepo;
+    use crate::ports::AuditLedgerVerifyReport;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const CANON_SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
@@ -1021,10 +1022,86 @@ mod tests {
         ) -> Result<AuditListResult, AuditError> {
             self.repo.list(tenant, page).await
         }
+
+        async fn verify_tenant(
+            &self,
+            tenant: vocab::TenantId,
+            batch: vocab::Limit,
+        ) -> Result<AuditLedgerVerifyReport, AuditError> {
+            let mut cursor = None;
+            let mut checked_entries = 0u64;
+            loop {
+                let result = self
+                    .repo
+                    .list(
+                        tenant,
+                        AuditPage {
+                            limit: batch,
+                            cursor,
+                        },
+                    )
+                    .await?;
+                checked_entries = checked_entries
+                    .checked_add(u64::try_from(result.entries.len()).map_err(AuditError::storage)?)
+                    .ok_or(AuditError::SequenceGap)?;
+                if !result.has_more {
+                    break;
+                }
+                cursor = result.next_cursor;
+                if cursor.is_none() {
+                    return Err(AuditError::SequenceGap);
+                }
+            }
+            Ok(AuditLedgerVerifyReport {
+                tenant,
+                checked_entries,
+            })
+        }
     }
 
     fn admin_repo(repo: Arc<DynAuditRepo<'static>>) -> Arc<DynAuditAdminRepo<'static>> {
         Arc::from(DynAuditAdminRepo::new_box(DelegatingAdminRepo::new(repo)))
+    }
+
+    #[derive(Default)]
+    struct CountingAdminRepo {
+        list_calls: Arc<std::sync::atomic::AtomicUsize>,
+        verify_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingAdminRepo {
+        fn list_calls(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.list_calls)
+        }
+
+        fn boxed(self) -> Arc<DynAuditAdminRepo<'static>> {
+            Arc::from(DynAuditAdminRepo::new_box(self))
+        }
+    }
+
+    impl crate::ports::AuditAdminRepo for CountingAdminRepo {
+        async fn list_tenant(
+            &self,
+            _tenant: vocab::TenantId,
+            _page: AuditPage,
+        ) -> Result<AuditListResult, AuditError> {
+            self.list_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(AuditError::HashMismatch)
+        }
+
+        async fn verify_tenant(
+            &self,
+            tenant: vocab::TenantId,
+            _batch: vocab::Limit,
+        ) -> Result<AuditLedgerVerifyReport, AuditError> {
+            self.verify_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(AuditLedgerVerifyReport {
+                tenant,
+                checked_entries: 0,
+            })
+        }
     }
 
     #[derive(Clone)]
@@ -2010,21 +2087,36 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_rejects_non_super_admin_even_same_tenant() {
-        let repo = repo();
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let admin = principal(vocab::PrincipalKind::Admin, Some(tenant));
+        for (label, kind, principal_tenant) in [
+            ("user", vocab::PrincipalKind::User, Some(tenant)),
+            ("device", vocab::PrincipalKind::Device, Some(tenant)),
+            ("admin", vocab::PrincipalKind::Admin, Some(tenant)),
+            ("service", vocab::PrincipalKind::Service, None),
+            ("anonymous", vocab::PrincipalKind::Anonymous, None),
+        ] {
+            let repo = repo();
+            let admin = CountingAdminRepo::default();
+            let list_calls = admin.list_calls();
+            let principal = principal(kind, principal_tenant);
 
-        let (status, body) = get_entries_with(
-            repo.clone(),
-            Some(admin_repo(repo)),
-            Some(admin),
-            &format!("?tenantId={CANON_TENANT}"),
-        )
-        .await;
+            let (status, body) = get_entries_with(
+                repo,
+                Some(admin.boxed()),
+                Some(principal),
+                &format!("?tenantId={CANON_TENANT}"),
+            )
+            .await;
 
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{label}");
+            assert_eq!(
+                list_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{label} must be rejected before admin repo read"
+            );
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN", "{label}");
+        }
     }
 
     #[tokio::test]
@@ -2118,10 +2210,12 @@ mod tests {
     async fn target_tenant_read_fails_closed_when_audit_fails() {
         let repo = repo();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let admin = CountingAdminRepo::default();
+        let list_calls = admin.list_calls();
 
         let (status, body) = get_entries_with_sink(
-            repo.clone(),
-            Some(admin_repo(repo)),
+            repo,
+            Some(admin.boxed()),
             Some(principal),
             RecordingAuditSink::failing(),
             &format!("?tenantId={CANON_TENANT}"),
@@ -2129,6 +2223,11 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            list_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "audit append failure must stop before admin repo read"
+        );
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(json["error"]["code"], "ERR_CORE_INTERNAL");
     }

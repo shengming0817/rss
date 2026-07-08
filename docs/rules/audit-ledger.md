@@ -68,3 +68,35 @@ fail-closed 不读取。Postgres admin repo 使用可选专用 `rss_audit_admin`
 只读事务中 `SET LOCAL rss.tenant_id = targetTenant`，复用现有 tenant-isolation RLS policy；不得授写权限、
 其它 public relation 权限，也不得新增 allow-all RLS policy。admin 池未配置时 privileged audit read 返回
 501 `ERR_CORE_NOT_IMPLEMENTED`，配置不完整或权限不安全则启动失败。
+
+## Operator full-chain verify
+
+生产运维入口是 `rss` binary：
+
+```
+rss audit-ledger verify \
+  --operator-service-token <token> \
+  --operator-tenant <uuid> \
+  --tenant <uuid> \
+  [--batch-size <1..500>]
+```
+
+该命令只验证一个指定 tenant 的完整链，不提供 `--all-tenants`、`--namespace` 或旧 alias。当前
+`audit_entries` schema 没有 namespace 维度；接受 namespace flag 会制造虚假隔离语义，因此必须 fail-closed。
+
+命令使用 `AuditAdminRepo::verify_tenant(tenant: TenantId, batch: vocab::Limit)`，而不是 append-capable
+`AuditRepo`。Postgres 实现只经 `rss_audit_admin` 只读池分页扫描整条 tenant chain：任何 seq gap / dup、
+prev 链接错误、entry_hash mismatch 或混租户行进入窗口都返回 `AuditError`。`verify_tail` 仍只是 bootstrap /
+诊断用的尾部窗口验证，不能代表 full-chain verify。
+
+operator 授权需要同时满足：
+
+- service-token 验签成功，且 token tenant 绑定到 `--operator-tenant`。
+- 验出的 principal 必须是 service principal。
+- 必填环境变量 `RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=subject|tenant,...` 中存在精确匹配
+  `subject == verified service subject` 且 `tenant == --tenant` 的 grant。无 wildcard、无 namespace、无
+  action fallback。
+
+命令 start / finish 都写 `auth_audit_events`，`resource_kind="audit.ledger.verify"`，action 固定为
+`audit.ledger.verify.start|finish`。失败原因使用固定枚举字符串，例如 `operator_auth`、
+`operator_authorization`、`operator_grants`、`operator_provider_config`、`run_error`。

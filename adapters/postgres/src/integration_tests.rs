@@ -16392,8 +16392,8 @@ async fn t24_rls_refresh_tokens_enforces_tenant_isolation() -> TestResult {
 // TA11: RLS NULL tenant fail-closed——未设 rss.tenant_id → 0 行
 // TA12: 空租户链 list + verify_tail 均 Ok
 
-// trait AuditRepo 须在 scope 才能调用 append / list / verify_tail 方法。
-use audit::ports::AuditRepo as _;
+// trait AuditRepo/AuditAdminRepo 须在 scope 才能调用 append / list / verify_tail / verify_tenant 方法。
+use audit::ports::{AuditAdminRepo as _, AuditRepo as _};
 // base64::Engine::encode 须在 scope（URL_SAFE_NO_PAD.encode(...)）。
 use base64::Engine as _;
 
@@ -16402,6 +16402,13 @@ fn make_audit_repo(
     store: &PgStore,
 ) -> crate::PgAuditRepo<crate::audit_repo::test_support::TestVerifier> {
     crate::PgAuditRepo::new(store, crate::audit_repo::test_support::test_hasher(0x5a))
+}
+
+/// 构造 audit admin 只读仓储（固定 0x5a key hasher）。
+fn make_audit_admin_repo(
+    store: &PgStore,
+) -> crate::PgAuditAdminRepo<crate::audit_repo::test_support::TestVerifier> {
+    crate::PgAuditAdminRepo::new(store, crate::audit_repo::test_support::test_hasher(0x5a))
 }
 
 /// 构造审计记录（nanos 可变，其余字段固定；actor UUID 硬编码确定性 ID）。
@@ -16890,6 +16897,185 @@ async fn ta12_audit_empty_tenant_list_and_verify_tail_ok() -> TestResult {
 
     repo.verify_tail(tenant, 10).await?;
 
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA15: audit admin full-chain verify 从 genesis 扫到尾，返回已验证条目数。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta15_audit_admin_verify_tenant_clean_chain_success() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+    for _ in 0..5 {
+        repo.append(make_audit_record(tenant, 0)).await?;
+    }
+
+    let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
+    let admin_repo = make_audit_admin_repo(&audit_admin);
+    let report = admin_repo
+        .verify_tenant(tenant, vocab::Limit::new(2).unwrap())
+        .await?;
+
+    assert_eq!(report.tenant, tenant);
+    assert_eq!(report.checked_entries, 5);
+    audit_admin.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA16: audit admin verify 的 tenant scope 精确隔离，A/B 只验证各自链。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta16_audit_admin_verify_tenant_ab_isolation() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+    repo.append(make_audit_record(tenant_a, 0)).await?;
+    repo.append(make_audit_record(tenant_a, 0)).await?;
+    repo.append(make_audit_record(tenant_b, 0)).await?;
+
+    let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
+    let admin_repo = make_audit_admin_repo(&audit_admin);
+    let a = admin_repo
+        .verify_tenant(tenant_a, vocab::Limit::new(1).unwrap())
+        .await?;
+    let b = admin_repo
+        .verify_tenant(tenant_b, vocab::Limit::new(1).unwrap())
+        .await?;
+
+    assert_eq!(a.checked_entries, 2, "tenant A chain only");
+    assert_eq!(b.checked_entries, 1, "tenant B chain only");
+    audit_admin.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA17: audit admin full-chain verify 覆盖 tail-verify 漏洞：genesis 篡改与 seq gap 都 fail-closed。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta17_audit_admin_verify_tenant_tamper_and_seq_gap_fail() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tampered_tenant_str = uuid::Uuid::new_v4().to_string();
+    let tampered_tenant = vocab::TenantId::parse(&tampered_tenant_str).unwrap();
+    let gap_tenant_str = uuid::Uuid::new_v4().to_string();
+    let gap_tenant = vocab::TenantId::parse(&gap_tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+    for _ in 0..5 {
+        repo.append(make_audit_record(tampered_tenant, 0)).await?;
+        repo.append(make_audit_record(gap_tenant, 0)).await?;
+    }
+    sqlx::query("UPDATE audit_entries SET entry_hash = $1 WHERE tenant_id = $2::uuid AND seq = 0")
+        .bind(vec![0xAAu8; 32])
+        .bind(&tampered_tenant_str)
+        .execute(&store.pool)
+        .await?;
+    sqlx::query("DELETE FROM audit_entries WHERE tenant_id = $1::uuid AND seq = 2")
+        .bind(&gap_tenant_str)
+        .execute(&store.pool)
+        .await?;
+
+    let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
+    let admin_repo = make_audit_admin_repo(&audit_admin);
+    let tampered = admin_repo
+        .verify_tenant(tampered_tenant, vocab::Limit::new(2).unwrap())
+        .await;
+    let gap = admin_repo
+        .verify_tenant(gap_tenant, vocab::Limit::new(2).unwrap())
+        .await;
+
+    assert!(
+        matches!(tampered, Err(audit::ports::AuditError::HashMismatch)),
+        "tampered genesis must fail full-chain verify, got: {tampered:?}"
+    );
+    assert!(
+        matches!(gap, Err(audit::ports::AuditError::SequenceGap)),
+        "deleted seq must fail full-chain verify, got: {gap:?}"
+    );
+    audit_admin.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA18: rss_audit_admin 是 verify/read-only capability，不得拥有 INSERT/UPDATE/DELETE。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta18_audit_admin_role_dml_is_rejected() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant_str = uuid::Uuid::new_v4().to_string();
+    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let repo = make_audit_repo(&store);
+    repo.append(make_audit_record(tenant, 0)).await?;
+
+    let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
+    {
+        let mut tx = audit_admin.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await?;
+        let update = sqlx::query(
+            "UPDATE audit_entries SET action = 'tampered:value' WHERE tenant_id = $1::uuid",
+        )
+        .bind(&tenant_str)
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            update.is_err(),
+            "rss_audit_admin must not UPDATE audit_entries"
+        );
+        tx.rollback().await.ok();
+    }
+    {
+        let mut tx = audit_admin.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await?;
+        let delete = sqlx::query("DELETE FROM audit_entries WHERE tenant_id = $1::uuid")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await;
+        assert!(
+            delete.is_err(),
+            "rss_audit_admin must not DELETE audit_entries"
+        );
+        tx.rollback().await.ok();
+    }
+    {
+        let mut tx = audit_admin.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_str)
+            .execute(&mut *tx)
+            .await?;
+        let insert = sqlx::query(
+            "INSERT INTO audit_entries \
+             (tenant_id, seq, prev_hash, entry_hash, actor, actor_kind, action, resource_kind, resource_id, outcome, recorded_at_secs, recorded_at_nanos) \
+             VALUES ($1::uuid, 99, $2, $2, $3::uuid, 'user', 'audit:read', 'session', 'sess-1', 'success', 0, 0)",
+        )
+        .bind(&tenant_str)
+        .bind(vec![0u8; 32])
+        .bind("11111111-2222-4333-8444-555555555555")
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            insert.is_err(),
+            "rss_audit_admin must not INSERT audit_entries"
+        );
+        tx.rollback().await.ok();
+    }
+
+    audit_admin.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }

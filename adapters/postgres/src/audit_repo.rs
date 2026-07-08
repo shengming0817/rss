@@ -25,9 +25,9 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use audit::ports::{
-    AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditListResult, AuditOutcome,
-    AuditPage, AuditRecord, AuditRepo, EntryHash, ResourceRef, TenantId, actor_kind_from_db,
-    actor_kind_to_db,
+    AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditLedgerVerifyReport,
+    AuditListResult, AuditOutcome, AuditPage, AuditRecord, AuditRepo, EntryHash, ResourceRef,
+    TenantId, actor_kind_from_db, actor_kind_to_db,
 };
 use base64::Engine as _;
 use primitives::MacVerifier;
@@ -41,7 +41,7 @@ use crate::cotx::PgTenantPool;
 // ---------------------------------------------------------------------------
 
 /// SELECT 列清单（list / verify_tail / 前驱行共用；actor::text 转换 UUID→String，无需 uuid feature）。
-const SELECT_COLS: &str = "seq, prev_hash, entry_hash, actor::text AS actor, actor_kind, \
+const SELECT_COLS: &str = "tenant_id::text AS tenant_id, seq, prev_hash, entry_hash, actor::text AS actor, actor_kind, \
                            action, resource_kind, resource_id, outcome, \
                            recorded_at_secs, recorded_at_nanos";
 
@@ -143,9 +143,15 @@ fn decode_cursor(cursor: &vocab::Cursor) -> Result<u64, AuditError> {
 
 /// 从数据库行重建 [`AuditEntry`]（fail-closed：未知 actor_kind / outcome / 无效 UUID → Storage）。
 ///
-/// 所有列名须与 [`SELECT_COLS`] + 查询 `actor::text AS actor` 对齐。`tenant` 来自调用方参数
-/// （RLS + WHERE tenant_id 双重隔离已保证行属于该租户，无需从行读取）。
+/// 所有列名须与 [`SELECT_COLS`] + 查询 `actor::text AS actor` 对齐。`tenant` 来自调用方 typed scope；
+/// 行内 `tenant_id` 仍读取并比对，作为 RLS + WHERE 之外的混租户防御纵深。
 fn hydrate_row(row: &sqlx::postgres::PgRow, tenant: TenantId) -> Result<AuditEntry, AuditError> {
+    let tenant_str: String = row.try_get("tenant_id").map_err(storage)?;
+    let row_tenant = TenantId::parse(&tenant_str).map_err(AuditError::storage)?;
+    if row_tenant != tenant {
+        return Err(AuditError::ChainBroken);
+    }
+
     let seq_i64: i64 = row.try_get("seq").map_err(storage)?;
     let seq = u64::try_from(seq_i64).map_err(AuditError::storage)?;
 
@@ -463,6 +469,45 @@ async fn verify_tail_in_tx<M: MacVerifier>(
     hasher.verify_window(predecessor.as_ref(), &entries)
 }
 
+/// verify_tenant 事务体：从 genesis 起按 batch 分页扫完整条 tenant chain。
+async fn verify_full_in_tx<M: MacVerifier>(
+    tx: &mut PgConnection,
+    tenant_uuid: &str,
+    tenant: TenantId,
+    batch: usize,
+    hasher: &AuditChainHasher<M>,
+) -> Result<AuditLedgerVerifyReport, AuditError> {
+    if batch == 0 {
+        return Err(AuditError::storage(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "audit ledger verify batch must be greater than zero",
+        )));
+    }
+
+    let mut start_seq = 0u64;
+    let mut checked_entries = 0u64;
+    loop {
+        let result = list_in_tx(tx, tenant_uuid, tenant, start_seq, batch, hasher).await?;
+        let window_len = u64::try_from(result.entries.len()).map_err(AuditError::storage)?;
+        checked_entries = checked_entries
+            .checked_add(window_len)
+            .ok_or(AuditError::SequenceGap)?;
+        if !result.has_more {
+            break;
+        }
+        if window_len == 0 {
+            return Err(AuditError::SequenceGap);
+        }
+        start_seq = start_seq
+            .checked_add(window_len)
+            .ok_or(AuditError::SequenceGap)?;
+    }
+    Ok(AuditLedgerVerifyReport {
+        tenant,
+        checked_entries,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // AuditRepo impl
 // ---------------------------------------------------------------------------
@@ -546,6 +591,28 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
                 move |conn| {
                     Box::pin(async move {
                         list_in_tx(conn, &tenant_uuid, tenant, start_seq, limit, &hasher).await
+                    })
+                },
+                storage,
+            )
+            .await
+    }
+
+    /// 按目标租户验证完整审计链；tenant scope 由专用 admin pool 上的 `SET LOCAL` 注入。
+    async fn verify_tenant(
+        &self,
+        tenant: TenantId,
+        batch: vocab::Limit,
+    ) -> Result<AuditLedgerVerifyReport, AuditError> {
+        let tenant_uuid = tenant_str(tenant);
+        let batch = usize::from(batch.get());
+        let hasher = Arc::clone(&self.hasher);
+        self.pool
+            .read_map(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        verify_full_in_tx(conn, &tenant_uuid, tenant, batch, &hasher).await
                     })
                 },
                 storage,

@@ -16,8 +16,9 @@
 //! ⇒ 无 key/clock 不可构造（编译期守）。
 //!
 //! INVARIANT: BINS-AUTH-SYNC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard, #1309) — `bins/server` 是 serving-only thin entry；`bins/rss` 先
-//! dispatch 显式 operator CLI（当前含 settings ConfigValue maintenance），未知参数 fail-closed，未命中 CLI
-//! 时再调用同一份 `runtime::run()` serving 组合根。auth wiring 一致性由「单一 `run()` 源」编译期保证，原
+//! dispatch 显式 operator CLI（audit ledger verify、settings ConfigValue maintenance、projection/DLQ
+//! maintenance），未知参数 fail-closed，未命中 CLI 时再调用同一份 `runtime::run()` serving 组合根。auth wiring
+//! 一致性由「单一 `run()` 源」编译期保证，原
 //! xtask Medium 守卫 `bins_auth_sync.rs` 退役（双写消除、无第二副本可漂移）。
 
 pub mod auth_bridge;
@@ -65,7 +66,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use audit::AuditDomain;
-use audit::ports::{AuditChainHasher, DynAuditRepo};
+use audit::ports::{AuditAdminRepo as _, AuditChainHasher, AuditLedgerVerifyReport, DynAuditRepo};
 use base64::Engine as _;
 use consistency::{EngineErrorKind, IdemKey, ProjectionBatchLimit, SerialInOrder};
 use crypto::RustCryptoMacVerifier;
@@ -1426,6 +1427,440 @@ where
 /// 执行 `rss projections replay|status|swap`。
 pub async fn run_projection_control_command(args: &[String]) -> anyhow::Result<()> {
     run_projection_control_command_with_runtime(args, &ProductionProjectionControlRuntime).await
+}
+
+/// `rss` binary 是否请求 per-tenant audit ledger full-chain verify。
+#[must_use]
+pub fn is_audit_ledger_verify_command(args: &[String]) -> bool {
+    matches!(
+        args,
+        [cmd, sub, ..] if cmd == "audit-ledger" && sub == "verify"
+    )
+}
+
+const AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV: &str = "RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS";
+const UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR: &str = "unverified-service-token";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditLedgerVerifyArgs {
+    operator_service_token: String,
+    operator_tenant: vocab::TenantId,
+    tenant: vocab::TenantId,
+    batch: vocab::Limit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditLedgerVerifyGrant {
+    subject: String,
+    tenant: vocab::TenantId,
+}
+
+fn audit_ledger_verify_usage() -> &'static str {
+    "usage: rss audit-ledger verify --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> [--batch-size <1..500>]"
+}
+
+fn parse_audit_ledger_verify_batch(raw: &str) -> anyhow::Result<vocab::Limit> {
+    let value = parse_positive_usize(raw, "--batch-size")?;
+    let value = u16::try_from(value).context("--batch-size exceeds u16")?;
+    vocab::Limit::new(value).context("--batch-size must be <= 500")
+}
+
+fn parse_audit_ledger_verify_args(args: &[String]) -> anyhow::Result<AuditLedgerVerifyArgs> {
+    anyhow::ensure!(
+        is_audit_ledger_verify_command(args),
+        audit_ledger_verify_usage()
+    );
+    let mut operator_service_token = None;
+    let mut operator_tenant = None;
+    let mut tenant = None;
+    let mut batch = vocab::Limit::new(500).context("default audit ledger verify batch")?;
+    let mut batch_seen = false;
+
+    let mut it = args[2..].iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--operator-service-token" => {
+                let raw = next_cli_value(&mut it, "--operator-service-token")?;
+                let trimmed = raw.trim();
+                anyhow::ensure!(
+                    !trimmed.is_empty(),
+                    "--operator-service-token must be non-empty"
+                );
+                set_cli_arg_once(
+                    &mut operator_service_token,
+                    "--operator-service-token",
+                    trimmed.to_owned(),
+                )?;
+            }
+            "--operator-tenant" => {
+                let raw = next_cli_value(&mut it, "--operator-tenant")?;
+                let parsed = vocab::TenantId::parse(raw)
+                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
+                set_cli_arg_once(&mut operator_tenant, "--operator-tenant", parsed)?;
+            }
+            "--tenant" => {
+                let raw = next_cli_value(&mut it, "--tenant")?;
+                let parsed = vocab::TenantId::parse(raw)
+                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
+                set_cli_arg_once(&mut tenant, "--tenant", parsed)?;
+            }
+            "--batch-size" => {
+                anyhow::ensure!(!batch_seen, "--batch-size must not be repeated");
+                let raw = next_cli_value(&mut it, "--batch-size")?;
+                batch = parse_audit_ledger_verify_batch(raw)?;
+                batch_seen = true;
+            }
+            "--all-tenants" => {
+                anyhow::bail!("audit ledger verify does not support --all-tenants")
+            }
+            "--namespace" => {
+                anyhow::bail!("audit ledger verify does not support --namespace")
+            }
+            other => anyhow::bail!("unknown audit ledger verify argument: {other}"),
+        }
+    }
+
+    Ok(AuditLedgerVerifyArgs {
+        operator_service_token: operator_service_token
+            .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?,
+        operator_tenant: operator_tenant
+            .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?,
+        tenant: tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
+        batch,
+    })
+}
+
+fn audit_ledger_verify_resource_id(parsed: &AuditLedgerVerifyArgs) -> String {
+    format!("tenant={} batch_size={}", parsed.tenant, parsed.batch.get())
+}
+
+fn parse_audit_ledger_verify_grants(raw: &str) -> anyhow::Result<Vec<AuditLedgerVerifyGrant>> {
+    let raw = raw.trim();
+    anyhow::ensure!(
+        !raw.is_empty(),
+        "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} must not be empty"
+    );
+    let mut grants = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        anyhow::ensure!(
+            !entry.is_empty(),
+            "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} must not contain empty entries"
+        );
+        let parts: Vec<&str> = entry.split('|').map(str::trim).collect();
+        anyhow::ensure!(
+            parts.len() == 2,
+            "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} entries must be subject|tenant"
+        );
+        let [subject, tenant] = parts.as_slice() else {
+            unreachable!("len checked");
+        };
+        anyhow::ensure!(
+            !subject.is_empty(),
+            "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} subject must be non-empty"
+        );
+        grants.push(AuditLedgerVerifyGrant {
+            subject: (*subject).to_owned(),
+            tenant: vocab::TenantId::parse(tenant).with_context(|| {
+                format!("{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
+            })?,
+        });
+    }
+    anyhow::ensure!(
+        !grants.is_empty(),
+        "{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} must contain at least one grant"
+    );
+    Ok(grants)
+}
+
+fn load_audit_ledger_verify_grants() -> anyhow::Result<Vec<AuditLedgerVerifyGrant>> {
+    let raw = std::env::var(AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV)
+        .with_context(|| format!("{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} is required"))?;
+    parse_audit_ledger_verify_grants(&raw)
+}
+
+fn authorize_audit_ledger_verify_operator(
+    operator_subject: &str,
+    parsed: &AuditLedgerVerifyArgs,
+    grants: &[AuditLedgerVerifyGrant],
+) -> anyhow::Result<()> {
+    let allowed = grants
+        .iter()
+        .any(|grant| grant.subject == operator_subject && grant.tenant == parsed.tenant);
+    anyhow::ensure!(
+        allowed,
+        "audit ledger verify operator is not authorized for tenant={}",
+        parsed.tenant
+    );
+    Ok(())
+}
+
+async fn verified_audit_ledger_verify_operator_subject(
+    service_token: &str,
+    operator_tenant: vocab::TenantId,
+    pdp: &diport::DynPdp<'_>,
+) -> anyhow::Result<String> {
+    verified_service_maintenance_operator_subject(
+        service_token,
+        operator_tenant,
+        pdp,
+        "audit ledger verify",
+    )
+    .await
+}
+
+async fn record_audit_ledger_verify_finish_audit(
+    pg: &PgMaintenanceDeps,
+    operator_subject: &str,
+    resource_id: &str,
+    outcome: MaintenanceAuditOutcome<'_>,
+) -> anyhow::Result<()> {
+    pg.record_audit_ledger_verify_audit(
+        operator_subject,
+        "audit.ledger.verify.finish",
+        outcome,
+        resource_id,
+    )
+    .await
+    .context("record audit ledger verify finish audit")
+}
+
+async fn audit_ledger_verify_operator_subject(
+    pg: &PgMaintenanceDeps,
+    parsed: &AuditLedgerVerifyArgs,
+    resource_id: &str,
+) -> anyhow::Result<String> {
+    let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
+    {
+        Ok(provider) => provider,
+        Err(err) => {
+            record_audit_ledger_verify_finish_audit(
+                pg,
+                UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_provider_config",
+                },
+            )
+            .await?;
+            return Err(err).context("audit ledger verify operator verifier");
+        }
+    };
+    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
+    let subject = match verified_audit_ledger_verify_operator_subject(
+        &parsed.operator_service_token,
+        parsed.operator_tenant,
+        operator_pdp,
+    )
+    .await
+    {
+        Ok(subject) => subject,
+        Err(err) => {
+            record_audit_ledger_verify_finish_audit(
+                pg,
+                UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_auth",
+                },
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let grants = match load_audit_ledger_verify_grants() {
+        Ok(grants) => grants,
+        Err(err) => {
+            record_audit_ledger_verify_finish_audit(
+                pg,
+                &subject,
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_grants",
+                },
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    if let Err(err) = authorize_audit_ledger_verify_operator(&subject, parsed, &grants) {
+        record_audit_ledger_verify_finish_audit(
+            pg,
+            &subject,
+            resource_id,
+            MaintenanceAuditOutcome::Failure {
+                reason: "operator_authorization",
+            },
+        )
+        .await?;
+        return Err(err);
+    }
+    Ok(subject)
+}
+
+#[allow(async_fn_in_trait)]
+trait AuditLedgerVerifyRuntime {
+    type Session;
+
+    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session>;
+
+    async fn record_audit_ledger_verify_audit(
+        &self,
+        session: &Self::Session,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> anyhow::Result<()>;
+
+    async fn operator_subject(
+        &self,
+        session: &Self::Session,
+        parsed: &AuditLedgerVerifyArgs,
+        resource_id: &str,
+    ) -> anyhow::Result<String>;
+
+    async fn verify_tenant(
+        &self,
+        session: &Self::Session,
+        parsed: &AuditLedgerVerifyArgs,
+    ) -> anyhow::Result<AuditLedgerVerifyReport>;
+
+    async fn shutdown(&self, session: Self::Session);
+}
+
+struct ProductionAuditLedgerVerifyRuntime;
+
+impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime {
+    type Session = PgMaintenanceDeps;
+
+    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+        let audit_admin_config =
+            build_pg_audit_admin_config().context("build audit admin postgres config")?;
+        match audit_admin_config.as_ref() {
+            Some(config) => PgRuntimeDeps::setup_maintenance_with_audit_admin_config(
+                &build_pg_migrator_config()?,
+                config,
+            )
+            .await
+            .context("setup postgres maintenance deps with audit admin"),
+            None => PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+                .await
+                .context("setup postgres maintenance deps"),
+        }
+    }
+
+    async fn record_audit_ledger_verify_audit(
+        &self,
+        session: &Self::Session,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> anyhow::Result<()> {
+        session
+            .record_audit_ledger_verify_audit(operator_subject, action, outcome, resource_id)
+            .await
+            .context("record audit ledger verify audit")
+    }
+
+    async fn operator_subject(
+        &self,
+        session: &Self::Session,
+        parsed: &AuditLedgerVerifyArgs,
+        resource_id: &str,
+    ) -> anyhow::Result<String> {
+        audit_ledger_verify_operator_subject(session, parsed, resource_id).await
+    }
+
+    async fn verify_tenant(
+        &self,
+        session: &Self::Session,
+        parsed: &AuditLedgerVerifyArgs,
+    ) -> anyhow::Result<AuditLedgerVerifyReport> {
+        let hasher =
+            build_audit_hasher(|name| std::env::var(name).ok()).context("audit chain key")?;
+        let repo = session.audit_admin_repo(hasher).context(
+            "audit ledger verify requires RSS_PG_AUDIT_ADMIN_USERNAME/RSS_PG_AUDIT_ADMIN_PASSWORD",
+        )?;
+        repo.verify_tenant(parsed.tenant, parsed.batch)
+            .await
+            .context("verify audit ledger")
+    }
+
+    async fn shutdown(&self, session: Self::Session) {
+        session.shutdown().await.ok();
+    }
+}
+
+async fn run_audit_ledger_verify_command_with_runtime<R>(
+    args: &[String],
+    runtime: &R,
+) -> anyhow::Result<()>
+where
+    R: AuditLedgerVerifyRuntime,
+{
+    let parsed = parse_audit_ledger_verify_args(args)?;
+    let resource_id = audit_ledger_verify_resource_id(&parsed);
+    let session = runtime.setup_maintenance().await?;
+    if let Err(err) = runtime
+        .record_audit_ledger_verify_audit(
+            &session,
+            UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
+            "audit.ledger.verify.start",
+            MaintenanceAuditOutcome::Success,
+            &resource_id,
+        )
+        .await
+        .context("record audit ledger verify start audit")
+    {
+        runtime.shutdown(session).await;
+        return Err(err);
+    }
+
+    let operator_subject = match runtime
+        .operator_subject(&session, &parsed, &resource_id)
+        .await
+    {
+        Ok(subject) => subject,
+        Err(err) => {
+            runtime.shutdown(session).await;
+            return Err(err);
+        }
+    };
+    let command_result = runtime.verify_tenant(&session, &parsed).await;
+    let finish_outcome = if command_result.is_ok() {
+        MaintenanceAuditOutcome::Success
+    } else {
+        MaintenanceAuditOutcome::Failure {
+            reason: "run_error",
+        }
+    };
+    let audit_result = runtime
+        .record_audit_ledger_verify_audit(
+            &session,
+            &operator_subject,
+            "audit.ledger.verify.finish",
+            finish_outcome,
+            &resource_id,
+        )
+        .await
+        .context("record audit ledger verify finish audit");
+    runtime.shutdown(session).await;
+    audit_result?;
+    let report = command_result?;
+    println!(
+        "operation=verify tenant={} batch_size={} checked_entries={}",
+        report.tenant,
+        parsed.batch.get(),
+        report.checked_entries
+    );
+    Ok(())
+}
+
+/// 执行 `rss audit-ledger verify`。
+pub async fn run_audit_ledger_verify_command(args: &[String]) -> anyhow::Result<()> {
+    run_audit_ledger_verify_command_with_runtime(args, &ProductionAuditLedgerVerifyRuntime).await
 }
 
 /// `rss` binary 是否请求 DLQ inspection / replay / redrive 控制命令。
@@ -4264,6 +4699,46 @@ mod tests {
 
             self.repo.list(tenant, page).await
         }
+
+        async fn verify_tenant(
+            &self,
+            tenant: vocab::TenantId,
+            batch: vocab::Limit,
+        ) -> Result<audit::ports::AuditLedgerVerifyReport, audit::ports::AuditError> {
+            use audit::ports::AuditRepo as _;
+
+            let mut cursor = None;
+            let mut checked_entries = 0u64;
+            loop {
+                let result = self
+                    .repo
+                    .list(
+                        tenant,
+                        audit::ports::AuditPage {
+                            limit: batch,
+                            cursor,
+                        },
+                    )
+                    .await?;
+                checked_entries = checked_entries
+                    .checked_add(
+                        u64::try_from(result.entries.len())
+                            .map_err(audit::ports::AuditError::storage)?,
+                    )
+                    .ok_or(audit::ports::AuditError::SequenceGap)?;
+                if !result.has_more {
+                    break;
+                }
+                cursor = result.next_cursor;
+                if cursor.is_none() {
+                    return Err(audit::ports::AuditError::SequenceGap);
+                }
+            }
+            Ok(audit::ports::AuditLedgerVerifyReport {
+                tenant,
+                checked_entries,
+            })
+        }
     }
 
     #[allow(clippy::expect_used)]
@@ -5601,6 +6076,495 @@ mod tests {
         assert_eq!(runtime.shutdown_count(), 0);
         assert!(runtime.audit_records().is_empty());
         assert!(runtime.command_records().is_empty());
+        Ok(())
+    }
+
+    const AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT: &str = "00000000-0000-4000-8000-000000000001";
+    const AUDIT_LEDGER_FIXTURE_TENANT: &str = "00000000-0000-4000-8000-000000000002";
+    const AUDIT_LEDGER_FIXTURE_OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000003";
+    const AUDIT_LEDGER_FIXTURE_OPERATOR: &str = "verified-audit-ledger-operator";
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FakeAuditLedgerVerifyAuditOutcome {
+        Success,
+        Failure { reason: String },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FakeAuditLedgerVerifyAuditRecord {
+        subject: String,
+        action: String,
+        outcome: FakeAuditLedgerVerifyAuditOutcome,
+        resource_id: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FakeAuditLedgerVerifyCommandRecord {
+        tenant: vocab::TenantId,
+        batch: u16,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FakeAuditLedgerVerifyOperator {
+        Verified(&'static str),
+        AuthFailure,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FakeAuditLedgerVerifyResult {
+        Success { checked_entries: u64 },
+        Failure(&'static str),
+    }
+
+    struct FakeAuditLedgerVerifyRuntime {
+        operator: FakeAuditLedgerVerifyOperator,
+        verify_result: FakeAuditLedgerVerifyResult,
+        audits: Mutex<Vec<FakeAuditLedgerVerifyAuditRecord>>,
+        commands: Mutex<Vec<FakeAuditLedgerVerifyCommandRecord>>,
+        setup_count: AtomicUsize,
+        shutdown_count: AtomicUsize,
+    }
+
+    impl FakeAuditLedgerVerifyRuntime {
+        fn success(checked_entries: u64) -> Self {
+            Self::new(
+                FakeAuditLedgerVerifyOperator::Verified(AUDIT_LEDGER_FIXTURE_OPERATOR),
+                FakeAuditLedgerVerifyResult::Success { checked_entries },
+            )
+        }
+
+        fn failure(reason: &'static str) -> Self {
+            Self::new(
+                FakeAuditLedgerVerifyOperator::Verified(AUDIT_LEDGER_FIXTURE_OPERATOR),
+                FakeAuditLedgerVerifyResult::Failure(reason),
+            )
+        }
+
+        fn auth_failure() -> Self {
+            Self::new(
+                FakeAuditLedgerVerifyOperator::AuthFailure,
+                FakeAuditLedgerVerifyResult::Success { checked_entries: 0 },
+            )
+        }
+
+        fn new(
+            operator: FakeAuditLedgerVerifyOperator,
+            verify_result: FakeAuditLedgerVerifyResult,
+        ) -> Self {
+            Self {
+                operator,
+                verify_result,
+                audits: Mutex::new(Vec::new()),
+                commands: Mutex::new(Vec::new()),
+                setup_count: AtomicUsize::new(0),
+                shutdown_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn audit_records(&self) -> Vec<FakeAuditLedgerVerifyAuditRecord> {
+            match self.audits.lock() {
+                Ok(records) => records.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn command_records(&self) -> Vec<FakeAuditLedgerVerifyCommandRecord> {
+            match self.commands.lock() {
+                Ok(records) => records.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn setup_count(&self) -> usize {
+            self.setup_count.load(Ordering::Relaxed)
+        }
+
+        fn shutdown_count(&self) -> usize {
+            self.shutdown_count.load(Ordering::Relaxed)
+        }
+    }
+
+    impl AuditLedgerVerifyRuntime for FakeAuditLedgerVerifyRuntime {
+        type Session = ();
+
+        async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+            self.setup_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn record_audit_ledger_verify_audit(
+            &self,
+            _session: &Self::Session,
+            operator_subject: &str,
+            action: &str,
+            outcome: MaintenanceAuditOutcome<'_>,
+            resource_id: &str,
+        ) -> anyhow::Result<()> {
+            let outcome = match outcome {
+                MaintenanceAuditOutcome::Success => FakeAuditLedgerVerifyAuditOutcome::Success,
+                MaintenanceAuditOutcome::Failure { reason } => {
+                    FakeAuditLedgerVerifyAuditOutcome::Failure {
+                        reason: reason.to_owned(),
+                    }
+                }
+            };
+            let record = FakeAuditLedgerVerifyAuditRecord {
+                subject: operator_subject.to_owned(),
+                action: action.to_owned(),
+                outcome,
+                resource_id: resource_id.to_owned(),
+            };
+            match self.audits.lock() {
+                Ok(mut records) => records.push(record),
+                Err(poisoned) => poisoned.into_inner().push(record),
+            }
+            Ok(())
+        }
+
+        async fn operator_subject(
+            &self,
+            session: &Self::Session,
+            _parsed: &AuditLedgerVerifyArgs,
+            resource_id: &str,
+        ) -> anyhow::Result<String> {
+            match self.operator {
+                FakeAuditLedgerVerifyOperator::Verified(subject) => Ok(subject.to_owned()),
+                FakeAuditLedgerVerifyOperator::AuthFailure => {
+                    self.record_audit_ledger_verify_audit(
+                        session,
+                        UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
+                        "audit.ledger.verify.finish",
+                        MaintenanceAuditOutcome::Failure {
+                            reason: "operator_auth",
+                        },
+                        resource_id,
+                    )
+                    .await?;
+                    anyhow::bail!("audit ledger verify operator auth failed");
+                }
+            }
+        }
+
+        async fn verify_tenant(
+            &self,
+            _session: &Self::Session,
+            parsed: &AuditLedgerVerifyArgs,
+        ) -> anyhow::Result<AuditLedgerVerifyReport> {
+            let record = FakeAuditLedgerVerifyCommandRecord {
+                tenant: parsed.tenant,
+                batch: parsed.batch.get(),
+            };
+            match self.commands.lock() {
+                Ok(mut records) => records.push(record),
+                Err(poisoned) => poisoned.into_inner().push(record),
+            }
+            match self.verify_result {
+                FakeAuditLedgerVerifyResult::Success { checked_entries } => {
+                    Ok(AuditLedgerVerifyReport {
+                        tenant: parsed.tenant,
+                        checked_entries,
+                    })
+                }
+                FakeAuditLedgerVerifyResult::Failure(reason) => anyhow::bail!(reason),
+            }
+        }
+
+        async fn shutdown(&self, _session: Self::Session) {
+            self.shutdown_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn audit_ledger_verify_args(extra: &[&str]) -> Vec<String> {
+        let mut parts = vec![
+            "audit-ledger",
+            "verify",
+            "--operator-service-token",
+            "opaque-token",
+            "--operator-tenant",
+            AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+            "--tenant",
+            AUDIT_LEDGER_FIXTURE_TENANT,
+        ];
+        parts.extend_from_slice(extra);
+        args(&parts)
+    }
+
+    fn audit_ledger_fixture_resource_id(batch: u16) -> String {
+        format!(
+            "tenant={} batch_size={}",
+            AUDIT_LEDGER_FIXTURE_TENANT, batch
+        )
+    }
+
+    fn assert_audit_ledger_verify_lifecycle_audit(
+        runtime: &FakeAuditLedgerVerifyRuntime,
+        batch: u16,
+        expected_finish: FakeAuditLedgerVerifyAuditOutcome,
+    ) {
+        let audits = runtime.audit_records();
+        assert_eq!(audits.len(), 2);
+        let resource_id = audit_ledger_fixture_resource_id(batch);
+        assert_eq!(
+            audits[0],
+            FakeAuditLedgerVerifyAuditRecord {
+                subject: UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR.to_owned(),
+                action: "audit.ledger.verify.start".to_owned(),
+                outcome: FakeAuditLedgerVerifyAuditOutcome::Success,
+                resource_id: resource_id.clone(),
+            }
+        );
+        assert_eq!(
+            audits[1],
+            FakeAuditLedgerVerifyAuditRecord {
+                subject: AUDIT_LEDGER_FIXTURE_OPERATOR.to_owned(),
+                action: "audit.ledger.verify.finish".to_owned(),
+                outcome: expected_finish,
+                resource_id,
+            }
+        );
+    }
+
+    #[test]
+    fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> {
+        let parsed =
+            parse_audit_ledger_verify_args(&audit_ledger_verify_args(&["--batch-size", "7"]))?;
+        assert_eq!(parsed.operator_service_token, "opaque-token");
+        assert_eq!(
+            parsed.operator_tenant,
+            vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT)?
+        );
+        assert_eq!(
+            parsed.tenant,
+            vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?
+        );
+        assert_eq!(parsed.batch.get(), 7);
+        assert!(is_audit_ledger_verify_command(&args(&[
+            "audit-ledger",
+            "verify"
+        ])));
+
+        let cases = vec![
+            ("missing namespace", args(&[])),
+            ("missing subcommand", args(&["audit-ledger"])),
+            ("unknown subcommand", args(&["audit-ledger", "tail"])),
+            (
+                "missing operator token",
+                args(&[
+                    "audit-ledger",
+                    "verify",
+                    "--operator-tenant",
+                    AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+                    "--tenant",
+                    AUDIT_LEDGER_FIXTURE_TENANT,
+                ]),
+            ),
+            (
+                "empty operator token",
+                args(&[
+                    "audit-ledger",
+                    "verify",
+                    "--operator-service-token",
+                    " ",
+                    "--operator-tenant",
+                    AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+                    "--tenant",
+                    AUDIT_LEDGER_FIXTURE_TENANT,
+                ]),
+            ),
+            (
+                "missing tenant",
+                args(&[
+                    "audit-ledger",
+                    "verify",
+                    "--operator-service-token",
+                    "opaque-token",
+                    "--operator-tenant",
+                    AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+                ]),
+            ),
+            (
+                "missing flag value",
+                args(&[
+                    "audit-ledger",
+                    "verify",
+                    "--operator-service-token",
+                    "opaque-token",
+                    "--operator-tenant",
+                ]),
+            ),
+            (
+                "duplicate singleton flag",
+                args(&[
+                    "audit-ledger",
+                    "verify",
+                    "--operator-service-token",
+                    "opaque-token",
+                    "--operator-service-token",
+                    "other-token",
+                    "--operator-tenant",
+                    AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+                    "--tenant",
+                    AUDIT_LEDGER_FIXTURE_TENANT,
+                ]),
+            ),
+            (
+                "invalid batch zero",
+                audit_ledger_verify_args(&["--batch-size", "0"]),
+            ),
+            (
+                "invalid batch over max",
+                audit_ledger_verify_args(&["--batch-size", "501"]),
+            ),
+            (
+                "unsupported all tenants",
+                audit_ledger_verify_args(&["--all-tenants"]),
+            ),
+            (
+                "unsupported namespace",
+                audit_ledger_verify_args(&["--namespace", "prod"]),
+            ),
+            ("unknown flag", audit_ledger_verify_args(&["--bogus"])),
+        ];
+
+        for (name, candidate) in cases {
+            assert!(
+                parse_audit_ledger_verify_args(&candidate).is_err(),
+                "case must fail: {name}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_ledger_verify_grants_authorize_exact_subject_and_tenant() -> anyhow::Result<()> {
+        let parsed = parse_audit_ledger_verify_args(&audit_ledger_verify_args(&[]))?;
+        let grants = parse_audit_ledger_verify_grants(&format!(
+            "{}|{}",
+            AUDIT_LEDGER_FIXTURE_OPERATOR, AUDIT_LEDGER_FIXTURE_TENANT
+        ))?;
+        authorize_audit_ledger_verify_operator(AUDIT_LEDGER_FIXTURE_OPERATOR, &parsed, &grants)?;
+
+        let wrong_subject = parse_audit_ledger_verify_grants(&format!(
+            "other-operator|{}",
+            AUDIT_LEDGER_FIXTURE_TENANT
+        ))?;
+        assert!(
+            authorize_audit_ledger_verify_operator(
+                AUDIT_LEDGER_FIXTURE_OPERATOR,
+                &parsed,
+                &wrong_subject
+            )
+            .is_err()
+        );
+        let wrong_tenant = parse_audit_ledger_verify_grants(&format!(
+            "{}|{}",
+            AUDIT_LEDGER_FIXTURE_OPERATOR, AUDIT_LEDGER_FIXTURE_OTHER_TENANT
+        ))?;
+        assert!(
+            authorize_audit_ledger_verify_operator(
+                AUDIT_LEDGER_FIXTURE_OPERATOR,
+                &parsed,
+                &wrong_tenant
+            )
+            .is_err()
+        );
+        assert!(parse_audit_ledger_verify_grants("").is_err());
+        assert!(parse_audit_ledger_verify_grants("operator-only").is_err());
+        assert!(parse_audit_ledger_verify_grants("operator|not-a-tenant").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_verify_lifecycle_records_success_audit() -> anyhow::Result<()> {
+        let runtime = FakeAuditLedgerVerifyRuntime::success(3);
+        run_audit_ledger_verify_command_with_runtime(
+            &audit_ledger_verify_args(&["--batch-size", "7"]),
+            &runtime,
+        )
+        .await?;
+
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert_audit_ledger_verify_lifecycle_audit(
+            &runtime,
+            7,
+            FakeAuditLedgerVerifyAuditOutcome::Success,
+        );
+        assert_eq!(
+            runtime.command_records(),
+            vec![FakeAuditLedgerVerifyCommandRecord {
+                tenant: vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?,
+                batch: 7,
+            }]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_verify_lifecycle_records_run_error_audit() -> anyhow::Result<()> {
+        let runtime =
+            FakeAuditLedgerVerifyRuntime::failure("audit ledger verify requires audit admin pool");
+        let result =
+            run_audit_ledger_verify_command_with_runtime(&audit_ledger_verify_args(&[]), &runtime)
+                .await;
+        let Err(err) = result else {
+            anyhow::bail!("verify failure must fail the command");
+        };
+        assert!(
+            format!("{err:#}").contains("audit admin pool"),
+            "unexpected error: {err:#}"
+        );
+
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert_audit_ledger_verify_lifecycle_audit(
+            &runtime,
+            500,
+            FakeAuditLedgerVerifyAuditOutcome::Failure {
+                reason: "run_error".to_owned(),
+            },
+        );
+        assert_eq!(runtime.command_records().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_ledger_verify_lifecycle_preserves_operator_auth_failure_audit()
+    -> anyhow::Result<()> {
+        let runtime = FakeAuditLedgerVerifyRuntime::auth_failure();
+        let result =
+            run_audit_ledger_verify_command_with_runtime(&audit_ledger_verify_args(&[]), &runtime)
+                .await;
+        let Err(err) = result else {
+            anyhow::bail!("operator auth failure must fail the command");
+        };
+        assert!(
+            format!("{err:#}").contains("operator auth"),
+            "unexpected error: {err:#}"
+        );
+
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert!(runtime.command_records().is_empty());
+        assert_eq!(
+            runtime.audit_records(),
+            vec![
+                FakeAuditLedgerVerifyAuditRecord {
+                    subject: UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR.to_owned(),
+                    action: "audit.ledger.verify.start".to_owned(),
+                    outcome: FakeAuditLedgerVerifyAuditOutcome::Success,
+                    resource_id: audit_ledger_fixture_resource_id(500),
+                },
+                FakeAuditLedgerVerifyAuditRecord {
+                    subject: UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR.to_owned(),
+                    action: "audit.ledger.verify.finish".to_owned(),
+                    outcome: FakeAuditLedgerVerifyAuditOutcome::Failure {
+                        reason: "operator_auth".to_owned(),
+                    },
+                    resource_id: audit_ledger_fixture_resource_id(500),
+                },
+            ]
+        );
         Ok(())
     }
 

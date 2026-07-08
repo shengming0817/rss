@@ -30,6 +30,13 @@ audit read 的 serving 池对 `RowScope::All` 始终 fail-closed。指定租户�
 allow-all RLS policy，而是在只读事务内 `SET LOCAL rss.tenant_id = targetTenant` 复用现有 tenant-isolation RLS。
 admin 池未配置时返回 501 `ERR_CORE_NOT_IMPLEMENTED`；配置不完整或权限不安全则启动 fail-fast。
 
+`rss audit-ledger verify` 是同一只读 admin capability 的 operator full-chain verify 入口。它只接受
+`--tenant <uuid>` 单租户目标，operator 身份来自 tenant-bound service-token，并额外要求
+`RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS=subject|tenant,...` 精确匹配验出的 service subject 与目标 tenant。
+命令不接受 `--all-tenants` 或 `--namespace`：audit ledger 当前 schema 无 namespace 列，接受该 flag 会让
+调用方误以为存在 namespace 隔离；全租户枚举也不在 `rss_audit_admin` capability 内。start/finish 必须写
+`auth_audit_events`，`resource_kind="audit.ledger.verify"`。
+
 ## Tenant source（认证通道，非 request body）
 
 tenant scope 只能来自**声明过的入口**：JWT tenant claim（→ ctx）或 `X-Tenant-ID` header。
@@ -163,7 +170,9 @@ settings-config-values maintenance` 的 `config_entries` backfill/rewrap。后�
 remaining plaintext；runtime 必须验签 operator service-token，用已验证 service principal subject 写入
 `auth_audit_events` job start/finish durable audit。维护 AAD 只能经 `ConfigValueMaintenanceCapability` 派生，
 普通 serving 读写路径不能读取
-scheme=0 plaintext。`dead_letter` retention sweep 和 outbox relay/retention/backlog 不保留 owner/maintenance
+scheme=0 plaintext。`rss audit-ledger verify` 是另一条命名维护入口：migrator/owner 连接只用于 migration
+与 `auth_audit_events` start/finish，审计链读取只能经 `rss_audit_admin` 只读 pool + typed `TenantId`
+scope，不能使用 owner pool 扫 `audit_entries`。`dead_letter` retention sweep 和 outbox relay/retention/backlog 不保留 owner/maintenance
 长期连接，也不授 `rss_app` 直接 DELETE/UPDATE；
 它们由迁移安装的窄 `SECURITY DEFINER` 函数承载，函数 owner 是 NOLOGIN BYPASSRLS 维护角色，只开放固定
 参数的全域维护能力。runtime 仍经 `rss_app` 调用这些函数；outbox relay 将 publish 失败写入 `dead_letter`

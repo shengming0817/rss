@@ -127,6 +127,7 @@ pub struct PgRuntimeDeps {
 /// legacy plaintext deny 门，否则 backfill 命令会在最需要运行时被 scheme=0 启动门挡住。
 pub struct PgMaintenanceDeps {
     store: Arc<PgStore>,
+    audit_admin_store: Option<Arc<PgStore>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -228,6 +229,26 @@ impl PgRuntimeDeps {
         store.run_migrations().await?;
         Ok(PgMaintenanceDeps {
             store,
+            audit_admin_store: None,
+            clock: Arc::new(PgMaintenanceSystemClock),
+        })
+    }
+
+    /// 构造带 audit-admin 只读池的离线维护能力包；只用于 per-tenant audit ledger verify。
+    ///
+    /// `migrator_config` 仍只负责 migration / durable audit 写入；`audit_admin_config` 必须直连
+    /// `rss_audit_admin`，并通过 exact read-only capability gate。
+    pub async fn setup_maintenance_with_audit_admin_config(
+        migrator_config: &PgConfig,
+        audit_admin_config: &PgConfig,
+    ) -> Result<PgMaintenanceDeps, PgError> {
+        let store = Arc::new(PgStore::connect(migrator_config).await?);
+        store.run_migrations().await?;
+        let audit_admin_store = Arc::new(PgStore::connect(audit_admin_config).await?);
+        audit_admin_store.verify_audit_admin_capability().await?;
+        Ok(PgMaintenanceDeps {
+            store,
+            audit_admin_store: Some(audit_admin_store),
             clock: Arc::new(PgMaintenanceSystemClock),
         })
     }
@@ -428,6 +449,38 @@ impl PgMaintenanceDeps {
         .await
     }
 
+    /// Durable audit record for per-tenant audit ledger verification jobs.
+    pub async fn record_audit_ledger_verify_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        self.record_maintenance_audit(
+            "audit.ledger.verify",
+            operator_subject,
+            action,
+            outcome,
+            resource_id,
+        )
+        .await
+    }
+
+    /// audit ledger verify 专用只读 admin repo。未通过 audit-admin setup 时返回 `None`。
+    #[must_use]
+    pub fn audit_admin_repo<M>(
+        &self,
+        hasher: audit::ports::AuditChainHasher<M>,
+    ) -> Option<PgAuditAdminRepo<M>>
+    where
+        M: primitives::MacVerifier + Send + Sync,
+    {
+        self.audit_admin_store
+            .as_ref()
+            .map(|store| PgAuditAdminRepo::new(store, hasher))
+    }
+
     /// Projection replay / shadow-swap control store.
     #[must_use]
     pub fn projection_control(
@@ -448,7 +501,13 @@ impl PgMaintenanceDeps {
 
     /// 关闭维护连接池。
     pub async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
-        self.store.shutdown().await
+        let audit_admin_result = match self.audit_admin_store.as_ref() {
+            Some(store) => store.shutdown().await,
+            None => Ok(()),
+        };
+        let primary_result = self.store.shutdown().await;
+        audit_admin_result?;
+        primary_result
     }
 }
 
@@ -1163,6 +1222,30 @@ mod tests {
     async fn audit_accessors_construct() {
         let a: PgDomainDeps<caps::Audit> = deps().for_domain();
         let _ = a.auth_audit_sink();
+    }
+
+    #[tokio::test]
+    async fn maintenance_shutdown_closes_primary_and_audit_admin_stores() {
+        let primary = lazy_store();
+        let audit_admin = lazy_store();
+        let deps = PgMaintenanceDeps {
+            store: Arc::clone(&primary),
+            audit_admin_store: Some(Arc::clone(&audit_admin)),
+            clock: Arc::new(EpochClock),
+        };
+
+        assert!(!primary.pool.is_closed(), "primary starts open");
+        assert!(!audit_admin.pool.is_closed(), "audit admin starts open");
+
+        deps.shutdown()
+            .await
+            .expect("lazy maintenance stores close cleanly");
+
+        assert!(primary.pool.is_closed(), "primary store must be closed");
+        assert!(
+            audit_admin.pool.is_closed(),
+            "audit admin store must be closed"
+        );
     }
 
     #[tokio::test]

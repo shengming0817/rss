@@ -77,6 +77,15 @@ pub struct AuditListResult {
     pub has_more: bool,
 }
 
+/// 单租户审计链全链验证报告。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditLedgerVerifyReport {
+    /// 已验证租户。
+    pub tenant: TenantId,
+    /// 已验证条目数。
+    pub checked_entries: u64,
+}
+
 // ---------------------------------------------------------------------------
 // AuditRepo —— 域形 repo DI port（trait_variant Send 变体 + dynosaur DynAuditRepo）
 // ---------------------------------------------------------------------------
@@ -124,8 +133,9 @@ pub trait AuditRepoLocal: Send + Sync {
 /// 跨租户 admin audit read 的只读 provider。
 ///
 /// 与 [`AuditRepo`] 分开是刻意的 capability 收窄：SuperAdmin target-tenant HTTP read 只需要读取指定租户
-/// 审计链并做完整性校验，不需要 append / verify_tail / write 能力。postgres provider 使用专用
-/// `rss_audit_admin` pool，经 `SET LOCAL rss.tenant_id = targetTenant` 复用现有 FORCE RLS policy。
+/// 审计链并做完整性校验；operator ledger verify 需要全链验证；二者都不需要 append / write 能力。
+/// postgres provider 使用专用 `rss_audit_admin` pool，经 `SET LOCAL rss.tenant_id = targetTenant` 复用现有
+/// FORCE RLS policy。
 #[trait_variant::make(AuditAdminRepo: Send)]
 #[dynosaur(pub DynAuditAdminRepo = dyn(box) AuditAdminRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
@@ -136,6 +146,13 @@ pub trait AuditAdminRepoLocal: Send + Sync {
         tenant: TenantId,
         page: AuditPage,
     ) -> Result<AuditListResult, AuditError>;
+
+    /// 按目标租户验证整条审计链；provider 负责分页扫描并对任何 seq gap / 链接 / 哈希 / 混租户异常 fail-closed。
+    async fn verify_tenant(
+        &self,
+        tenant: TenantId,
+        batch: vocab::Limit,
+    ) -> Result<AuditLedgerVerifyReport, AuditError>;
 }
 
 #[cfg(test)]
@@ -145,8 +162,8 @@ mod smoke {
     use std::sync::Arc;
 
     use super::{
-        AuditAdminRepo, AuditError, AuditListResult, AuditPage, AuditRecord, AuditRepo,
-        DynAuditAdminRepo, DynAuditRepo, TenantId,
+        AuditAdminRepo, AuditError, AuditLedgerVerifyReport, AuditListResult, AuditPage,
+        AuditRecord, AuditRepo, DynAuditAdminRepo, DynAuditRepo, TenantId,
     };
 
     struct NoopAuditRepo;
@@ -173,6 +190,14 @@ mod smoke {
             _tenant: TenantId,
             _page: AuditPage,
         ) -> Result<AuditListResult, AuditError> {
+            todo!()
+        }
+
+        async fn verify_tenant(
+            &self,
+            _tenant: TenantId,
+            _batch: vocab::Limit,
+        ) -> Result<AuditLedgerVerifyReport, AuditError> {
             todo!()
         }
     }
