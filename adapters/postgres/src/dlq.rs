@@ -6,8 +6,10 @@ use diport::{
     KEY_SCHEMA_VERSION, KEY_TENANT_ID,
 };
 use eventexec::{
-    DlqEntryKind, DlqEntrySummary, DlqError, DlqListQuery, DlqListResult, DlqRedriveOutcome,
-    DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqStore,
+    DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
+    DlqListResult, DlqMutationKind, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
+    DlqReplayRequest, DlqStore, record_dlq_mutation_error, record_dlq_outbox_redrive,
+    record_dlq_replay,
 };
 
 use crate::PgStore;
@@ -21,7 +23,7 @@ use crate::projection_events::ProjectionWriteRegistry;
 const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
 #[cfg(test)]
-const LIST_DEAD_LETTER_BIND_COUNT: u32 = 9;
+const LIST_DEAD_LETTER_BIND_COUNT: u32 = 10;
 const LIST_DEAD_LETTER_SQL: &str = r#"
     SELECT id::text,
            message_id,
@@ -36,30 +38,31 @@ const LIST_DEAD_LETTER_SQL: &str = r#"
            EXTRACT(EPOCH FROM last_attempt_at)::bigint
     FROM dead_letter
     WHERE tenant_id = $1::uuid
-      AND source_kind <> $4
       AND ($2::text IS NULL OR domain = $2)
       AND ($3::text IS NULL OR source_kind = $3)
+      AND ($4::text IS NULL OR contract_id = $4)
+      AND source_kind <> $5
       AND (
-            $5::bigint IS NULL
-         OR EXTRACT(EPOCH FROM last_attempt_at)::bigint < $5
+            $6::bigint IS NULL
+         OR EXTRACT(EPOCH FROM last_attempt_at)::bigint < $6
          OR (
-                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $5
-            AND $6::text > $7
+                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $6
+            AND $7::text > $8
             )
          OR (
-                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $5
-            AND $6::text = $7
-            AND id::text > $8
+                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $6
+            AND $7::text = $8
+            AND id::text > $9
             )
       )
-    ORDER BY last_attempt_at DESC, id ASC
-    LIMIT $9
+    ORDER BY EXTRACT(EPOCH FROM last_attempt_at)::bigint DESC, id ASC
+    LIMIT $10
     "#;
 
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
     tenant_pool: PgTenantPool,
-    payload_protector: DlxPayloadProtector,
+    payload_protector: Option<DlxPayloadProtector>,
     projection_registry: ProjectionWriteRegistry,
 }
 
@@ -77,7 +80,18 @@ impl PgStore {
     ) -> PgDlqStore {
         PgDlqStore {
             tenant_pool: PgTenantPool::new(self),
-            payload_protector,
+            payload_protector: Some(payload_protector),
+            projection_registry,
+        }
+    }
+
+    pub(crate) fn dlq_without_payload_replay(
+        &self,
+        projection_registry: ProjectionWriteRegistry,
+    ) -> PgDlqStore {
+        PgDlqStore {
+            tenant_pool: PgTenantPool::new(self),
+            payload_protector: None,
             projection_registry,
         }
     }
@@ -90,13 +104,32 @@ impl DlqStore for PgDlqStore {
         Ok(DlqListResult::from_sorted_rows(&query, rows))
     }
 
+    async fn inspect_dlq(&self, request: DlqInspectRequest) -> Result<DlqEntrySummary, DlqError> {
+        match request.target() {
+            DlqInspectTarget::DeadLetter(id) => {
+                self.inspect_dead_letter(request.tenant(), id.as_str())
+                    .await
+            }
+            DlqInspectTarget::OutboxDlx(event_id) => {
+                self.inspect_outbox_dlx(request.tenant(), event_id.as_str())
+                    .await
+            }
+        }
+    }
+
     async fn replay_dead_letter(
         &self,
         request: DlqReplayRequest,
     ) -> Result<DlqReplayOutcome, DlqError> {
-        let payload_protector = self.payload_protector.clone();
+        let tenant = request.tenant();
+        let Some(payload_protector) = self.payload_protector.clone() else {
+            let err = DlqError::PayloadKeyUnavailable;
+            record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, &err);
+            return Err(err);
+        };
         let projection_registry = self.projection_registry;
-        self.tenant_pool
+        let result = self
+            .tenant_pool
             .write(
                 request.tenant(),
                 move |conn| {
@@ -201,7 +234,14 @@ impl DlqStore for PgDlqStore {
                 },
                 db_error("replay.tx"),
             )
-            .await
+            .await;
+        match &result {
+            Ok(outcome) => record_dlq_replay(tenant, *outcome),
+            Err(err) => {
+                record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, err);
+            }
+        }
+        result
     }
 
     async fn redrive_outbox(
@@ -232,17 +272,120 @@ impl DlqStore for PgDlqStore {
                 },
                 db_error("redrive.tx"),
             )
-            .await?;
+            .await;
 
-        if result == 1 {
-            Ok(DlqRedriveOutcome::Redriven)
-        } else {
-            Ok(DlqRedriveOutcome::NotFound)
+        let outcome = match result {
+            Ok(1) => Ok(DlqRedriveOutcome::Redriven),
+            Ok(_) => Ok(DlqRedriveOutcome::NotFound),
+            Err(err) => Err(err),
+        };
+        match &outcome {
+            Ok(outcome) => record_dlq_outbox_redrive(tenant, *outcome),
+            Err(err) => {
+                record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxRedrive, err);
+            }
         }
+        outcome
     }
 }
 
 impl PgDlqStore {
+    async fn inspect_dead_letter(
+        &self,
+        tenant: vocab::TenantId,
+        id: &str,
+    ) -> Result<DlqEntrySummary, DlqError> {
+        let id = id.to_string();
+        let row: Option<DeadLetterRow> = self
+            .tenant_pool
+            .read(tenant, move |conn| {
+                Box::pin(async move {
+                    sqlx::query_as(
+                        r#"
+                        SELECT id::text,
+                               message_id,
+                               domain,
+                               contract_id,
+                               topic,
+                               consumer_group,
+                               original_entry_payload_len,
+                               error_summary,
+                               num_attempts,
+                               source_kind,
+                               EXTRACT(EPOCH FROM last_attempt_at)::bigint
+                        FROM dead_letter
+                        WHERE tenant_id = $1::uuid
+                          AND id = $2::uuid
+                          AND source_kind <> $3
+                        "#,
+                    )
+                    .bind(tenant.to_string())
+                    .bind(id)
+                    .bind(DeadLetterSource::OutboxRelay.as_str())
+                    .fetch_optional(&mut *conn)
+                    .await
+                })
+            })
+            .await
+            .map_err(db_error("inspect.fetch_dead_letter"))?;
+        row.ok_or(DlqError::NotFound)?
+            .into_summary(DlqEntryKind::DeadLetter, tenant)
+    }
+
+    async fn inspect_outbox_dlx(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> Result<DlqEntrySummary, DlqError> {
+        let event_id = event_id.to_string();
+        let row: Option<OutboxRow> = self
+            .tenant_pool
+            .read_map(
+                tenant,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query_as(
+                            r#"
+                            SELECT o.event_id,
+                                   o.domain,
+                                   o.contract_id,
+                                   o.topic,
+                                   octet_length(o.payload)::bigint,
+                                   COALESCE(dl.metadata ->> $4, dl.error_summary, $5),
+                                   o.retry_count,
+                                   EXTRACT(EPOCH FROM o.updated_at)::bigint
+                            FROM outbox o
+                            LEFT JOIN LATERAL (
+                                SELECT dl.error_summary, dl.metadata
+                                FROM dead_letter dl
+                                WHERE dl.tenant_id = o.tenant_id
+                                  AND dl.message_id = o.event_id
+                                  AND dl.source_kind = $6
+                                ORDER BY dl.last_attempt_at DESC, dl.id DESC
+                                LIMIT 1
+                            ) dl ON true
+                            WHERE o.status = $1
+                              AND o.tenant_id = $2::uuid
+                              AND o.event_id = $3
+                            "#,
+                        )
+                        .bind(STATUS_DLX)
+                        .bind(tenant.to_string())
+                        .bind(event_id)
+                        .bind(KEY_RELAY_FAILURE_REASON)
+                        .bind(OUTBOX_RELAY_DLX_FALLBACK_SUMMARY)
+                        .bind(DeadLetterSource::OutboxRelay.as_str())
+                        .fetch_optional(&mut *conn)
+                        .await
+                        .map_err(db_error("inspect.fetch_outbox_dlx"))
+                    })
+                },
+                db_error("inspect.outbox_tx"),
+            )
+            .await?;
+        row.ok_or(DlqError::NotFound)?.into_summary(tenant)
+    }
+
     async fn list_dead_letter(
         &self,
         query: &DlqListQuery,
@@ -257,6 +400,7 @@ impl PgDlqStore {
             .map(str::to_owned);
         let tenant = query.tenant();
         let domain = query.domain().map(str::to_owned);
+        let contract_id = query.contract_id().map(str::to_owned);
         let fetch_limit = query.fetch_limit();
         let cursor_epoch = query.cursor().map(|cursor| cursor.last_epoch_secs());
         let cursor_kind = query
@@ -271,6 +415,7 @@ impl PgDlqStore {
                         .bind(tenant.to_string())
                         .bind(domain)
                         .bind(source)
+                        .bind(contract_id)
                         .bind(DeadLetterSource::OutboxRelay.as_str())
                         .bind(cursor_epoch)
                         .bind(DlqEntryKind::DeadLetter.cursor_part())
@@ -301,6 +446,7 @@ impl PgDlqStore {
 
         let tenant = query.tenant();
         let domain = query.domain().map(ToString::to_string);
+        let contract_id = query.contract_id().map(ToString::to_string);
         let cursor_epoch = query.cursor().map(|cursor| cursor.last_epoch_secs());
         let cursor_kind = query
             .cursor()
@@ -313,6 +459,7 @@ impl PgDlqStore {
                 tenant,
                 move |conn| {
                     let domain = domain.clone();
+                    let contract_id = contract_id.clone();
                     let cursor_kind = cursor_kind.clone();
                     let cursor_id = cursor_id.clone();
                     Box::pin(async move {
@@ -323,7 +470,7 @@ impl PgDlqStore {
                                    o.contract_id,
                                    o.topic,
                                    octet_length(o.payload)::bigint,
-                                   COALESCE(dl.metadata ->> $8, dl.error_summary, $9),
+                                   COALESCE(dl.metadata ->> $9, dl.error_summary, $10),
                                    o.retry_count,
                                    EXTRACT(EPOCH FROM o.updated_at)::bigint
                             FROM outbox o
@@ -332,33 +479,35 @@ impl PgDlqStore {
                                 FROM dead_letter dl
                                 WHERE dl.tenant_id = o.tenant_id
                                   AND dl.message_id = o.event_id
-                                  AND dl.source_kind = $10
+                                  AND dl.source_kind = $11
                                 ORDER BY dl.last_attempt_at DESC, dl.id DESC
                                 LIMIT 1
                             ) dl ON true
                             WHERE o.status = $1
                               AND o.tenant_id = $2::uuid
                               AND ($3::text IS NULL OR o.domain = $3)
+                              AND ($4::text IS NULL OR o.contract_id = $4)
                               AND (
-                                    $4::bigint IS NULL
-                                 OR EXTRACT(EPOCH FROM o.updated_at)::bigint < $4
+                                    $5::bigint IS NULL
+                                 OR EXTRACT(EPOCH FROM o.updated_at)::bigint < $5
                                  OR (
-                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $4
-                                    AND $5::text > $6
+                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
+                                    AND $6::text > $7
                                     )
                                  OR (
-                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $4
-                                    AND $5::text = $6
-                                    AND o.event_id > $7
+                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
+                                    AND $6::text = $7
+                                    AND o.event_id > $8
                                     )
                               )
-                            ORDER BY o.updated_at DESC, o.event_id ASC
-                            LIMIT $11
+                            ORDER BY EXTRACT(EPOCH FROM o.updated_at)::bigint DESC, o.event_id ASC
+                            LIMIT $12
                             "#,
                         )
                         .bind(STATUS_DLX)
                         .bind(tenant.to_string())
                         .bind(domain)
+                        .bind(contract_id)
                         .bind(cursor_epoch)
                         .bind(DlqEntryKind::OutboxDlx.cursor_part())
                         .bind(cursor_kind)
@@ -643,6 +792,11 @@ mod tests {
         assert_eq!(
             max_pg_placeholder(LIST_DEAD_LETTER_SQL),
             LIST_DEAD_LETTER_BIND_COUNT
+        );
+        assert!(
+            LIST_DEAD_LETTER_SQL
+                .contains("ORDER BY EXTRACT(EPOCH FROM last_attempt_at)::bigint DESC, id ASC"),
+            "dead_letter list SQL must order by the same second-level key used by DlqCursor"
         );
     }
 

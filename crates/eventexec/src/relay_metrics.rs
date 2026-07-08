@@ -14,6 +14,7 @@
 //! - `outbox_dlx_total{domain,contract_id,tenant_id}`（Counter）—— `Reject`（永久失败进 DLX）。
 //! - `outbox_pending_depth{domain,contract_id,tenant_id}` /
 //!   `outbox_oldest_pending_age_seconds{domain,contract_id,tenant_id}`（Gauge）—— 采样器。
+//! - `outbox_partition_blocked_depth{domain,contract_id,tenant_id}`（Gauge）—— partition head gate 阻塞行数。
 //! - `outbox_relay_tick_duration_seconds{phase}`（Histogram，phase=poll|publish）—— relay tick 分相耗时。
 //!
 //! # INVARIANT: OUTBOX-METRICS-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -88,6 +89,9 @@ pub trait OutboxMetrics: Send + Sync {
     /// 采样器：set `outbox_pending_depth` / `outbox_oldest_pending_age_seconds` gauge。
     fn record_backlog(&self, scope: &OutboxMetricScope<'_>, sample: BacklogSample);
 
+    /// 采样器：set `outbox_partition_blocked_depth` gauge。
+    fn record_partition_blocked(&self, scope: &OutboxMetricScope<'_>, blocked_depth: u64);
+
     /// relay tick 分相耗时：observe `outbox_relay_tick_duration_seconds{phase}` histogram。
     fn record_tick_duration(&self, phase: RelayPhase, seconds: f64);
 }
@@ -146,6 +150,19 @@ impl OutboxMetrics for MetricsOutboxMetrics {
         .set(sample.oldest_age_seconds() as f64);
     }
 
+    fn record_partition_blocked(&self, scope: &OutboxMetricScope<'_>, blocked_depth: u64) {
+        let domain = scope.domain_label().to_owned();
+        let contract_id = scope.contract_id_label().to_owned();
+        let tenant_id = scope.tenant_id_label();
+        metrics::gauge!(
+            "outbox_partition_blocked_depth",
+            "domain" => domain,
+            "contract_id" => contract_id,
+            "tenant_id" => tenant_id,
+        )
+        .set(blocked_depth as f64);
+    }
+
     fn record_tick_duration(&self, phase: RelayPhase, seconds: f64) {
         metrics::histogram!("outbox_relay_tick_duration_seconds", "phase" => phase.as_label())
             .record(seconds);
@@ -193,6 +210,7 @@ mod tests {
             let scope = OutboxMetricScope::new(&domain, &subject);
             m.record_publish(&scope, Disposition::Reject);
             m.record_backlog(&scope, BacklogSample::new(7, 305));
+            m.record_partition_blocked(&scope, 2);
             m.record_tick_duration(RelayPhase::Publish, 0.25);
         });
         let rendered = handle.render();
@@ -209,6 +227,10 @@ mod tests {
         assert!(rendered.contains("outbox_pending_depth"), "{rendered}");
         assert!(
             rendered.contains("outbox_oldest_pending_age_seconds"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("outbox_partition_blocked_depth"),
             "{rendered}"
         );
         assert!(

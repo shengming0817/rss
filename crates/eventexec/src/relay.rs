@@ -513,6 +513,7 @@ async fn sampler_tick<B>(
                     current_scopes.insert(ObservedBacklogScope::from_subject(sample.subject()));
                     let scope = OutboxMetricScope::new(domain, sample.subject());
                     metrics.record_backlog(&scope, sample.sample());
+                    metrics.record_partition_blocked(&scope, sample.partition_blocked_depth());
                 }
                 let stale_scopes = observed_scopes
                     .get(domain.as_str())
@@ -527,6 +528,7 @@ async fn sampler_tick<B>(
                     let subject = stale_scope.to_subject();
                     let scope = OutboxMetricScope::new(domain, &subject);
                     metrics.record_backlog(&scope, BacklogSample::empty());
+                    metrics.record_partition_blocked(&scope, 0);
                 }
                 if current_scopes.is_empty() {
                     observed_scopes.remove(domain.as_str());
@@ -794,11 +796,24 @@ mod tests {
         BacklogMetricSample::new(subject(contract_id), sample)
     }
 
+    fn blocked_backlog_sample(
+        contract_id: &str,
+        sample: BacklogSample,
+        partition_blocked_depth: u64,
+    ) -> BacklogMetricSample {
+        BacklogMetricSample::with_partition_blocked_depth(
+            subject(contract_id),
+            sample,
+            partition_blocked_depth,
+        )
+    }
+
     /// 记录发射调用的 metrics fake（确定性断言；不碰全局 recorder）。
     #[derive(Default)]
     struct CountingMetrics {
         publishes: Mutex<Vec<(String, String, String, Disposition)>>,
         backlogs: Mutex<Vec<(String, String, String, BacklogSample)>>,
+        partition_blocked: Mutex<Vec<(String, String, String, u64)>>,
         tick_phases: Mutex<Vec<RelayPhase>>,
     }
 
@@ -815,6 +830,11 @@ mod tests {
         // reason: 同上。
         fn backlogs(&self) -> Vec<(String, String, String, BacklogSample)> {
             self.backlogs.lock().unwrap().clone()
+        }
+        #[allow(clippy::unwrap_used)]
+        // reason: 同上。
+        fn partition_blocked(&self) -> Vec<(String, String, String, u64)> {
+            self.partition_blocked.lock().unwrap().clone()
         }
         #[allow(clippy::unwrap_used)]
         // reason: 同上。
@@ -842,6 +862,16 @@ mod tests {
                 scope.contract_id_label().to_string(),
                 scope.tenant_id_label(),
                 sample,
+            ));
+        }
+        #[allow(clippy::unwrap_used)]
+        // reason: 同上。
+        fn record_partition_blocked(&self, scope: &OutboxMetricScope<'_>, blocked_depth: u64) {
+            self.partition_blocked.lock().unwrap().push((
+                scope.domain_label().to_string(),
+                scope.contract_id_label().to_string(),
+                scope.tenant_id_label(),
+                blocked_depth,
             ));
         }
         #[allow(clippy::unwrap_used)]
@@ -1604,7 +1634,7 @@ mod tests {
         let sample_a = BacklogSample::new(42, 305);
         let sample_b = BacklogSample::empty();
         let store = FakeBacklog::with_samples(vec![
-            backlog_sample("identity.session-created", sample_a),
+            blocked_backlog_sample("identity.session-created", sample_a, 2),
             backlog_sample("identity.role-assigned", sample_b),
         ]);
         let health = Arc::new(WorkerHealth::healthy());
@@ -1632,6 +1662,23 @@ mod tests {
                     "identity.role-assigned".to_string(),
                     "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
                     sample_b,
+                ),
+            ]
+        );
+        assert_eq!(
+            metrics.partition_blocked(),
+            vec![
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    2,
+                ),
+                (
+                    "identity".to_string(),
+                    "identity.role-assigned".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    0,
                 ),
             ]
         );
@@ -1682,6 +1729,23 @@ mod tests {
                     "identity.session-created".to_string(),
                     "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
                     BacklogSample::empty(),
+                ),
+            ]
+        );
+        assert_eq!(
+            metrics.partition_blocked(),
+            vec![
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    0,
+                ),
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    0,
                 ),
             ]
         );

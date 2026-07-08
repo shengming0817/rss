@@ -46,9 +46,10 @@ pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, 
 
 pub mod dlq;
 pub use dlq::{
-    DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqListQuery, DlqListResult,
+    DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest,
+    DlqInspectTarget, DlqListQuery, DlqListResult, DlqMutationKind, DlqMutationMetricOutcome,
     DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome, DlqReplayRequest, DlqStore,
-    OperatorDlqCapability,
+    OperatorDlqCapability, record_dlq_mutation_error, record_dlq_outbox_redrive, record_dlq_replay,
 };
 
 pub mod reconcile;

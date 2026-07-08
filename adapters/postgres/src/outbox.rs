@@ -1156,9 +1156,9 @@ async fn sample_outbox_backlog(
     pool: &sqlx::PgPool,
     domain: &str,
 ) -> Result<Vec<BacklogMetricSample>, EngineError> {
-    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+    let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
         r#"
-        SELECT tenant_id, contract_id, depth, oldest_age_seconds
+        SELECT tenant_id, contract_id, depth, oldest_age_seconds, partition_blocked_depth
         FROM rss_outbox_sample_backlog($1)
         "#,
     )
@@ -1171,21 +1171,26 @@ async fn sample_outbox_backlog(
     })?;
 
     rows.into_iter()
-        .map(|(tenant_id, contract_id, raw_depth, raw_age)| {
-            let subject = parse_metric_subject(&tenant_id, &contract_id)?;
-            // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
-            let depth = u64::try_from(raw_depth)
-                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+        .map(
+            |(tenant_id, contract_id, raw_depth, raw_age, raw_partition_blocked)| {
+                let subject = parse_metric_subject(&tenant_id, &contract_id)?;
+                // count(*) 恒 ≥ 0；i64→u64 转换失败在理论上不可表达，fail-closed。
+                let depth = u64::try_from(raw_depth)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                let partition_blocked_depth = u64::try_from(raw_partition_blocked)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
 
-            // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
-            let oldest_age_seconds = u64::try_from(raw_age.max(0))
-                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                // clock skew 或极端 EXTRACT 结果可能返负值；负龄无语义，截断到 0。
+                let oldest_age_seconds = u64::try_from(raw_age.max(0))
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
 
-            Ok(BacklogMetricSample::new(
-                subject,
-                BacklogSample::new(depth, oldest_age_seconds),
-            ))
-        })
+                Ok(BacklogMetricSample::with_partition_blocked_depth(
+                    subject,
+                    BacklogSample::new(depth, oldest_age_seconds),
+                    partition_blocked_depth,
+                ))
+            },
+        )
         .collect()
 }
 
@@ -2040,6 +2045,8 @@ mod tests {
             include_str!("../migrations/0036_add_outbox_schema_columns.sql");
         const MIGRATION_0037: &str =
             include_str!("../migrations/0037_outbox_metric_scope_functions.sql");
+        const MIGRATION_0047: &str =
+            include_str!("../migrations/0047_outbox_partition_blocked_metric.sql");
         let ttl = format!("make_interval(secs => {LEASE_TTL_SECONDS})");
         assert_eq!(
             MIGRATION.matches(&ttl).count(),
@@ -2108,6 +2115,23 @@ mod tests {
             assert!(
                 MIGRATION_0037.contains(needle),
                 "0037 drift: missing {needle}"
+            );
+        }
+        assert_eq!(
+            MIGRATION_0047.matches(&ttl).count(),
+            1,
+            "0047 sample_backlog SQL must use the Rust lease TTL constant"
+        );
+        for needle in [
+            "DROP FUNCTION IF EXISTS rss_outbox_sample_backlog(text)",
+            "partition_blocked_depth bigint",
+            "b.status <> 'published'",
+            "count(*) FILTER (WHERE is_partition_blocked)::bigint AS partition_blocked_depth",
+            "GRANT EXECUTE ON FUNCTION rss_outbox_sample_backlog(text) TO rss_app",
+        ] {
+            assert!(
+                MIGRATION_0047.contains(needle),
+                "0047 drift: missing {needle}"
             );
         }
     }

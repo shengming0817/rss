@@ -11,6 +11,11 @@ async fn main() -> anyhow::Result<()> {
         runtime::shutdown_trace_export(trace_export).await?;
         return result;
     }
+    if runtime::is_dlq_command(&args) {
+        let result = runtime::run_dlq_control_command(&args).await;
+        runtime::shutdown_trace_export(trace_export).await?;
+        return result;
+    }
     if runtime::is_settings_config_value_maintenance_command(&args) {
         let result = runtime::run_settings_config_value_maintenance(&args).await;
         runtime::shutdown_trace_export(trace_export).await?;

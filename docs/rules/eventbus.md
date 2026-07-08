@@ -308,12 +308,21 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   行直接 fail-fast，不做 plaintext 迁移。
 - durable runtime 必须配置 `RSS_DLX_PAYLOAD_KEY_NAME` 以及 Vault transit provider
   `RSS_VAULT_ADDR` / `RSS_VAULT_TOKEN` / `RSS_VAULT_TRANSIT_MOUNT`；broker tenant authority 另必填
-  `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`，可选 `RSS_TENANT_AUTHORITY_TTL_SECS`（默认 3600）和
-  `RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS`（默认 60，上限 300）。DLX list API 只返回 payload 长度与摘要元数据，
+	  `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`，可选 `RSS_TENANT_AUTHORITY_TTL_SECS`（默认 3600）和
+	  `RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS`（默认 60，上限 300）。`rss dlq replay-dead-letter`
+	  需要同一 DLX payload key provider；`list` / `inspect` / `redrive-outbox` 是 payload-free 路径，不因
+	  Vault/key provider 不可用而阻断。DLX list API 只返回 payload 长度与摘要元数据，
   不返回 payload 内容；返回 `DlqListResult { data, has_more, next_cursor }`，`next_cursor` 是
   `(last_attempt_epoch_secs DESC, kind, id)` keyset cursor，调用方必须用它稳定续页，不能用 offset 或假设一次
   `Vec` 即完整队列。
-- 当前只提供内部 Rust API：`eventexec::DlqStore` + `PgInfraDeps::dlq()`。CLI / HTTP 管控面不在本轮。
+- Runtime 提供 tenant-scoped operator CLI：`rss dlq list` / `inspect` / `replay-dead-letter` /
+  `redrive-outbox`。所有命令必须带 `--operator-service-token`、`--operator-tenant`、`--tenant`；授权由
+  service token PDP 验证（`jti` 经 Postgres 持久 replay guard 原子记录，跨 CLI 进程防重放）+
+  `RSS_DLQ_OPERATOR_GRANTS=subject|action|tenant` 精确 grant 共同决定。`list` 支持 `--source` / `--domain` /
+  `--contract-id` / `--cursor` 精确收窄，filter 集合覆盖 `OutboxPartitionBlocked{tenant_id,domain,contract_id}`
+  告警标签。审计 kind 固定为
+  `dlq.maintenance`，action 固定为 `dlq.<action>.start|finish`。v1 不提供 destructive `skip` 或旧命令别名；
+  partition unblock 定义为 redrive outbox DLX 队头后让 relay 正常发布。
 - Consumer `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
   `IdemKey`，由同一 `KeyProvider` 解密原 payload 后插入一条新的 outbox 行；不得删除原 `dead_letter`，
   不得重置 `inbox_receipts done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
@@ -323,8 +332,9 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   projection poison `message_id` 固定为 `projection:<owner>:<projection_id>:<lsn>`，重复写入必须幂等。
   Projection read-model shadow replay 不从 DLQ 恢复，必须走 `rss projections replay`，输入源是
   `projection_events` 的 generated projection input binding 镜像。
-  `OperatorDlqCapability::issue_for_authorized_operator()`
-  只能在 admin/PDP 边界签发，调用点由 dylint `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；
+	  `OperatorDlqCapability::issue_for_authorized_operator()`
+	  只能在 admin/PDP 边界签发；runtime CLI 用精确 `issue_authorized_dlq_capability` wrapper，调用点由 dylint
+	  `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；
   replay decrypt 只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与
   `Forbidden/NotFound` 保留为 operator 可区分的依赖/配置错误。
 - PG outbox relay claim **与** consumer inbox claim 均写入 lease/fencing token；所有状态回写（commit / extend /

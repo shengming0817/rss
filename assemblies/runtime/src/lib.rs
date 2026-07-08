@@ -42,7 +42,10 @@ pub use infra::vault::{
 pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
-use infra::oidc::{OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_runtime_oidc_provider};
+use infra::oidc::{
+    OIDC_JWKS_READY_PROBE_NAME, OidcJwksReadyProbe, build_provider_with_replay_guard,
+    build_runtime_oidc_provider,
+};
 use infra::pg::{build_readiness_interval, legacy_config_plaintext_policy};
 use infra::redis::{
     REDIS_READY_PROBE_NAME, RedisReadyProbe, build_redis_readiness_interval,
@@ -64,11 +67,13 @@ use anyhow::Context as _;
 use audit::AuditDomain;
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use base64::Engine as _;
-use consistency::{EngineErrorKind, ProjectionBatchLimit, SerialInOrder};
+use consistency::{EngineErrorKind, IdemKey, ProjectionBatchLimit, SerialInOrder};
 use crypto::RustCryptoMacVerifier;
 use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
 use eventexec::{
-    ProjectionHarness, ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
+    DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
+    DlqRedriveRequest, DlqReplayRequest, DlqStore, OperatorDlqCapability, ProjectionHarness,
+    ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
     ProjectionTargetRegistry, ProjectionVersion, projection_runner_once,
 };
 use identity::{
@@ -82,8 +87,9 @@ use identity::{
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
-    MaintenanceAuditOutcome, PgAuthAuditSink, PgDbReadiness, PgMaintenanceDeps, PgRuntimeDeps,
-    PoolReadiness, ProjectionMaintenanceCapability, ProjectionPointerPrecondition, caps,
+    MaintenanceAuditOutcome, PgAuthAuditSink, PgDbReadiness, PgDlqStore, PgMaintenanceDeps,
+    PgRuntimeDeps, PoolReadiness, ProjectionMaintenanceCapability, ProjectionPointerPrecondition,
+    caps,
 };
 use primitives::{HealthCheck, HealthStatus, MacKey, ProbeName};
 use settings::ports::DynSecretRepo;
@@ -547,10 +553,19 @@ fn projection_cli_usage() -> &'static str {
     "usage: rss projections replay|status|swap --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> [--batch-size <n>] [--expected-active-version <id>|--expect-unset]"
 }
 
-fn set_projection_arg_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> anyhow::Result<()> {
+fn set_cli_arg_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> anyhow::Result<()> {
     anyhow::ensure!(slot.is_none(), "{flag} must not be repeated");
     *slot = Some(value);
     Ok(())
+}
+
+fn next_cli_value<'a>(
+    it: &mut std::slice::Iter<'a, String>,
+    flag: &str,
+) -> anyhow::Result<&'a str> {
+    it.next()
+        .map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))
 }
 
 fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
@@ -585,7 +600,7 @@ fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
                     !trimmed.is_empty(),
                     "--operator-service-token must be non-empty"
                 );
-                set_projection_arg_once(
+                set_cli_arg_once(
                     &mut operator_service_token,
                     "--operator-service-token",
                     trimmed.to_owned(),
@@ -597,7 +612,7 @@ fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
                     .ok_or_else(|| anyhow::anyhow!("--operator-tenant requires a value"))?;
                 let parsed = vocab::TenantId::parse(raw)
                     .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
-                set_projection_arg_once(&mut operator_tenant, "--operator-tenant", parsed)?;
+                set_cli_arg_once(&mut operator_tenant, "--operator-tenant", parsed)?;
             }
             "--tenant" => {
                 let raw = it
@@ -605,7 +620,7 @@ fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
                     .ok_or_else(|| anyhow::anyhow!("--tenant requires a value"))?;
                 let parsed = vocab::TenantId::parse(raw)
                     .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
-                set_projection_arg_once(&mut tenant, "--tenant", parsed)?;
+                set_cli_arg_once(&mut tenant, "--tenant", parsed)?;
             }
             "--projection" => {
                 let raw = it
@@ -613,7 +628,7 @@ fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
                     .ok_or_else(|| anyhow::anyhow!("--projection requires a value"))?;
                 let parsed = ProjectionId::parse(raw)
                     .with_context(|| format!("--projection must be canonical: {raw}"))?;
-                set_projection_arg_once(&mut projection, "--projection", parsed)?;
+                set_cli_arg_once(&mut projection, "--projection", parsed)?;
             }
             "--version" => {
                 let raw = it
@@ -621,7 +636,7 @@ fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
                     .ok_or_else(|| anyhow::anyhow!("--version requires a value"))?;
                 let parsed = ProjectionVersion::parse(raw)
                     .with_context(|| format!("--version must be canonical: {raw}"))?;
-                set_projection_arg_once(&mut version, "--version", parsed)?;
+                set_cli_arg_once(&mut version, "--version", parsed)?;
             }
             "--batch-size" => {
                 anyhow::ensure!(!batch_limit_seen, "--batch-size must not be repeated");
@@ -875,7 +890,8 @@ async fn projection_maintenance_operator_subject(
     parsed: &ProjectionCliArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let operator_provider = match build_provider() {
+    let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
+    {
         Ok(provider) => provider,
         Err(err) => {
             record_projection_maintenance_finish_audit(
@@ -1410,6 +1426,880 @@ where
 /// 执行 `rss projections replay|status|swap`。
 pub async fn run_projection_control_command(args: &[String]) -> anyhow::Result<()> {
     run_projection_control_command_with_runtime(args, &ProductionProjectionControlRuntime).await
+}
+
+/// `rss` binary 是否请求 DLQ inspection / replay / redrive 控制命令。
+#[must_use]
+pub fn is_dlq_command(args: &[String]) -> bool {
+    matches!(args, [cmd, ..] if cmd == "dlq")
+}
+
+const DLQ_OPERATOR_GRANTS_ENV: &str = "RSS_DLQ_OPERATOR_GRANTS";
+const UNVERIFIED_DLQ_OPERATOR: &str = "unverified-service-token";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DlqCliArgs {
+    command: DlqCliCommand,
+    operator_service_token: String,
+    operator_tenant: vocab::TenantId,
+    tenant: vocab::TenantId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DlqCliCommand {
+    List {
+        source: Option<diport::DeadLetterSource>,
+        domain: Option<String>,
+        contract_id: Option<String>,
+        limit: u32,
+        cursor: Option<DlqCursor>,
+    },
+    Inspect {
+        target: DlqInspectTarget,
+    },
+    ReplayDeadLetter {
+        dead_letter_id: DeadLetterId,
+        replay_id: IdemKey,
+    },
+    RedriveOutbox {
+        event_id: IdemKey,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DlqMaintenanceAction {
+    List,
+    Inspect,
+    ReplayDeadLetter,
+    RedriveOutbox,
+}
+
+impl DlqMaintenanceAction {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "list" => Ok(Self::List),
+            "inspect" => Ok(Self::Inspect),
+            "replay-dead-letter" => Ok(Self::ReplayDeadLetter),
+            "redrive-outbox" => Ok(Self::RedriveOutbox),
+            other => anyhow::bail!(
+                "unknown DLQ maintenance action in {DLQ_OPERATOR_GRANTS_ENV}: {other}"
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Inspect => "inspect",
+            Self::ReplayDeadLetter => "replay-dead-letter",
+            Self::RedriveOutbox => "redrive-outbox",
+        }
+    }
+}
+
+impl DlqCliCommand {
+    fn action(&self) -> DlqMaintenanceAction {
+        match self {
+            Self::List { .. } => DlqMaintenanceAction::List,
+            Self::Inspect { .. } => DlqMaintenanceAction::Inspect,
+            Self::ReplayDeadLetter { .. } => DlqMaintenanceAction::ReplayDeadLetter,
+            Self::RedriveOutbox { .. } => DlqMaintenanceAction::RedriveOutbox,
+        }
+    }
+
+    fn requires_payload_protector(&self) -> bool {
+        matches!(self, Self::ReplayDeadLetter { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DlqMaintenanceGrant {
+    subject: String,
+    action: DlqMaintenanceAction,
+    tenant: vocab::TenantId,
+}
+
+fn dlq_cli_usage() -> &'static str {
+    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> ..."
+}
+
+fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
+    let value = parse_positive_usize(raw, "--limit")?;
+    let value = u32::try_from(value).context("--limit exceeds u32")?;
+    anyhow::ensure!(value <= 500, "--limit must be <= 500");
+    Ok(value)
+}
+
+fn parse_dlq_source(raw: &str) -> anyhow::Result<diport::DeadLetterSource> {
+    diport::DeadLetterSource::parse(raw).ok_or_else(|| {
+        anyhow::anyhow!("--source must be legacy|consumer|outbox_relay|saga|projection")
+    })
+}
+
+fn parse_dlq_kind_target(kind: &str, id: &str) -> anyhow::Result<DlqInspectTarget> {
+    match kind {
+        "dead-letter" => Ok(DlqInspectTarget::DeadLetter(
+            DeadLetterId::parse(id)
+                .with_context(|| format!("--id must be a dead_letter UUID: {id}"))?,
+        )),
+        "outbox-dlx" => Ok(DlqInspectTarget::OutboxDlx(
+            IdemKey::parse(id).with_context(|| format!("--id must be an outbox event id: {id}"))?,
+        )),
+        other => anyhow::bail!("--kind must be dead-letter|outbox-dlx, got {other}"),
+    }
+}
+
+#[derive(Debug)]
+struct DlqRawArgs {
+    operator_service_token: Option<String>,
+    operator_tenant: Option<vocab::TenantId>,
+    tenant: Option<vocab::TenantId>,
+    source: Option<diport::DeadLetterSource>,
+    domain: Option<String>,
+    contract_id: Option<String>,
+    limit: u32,
+    limit_seen: bool,
+    cursor: Option<DlqCursor>,
+    kind: Option<String>,
+    id: Option<String>,
+    dead_letter_id: Option<DeadLetterId>,
+    replay_id: Option<IdemKey>,
+    event_id: Option<IdemKey>,
+}
+
+impl Default for DlqRawArgs {
+    fn default() -> Self {
+        Self {
+            operator_service_token: None,
+            operator_tenant: None,
+            tenant: None,
+            source: None,
+            domain: None,
+            contract_id: None,
+            limit: 100,
+            limit_seen: false,
+            cursor: None,
+            kind: None,
+            id: None,
+            dead_letter_id: None,
+            replay_id: None,
+            event_id: None,
+        }
+    }
+}
+
+fn parse_dlq_raw_args(args: &[String]) -> anyhow::Result<DlqRawArgs> {
+    let mut parsed = DlqRawArgs::default();
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--operator-service-token" => {
+                let value = next_cli_value(&mut it, "--operator-service-token")?;
+                let trimmed = value.trim();
+                anyhow::ensure!(
+                    !trimmed.is_empty(),
+                    "--operator-service-token must be non-empty"
+                );
+                set_cli_arg_once(
+                    &mut parsed.operator_service_token,
+                    "--operator-service-token",
+                    trimmed.to_owned(),
+                )?;
+            }
+            "--operator-tenant" => {
+                let value = next_cli_value(&mut it, "--operator-tenant")?;
+                let tenant = vocab::TenantId::parse(value)
+                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {value}"))?;
+                set_cli_arg_once(&mut parsed.operator_tenant, "--operator-tenant", tenant)?;
+            }
+            "--tenant" => {
+                let value = next_cli_value(&mut it, "--tenant")?;
+                let tenant = vocab::TenantId::parse(value)
+                    .with_context(|| format!("--tenant must be a tenant UUID: {value}"))?;
+                set_cli_arg_once(&mut parsed.tenant, "--tenant", tenant)?;
+            }
+            "--source" => {
+                let value = next_cli_value(&mut it, "--source")?;
+                set_cli_arg_once(&mut parsed.source, "--source", parse_dlq_source(value)?)?;
+            }
+            "--domain" => {
+                let value = next_cli_value(&mut it, "--domain")?;
+                anyhow::ensure!(!value.trim().is_empty(), "--domain must be non-empty");
+                set_cli_arg_once(&mut parsed.domain, "--domain", value.trim().to_owned())?;
+            }
+            "--contract-id" => {
+                let value = next_cli_value(&mut it, "--contract-id")?;
+                anyhow::ensure!(!value.trim().is_empty(), "--contract-id must be non-empty");
+                set_cli_arg_once(
+                    &mut parsed.contract_id,
+                    "--contract-id",
+                    value.trim().to_owned(),
+                )?;
+            }
+            "--limit" => {
+                anyhow::ensure!(!parsed.limit_seen, "--limit must not be repeated");
+                let value = next_cli_value(&mut it, "--limit")?;
+                parsed.limit = parse_dlq_limit(value)?;
+                parsed.limit_seen = true;
+            }
+            "--cursor" => {
+                let value = next_cli_value(&mut it, "--cursor")?;
+                set_cli_arg_once(
+                    &mut parsed.cursor,
+                    "--cursor",
+                    DlqCursor::parse(value).context("--cursor is invalid")?,
+                )?;
+            }
+            "--kind" => {
+                let value = next_cli_value(&mut it, "--kind")?;
+                set_cli_arg_once(&mut parsed.kind, "--kind", value.to_owned())?;
+            }
+            "--id" => {
+                let value = next_cli_value(&mut it, "--id")?;
+                anyhow::ensure!(!value.trim().is_empty(), "--id must be non-empty");
+                set_cli_arg_once(&mut parsed.id, "--id", value.trim().to_owned())?;
+            }
+            "--dead-letter-id" => {
+                let value = next_cli_value(&mut it, "--dead-letter-id")?;
+                set_cli_arg_once(
+                    &mut parsed.dead_letter_id,
+                    "--dead-letter-id",
+                    DeadLetterId::parse(value)
+                        .with_context(|| format!("--dead-letter-id must be a UUID: {value}"))?,
+                )?;
+            }
+            "--replay-id" => {
+                let value = next_cli_value(&mut it, "--replay-id")?;
+                set_cli_arg_once(
+                    &mut parsed.replay_id,
+                    "--replay-id",
+                    IdemKey::parse(value).with_context(|| {
+                        format!("--replay-id must be an idempotency key: {value}")
+                    })?,
+                )?;
+            }
+            "--event-id" => {
+                let value = next_cli_value(&mut it, "--event-id")?;
+                set_cli_arg_once(
+                    &mut parsed.event_id,
+                    "--event-id",
+                    IdemKey::parse(value).with_context(|| {
+                        format!("--event-id must be an idempotency key: {value}")
+                    })?,
+                )?;
+            }
+            other => anyhow::bail!("unknown dlq command argument: {other}"),
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
+    anyhow::ensure!(is_dlq_command(args), dlq_cli_usage());
+    let subcommand = args
+        .get(1)
+        .map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!(dlq_cli_usage()))?;
+    anyhow::ensure!(
+        matches!(
+            subcommand,
+            "list" | "inspect" | "replay-dead-letter" | "redrive-outbox"
+        ),
+        "unknown dlq subcommand: {subcommand}; {}",
+        dlq_cli_usage()
+    );
+    let mut raw = parse_dlq_raw_args(&args[2..])?;
+
+    let command = match subcommand {
+        "list" => {
+            anyhow::ensure!(
+                raw.kind.is_none() && raw.id.is_none(),
+                "list does not accept --kind or --id"
+            );
+            anyhow::ensure!(
+                raw.dead_letter_id.is_none() && raw.replay_id.is_none() && raw.event_id.is_none(),
+                "list does not accept mutation target flags"
+            );
+            DlqCliCommand::List {
+                source: raw.source.take(),
+                domain: raw.domain.take(),
+                contract_id: raw.contract_id.take(),
+                limit: raw.limit,
+                cursor: raw.cursor.take(),
+            }
+        }
+        "inspect" => {
+            anyhow::ensure!(
+                raw.source.is_none()
+                    && raw.domain.is_none()
+                    && raw.contract_id.is_none()
+                    && raw.cursor.is_none()
+                    && !raw.limit_seen,
+                "inspect does not accept list filters"
+            );
+            anyhow::ensure!(
+                raw.dead_letter_id.is_none() && raw.replay_id.is_none() && raw.event_id.is_none(),
+                "inspect does not accept mutation target flags"
+            );
+            let kind = raw
+                .kind
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("--kind is required"))?;
+            let id = raw
+                .id
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("--id is required"))?;
+            DlqCliCommand::Inspect {
+                target: parse_dlq_kind_target(&kind, &id)?,
+            }
+        }
+        "replay-dead-letter" => {
+            anyhow::ensure!(
+                raw.source.is_none()
+                    && raw.domain.is_none()
+                    && raw.contract_id.is_none()
+                    && raw.cursor.is_none()
+                    && !raw.limit_seen
+                    && raw.kind.is_none()
+                    && raw.id.is_none()
+                    && raw.event_id.is_none(),
+                "replay-dead-letter only accepts --dead-letter-id and --replay-id target flags"
+            );
+            DlqCliCommand::ReplayDeadLetter {
+                dead_letter_id: raw
+                    .dead_letter_id
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("--dead-letter-id is required"))?,
+                replay_id: raw
+                    .replay_id
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("--replay-id is required"))?,
+            }
+        }
+        "redrive-outbox" => {
+            anyhow::ensure!(
+                raw.source.is_none()
+                    && raw.domain.is_none()
+                    && raw.contract_id.is_none()
+                    && raw.cursor.is_none()
+                    && !raw.limit_seen
+                    && raw.kind.is_none()
+                    && raw.id.is_none()
+                    && raw.dead_letter_id.is_none()
+                    && raw.replay_id.is_none(),
+                "redrive-outbox only accepts --event-id target flag"
+            );
+            DlqCliCommand::RedriveOutbox {
+                event_id: raw
+                    .event_id
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("--event-id is required"))?,
+            }
+        }
+        _ => unreachable!("subcommand checked"),
+    };
+
+    Ok(DlqCliArgs {
+        command,
+        operator_service_token: raw
+            .operator_service_token
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?,
+        operator_tenant: raw
+            .operator_tenant
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?,
+        tenant: raw
+            .tenant
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
+    })
+}
+
+fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
+    let raw = raw.trim();
+    anyhow::ensure!(
+        !raw.is_empty(),
+        "{DLQ_OPERATOR_GRANTS_ENV} must not be empty"
+    );
+    let mut grants = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        anyhow::ensure!(
+            !entry.is_empty(),
+            "{DLQ_OPERATOR_GRANTS_ENV} must not contain empty entries"
+        );
+        let parts: Vec<_> = entry.split('|').map(str::trim).collect();
+        anyhow::ensure!(
+            parts.len() == 3,
+            "{DLQ_OPERATOR_GRANTS_ENV} entries must be subject|action|tenant"
+        );
+        let [subject, action, tenant] = parts.as_slice() else {
+            unreachable!("len checked");
+        };
+        anyhow::ensure!(
+            !subject.is_empty(),
+            "{DLQ_OPERATOR_GRANTS_ENV} subject must be non-empty"
+        );
+        grants.push(DlqMaintenanceGrant {
+            subject: (*subject).to_owned(),
+            action: DlqMaintenanceAction::parse(action)?,
+            tenant: vocab::TenantId::parse(tenant).with_context(|| {
+                format!("{DLQ_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
+            })?,
+        });
+    }
+    anyhow::ensure!(
+        !grants.is_empty(),
+        "{DLQ_OPERATOR_GRANTS_ENV} must contain at least one grant"
+    );
+    Ok(grants)
+}
+
+fn load_dlq_operator_grants() -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
+    let raw = std::env::var(DLQ_OPERATOR_GRANTS_ENV)
+        .with_context(|| format!("{DLQ_OPERATOR_GRANTS_ENV} is required"))?;
+    parse_dlq_operator_grants(&raw)
+}
+
+fn authorize_dlq_operator(
+    operator_subject: &str,
+    parsed: &DlqCliArgs,
+    grants: &[DlqMaintenanceGrant],
+) -> anyhow::Result<()> {
+    let action = parsed.command.action();
+    let allowed = grants.iter().any(|grant| {
+        grant.subject == operator_subject && grant.action == action && grant.tenant == parsed.tenant
+    });
+    anyhow::ensure!(
+        allowed,
+        "DLQ operator is not authorized for action={} tenant={}",
+        action.as_str(),
+        parsed.tenant
+    );
+    Ok(())
+}
+
+fn dlq_command_resource_id(parsed: &DlqCliArgs) -> String {
+    let target = match &parsed.command {
+        DlqCliCommand::List {
+            source,
+            domain,
+            contract_id,
+            ..
+        } => format!(
+            "source={} domain={} contract_id={}",
+            source.map(|source| source.as_str()).unwrap_or("all"),
+            domain.as_deref().unwrap_or("all"),
+            contract_id.as_deref().unwrap_or("all")
+        ),
+        DlqCliCommand::Inspect { target } => match target {
+            DlqInspectTarget::DeadLetter(dead_letter_id) => {
+                format!("kind=dead_letter dead_letter_id={dead_letter_id}")
+            }
+            DlqInspectTarget::OutboxDlx(event_id) => {
+                format!("kind=outbox_dlx event_id={}", event_id.as_str())
+            }
+        },
+        DlqCliCommand::ReplayDeadLetter {
+            dead_letter_id,
+            replay_id,
+        } => {
+            format!(
+                "dead_letter_id={dead_letter_id} replay_id={}",
+                replay_id.as_str()
+            )
+        }
+        DlqCliCommand::RedriveOutbox { event_id } => format!("event_id={}", event_id.as_str()),
+    };
+    format!(
+        "operation={} tenant={} {}",
+        parsed.command.action().as_str(),
+        parsed.tenant,
+        target
+    )
+}
+
+async fn verified_dlq_operator_subject(
+    service_token: &str,
+    operator_tenant: vocab::TenantId,
+    pdp: &diport::DynPdp<'_>,
+) -> anyhow::Result<String> {
+    verified_service_maintenance_operator_subject(
+        service_token,
+        operator_tenant,
+        pdp,
+        "DLQ maintenance",
+    )
+    .await
+}
+
+async fn record_dlq_maintenance_finish_audit(
+    pg: &PgMaintenanceDeps,
+    operator_subject: &str,
+    action: &str,
+    resource_id: &str,
+    outcome: MaintenanceAuditOutcome<'_>,
+) -> anyhow::Result<()> {
+    pg.record_dlq_maintenance_audit(operator_subject, action, outcome, resource_id)
+        .await
+        .context("record DLQ maintenance finish audit")
+}
+
+async fn dlq_operator_subject(
+    pg: &PgMaintenanceDeps,
+    parsed: &DlqCliArgs,
+    resource_id: &str,
+) -> anyhow::Result<String> {
+    let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
+    {
+        Ok(provider) => provider,
+        Err(err) => {
+            record_dlq_maintenance_finish_audit(
+                pg,
+                UNVERIFIED_DLQ_OPERATOR,
+                &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_provider_config",
+                },
+            )
+            .await?;
+            return Err(err).context("DLQ maintenance operator verifier");
+        }
+    };
+    let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
+    let subject = match verified_dlq_operator_subject(
+        &parsed.operator_service_token,
+        parsed.operator_tenant,
+        operator_pdp,
+    )
+    .await
+    {
+        Ok(subject) => subject,
+        Err(err) => {
+            record_dlq_maintenance_finish_audit(
+                pg,
+                UNVERIFIED_DLQ_OPERATOR,
+                &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_auth",
+                },
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    let grants = match load_dlq_operator_grants() {
+        Ok(grants) => grants,
+        Err(err) => {
+            record_dlq_maintenance_finish_audit(
+                pg,
+                &subject,
+                &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_grants",
+                },
+            )
+            .await?;
+            return Err(err);
+        }
+    };
+    if let Err(err) = authorize_dlq_operator(&subject, parsed, &grants) {
+        record_dlq_maintenance_finish_audit(
+            pg,
+            &subject,
+            &format!("dlq.{}.finish", parsed.command.action().as_str()),
+            resource_id,
+            MaintenanceAuditOutcome::Failure {
+                reason: "operator_authorization",
+            },
+        )
+        .await?;
+        return Err(err);
+    }
+    Ok(subject)
+}
+
+fn dlq_summary_json_line(summary: &DlqEntrySummary) -> anyhow::Result<String> {
+    let value = serde_json::json!({
+        "kind": summary.kind().as_label(),
+        "id": summary.id(),
+        "source": summary.source().as_str(),
+        "tenant": summary.tenant().to_string(),
+        "messageId": summary.message_id(),
+        "domain": summary.domain(),
+        "contractId": summary.contract_id(),
+        "topic": summary.topic(),
+        "consumerGroup": summary.consumer_group(),
+        "payloadLen": summary.payload_len(),
+        "errorSummary": summary.error_summary(),
+        "numAttempts": summary.num_attempts(),
+        "lastAttemptEpochSecs": summary.last_attempt_epoch_secs(),
+    });
+    serde_json::to_string(&value).context("render DLQ summary json")
+}
+
+fn print_dlq_summary(summary: &DlqEntrySummary) -> anyhow::Result<()> {
+    println!("{}", dlq_summary_json_line(summary)?);
+    Ok(())
+}
+
+async fn run_dlq_command_inner<S: DlqStore>(
+    store: &S,
+    parsed: &DlqCliArgs,
+    capability: OperatorDlqCapability,
+) -> anyhow::Result<()> {
+    match &parsed.command {
+        DlqCliCommand::List {
+            source,
+            domain,
+            contract_id,
+            limit,
+            cursor,
+        } => {
+            let mut query = DlqListQuery::new(parsed.tenant).with_limit(*limit);
+            if let Some(source) = source {
+                query = query.with_source(*source);
+            }
+            if let Some(domain) = domain {
+                query = query.with_domain(domain.clone());
+            }
+            if let Some(contract_id) = contract_id {
+                query = query.with_contract_id(contract_id.clone());
+            }
+            if let Some(cursor) = cursor {
+                query = query.with_cursor(cursor.clone());
+            }
+            let result = store.list_dlq(query).await?;
+            for summary in result.data() {
+                print_dlq_summary(summary)?;
+            }
+            println!(
+                "operation=list tenant={} count={} has_more={} next_cursor={}",
+                parsed.tenant,
+                result.data().len(),
+                result.has_more(),
+                result.next_cursor().unwrap_or("none")
+            );
+            Ok(())
+        }
+        DlqCliCommand::Inspect { target } => {
+            let summary = store
+                .inspect_dlq(DlqInspectRequest::new(parsed.tenant, target.clone()))
+                .await?;
+            print_dlq_summary(&summary)?;
+            match target {
+                DlqInspectTarget::DeadLetter(dead_letter_id) => println!(
+                    "operation=inspect tenant={} kind=dead_letter dead_letter_id={}",
+                    parsed.tenant, dead_letter_id
+                ),
+                DlqInspectTarget::OutboxDlx(event_id) => println!(
+                    "operation=inspect tenant={} kind=outbox_dlx event_id={}",
+                    parsed.tenant,
+                    event_id.as_str()
+                ),
+            }
+            Ok(())
+        }
+        DlqCliCommand::ReplayDeadLetter {
+            dead_letter_id,
+            replay_id,
+        } => {
+            let outcome = store
+                .replay_dead_letter(DlqReplayRequest::new(
+                    parsed.tenant,
+                    dead_letter_id.clone(),
+                    replay_id.clone(),
+                    capability,
+                ))
+                .await?;
+            println!(
+                "operation=replay-dead-letter tenant={} dead_letter_id={} replay_id={} outcome={}",
+                parsed.tenant,
+                dead_letter_id,
+                replay_id.as_str(),
+                outcome.as_label()
+            );
+            Ok(())
+        }
+        DlqCliCommand::RedriveOutbox { event_id } => {
+            let outcome = store
+                .redrive_outbox(DlqRedriveRequest::new(
+                    parsed.tenant,
+                    event_id.clone(),
+                    capability,
+                ))
+                .await?;
+            println!(
+                "operation=redrive-outbox tenant={} event_id={} outcome={}",
+                parsed.tenant,
+                event_id.as_str(),
+                outcome.as_label()
+            );
+            Ok(())
+        }
+    }
+}
+
+#[allow(async_fn_in_trait)]
+trait DlqControlRuntime {
+    type Session;
+    type Store: DlqStore;
+
+    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session>;
+
+    async fn record_dlq_maintenance_audit(
+        &self,
+        session: &Self::Session,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> anyhow::Result<()>;
+
+    async fn operator_subject(
+        &self,
+        session: &Self::Session,
+        parsed: &DlqCliArgs,
+        resource_id: &str,
+    ) -> anyhow::Result<String>;
+
+    fn dlq_store(
+        &self,
+        session: &Self::Session,
+        command: &DlqCliCommand,
+    ) -> anyhow::Result<Self::Store>;
+
+    async fn shutdown(&self, session: Self::Session);
+}
+
+struct ProductionDlqControlRuntime;
+
+impl DlqControlRuntime for ProductionDlqControlRuntime {
+    type Session = PgMaintenanceDeps;
+    type Store = PgDlqStore;
+
+    async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+        PgRuntimeDeps::setup_maintenance(&build_pg_migrator_config()?)
+            .await
+            .context("setup postgres maintenance deps")
+    }
+
+    async fn record_dlq_maintenance_audit(
+        &self,
+        session: &Self::Session,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> anyhow::Result<()> {
+        session
+            .record_dlq_maintenance_audit(operator_subject, action, outcome, resource_id)
+            .await
+            .context("record DLQ maintenance audit")
+    }
+
+    async fn operator_subject(
+        &self,
+        session: &Self::Session,
+        parsed: &DlqCliArgs,
+        resource_id: &str,
+    ) -> anyhow::Result<String> {
+        dlq_operator_subject(session, parsed, resource_id).await
+    }
+
+    fn dlq_store(
+        &self,
+        session: &Self::Session,
+        command: &DlqCliCommand,
+    ) -> anyhow::Result<Self::Store> {
+        let infra = session.infra();
+        if command.requires_payload_protector() {
+            let dlx_payload_protector =
+                event_transport::build_dlx_payload_protector_from(&|name| std::env::var(name).ok())
+                    .context("build DLQ payload protector")?;
+            Ok(infra.dlq(dlx_payload_protector))
+        } else {
+            Ok(infra.dlq_without_payload_replay())
+        }
+    }
+
+    async fn shutdown(&self, session: Self::Session) {
+        session.shutdown().await.ok();
+    }
+}
+
+async fn run_dlq_control_command_with_runtime<R>(args: &[String], runtime: &R) -> anyhow::Result<()>
+where
+    R: DlqControlRuntime,
+{
+    let parsed = parse_dlq_args(args)?;
+    let resource_id = dlq_command_resource_id(&parsed);
+    let session = runtime.setup_maintenance().await?;
+    let start_action = format!("dlq.{}.start", parsed.command.action().as_str());
+    if let Err(err) = runtime
+        .record_dlq_maintenance_audit(
+            &session,
+            UNVERIFIED_DLQ_OPERATOR,
+            &start_action,
+            MaintenanceAuditOutcome::Success,
+            &resource_id,
+        )
+        .await
+        .context("record DLQ maintenance start audit")
+    {
+        runtime.shutdown(session).await;
+        return Err(err);
+    }
+
+    let finish_action = format!("dlq.{}.finish", parsed.command.action().as_str());
+    let operator_subject = match runtime
+        .operator_subject(&session, &parsed, &resource_id)
+        .await
+    {
+        Ok(subject) => subject,
+        Err(err) => {
+            runtime.shutdown(session).await;
+            return Err(err);
+        }
+    };
+    let capability = issue_authorized_dlq_capability();
+    let command_result = match runtime.dlq_store(&session, &parsed.command) {
+        Ok(store) => run_dlq_command_inner(&store, &parsed, capability).await,
+        Err(err) => Err(err),
+    };
+    let finish_outcome = if command_result.is_ok() {
+        MaintenanceAuditOutcome::Success
+    } else {
+        MaintenanceAuditOutcome::Failure {
+            reason: "run_error",
+        }
+    };
+    let audit_result = runtime
+        .record_dlq_maintenance_audit(
+            &session,
+            &operator_subject,
+            &finish_action,
+            finish_outcome,
+            &resource_id,
+        )
+        .await
+        .context("record DLQ maintenance finish audit");
+    runtime.shutdown(session).await;
+    audit_result?;
+    command_result.with_context(|| format!("DLQ command failed: {resource_id}"))
+}
+
+fn issue_authorized_dlq_capability() -> OperatorDlqCapability {
+    OperatorDlqCapability::issue_for_authorized_operator()
+}
+
+/// 执行 `rss dlq ...`。
+pub async fn run_dlq_control_command(args: &[String]) -> anyhow::Result<()> {
+    run_dlq_control_command_with_runtime(args, &ProductionDlqControlRuntime).await
 }
 
 #[derive(Debug, Clone)]
@@ -2695,6 +3585,7 @@ mod tests {
 
     use axum::http::Method;
     use diport::ServiceTokenReplayGuard;
+    use eventexec::DlqError;
     use oidc::OidcProvider;
     use primitives::ListenerKind;
     use std::future::Future;
@@ -4417,6 +5308,730 @@ mod tests {
         assert_eq!(runtime.shutdown_count(), 0);
         assert!(runtime.audit_records().is_empty());
         assert!(runtime.command_records().is_empty());
+        Ok(())
+    }
+
+    const DLQ_FIXTURE_OPERATOR_TENANT: &str = "00000000-0000-4000-8000-000000000001";
+    const DLQ_FIXTURE_TENANT: &str = "00000000-0000-4000-8000-000000000002";
+    const DLQ_FIXTURE_OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000003";
+    const DLQ_FIXTURE_OPERATOR: &str = "verified-dlq-operator";
+    const DLQ_FIXTURE_DEAD_LETTER_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const DLQ_FIXTURE_REPLAY_ID: &str = "evt-dlq-replay";
+    const DLQ_FIXTURE_EVENT_ID: &str = "evt-outbox-dlx";
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FakeDlqAuditOutcome {
+        Success,
+        Failure { reason: String },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FakeDlqAuditRecord {
+        subject: String,
+        action: String,
+        outcome: FakeDlqAuditOutcome,
+        resource_id: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FakeDlqCommandRecord {
+        List {
+            tenant: vocab::TenantId,
+            source: Option<diport::DeadLetterSource>,
+            domain: Option<String>,
+            contract_id: Option<String>,
+            limit: u32,
+            cursor: Option<String>,
+        },
+        Inspect {
+            tenant: vocab::TenantId,
+            target: DlqInspectTarget,
+        },
+        ReplayDeadLetter {
+            tenant: vocab::TenantId,
+            dead_letter_id: String,
+            replay_id: String,
+        },
+        RedriveOutbox {
+            tenant: vocab::TenantId,
+            event_id: String,
+        },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FakeDlqOperator {
+        Verified(&'static str),
+        AuthFailure,
+        GrantFailure,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FakeDlqStoreMode {
+        Success,
+        StoreFailure,
+    }
+
+    #[derive(Clone)]
+    struct FakeDlqStore {
+        mode: FakeDlqStoreMode,
+        commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>,
+    }
+
+    impl FakeDlqStore {
+        fn new(mode: FakeDlqStoreMode, commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>) -> Self {
+            Self { mode, commands }
+        }
+
+        fn push(&self, record: FakeDlqCommandRecord) {
+            match self.commands.lock() {
+                Ok(mut records) => records.push(record),
+                Err(poisoned) => poisoned.into_inner().push(record),
+            }
+        }
+
+        fn maybe_fail(&self) -> Result<(), DlqError> {
+            match self.mode {
+                FakeDlqStoreMode::Success => Ok(()),
+                FakeDlqStoreMode::StoreFailure => Err(DlqError::Store),
+            }
+        }
+    }
+
+    impl DlqStore for FakeDlqStore {
+        async fn list_dlq(
+            &self,
+            query: DlqListQuery,
+        ) -> Result<eventexec::DlqListResult, DlqError> {
+            self.push(FakeDlqCommandRecord::List {
+                tenant: query.tenant(),
+                source: query.source(),
+                domain: query.domain().map(ToOwned::to_owned),
+                contract_id: query.contract_id().map(ToOwned::to_owned),
+                limit: query.limit(),
+                cursor: query.cursor().map(DlqCursor::encode),
+            });
+            self.maybe_fail()?;
+            let rows = vec![dlq_summary(
+                query.tenant(),
+                eventexec::DlqEntryKind::DeadLetter,
+            )];
+            Ok(eventexec::DlqListResult::from_sorted_rows(&query, rows))
+        }
+
+        async fn inspect_dlq(
+            &self,
+            request: DlqInspectRequest,
+        ) -> Result<DlqEntrySummary, DlqError> {
+            self.push(FakeDlqCommandRecord::Inspect {
+                tenant: request.tenant(),
+                target: request.target().clone(),
+            });
+            self.maybe_fail()?;
+            Ok(dlq_summary(request.tenant(), request.target().kind()))
+        }
+
+        async fn replay_dead_letter(
+            &self,
+            request: DlqReplayRequest,
+        ) -> Result<eventexec::DlqReplayOutcome, DlqError> {
+            self.push(FakeDlqCommandRecord::ReplayDeadLetter {
+                tenant: request.tenant(),
+                dead_letter_id: request.dead_letter_id().as_str().to_owned(),
+                replay_id: request.replay_id().as_str().to_owned(),
+            });
+            self.maybe_fail()?;
+            Ok(eventexec::DlqReplayOutcome::Inserted)
+        }
+
+        async fn redrive_outbox(
+            &self,
+            request: DlqRedriveRequest,
+        ) -> Result<eventexec::DlqRedriveOutcome, DlqError> {
+            self.push(FakeDlqCommandRecord::RedriveOutbox {
+                tenant: request.tenant(),
+                event_id: request.event_id().as_str().to_owned(),
+            });
+            self.maybe_fail()?;
+            Ok(eventexec::DlqRedriveOutcome::Redriven)
+        }
+    }
+
+    struct FakeDlqControlRuntime {
+        operator: FakeDlqOperator,
+        store_mode: FakeDlqStoreMode,
+        audits: Mutex<Vec<FakeDlqAuditRecord>>,
+        commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>,
+        setup_count: AtomicUsize,
+        shutdown_count: AtomicUsize,
+    }
+
+    impl FakeDlqControlRuntime {
+        fn verified(store_mode: FakeDlqStoreMode) -> Self {
+            Self::new(FakeDlqOperator::Verified(DLQ_FIXTURE_OPERATOR), store_mode)
+        }
+
+        fn auth_failure() -> Self {
+            Self::new(FakeDlqOperator::AuthFailure, FakeDlqStoreMode::Success)
+        }
+
+        fn grant_failure() -> Self {
+            Self::new(FakeDlqOperator::GrantFailure, FakeDlqStoreMode::Success)
+        }
+
+        fn new(operator: FakeDlqOperator, store_mode: FakeDlqStoreMode) -> Self {
+            Self {
+                operator,
+                store_mode,
+                audits: Mutex::new(Vec::new()),
+                commands: Arc::new(Mutex::new(Vec::new())),
+                setup_count: AtomicUsize::new(0),
+                shutdown_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn audit_records(&self) -> Vec<FakeDlqAuditRecord> {
+            match self.audits.lock() {
+                Ok(records) => records.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn command_records(&self) -> Vec<FakeDlqCommandRecord> {
+            match self.commands.lock() {
+                Ok(records) => records.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn setup_count(&self) -> usize {
+            self.setup_count.load(Ordering::Relaxed)
+        }
+
+        fn shutdown_count(&self) -> usize {
+            self.shutdown_count.load(Ordering::Relaxed)
+        }
+    }
+
+    impl DlqControlRuntime for FakeDlqControlRuntime {
+        type Session = ();
+        type Store = FakeDlqStore;
+
+        async fn setup_maintenance(&self) -> anyhow::Result<Self::Session> {
+            self.setup_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn record_dlq_maintenance_audit(
+            &self,
+            _session: &Self::Session,
+            operator_subject: &str,
+            action: &str,
+            outcome: MaintenanceAuditOutcome<'_>,
+            resource_id: &str,
+        ) -> anyhow::Result<()> {
+            let outcome = match outcome {
+                MaintenanceAuditOutcome::Success => FakeDlqAuditOutcome::Success,
+                MaintenanceAuditOutcome::Failure { reason } => FakeDlqAuditOutcome::Failure {
+                    reason: reason.to_owned(),
+                },
+            };
+            let record = FakeDlqAuditRecord {
+                subject: operator_subject.to_owned(),
+                action: action.to_owned(),
+                outcome,
+                resource_id: resource_id.to_owned(),
+            };
+            match self.audits.lock() {
+                Ok(mut records) => records.push(record),
+                Err(poisoned) => poisoned.into_inner().push(record),
+            }
+            Ok(())
+        }
+
+        async fn operator_subject(
+            &self,
+            session: &Self::Session,
+            parsed: &DlqCliArgs,
+            resource_id: &str,
+        ) -> anyhow::Result<String> {
+            match self.operator {
+                FakeDlqOperator::Verified(subject) => Ok(subject.to_owned()),
+                FakeDlqOperator::AuthFailure => {
+                    self.record_dlq_maintenance_audit(
+                        session,
+                        UNVERIFIED_DLQ_OPERATOR,
+                        &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                        MaintenanceAuditOutcome::Failure {
+                            reason: "operator_auth",
+                        },
+                        resource_id,
+                    )
+                    .await?;
+                    anyhow::bail!("DLQ operator auth failed");
+                }
+                FakeDlqOperator::GrantFailure => {
+                    self.record_dlq_maintenance_audit(
+                        session,
+                        DLQ_FIXTURE_OPERATOR,
+                        &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                        MaintenanceAuditOutcome::Failure {
+                            reason: "operator_authorization",
+                        },
+                        resource_id,
+                    )
+                    .await?;
+                    anyhow::bail!("DLQ operator grant failed");
+                }
+            }
+        }
+
+        fn dlq_store(
+            &self,
+            _session: &Self::Session,
+            _command: &DlqCliCommand,
+        ) -> anyhow::Result<Self::Store> {
+            Ok(FakeDlqStore::new(
+                self.store_mode,
+                Arc::clone(&self.commands),
+            ))
+        }
+
+        async fn shutdown(&self, _session: Self::Session) {
+            self.shutdown_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn dlq_summary(tenant: vocab::TenantId, kind: eventexec::DlqEntryKind) -> DlqEntrySummary {
+        DlqEntrySummary::new(
+            kind,
+            "dlq-row-1",
+            diport::DeadLetterSource::Consumer,
+            tenant,
+            "msg-1",
+            "identity",
+            "identity.session-created",
+            "identity.session.created",
+            Some("identity.session.consumer".to_owned()),
+            12,
+            "max retries exhausted",
+            3,
+            1_700_000_000,
+        )
+    }
+
+    fn dlq_control_args(subcommand: &str, extra: &[&str]) -> Vec<String> {
+        let mut parts = vec![
+            "dlq",
+            subcommand,
+            "--operator-service-token",
+            "opaque-token",
+            "--operator-tenant",
+            DLQ_FIXTURE_OPERATOR_TENANT,
+            "--tenant",
+            DLQ_FIXTURE_TENANT,
+        ];
+        parts.extend_from_slice(extra);
+        args(&parts)
+    }
+
+    fn dlq_fixture_resource_id(action: DlqMaintenanceAction, target: &str) -> String {
+        format!(
+            "operation={} tenant={} {}",
+            action.as_str(),
+            DLQ_FIXTURE_TENANT,
+            target
+        )
+    }
+
+    fn assert_dlq_lifecycle_audit(
+        runtime: &FakeDlqControlRuntime,
+        action: DlqMaintenanceAction,
+        target: &str,
+        expected_finish: FakeDlqAuditOutcome,
+    ) {
+        let audits = runtime.audit_records();
+        assert_eq!(audits.len(), 2);
+        let resource_id = dlq_fixture_resource_id(action, target);
+        assert_eq!(
+            audits[0],
+            FakeDlqAuditRecord {
+                subject: UNVERIFIED_DLQ_OPERATOR.to_owned(),
+                action: format!("dlq.{}.start", action.as_str()),
+                outcome: FakeDlqAuditOutcome::Success,
+                resource_id: resource_id.clone(),
+            }
+        );
+        assert_eq!(
+            audits[1],
+            FakeDlqAuditRecord {
+                subject: DLQ_FIXTURE_OPERATOR.to_owned(),
+                action: format!("dlq.{}.finish", action.as_str()),
+                outcome: expected_finish,
+                resource_id,
+            }
+        );
+    }
+
+    #[test]
+    fn dlq_args_parse_list_and_inspect() -> anyhow::Result<()> {
+        let list = parse_dlq_args(&dlq_control_args(
+            "list",
+            &[
+                "--source",
+                "consumer",
+                "--domain",
+                "identity",
+                "--contract-id",
+                "identity.session-created",
+                "--limit",
+                "7",
+                "--cursor",
+                "1700000000:dead_letter:row-1",
+            ],
+        ))?;
+        assert_eq!(list.operator_service_token, "opaque-token");
+        assert_eq!(
+            list.operator_tenant,
+            vocab::TenantId::parse(DLQ_FIXTURE_OPERATOR_TENANT)?
+        );
+        assert_eq!(list.tenant, vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?);
+        assert!(matches!(
+            list.command,
+            DlqCliCommand::List {
+                source: Some(diport::DeadLetterSource::Consumer),
+                ref domain,
+                ref contract_id,
+                limit: 7,
+                ref cursor,
+            } if domain.as_deref() == Some("identity")
+                && contract_id.as_deref() == Some("identity.session-created")
+                && cursor.as_ref().map(DlqCursor::encode).as_deref()
+                    == Some("1700000000:dead_letter:row-1")
+        ));
+
+        let inspect = parse_dlq_args(&dlq_control_args(
+            "inspect",
+            &["--kind", "outbox-dlx", "--id", DLQ_FIXTURE_EVENT_ID],
+        ))?;
+        assert!(matches!(
+            inspect.command,
+            DlqCliCommand::Inspect {
+                target: DlqInspectTarget::OutboxDlx(ref event_id),
+            } if event_id.as_str() == DLQ_FIXTURE_EVENT_ID
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn dlq_args_parse_replay_and_redrive() -> anyhow::Result<()> {
+        let replay = parse_dlq_args(&dlq_control_args(
+            "replay-dead-letter",
+            &[
+                "--dead-letter-id",
+                DLQ_FIXTURE_DEAD_LETTER_ID,
+                "--replay-id",
+                DLQ_FIXTURE_REPLAY_ID,
+            ],
+        ))?;
+        assert!(matches!(
+            replay.command,
+            DlqCliCommand::ReplayDeadLetter {
+                ref dead_letter_id,
+                ref replay_id,
+            } if dead_letter_id.as_str() == DLQ_FIXTURE_DEAD_LETTER_ID
+                && replay_id.as_str() == DLQ_FIXTURE_REPLAY_ID
+        ));
+
+        let redrive = parse_dlq_args(&dlq_control_args(
+            "redrive-outbox",
+            &["--event-id", DLQ_FIXTURE_EVENT_ID],
+        ))?;
+        assert!(matches!(
+            redrive.command,
+            DlqCliCommand::RedriveOutbox { ref event_id }
+                if event_id.as_str() == DLQ_FIXTURE_EVENT_ID
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
+        let cases = [
+            ("missing namespace", args(&[])),
+            ("missing subcommand", args(&["dlq"])),
+            ("unknown subcommand", args(&["dlq", "skip"])),
+            (
+                "missing operator token",
+                args(&[
+                    "dlq",
+                    "list",
+                    "--operator-tenant",
+                    DLQ_FIXTURE_OPERATOR_TENANT,
+                    "--tenant",
+                    DLQ_FIXTURE_TENANT,
+                ]),
+            ),
+            (
+                "invalid tenant",
+                args(&[
+                    "dlq",
+                    "list",
+                    "--operator-service-token",
+                    "opaque-token",
+                    "--operator-tenant",
+                    DLQ_FIXTURE_OPERATOR_TENANT,
+                    "--tenant",
+                    "not-a-uuid",
+                ]),
+            ),
+            (
+                "invalid inspect id",
+                dlq_control_args("inspect", &["--kind", "dead-letter", "--id", "not-a-uuid"]),
+            ),
+            (
+                "invalid cursor",
+                dlq_control_args("list", &["--cursor", "not-a-cursor"]),
+            ),
+            (
+                "duplicate tenant",
+                dlq_control_args("list", &["--tenant", DLQ_FIXTURE_TENANT]),
+            ),
+            (
+                "unknown flag",
+                dlq_control_args(
+                    "redrive-outbox",
+                    &["--event-id", DLQ_FIXTURE_EVENT_ID, "--bogus"],
+                ),
+            ),
+            (
+                "wrong flag for subcommand",
+                dlq_control_args(
+                    "redrive-outbox",
+                    &["--event-id", DLQ_FIXTURE_EVENT_ID, "--limit", "1"],
+                ),
+            ),
+        ];
+
+        for (name, candidate) in cases {
+            assert!(
+                parse_dlq_args(&candidate).is_err(),
+                "case must fail closed: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn dlq_operator_grants_authorize_exact_subject_action_and_tenant() -> anyhow::Result<()> {
+        let parsed = parse_dlq_args(&dlq_control_args(
+            "redrive-outbox",
+            &["--event-id", DLQ_FIXTURE_EVENT_ID],
+        ))?;
+        let grants = parse_dlq_operator_grants(&format!(
+            "{DLQ_FIXTURE_OPERATOR}|redrive-outbox|{DLQ_FIXTURE_TENANT}"
+        ))?;
+        authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &grants)?;
+
+        let wrong_action = parse_dlq_operator_grants(&format!(
+            "{DLQ_FIXTURE_OPERATOR}|list|{DLQ_FIXTURE_TENANT}"
+        ))?;
+        assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &wrong_action).is_err());
+
+        let wrong_tenant = parse_dlq_operator_grants(&format!(
+            "{DLQ_FIXTURE_OPERATOR}|redrive-outbox|{DLQ_FIXTURE_OTHER_TENANT}"
+        ))?;
+        assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &wrong_tenant).is_err());
+
+        assert!(parse_dlq_operator_grants("").is_err());
+        assert!(parse_dlq_operator_grants("subject|skip|tenant").is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn dlq_operator_provider_uses_durable_replay_guard() {
+        let source = include_str!("lib.rs");
+        let function = source
+            .split("async fn dlq_operator_subject(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn dlq_summary_json_line(").next())
+            .expect("dlq_operator_subject source slice");
+
+        assert!(
+            function.contains("build_provider_with_replay_guard")
+                && function.contains("pg.service_token_replay_guard()"),
+            "DLQ operator verifier must inject the durable PG service-token replay guard"
+        );
+        assert!(
+            !function.contains("build_provider()"),
+            "DLQ operator verifier must not fall back to the in-process replay guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn dlq_control_lifecycle_dispatches_commands_with_audit() -> anyhow::Result<()> {
+        let cases = [
+            (
+                DlqMaintenanceAction::List,
+                dlq_control_args(
+                    "list",
+                    &[
+                        "--source",
+                        "consumer",
+                        "--domain",
+                        "identity",
+                        "--contract-id",
+                        "identity.session-created",
+                        "--limit",
+                        "7",
+                        "--cursor",
+                        "1700000000:dead_letter:row-1",
+                    ],
+                ),
+                "source=consumer domain=identity contract_id=identity.session-created",
+                FakeDlqCommandRecord::List {
+                    tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                    source: Some(diport::DeadLetterSource::Consumer),
+                    domain: Some("identity".to_owned()),
+                    contract_id: Some("identity.session-created".to_owned()),
+                    limit: 7,
+                    cursor: Some("1700000000:dead_letter:row-1".to_owned()),
+                },
+            ),
+            (
+                DlqMaintenanceAction::Inspect,
+                dlq_control_args(
+                    "inspect",
+                    &["--kind", "dead-letter", "--id", DLQ_FIXTURE_DEAD_LETTER_ID],
+                ),
+                "kind=dead_letter dead_letter_id=11111111-1111-4111-8111-111111111111",
+                FakeDlqCommandRecord::Inspect {
+                    tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                    target: DlqInspectTarget::DeadLetter(DeadLetterId::parse(
+                        DLQ_FIXTURE_DEAD_LETTER_ID,
+                    )?),
+                },
+            ),
+            (
+                DlqMaintenanceAction::ReplayDeadLetter,
+                dlq_control_args(
+                    "replay-dead-letter",
+                    &[
+                        "--dead-letter-id",
+                        DLQ_FIXTURE_DEAD_LETTER_ID,
+                        "--replay-id",
+                        DLQ_FIXTURE_REPLAY_ID,
+                    ],
+                ),
+                "dead_letter_id=11111111-1111-4111-8111-111111111111 replay_id=evt-dlq-replay",
+                FakeDlqCommandRecord::ReplayDeadLetter {
+                    tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                    dead_letter_id: DLQ_FIXTURE_DEAD_LETTER_ID.to_owned(),
+                    replay_id: DLQ_FIXTURE_REPLAY_ID.to_owned(),
+                },
+            ),
+            (
+                DlqMaintenanceAction::RedriveOutbox,
+                dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+                "event_id=evt-outbox-dlx",
+                FakeDlqCommandRecord::RedriveOutbox {
+                    tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                    event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
+                },
+            ),
+        ];
+
+        for (action, command_args, target, expected_command) in cases {
+            let runtime = FakeDlqControlRuntime::verified(FakeDlqStoreMode::Success);
+            run_dlq_control_command_with_runtime(&command_args, &runtime).await?;
+
+            assert_eq!(runtime.setup_count(), 1);
+            assert_eq!(runtime.shutdown_count(), 1);
+            assert_dlq_lifecycle_audit(&runtime, action, target, FakeDlqAuditOutcome::Success);
+            assert_eq!(runtime.command_records(), vec![expected_command]);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dlq_control_lifecycle_audits_command_failure() -> anyhow::Result<()> {
+        let runtime = FakeDlqControlRuntime::verified(FakeDlqStoreMode::StoreFailure);
+        let result = run_dlq_control_command_with_runtime(
+            &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+            &runtime,
+        )
+        .await;
+        let Err(err) = result else {
+            anyhow::bail!("store failure must fail");
+        };
+        assert!(
+            format!("{err:#}").contains("operation=redrive-outbox tenant="),
+            "DLQ command failure must include operation and tenant context: {err:#}"
+        );
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert_dlq_lifecycle_audit(
+            &runtime,
+            DlqMaintenanceAction::RedriveOutbox,
+            "event_id=evt-outbox-dlx",
+            FakeDlqAuditOutcome::Failure {
+                reason: "run_error".to_owned(),
+            },
+        );
+        assert!(matches!(
+            runtime.command_records().as_slice(),
+            [FakeDlqCommandRecord::RedriveOutbox { .. }]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dlq_control_lifecycle_does_not_call_store_before_auth_or_grant_success()
+    -> anyhow::Result<()> {
+        for runtime in [
+            FakeDlqControlRuntime::auth_failure(),
+            FakeDlqControlRuntime::grant_failure(),
+        ] {
+            let result = run_dlq_control_command_with_runtime(
+                &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+                &runtime,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(runtime.setup_count(), 1);
+            assert_eq!(runtime.shutdown_count(), 1);
+            assert!(runtime.command_records().is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dlq_summary_renders_json_line_without_space_delimited_free_text() -> anyhow::Result<()> {
+        let tenant = vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?;
+        let summary = DlqEntrySummary::new(
+            eventexec::DlqEntryKind::DeadLetter,
+            "dlq-row-1",
+            diport::DeadLetterSource::Consumer,
+            tenant,
+            "msg-1",
+            "identity",
+            "identity.session-created",
+            "identity.session.created",
+            Some("identity.session.consumer".to_owned()),
+            12,
+            "max retries exhausted with spaces",
+            3,
+            1_700_000_000,
+        );
+
+        let rendered = dlq_summary_json_line(&summary)?;
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)?;
+        assert_eq!(parsed["errorSummary"], "max retries exhausted with spaces");
+        assert_eq!(parsed["contractId"], "identity.session-created");
+        assert!(
+            !rendered.contains("error_summary=max retries exhausted"),
+            "free text must not be emitted in space-delimited key=value form: {rendered}"
+        );
         Ok(())
     }
 

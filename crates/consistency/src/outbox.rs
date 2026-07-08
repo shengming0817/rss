@@ -527,12 +527,30 @@ impl BacklogSample {
 pub struct BacklogMetricSample {
     subject: OutboxMetricSubject,
     sample: BacklogSample,
+    partition_blocked_depth: u64,
 }
 
 impl BacklogMetricSample {
     /// 由 metric subject + backlog 标量构造 scoped backlog sample。
     pub fn new(subject: OutboxMetricSubject, sample: BacklogSample) -> Self {
-        Self { subject, sample }
+        Self {
+            subject,
+            sample,
+            partition_blocked_depth: 0,
+        }
+    }
+
+    /// 由 metric subject + backlog 标量 + partition head-blocked 行数构造 scoped backlog sample。
+    pub fn with_partition_blocked_depth(
+        subject: OutboxMetricSubject,
+        sample: BacklogSample,
+        partition_blocked_depth: u64,
+    ) -> Self {
+        Self {
+            subject,
+            sample,
+            partition_blocked_depth,
+        }
     }
 
     /// 借出 metric subject。
@@ -543,6 +561,11 @@ impl BacklogMetricSample {
     /// 借出 backlog 标量。
     pub fn sample(&self) -> BacklogSample {
         self.sample
+    }
+
+    /// 同 tenant/domain/contract 下因 partition 队头未 published 而被 head gate 阻塞的行数。
+    pub fn partition_blocked_depth(&self) -> u64 {
+        self.partition_blocked_depth
     }
 }
 

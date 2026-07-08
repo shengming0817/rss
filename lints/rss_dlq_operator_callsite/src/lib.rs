@@ -5,7 +5,8 @@
 //!
 //! `OperatorDlqCapability` 的私有字段让构造只能经 `issue_for_authorized_operator()` funnel（上游 Hard），
 //! 但“谁可以调用该 funnel”是跨 crate callsite 约束，类型系统不能表达；本 lint 复用
-//! `rss_crosstenant_callsite` 的下游治理模式，只允许 admin/PDP 边界 crate 调用该签发函数。
+//! `rss_crosstenant_callsite` 的下游治理模式，只允许 admin/PDP 边界 crate 或最小 runtime CLI wrapper
+//! 调用该签发函数。
 
 extern crate rustc_hir;
 extern crate rustc_middle;
@@ -18,8 +19,9 @@ use rustc_hir::{Expr, ExprKind, HirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
-/// 仅 admin/PDP 边界可签发 DLQ mutation capability；扩项须治理评审。
+/// 仅 admin/PDP 边界可签发 DLQ mutation capability；runtime 只允许精确 wrapper。
 const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve"];
+const ALLOWED_RUNTIME_FUNCTION: &str = "issue_authorized_dlq_capability";
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -47,7 +49,7 @@ impl<'tcx> LateLintPass<'tcx> for RssDlqOperatorCallsite {
         let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
             return;
         };
-        if is_dlq_operator_funnel_did(cx, did) && !caller_is_allowed(cx) {
+        if is_dlq_operator_funnel_did(cx, did) && !caller_is_allowed(cx, expr.hir_id) {
             emit(cx, expr.hir_id, expr.span);
         }
     }
@@ -59,8 +61,21 @@ fn is_dlq_operator_funnel_did(cx: &LateContext<'_>, did: DefId) -> bool {
         && matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. })
 }
 
-fn caller_is_allowed(cx: &LateContext<'_>) -> bool {
-    ALLOWED_CALLER_CRATES.contains(&cx.tcx.crate_name(LOCAL_CRATE).as_str())
+fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+    let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
+    if ALLOWED_CALLER_CRATES.contains(&crate_name.as_str()) {
+        return true;
+    }
+    if crate_name.as_str() != "runtime" {
+        return false;
+    }
+    let parent = cx.tcx.hir_get_parent_item(hir_id);
+    let parent_def_id = parent.to_def_id();
+    if cx.tcx.item_name(parent_def_id).as_str() != ALLOWED_RUNTIME_FUNCTION {
+        return false;
+    }
+    let def_path = cx.tcx.def_path_str(parent_def_id);
+    def_path == ALLOWED_RUNTIME_FUNCTION
 }
 
 fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
@@ -72,7 +87,7 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         "DLQ mutation capability 仅 admin/PDP 边界可签发：`OperatorDlqCapability::issue_for_authorized_operator` 不得在此 crate 调用",
         |diag| {
             diag.help(
-                "在 allowlist 的 admin/PDP 授权路径中签发 capability，其它 crate 经请求 DTO 接收；确需扩项须治理评审扩 `ALLOWED_CALLER_CRATES`",
+                "在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许 `issue_authorized_dlq_capability` wrapper，其它 crate 经请求 DTO 接收",
             );
         },
     );
@@ -86,4 +101,9 @@ fn ui_disallowed() {
 #[test]
 fn ui_httpserve_allowed() {
     dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "httpserve");
+}
+
+#[test]
+fn ui_runtime_non_boundary_disallowed() {
+    dylint_testing::ui_test_example(env!("CARGO_PKG_NAME"), "runtime");
 }

@@ -924,8 +924,10 @@ pub fn consistency::outbox::TopicError::from(T) -> T
 pub struct consistency::outbox::BacklogMetricSample
 impl consistency::outbox::BacklogMetricSample
 pub fn consistency::outbox::BacklogMetricSample::new(consistency::outbox::OutboxMetricSubject, consistency::outbox::BacklogSample) -> Self
+pub fn consistency::outbox::BacklogMetricSample::partition_blocked_depth(&self) -> u64
 pub fn consistency::outbox::BacklogMetricSample::sample(&self) -> consistency::outbox::BacklogSample
 pub fn consistency::outbox::BacklogMetricSample::subject(&self) -> &consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::BacklogMetricSample::with_partition_blocked_depth(consistency::outbox::OutboxMetricSubject, consistency::outbox::BacklogSample, u64) -> Self
 impl core::clone::Clone for consistency::outbox::BacklogMetricSample
 pub fn consistency::outbox::BacklogMetricSample::clone(&self) -> consistency::outbox::BacklogMetricSample
 impl core::cmp::Eq for consistency::outbox::BacklogMetricSample
@@ -1375,6 +1377,47 @@ pub async fn consistency::outbox::OutboxSource::poll_pending(&self, &str, usize)
 pub trait consistency::outbox::RetentionSweeper
 pub async fn consistency::outbox::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub mod consistency::projection
+pub enum consistency::projection::ProjectionApplyOutcome
+pub consistency::projection::ProjectionApplyOutcome::Applied
+pub consistency::projection::ProjectionApplyOutcome::Filtered
+impl core::clone::Clone for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::clone(&self) -> consistency::projection::ProjectionApplyOutcome
+impl core::cmp::Eq for consistency::projection::ProjectionApplyOutcome
+impl core::cmp::PartialEq for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::eq(&self, &consistency::projection::ProjectionApplyOutcome) -> bool
+impl core::fmt::Debug for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::projection::ProjectionApplyOutcome
+impl core::marker::StructuralPartialEq for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Freeze for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Send for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Sync for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Unpin for consistency::projection::ProjectionApplyOutcome
+impl core::marker::UnsafeUnpin for consistency::projection::ProjectionApplyOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionApplyOutcome
+impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionApplyOutcome
+impl<T, U> core::convert::Into<U> for consistency::projection::ProjectionApplyOutcome where U: core::convert::From<T>
+pub fn consistency::projection::ProjectionApplyOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::projection::ProjectionApplyOutcome where U: core::convert::Into<T>
+pub type consistency::projection::ProjectionApplyOutcome::Error = core::convert::Infallible
+pub fn consistency::projection::ProjectionApplyOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::projection::ProjectionApplyOutcome where U: core::convert::TryFrom<T>
+pub type consistency::projection::ProjectionApplyOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::projection::ProjectionApplyOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::projection::ProjectionApplyOutcome where T: core::clone::Clone
+pub type consistency::projection::ProjectionApplyOutcome::Owned = T
+pub fn consistency::projection::ProjectionApplyOutcome::clone_into(&self, &mut T)
+pub fn consistency::projection::ProjectionApplyOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::projection::ProjectionApplyOutcome where T: 'static + ?core::marker::Sized
+pub fn consistency::projection::ProjectionApplyOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::projection::ProjectionApplyOutcome where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionApplyOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::projection::ProjectionApplyOutcome where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionApplyOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::projection::ProjectionApplyOutcome where T: core::clone::Clone
+pub unsafe fn consistency::projection::ProjectionApplyOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::from(T) -> T
 #[non_exhaustive] pub enum consistency::projection::ProjectionBatchLimitError
 pub consistency::projection::ProjectionBatchLimitError::TooLarge
 pub consistency::projection::ProjectionBatchLimitError::TooLarge::attempted: u32
@@ -1848,9 +1891,9 @@ pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consi
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
 pub trait consistency::projection::ProjectionEventSource: consistency::projection::PartitionSerialDelivery
-pub async fn consistency::projection::ProjectionEventSource::read_from(&self, consistency::projection::Lsn, consistency::projection::ProjectionBatchLimit) -> core::result::Result<alloc::vec::Vec<consistency::projection::ProjectionEventRecord>, consistency::error::EngineError>
+pub async fn consistency::projection::ProjectionEventSource::read_from(&self, core::option::Option<consistency::projection::Lsn>, consistency::projection::ProjectionBatchLimit) -> core::result::Result<alloc::vec::Vec<consistency::projection::ProjectionEventRecord>, consistency::error::EngineError>
 pub trait consistency::projection::Projector
-pub async fn consistency::projection::Projector::apply<E: consistency::projection::ProjectionEvent>(&self, &E) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::projection::Projector::apply<E: consistency::projection::ProjectionEvent>(&self, &E) -> core::result::Result<consistency::projection::ProjectionApplyOutcome, consistency::error::EngineError>
 pub trait consistency::projection::SerialInOrderGuarantor: consistency::projection::sealed::Sealed + core::marker::Copy
 impl consistency::projection::SerialInOrderGuarantor for consistency::projection::SerialInOrder
 pub mod consistency::reconcile
@@ -2550,7 +2593,12 @@ pub consistency::saga::SagaInterruption::InstanceDegraded
 pub consistency::saga::SagaInterruption::JournalConflict
 pub consistency::saga::SagaInterruption::LeaseBusy
 pub consistency::saga::SagaInterruption::LeaseLost
+pub consistency::saga::SagaInterruption::RuntimeLockBusy
+pub consistency::saga::SagaInterruption::RuntimeLockLost
+pub consistency::saga::SagaInterruption::RuntimeLockUnavailable
 pub consistency::saga::SagaInterruption::StoreUnavailable
+impl consistency::saga::SagaInterruption
+pub const fn consistency::saga::SagaInterruption::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::saga::SagaInterruption
 pub fn consistency::saga::SagaInterruption::clone(&self) -> consistency::saga::SagaInterruption
 impl core::cmp::Eq for consistency::saga::SagaInterruption
@@ -4229,6 +4277,47 @@ impl<T> core::clone::CloneToUninit for consistency::outbox::PermanentErrorKind w
 pub unsafe fn consistency::outbox::PermanentErrorKind::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::outbox::PermanentErrorKind
 pub fn consistency::outbox::PermanentErrorKind::from(T) -> T
+pub enum consistency::ProjectionApplyOutcome
+pub consistency::ProjectionApplyOutcome::Applied
+pub consistency::ProjectionApplyOutcome::Filtered
+impl core::clone::Clone for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::clone(&self) -> consistency::projection::ProjectionApplyOutcome
+impl core::cmp::Eq for consistency::projection::ProjectionApplyOutcome
+impl core::cmp::PartialEq for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::eq(&self, &consistency::projection::ProjectionApplyOutcome) -> bool
+impl core::fmt::Debug for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::projection::ProjectionApplyOutcome
+impl core::marker::StructuralPartialEq for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Freeze for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Send for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Sync for consistency::projection::ProjectionApplyOutcome
+impl core::marker::Unpin for consistency::projection::ProjectionApplyOutcome
+impl core::marker::UnsafeUnpin for consistency::projection::ProjectionApplyOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionApplyOutcome
+impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionApplyOutcome
+impl<T, U> core::convert::Into<U> for consistency::projection::ProjectionApplyOutcome where U: core::convert::From<T>
+pub fn consistency::projection::ProjectionApplyOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::projection::ProjectionApplyOutcome where U: core::convert::Into<T>
+pub type consistency::projection::ProjectionApplyOutcome::Error = core::convert::Infallible
+pub fn consistency::projection::ProjectionApplyOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::projection::ProjectionApplyOutcome where U: core::convert::TryFrom<T>
+pub type consistency::projection::ProjectionApplyOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::projection::ProjectionApplyOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::projection::ProjectionApplyOutcome where T: core::clone::Clone
+pub type consistency::projection::ProjectionApplyOutcome::Owned = T
+pub fn consistency::projection::ProjectionApplyOutcome::clone_into(&self, &mut T)
+pub fn consistency::projection::ProjectionApplyOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::projection::ProjectionApplyOutcome where T: 'static + ?core::marker::Sized
+pub fn consistency::projection::ProjectionApplyOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::projection::ProjectionApplyOutcome where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionApplyOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::projection::ProjectionApplyOutcome where T: ?core::marker::Sized
+pub fn consistency::projection::ProjectionApplyOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::projection::ProjectionApplyOutcome where T: core::clone::Clone
+pub unsafe fn consistency::projection::ProjectionApplyOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::projection::ProjectionApplyOutcome
+pub fn consistency::projection::ProjectionApplyOutcome::from(T) -> T
 #[non_exhaustive] pub enum consistency::ProjectionBatchLimitError
 pub consistency::ProjectionBatchLimitError::TooLarge
 pub consistency::ProjectionBatchLimitError::TooLarge::attempted: u32
@@ -4566,7 +4655,12 @@ pub consistency::SagaInterruption::InstanceDegraded
 pub consistency::SagaInterruption::JournalConflict
 pub consistency::SagaInterruption::LeaseBusy
 pub consistency::SagaInterruption::LeaseLost
+pub consistency::SagaInterruption::RuntimeLockBusy
+pub consistency::SagaInterruption::RuntimeLockLost
+pub consistency::SagaInterruption::RuntimeLockUnavailable
 pub consistency::SagaInterruption::StoreUnavailable
+impl consistency::saga::SagaInterruption
+pub const fn consistency::saga::SagaInterruption::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::saga::SagaInterruption
 pub fn consistency::saga::SagaInterruption::clone(&self) -> consistency::saga::SagaInterruption
 impl core::cmp::Eq for consistency::saga::SagaInterruption
@@ -5218,8 +5312,10 @@ pub fn consistency::reconcile::ActualState<T>::from(T) -> T
 pub struct consistency::BacklogMetricSample
 impl consistency::outbox::BacklogMetricSample
 pub fn consistency::outbox::BacklogMetricSample::new(consistency::outbox::OutboxMetricSubject, consistency::outbox::BacklogSample) -> Self
+pub fn consistency::outbox::BacklogMetricSample::partition_blocked_depth(&self) -> u64
 pub fn consistency::outbox::BacklogMetricSample::sample(&self) -> consistency::outbox::BacklogSample
 pub fn consistency::outbox::BacklogMetricSample::subject(&self) -> &consistency::outbox::OutboxMetricSubject
+pub fn consistency::outbox::BacklogMetricSample::with_partition_blocked_depth(consistency::outbox::OutboxMetricSubject, consistency::outbox::BacklogSample, u64) -> Self
 impl core::clone::Clone for consistency::outbox::BacklogMetricSample
 pub fn consistency::outbox::BacklogMetricSample::clone(&self) -> consistency::outbox::BacklogMetricSample
 impl core::cmp::Eq for consistency::outbox::BacklogMetricSample
@@ -7039,9 +7135,9 @@ pub fn consistency::projection::ProjectionEventRecord::metadata(&self) -> &consi
 pub fn consistency::projection::ProjectionEventRecord::payload(&self) -> &[u8]
 pub fn consistency::projection::ProjectionEventRecord::topic(&self) -> &consistency::outbox::Topic
 pub trait consistency::ProjectionEventSource: consistency::projection::PartitionSerialDelivery
-pub async fn consistency::ProjectionEventSource::read_from(&self, consistency::projection::Lsn, consistency::projection::ProjectionBatchLimit) -> core::result::Result<alloc::vec::Vec<consistency::projection::ProjectionEventRecord>, consistency::error::EngineError>
+pub async fn consistency::ProjectionEventSource::read_from(&self, core::option::Option<consistency::projection::Lsn>, consistency::projection::ProjectionBatchLimit) -> core::result::Result<alloc::vec::Vec<consistency::projection::ProjectionEventRecord>, consistency::error::EngineError>
 pub trait consistency::Projector
-pub async fn consistency::Projector::apply<E: consistency::projection::ProjectionEvent>(&self, &E) -> core::result::Result<(), consistency::error::EngineError>
+pub async fn consistency::Projector::apply<E: consistency::projection::ProjectionEvent>(&self, &E) -> core::result::Result<consistency::projection::ProjectionApplyOutcome, consistency::error::EngineError>
 pub trait consistency::Reconciler
 pub async fn consistency::Reconciler::reconcile(&self, &consistency::reconcile::Context, consistency::reconcile::Request) -> core::result::Result<consistency::reconcile::Outcome, consistency::reconcile::ReconcileError>
 pub trait consistency::RetentionSweeper

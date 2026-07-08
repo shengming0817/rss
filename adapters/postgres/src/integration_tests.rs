@@ -480,6 +480,32 @@ async fn verify_rls_capability_ok_after_migrations() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn service_token_replay_guard_rejects_duplicate_nonce_after_migrations() -> TestResult {
+    use diport::{ServiceTokenReplayError, ServiceTokenReplayGuard as _};
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let store = Arc::new(store);
+    let guard = crate::PgServiceTokenReplayGuard::new(Arc::clone(&store));
+    let nonce = format!("nonce-{}", uuid::Uuid::new_v4().simple());
+    let expires_at = SystemTime::now() + Duration::from_secs(60);
+
+    guard.check_and_record(&nonce, expires_at)?;
+    assert!(
+        matches!(
+            guard.check_and_record(&nonce, expires_at),
+            Err(ServiceTokenReplayError::Replayed)
+        ),
+        "same service-token jti must be rejected across guard calls"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// audit admin pool 角色必须是可直连 LOGIN role；部署只需注入密码，不应再把权限组 NOLOGIN 当连接身份。
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_admin_role_is_login_after_migrations() -> TestResult {
@@ -6193,9 +6219,11 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
 #[allow(clippy::unwrap_used)]
 // reason: integration test fixtures use known-valid ids; assertions should fail loud.
 async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> TestResult {
+    use consistency::PartitionKey;
     use eventexec::{
-        DeadLetterId, DlqEntryKind, DlqError, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest,
-        DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
+        DeadLetterId, DlqEntryKind, DlqError, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
+        DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore as _,
+        OperatorDlqCapability,
     };
 
     let (pg, store) = connect_pg().await?;
@@ -6205,12 +6233,14 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
     let domain = unique_domain("dlq-outbox");
     let event_id = unique_event_id("outbox-dlx");
+    let partition_key = PartitionKey::parse("outbox-dlx-partition").unwrap();
     let entry = make_entry(&event_id);
 
     store
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
-            let env = make_test_env(&domain, "contract-dlq");
+            let env = make_test_env(&domain, "contract-dlq")
+                .with_partition_key_opt(Some(partition_key.clone()));
             Box::pin(async move {
                 append_outbox(cap, &entry, &env).await?;
                 Ok(())
@@ -6259,6 +6289,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let dlq = app.dlq(test_dlx_payload_protector());
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics_handle = recorder.handle();
     let replay_id = IdemKey::parse(&unique_event_id("bad-replay")).unwrap();
     let replay = dlq
         .replay_dead_letter(DlqReplayRequest::new(
@@ -6292,9 +6324,37 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     );
 
     let event_key = IdemKey::parse(&event_id).unwrap();
-    let wrong_tenant = dlq
-        .redrive_outbox(DlqRedriveRequest::new(tenant_b, event_key.clone(), cap))
+    let inspected = dlq
+        .inspect_dlq(DlqInspectRequest::new(
+            tenant,
+            DlqInspectTarget::OutboxDlx(event_key.clone()),
+        ))
         .await?;
+    assert_eq!(inspected.kind(), DlqEntryKind::OutboxDlx);
+    assert_eq!(inspected.id(), event_id);
+    assert_eq!(inspected.error_summary(), "envelope_invalid_schema_hash");
+
+    let before_redrive: (Vec<u8>, i64, String, Option<String>, serde_json::Value, String, String) =
+        sqlx::query_as(
+            "SELECT payload, seq, partition_key, lease_token::text, metadata, contract_version, schema_hash \
+             FROM outbox WHERE event_id = $1",
+        )
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert!(
+        before_redrive.3.is_some(),
+        "dlx row should retain the failed relay lease before redrive"
+    );
+
+    let wrong_tenant =
+        metrics::with_local_recorder(&recorder, || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(
+                    dlq.redrive_outbox(DlqRedriveRequest::new(tenant_b, event_key.clone(), cap)),
+                )
+            })
+        })?;
     assert_eq!(wrong_tenant, DlqRedriveOutcome::NotFound);
 
     let status_after_wrong: (String,) =
@@ -6304,20 +6364,60 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
             .await?;
     assert_eq!(status_after_wrong.0, STATUS_DLX);
 
-    let redriven = dlq
-        .redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
-        .await?;
+    let redriven =
+        metrics::with_local_recorder(&recorder, || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(
+                    dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key.clone(), cap)),
+                )
+            })
+        })?;
     assert_eq!(redriven, DlqRedriveOutcome::Redriven);
-    let status_after_redrive: (String, i32, String, String) = sqlx::query_as(
-        "SELECT status, retry_count, contract_version, schema_hash FROM outbox WHERE event_id = $1",
+    let status_after_redrive: (
+        String,
+        i32,
+        bool,
+        Option<String>,
+        Vec<u8>,
+        i64,
+        String,
+        serde_json::Value,
+        String,
+        String,
+    ) = sqlx::query_as(
+        "SELECT status, retry_count, retry_after IS NULL, lease_token::text, payload, seq, partition_key, metadata, contract_version, schema_hash \
+         FROM outbox WHERE event_id = $1",
     )
     .bind(&event_id)
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(status_after_redrive.0, STATUS_PENDING);
     assert_eq!(status_after_redrive.1, 0);
-    assert_eq!(status_after_redrive.2, "v1");
-    assert_eq!(status_after_redrive.3, TEST_SCHEMA_HASH);
+    assert!(status_after_redrive.2);
+    assert_eq!(status_after_redrive.3, None);
+    assert_eq!(status_after_redrive.4, before_redrive.0);
+    assert_eq!(status_after_redrive.5, before_redrive.1);
+    assert_eq!(status_after_redrive.6, before_redrive.2);
+    assert_eq!(status_after_redrive.7, before_redrive.4);
+    assert_eq!(status_after_redrive.8, "v1");
+    assert_eq!(status_after_redrive.9, TEST_SCHEMA_HASH);
+
+    let pending_redrive = metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap)))
+        })
+    })?;
+    assert_eq!(
+        pending_redrive,
+        DlqRedriveOutcome::NotFound,
+        "redrive must only mutate current dlx rows"
+    );
+    let rendered = metrics_handle.render();
+    assert!(rendered.contains("dlq_redrive_total"), "{rendered}");
+    assert!(rendered.contains("outbox_dlx_redrive"), "{rendered}");
+    assert!(rendered.contains("redriven"), "{rendered}");
+    assert!(rendered.contains("not_found"), "{rendered}");
 
     let listed_after_redrive = dlq
         .list_dlq(
@@ -7687,6 +7787,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
 async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     use consistency::PartitionKey;
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
 
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
@@ -7757,13 +7858,16 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
         "t27: NULL-partition dlx 不阻塞 null_live 行（反真空）"
     );
 
-    // re-drive H：把 H 从 dlx 重置回 pending。
-    sqlx::query(
-        "UPDATE outbox SET status = 'pending', retry_count = 0, retry_after = NULL WHERE event_id = $1",
-    )
-    .bind(&h_id)
-    .execute(&store.pool)
-    .await?;
+    // re-drive H：经 DLQ store 固定函数把 H 从 dlx 重置回 pending。
+    let dlq = store.dlq(test_dlx_payload_protector());
+    let redrive = dlq
+        .redrive_outbox(DlqRedriveRequest::new(
+            test_tenant(),
+            IdemKey::parse(&h_id).unwrap(),
+            OperatorDlqCapability::issue_for_authorized_operator(),
+        ))
+        .await?;
+    assert_eq!(redrive, DlqRedriveOutcome::Redriven);
 
     // relay H → published。
     let redriven = outbox.poll_pending(&domain, 10).await?;
@@ -8485,6 +8589,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
 async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     use consistency::PartitionKey;
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
 
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
@@ -8514,6 +8619,16 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
 
     // sample_backlog depth = 4（全部计入，gate 不减少 backlog 深度）。
     let samples = outbox.sample_backlog(&domain).await?;
+    assert_eq!(
+        samples.len(),
+        1,
+        "t29: 单 contract backlog 应产生一个 metric sample"
+    );
+    assert_eq!(
+        samples[0].partition_blocked_depth(),
+        3,
+        "t29: H 后 3 个同 partition 后继必须计入 blocked depth"
+    );
     let sample = summarize_backlog(&samples);
     assert_eq!(
         sample.depth(),
@@ -8539,6 +8654,70 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         polled[0].idem_key().as_str(),
         ids[0],
         "t29: poll_pending 返回的必须是 H（最小 seq 的队头）"
+    );
+
+    let dlx_domain = unique_domain("t29-dlx");
+    let dlx_key = PartitionKey::parse("part-backlog-dlx").unwrap();
+    let dlx_ids: Vec<_> = (0..3)
+        .map(|i| unique_event_id(&format!("t29-dlx-{i}")))
+        .collect();
+    for eid in &dlx_ids {
+        let entry = make_entry(eid);
+        let env = make_test_env(&dlx_domain, "c").with_partition_key_opt(Some(dlx_key.clone()));
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                let entry = entry.clone();
+                Box::pin(async move {
+                    append_outbox(cap, &entry, &env).await?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    sqlx::query("UPDATE outbox SET status = $1 WHERE event_id = $2")
+        .bind(STATUS_DLX)
+        .bind(&dlx_ids[0])
+        .execute(&store.pool)
+        .await?;
+
+    let dlx_samples = outbox.sample_backlog(&dlx_domain).await?;
+    assert_eq!(
+        dlx_samples[0].partition_blocked_depth(),
+        2,
+        "t29: DLX 队头后 2 个同 partition 后继必须计入 blocked depth"
+    );
+    assert_eq!(
+        summarize_backlog(&dlx_samples).depth(),
+        2,
+        "t29: DLX 队头本身不计入 pending backlog depth，后继仍计入"
+    );
+    assert!(
+        outbox.poll_pending(&dlx_domain, 10).await?.is_empty(),
+        "t29: DLX 队头必须阻塞同 partition 后继投递"
+    );
+
+    let dlq = store.dlq(test_dlx_payload_protector());
+    let redrive = dlq
+        .redrive_outbox(DlqRedriveRequest::new(
+            test_tenant(),
+            IdemKey::parse(&dlx_ids[0]).unwrap(),
+            OperatorDlqCapability::issue_for_authorized_operator(),
+        ))
+        .await?;
+    assert_eq!(redrive, DlqRedriveOutcome::Redriven);
+
+    let redriven_head = outbox.poll_pending(&dlx_domain, 10).await?;
+    assert_eq!(redriven_head.len(), 1, "t29: redrive 后仅队头可投递");
+    assert_eq!(redriven_head[0].idem_key().as_str(), dlx_ids[0]);
+    let disp = outbox.relay(&redriven_head[0]).await?;
+    assert_eq!(disp, Disposition::Ack, "t29: redriven 队头应成功发布");
+
+    let unblocked = outbox.poll_pending(&dlx_domain, 10).await?;
+    assert_eq!(unblocked.len(), 1, "t29: 队头发布后仅第一后继可投递");
+    assert_eq!(
+        unblocked[0].idem_key().as_str(),
+        dlx_ids[1],
+        "t29: DLX 队头发布后必须按 partition 顺序解除第一后继"
     );
 
     store.shutdown().await?;

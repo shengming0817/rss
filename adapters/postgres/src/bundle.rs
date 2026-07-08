@@ -69,8 +69,9 @@ use crate::{
     PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance,
     PgPolicyLifecycle, PgPolicyRepo, PgProjectionControl, PgProjectionEvents, PgReadinessSampler,
     PgReconcileStore, PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle,
-    PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo, PgSessionLifecycle,
-    PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard, ProjectionMaintenanceCapability,
+    PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo, PgServiceTokenReplayGuard,
+    PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard,
+    ProjectionMaintenanceCapability,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -315,6 +316,12 @@ impl PgRuntimeDeps {
 }
 
 impl PgMaintenanceDeps {
+    /// Durable replay guard for one-shot maintenance operator service tokens.
+    #[must_use]
+    pub fn service_token_replay_guard(&self) -> Arc<dyn diport::ServiceTokenReplayGuard> {
+        Arc::new(PgServiceTokenReplayGuard::new(Arc::clone(&self.store)))
+    }
+
     /// settings `ConfigValue` 存量 backfill/rewrap 执行器。
     #[must_use]
     pub fn config_value_maintenance(
@@ -395,6 +402,24 @@ impl PgMaintenanceDeps {
     ) -> Result<(), PgError> {
         self.record_maintenance_audit(
             "projection.maintenance",
+            operator_subject,
+            action,
+            outcome,
+            resource_id,
+        )
+        .await
+    }
+
+    /// Durable audit record for DLQ inspection / replay / redrive jobs.
+    pub async fn record_dlq_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        self.record_maintenance_audit(
+            "dlq.maintenance",
             operator_subject,
             action,
             outcome,
@@ -826,6 +851,14 @@ impl PgInfraDeps {
     pub fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
         self.store
             .dlq_with_projection_registry(payload_protector, self.projection_registry)
+    }
+
+    /// Payload-free DLQ inspection/redrive API. Consumer dead_letter replay requires [`Self::dlq`]
+    /// because it decrypts `dead_letter.original_entry`.
+    #[must_use]
+    pub fn dlq_without_payload_replay(&self) -> PgDlqStore {
+        self.store
+            .dlq_without_payload_replay(self.projection_registry)
     }
 
     /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。

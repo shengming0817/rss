@@ -45,6 +45,16 @@ groups:
           summary: "Outbox pending 深度持续偏高（domain={{ $labels.domain }}）"
           description: "outbox_pending_depth={{ $value }} on domain {{ $labels.domain }}；relay 吞吐跟不上写入速率，考虑增大 relay batch 或排查 broker。"
 
+      # 同 partition 队头进入 DLX 或长时间未发布会阻塞后继；metric 不暴露 partition_key，定位时从 DLQ event_id 入手。
+      - alert: OutboxPartitionBlocked
+        expr: sum by (domain, contract_id, tenant_id) (outbox_partition_blocked_depth) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox partition 被队头阻塞（domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }}）"
+          description: "outbox_partition_blocked_depth={{ $value }}（tenant={{ $labels.tenant_id }}）；检查 outbox DLX 队头，按 runbook inspect/redrive，不要从 metric 追 partition_key。"
+
       # 重试风暴（次级早期信号）：broker 抖动引发批量 Requeue，pending 上涨但 DLX 未增（预算未耗尽）的
       # 窗口期，oldest-age 超阈前的领先指标。阈值按部署基线调（此处 5/s 兜底）。
       - alert: OutboxRequeueStorm
@@ -85,6 +95,16 @@ groups:
         annotations:
           summary: "Consumer release claim 失败（domain={{ $labels.domain }}）"
           description: "近 5min consumer_release_failed_total 增长 {{ $value }}（domain={{ $labels.domain }}）；该路径会 broker Reject，需检查 inbox claim store 和 DLX 写失败根因。"
+
+      # lease lost 是 hard-fence 正常控制流，但持续升高说明 handler 过慢、TTL 偏小或并发争用异常。
+      - alert: ConsumerLeaseLostHigh
+        expr: sum by (domain) (rate(consumer_lease_lost_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer lease lost 速率偏高（domain={{ $labels.domain }}）"
+          description: "consumer_lease_lost_total rate={{ $value }}/s；检查 handler duration、inbox lease TTL、worker 并发与数据库延迟。"
 
       # Saga 补偿失败已写入 dead_letter：需要人工介入，不允许静默累积。
       - alert: SagaDeadLetterGrowth

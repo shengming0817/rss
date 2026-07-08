@@ -47,6 +47,7 @@ mod role_binding_lifecycle;
 mod role_repo;
 mod saga;
 mod secret_repo;
+mod service_token_replay;
 mod session_lifecycle;
 mod session_sweeper;
 mod tx;
@@ -95,6 +96,7 @@ pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaInstanceStore, PgSagaJournal};
 pub use secret_repo::PgSecretRepo;
+pub use service_token_replay::PgServiceTokenReplayGuard;
 pub use session_lifecycle::PgSessionLifecycle;
 pub use session_sweeper::PgSessionSweeper;
 

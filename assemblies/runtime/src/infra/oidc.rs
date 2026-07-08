@@ -169,10 +169,23 @@ pub fn build_provider() -> anyhow::Result<OidcProvider> {
     build_provider_from(|name| std::env::var(name).ok())
 }
 
+pub(crate) fn build_provider_with_replay_guard(
+    replay_guard: Arc<dyn diport::ServiceTokenReplayGuard>,
+) -> anyhow::Result<OidcProvider> {
+    build_provider_from_with_replay_guard(|name| std::env::var(name).ok(), Some(replay_guard))
+}
+
 /// 由注入的配置读取器构造 `OidcProvider`（DI：测试传 fake getter，无 env 副作用——workspace `forbid(unsafe)`
 /// 下测试不能 `set_var`，故读取器入参化）。错误只含变量**名**，不含值（无 PII / 无 secret 泄漏）。
 pub(crate) fn build_provider_from(
     get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<OidcProvider> {
+    build_provider_from_with_replay_guard(get, None)
+}
+
+fn build_provider_from_with_replay_guard(
+    get: impl Fn(&str) -> Option<String>,
+    replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
 ) -> anyhow::Result<OidcProvider> {
     let issuer = get("RSS_OIDC_ISSUER")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_ISSUER"))?;
@@ -180,14 +193,17 @@ pub(crate) fn build_provider_from(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_AUDIENCE"))?;
     let trusted_kinds = get("RSS_OIDC_TRUSTED_KINDS")
         .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_OIDC_TRUSTED_KINDS"))?;
-    provider_from_b64(
+    provider_from_b64_with_replay_guard(
         &issuer,
         &audience,
         &trusted_kinds,
         get("RSS_OIDC_ES256_SEC1_B64URL").as_deref(),
         get("RSS_OIDC_HS256_SECRET_B64URL").as_deref(),
         get("RSS_OIDC_HS256_KID").as_deref(),
-        Box::new(SystemClock),
+        ProviderAuthDeps {
+            clock: Box::new(SystemClock),
+            replay_guard,
+        },
     )
 }
 
@@ -208,6 +224,34 @@ pub fn provider_from_b64(
     hs256_b64: Option<&str>,
     hs256_kid: Option<&str>,
     clock: Box<dyn diport::Clock>,
+) -> anyhow::Result<OidcProvider> {
+    provider_from_b64_with_replay_guard(
+        issuer,
+        audience,
+        trusted_kinds_csv,
+        es256_csv,
+        hs256_b64,
+        hs256_kid,
+        ProviderAuthDeps {
+            clock,
+            replay_guard: None,
+        },
+    )
+}
+
+struct ProviderAuthDeps {
+    clock: Box<dyn diport::Clock>,
+    replay_guard: Option<Arc<dyn diport::ServiceTokenReplayGuard>>,
+}
+
+fn provider_from_b64_with_replay_guard(
+    issuer: &str,
+    audience: &str,
+    trusted_kinds_csv: &str,
+    es256_csv: Option<&str>,
+    hs256_b64: Option<&str>,
+    hs256_kid: Option<&str>,
+    deps: ProviderAuthDeps,
 ) -> anyhow::Result<OidcProvider> {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let mut keys = oidc::StaticKeySource::builder();
@@ -235,8 +279,10 @@ pub fn provider_from_b64(
 
     let mut builder = oidc::VerifierConfigBuilder::new(issuer, audience).keys(keys.build());
     if hs256_b64.is_some() {
-        builder =
-            builder.service_token_replay_guard(Arc::new(RuntimeServiceTokenReplayGuard::default()));
+        builder = builder.service_token_replay_guard(
+            deps.replay_guard
+                .unwrap_or_else(|| Arc::new(RuntimeServiceTokenReplayGuard::default())),
+        );
     }
     let mut trusted = 0usize;
     for kind in trusted_kinds_csv
@@ -256,7 +302,7 @@ pub fn provider_from_b64(
     let config = builder
         .build()
         .map_err(|e| anyhow::anyhow!("invalid verifier config: {e}"))?;
-    Ok(OidcProvider::new(config, clock))
+    Ok(OidcProvider::new(config, deps.clock))
 }
 
 #[cfg(test)]

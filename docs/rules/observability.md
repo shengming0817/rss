@@ -168,7 +168,9 @@ outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` �
 | `outbox_relay_envelope_validation_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`reason` | relay 发布前本地 envelope header 校验失败 |
 | `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | 可投递 backlog：到期 pending + stale publishing（采样器） |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | 最老 backlog 龄；进程内已观测 scope 无 backlog ⇒ 0（非缺失） |
+| `outbox_partition_blocked_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | 同 tenant/domain/partition 前序未 published 导致被队头阻塞的 outbox 行数；不暴露 `partition_key` |
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=poll/publish；settle 并入 publish，见 §settle 相说明） |
+| `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | operator DLQ replay/redrive mutation 结果计数；kind=dead_letter_replay/outbox_dlx_redrive；仅在进程安装 metrics recorder 时可采集，一次性 `rss dlq` 的长期告警看 `dlq.maintenance` audit/log |
 
 label 闭值集纪律：
 
@@ -180,6 +182,11 @@ label 闭值集纪律：
   `RelayEnvelopeValidationReason::as_label()`：`envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
   `envelope_missing_schema_version` / `envelope_invalid_schema_version` / `envelope_missing_schema_hash` /
   `envelope_invalid_schema_hash` / `envelope_schema_version_mismatch` / `envelope_schema_hash_mismatch`。
+- `dlq_redrive_total.kind` 闭合于 `eventexec::DlqMutationKind::as_label()`：`dead_letter_replay` /
+  `outbox_dlx_redrive`。`outcome` 闭合于 mutation outcome 与 `DlqError::as_label()`：`inserted` /
+  `already_exists` / `redriven` / `not_found` / `invalid_id` / `invalid_cursor` / `not_replayable` /
+  `invalid_payload` / `invalid_schema_headers` / `payload_key_unavailable` / `payload_key_forbidden` / `store`。
+  `tenant_id` 必须来自 typed `vocab::TenantId`，禁止把 dead_letter id、event id、partition key、payload 或错误文本放入 label。
 - `domain` label 值来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式，
   非请求/租户派生），基数有界，是 §HTTP Metrics domain Label 同款「assembly/config 声明 closed set」的
   合法低基数用法。`eventexec`（Service 层）依层矩阵不能依赖 `observ`，故这些 label 暂不经 `observ`
@@ -190,7 +197,8 @@ label 闭值集纪律：
 - PII / 高基数边界：outbox metric label 仍禁止 payload、topic、subject、actor、metadata、error text、
   handler error 或任意请求输入。backlog zero sample 对 adapter 返回的历史 outbox scope 以及同一 sampler
   进程内曾返回、后续成功采样时消失的 `(domain, tenant_id, contract_id)` 输出；从未出现、新进程尚未观测或
-  recorder 已清理的 scope 不造假 label。
+  recorder 已清理的 scope 不造假 label。`outbox_partition_blocked_depth` 与 backlog gauge 同 scope 输出；
+  仅输出 blocked count，绝不把 `partition_key` 作为 metric label 或 sample 字段。
 
 新增或改名上述 metric / label 必须同步 schema、tests、dashboard、`docs/ops/outbox-relay-alerts.rules.yaml`
 与 emit site。
@@ -205,6 +213,7 @@ at-least-once consumer（`eventexec::run_consumer_ackable`）每次向 broker �
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | fail-closed preflight 路径主动跳过 app DLX 写入（malformed id / tenant authority / envelope header / inbox receipt context 校验失败） |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | app DLX store 写入结果（outcome=ok/error）；error 同时把 consumer health 标为 degraded |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release claim 也失败；consumer 必须 broker `Reject`，不能 `Ack` 或 `Requeue` |
+| `consumer_lease_lost_total` | Counter | `domain` | handler / tx / commit 期间 inbox lease lost hard-fence；取消当前执行并 broker Requeue，不写 app DLX |
 
 label 闭值集纪律：
 
@@ -235,6 +244,9 @@ label 闭值集纪律：
   `consumer_release_failed_total{domain}` 并 broker Reject）。
 - `consumer_release_failed_total` emit site = `eventexec::consumer::emit_release_failed`；这是 DLX 写失败叠加
   release 失败的正确性告警面，label 仅含低基数 `domain`。
+- `consumer_lease_lost_total` emit site = `eventexec::consumer::emit_lease_lost`；这是 lease CAS hard-fence 信号，
+  label 仅含注册期 `domain`。该路径不代表业务 handler 失败，排障时看 inbox lease TTL、handler duration 与
+  consumer worker 并发。
 
 ### Saga DLX Metrics
 

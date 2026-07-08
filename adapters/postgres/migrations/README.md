@@ -95,6 +95,14 @@ expire 经 versioned tombstone UPDATE，不授表级 DELETE。主键为
 `(tenant_id, contract_id, permission, resource_id, attribute_key)`，只允许动态 `resource.*` key，且
 `resource.id` 保留给 HTTP route synthetic resource id，不可落库。
 
+`0047` 前向替换 `rss_outbox_sample_backlog(text)`，在既有 `depth` / `oldest_age_seconds` 基础上返回
+`partition_blocked_depth`。该值只统计同 tenant/domain/partition 前序未 published 导致被队头阻塞的行数；
+函数不返回 `partition_key`，避免把业务分区键带入 metrics 或 operator 输出。
+
+`0048` 新增 `service_token_replay_nonces` 平台表，供一次性 maintenance/operator CLI 的 service-token `jti`
+防重放使用。该表不带 `tenant_id`：auth 完成前还没有可信 tenant RLS 上下文，且 `jti` replay 检查必须跨
+CLI 进程全局生效。唯一键 `(nonce)` 提供原子 insert-if-absent；`expires_at` 索引用于 opportunistic prune。
+
 `0038` 新增 `inbox_receipts` tenant 表作为 runtime durable consumer 的 receipt schema：tenant-first
 主键、contract/schema header、trace/correlation、lease CAS 状态与 `FORCE RLS` 同迁移落地。该表是可变
 claim/commit 状态，不是 append-only ledger，因此授予 `rss_app` SELECT/INSERT/UPDATE/DELETE。

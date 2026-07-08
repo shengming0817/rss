@@ -1030,6 +1030,7 @@ mod tests {
         ) {
         }
         fn record_backlog(&self, _: &crate::OutboxMetricScope<'_>, _: consistency::BacklogSample) {}
+        fn record_partition_blocked(&self, _: &crate::OutboxMetricScope<'_>, _: u64) {}
         fn record_tick_duration(&self, _: crate::RelayPhase, _: f64) {}
     }
 
