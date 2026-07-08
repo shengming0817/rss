@@ -18,10 +18,12 @@ use diport::{
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
-    DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Policy,
-    PolicyId, PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope,
-    PolicyVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId, RoleListResult, RolePage,
-    RoleRepo,
+    DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo, DynRoleBindingLifecycle,
+    DynRoleRepo, IdentityError, Policy, PolicyId, PolicyLifecycle, PolicyListResult, PolicyPage,
+    PolicyRepo, PolicyRouteScope, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
+    ResourceAttributeRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
+    ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId, RoleListResult,
+    RolePage, RoleRepo,
 };
 use identity::{
     IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
@@ -352,6 +354,46 @@ impl PolicyRepo for NoopPolicyRepo {
     }
 }
 
+struct NoopResourceAttributeRepo;
+
+impl ResourceAttributeRepo for NoopResourceAttributeRepo {
+    async fn resolve_effective(
+        &self,
+        _tenant: TenantId,
+        _scope: PolicyRouteScope,
+        _resource_id: ResourceAttributeResourceId,
+        mut required_keys: Vec<ResourceAttributeKey>,
+        _at: std::time::SystemTime,
+    ) -> Result<ResourceAttributeResolution, IdentityError> {
+        let Some(key) = required_keys.pop() else {
+            return Ok(ResourceAttributeResolution::Known(Vec::new()));
+        };
+        Ok(ResourceAttributeResolution::Missing(key))
+    }
+
+    async fn upsert(
+        &self,
+        _tenant: TenantId,
+        _attribute: ResourceAttribute,
+        _expected: Option<ResourceAttributeVersion>,
+    ) -> Result<ResourceAttribute, IdentityError> {
+        Err(IdentityError::Storage(Box::new(std::io::Error::other(
+            "noop resource attributes",
+        ))))
+    }
+
+    async fn expire(
+        &self,
+        _tenant: TenantId,
+        _scope: PolicyRouteScope,
+        _resource_id: ResourceAttributeResourceId,
+        _key: ResourceAttributeKey,
+        _expected: ResourceAttributeVersion,
+    ) -> Result<bool, IdentityError> {
+        Ok(false)
+    }
+}
+
 struct NoopPolicyLifecycle;
 
 impl PolicyLifecycle for NoopPolicyLifecycle {
@@ -400,6 +442,8 @@ where
     let bindings: Arc<DynRoleBindingLifecycle<'static>> =
         Arc::from(DynRoleBindingLifecycle::new_box(NoopRoleBindingLifecycle));
     let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(NoopPolicyRepo));
+    let resource_attrs: Arc<DynResourceAttributeRepo<'static>> =
+        Arc::from(DynResourceAttributeRepo::new_box(NoopResourceAttributeRepo));
     let policy_lifecycle: Arc<DynPolicyLifecycle<'static>> =
         Arc::from(DynPolicyLifecycle::new_box(NoopPolicyLifecycle));
     let rbac = Arc::new(RbacAdminService::new(
@@ -420,6 +464,7 @@ where
         roles,
         bindings,
         policies,
+        resource_attrs,
         clock: Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     })
 }

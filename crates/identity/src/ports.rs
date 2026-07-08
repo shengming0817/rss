@@ -32,8 +32,10 @@ pub use crate::domain::{
     POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
     POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy, PolicyCondition, PolicyEffect,
     PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, RefreshRotation,
-    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, Role, RoleBinding, RoleId,
-    Session, SessionId, kind_from_db, kind_to_db,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttribute,
+    ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
+    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId, Session,
+    SessionId, kind_from_db, kind_to_db,
 };
 pub use vocab::TenantId;
 
@@ -75,6 +77,41 @@ pub struct PolicyPage {
 pub struct PolicyListResult {
     pub policies: Vec<Policy>,
     pub has_more: bool,
+}
+
+/// Tenant-scoped resource attribute store / resolver for route ABAC.
+///
+/// This is the only durable PIP port used by `ContractAuthorizer`. Resolution failures are
+/// explicit (`Missing` / `Stale`) so callers cannot accidentally treat an unavailable attribute as
+/// an empty attribute bag and fall back to baseline RBAC.
+#[trait_variant::make(ResourceAttributeRepo: Send)]
+#[dynosaur(pub DynResourceAttributeRepo = dyn(box) ResourceAttributeRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait ResourceAttributeRepoLocal: Send + Sync {
+    async fn resolve_effective(
+        &self,
+        tenant: TenantId,
+        scope: PolicyRouteScope,
+        resource_id: ResourceAttributeResourceId,
+        required_keys: Vec<ResourceAttributeKey>,
+        at: SystemTime,
+    ) -> Result<ResourceAttributeResolution, IdentityError>;
+
+    async fn upsert(
+        &self,
+        tenant: TenantId,
+        attribute: ResourceAttribute,
+        expected: Option<ResourceAttributeVersion>,
+    ) -> Result<ResourceAttribute, IdentityError>;
+
+    async fn expire(
+        &self,
+        tenant: TenantId,
+        scope: PolicyRouteScope,
+        resource_id: ResourceAttributeResourceId,
+        key: ResourceAttributeKey,
+        expected: ResourceAttributeVersion,
+    ) -> Result<bool, IdentityError>;
 }
 
 /// ABAC policy lifecycle DI port（domain-shaped）——policy mutation + `identity.policy-updated` outbox 的唯一写口。

@@ -35,10 +35,15 @@ use crate::ports::RefreshTokenStore;
 
 // RBAC 角色仓储 + 绑定生命周期 in-mem 替身（`#[cfg(test)]` 门控，#1190）。
 #[cfg(test)]
-use crate::domain::{Policy, PolicyId, PolicyRouteScope, PolicyVersion, Role, RoleBinding, RoleId};
+use crate::domain::{
+    Policy, PolicyId, PolicyRouteScope, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
+    RoleBinding, RoleId,
+};
 #[cfg(test)]
 use crate::ports::{
-    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, RoleBindingLifecycle, RoleRepo,
+    PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, ResourceAttributeRepo,
+    RoleBindingLifecycle, RoleRepo,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -492,6 +497,216 @@ impl PolicyLifecycle for InMemPolicyRepo {
 }
 
 // ---------------------------------------------------------------------------
+// InMemResourceAttributeRepo — durable resource attribute store / resolver 替身（#1590）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[derive(Clone)]
+struct StoredResourceAttribute {
+    version: ResourceAttributeVersion,
+    active: Option<ResourceAttribute>,
+}
+
+#[cfg(test)]
+type ResourceAttributeStoreKey = (String, String, String, String, String);
+
+#[cfg(test)]
+impl StoredResourceAttribute {
+    fn active(attribute: ResourceAttribute) -> Self {
+        Self {
+            version: attribute.version(),
+            active: Some(attribute),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct InMemResourceAttributeRepo {
+    attributes: Arc<Mutex<HashMap<ResourceAttributeStoreKey, StoredResourceAttribute>>>,
+    fail_reads: bool,
+    fail_writes: bool,
+}
+
+#[cfg(test)]
+impl InMemResourceAttributeRepo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn failing_reads() -> Self {
+        Self {
+            fail_reads: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn failing_writes() -> Self {
+        Self {
+            fail_writes: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_attribute(self, attribute: ResourceAttribute) -> Self {
+        recover(&self.attributes).insert(
+            Self::key_from_attribute(&attribute),
+            StoredResourceAttribute::active(attribute),
+        );
+        self
+    }
+
+    fn key(
+        tenant: TenantId,
+        scope: &PolicyRouteScope,
+        resource_id: &ResourceAttributeResourceId,
+        key: &ResourceAttributeKey,
+    ) -> ResourceAttributeStoreKey {
+        (
+            tenant.to_string(),
+            scope.contract_id().to_string(),
+            scope.permission().to_string(),
+            resource_id.as_str().to_string(),
+            key.as_str().to_string(),
+        )
+    }
+
+    fn key_from_attribute(
+        attribute: &ResourceAttribute,
+    ) -> (String, String, String, String, String) {
+        Self::key(
+            attribute.tenant(),
+            attribute.route_scope(),
+            attribute.resource_id(),
+            attribute.key(),
+        )
+    }
+
+    fn rebuild_with_version(
+        attribute: &ResourceAttribute,
+        version: ResourceAttributeVersion,
+    ) -> Result<ResourceAttribute, IdentityError> {
+        ResourceAttribute::hydrate(
+            attribute.tenant(),
+            attribute.route_scope().clone(),
+            attribute.resource_id().clone(),
+            attribute.key().clone(),
+            attribute.value().clone(),
+            version.get(),
+            attribute.effective_from(),
+            attribute.effective_until(),
+        )
+    }
+}
+
+#[cfg(test)]
+impl ResourceAttributeRepo for InMemResourceAttributeRepo {
+    async fn resolve_effective(
+        &self,
+        tenant: TenantId,
+        scope: PolicyRouteScope,
+        resource_id: ResourceAttributeResourceId,
+        required_keys: Vec<ResourceAttributeKey>,
+        at: SystemTime,
+    ) -> Result<ResourceAttributeResolution, IdentityError> {
+        if self.fail_reads {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-resource-attribute-read-fail",
+            ))));
+        }
+        let guard = recover(&self.attributes);
+        let mut attrs = Vec::with_capacity(required_keys.len());
+        for required in required_keys {
+            let store_key = Self::key(tenant, &scope, &resource_id, &required);
+            let Some(stored) = guard.get(&store_key) else {
+                return Ok(ResourceAttributeResolution::Missing(required));
+            };
+            let Some(attribute) = stored.active.as_ref() else {
+                return Ok(ResourceAttributeResolution::Missing(required));
+            };
+            if !attribute.is_effective_at(at) {
+                return Ok(ResourceAttributeResolution::Stale(required));
+            }
+            attrs.push(attribute.clone());
+        }
+        Ok(ResourceAttributeResolution::Known(attrs))
+    }
+
+    async fn upsert(
+        &self,
+        tenant: TenantId,
+        attribute: ResourceAttribute,
+        expected: Option<ResourceAttributeVersion>,
+    ) -> Result<ResourceAttribute, IdentityError> {
+        if self.fail_writes {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-resource-attribute-write-fail",
+            ))));
+        }
+        if attribute.tenant() != tenant {
+            return Err(IdentityError::InvalidPolicy);
+        }
+        let key = Self::key_from_attribute(&attribute);
+        let mut guard = recover(&self.attributes);
+        match expected {
+            None => {
+                if guard.contains_key(&key)
+                    || attribute.version() != ResourceAttributeVersion::first()
+                {
+                    return Err(IdentityError::VersionConflict);
+                }
+                guard.insert(key, StoredResourceAttribute::active(attribute.clone()));
+                Ok(attribute)
+            }
+            Some(expected) => {
+                let Some(stored) = guard.get_mut(&key) else {
+                    return Err(IdentityError::VersionConflict);
+                };
+                let Some(active) = stored.active.as_ref() else {
+                    return Err(IdentityError::VersionConflict);
+                };
+                if active.version() != expected {
+                    return Err(IdentityError::VersionConflict);
+                }
+                let next = Self::rebuild_with_version(&attribute, expected.next_checked()?)?;
+                stored.version = next.version();
+                stored.active = Some(next.clone());
+                Ok(next)
+            }
+        }
+    }
+
+    async fn expire(
+        &self,
+        tenant: TenantId,
+        scope: PolicyRouteScope,
+        resource_id: ResourceAttributeResourceId,
+        key: ResourceAttributeKey,
+        expected: ResourceAttributeVersion,
+    ) -> Result<bool, IdentityError> {
+        if self.fail_writes {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "inmem-resource-attribute-write-fail",
+            ))));
+        }
+        let store_key = Self::key(tenant, &scope, &resource_id, &key);
+        let mut guard = recover(&self.attributes);
+        let Some(stored) = guard.get_mut(&store_key) else {
+            return Ok(false);
+        };
+        let Some(active) = stored.active.as_ref() else {
+            return Ok(false);
+        };
+        if active.version() != expected {
+            return Err(IdentityError::VersionConflict);
+        }
+        stored.version = expected.next_checked()?;
+        stored.active = None;
+        Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InMemRoleRepo / InMemRoleBindingLifecycle — RBAC 角色仓储 + 绑定生命周期 in-mem 替身（#1190，US5）
 // ---------------------------------------------------------------------------
 
@@ -794,13 +1009,18 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        Credential, InMemCredentialRepo, InMemPolicyRepo, InMemSessionLifecycle, TenantId,
+        Credential, InMemCredentialRepo, InMemPolicyRepo, InMemResourceAttributeRepo,
+        InMemSessionLifecycle, TenantId,
     };
     use crate::domain::{
-        AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId, PolicyVersion, Session,
-        SessionId,
+        AttributeValue, AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId,
+        PolicyRouteScope, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
+        ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
+        Session, SessionId,
     };
-    use crate::ports::{CredentialRepo, PolicyLifecycle, PolicyRepo, SessionLifecycle};
+    use crate::ports::{
+        CredentialRepo, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo, SessionLifecycle,
+    };
     use consistency::{Entry, IdemKey, OutboxPayload, Topic};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
     use std::time::{Duration, SystemTime};
@@ -811,6 +1031,7 @@ mod tests {
     const USER_ALICE: &str = "11111111-2222-4333-8444-555555555555";
     // 未种子化的 canonical user id（find_by_user_id 未知主体 → None，#1277 F2）。
     const USER_GHOST: &str = "99999999-8888-4777-8666-555544443333";
+    const RESOURCE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     fn tid(raw: &str) -> TenantId {
         TenantId::parse(raw).expect("canonical tenant parses")
@@ -856,6 +1077,36 @@ mod tests {
 
     fn policy(raw: &str, tenant: TenantId) -> Policy {
         Policy::new(policy_id(raw), tenant, Vec::new())
+    }
+
+    fn resource_scope() -> PolicyRouteScope {
+        PolicyRouteScope::parse("test.contract", "test:read").expect("resource scope")
+    }
+
+    fn resource_id() -> ResourceAttributeResourceId {
+        ResourceAttributeResourceId::parse(RESOURCE_ID).expect("resource id")
+    }
+
+    fn resource_key(raw: &str) -> ResourceAttributeKey {
+        ResourceAttributeKey::parse(raw).expect("resource key")
+    }
+
+    fn resource_attribute(
+        tenant: TenantId,
+        key: ResourceAttributeKey,
+        from: u64,
+        until: Option<u64>,
+    ) -> ResourceAttribute {
+        ResourceAttribute::build(
+            tenant,
+            resource_scope(),
+            resource_id(),
+            key,
+            AttributeValue::new(USER_ALICE),
+            epoch(from),
+            until.map(epoch),
+        )
+        .expect("resource attribute")
     }
 
     // co-tx 创建入参占位（InMemSessionLifecycle::persist_session_and_emit 忽略 entry/envelope，仅存 session）。
@@ -1134,6 +1385,112 @@ mod tests {
                 .is_none(),
             "rejected recreate must not restore active policy"
         );
+    }
+
+    #[tokio::test]
+    async fn resource_attribute_resolve_reports_missing_and_stale_explicitly() {
+        let tenant = tid(TENANT_A);
+        let stale_key = resource_key("resource.stale_owner");
+        let repo = InMemResourceAttributeRepo::new().with_attribute(resource_attribute(
+            tenant,
+            stale_key.clone(),
+            0,
+            Some(500),
+        ));
+
+        let missing = repo
+            .resolve_effective(
+                tenant,
+                resource_scope(),
+                resource_id(),
+                vec![resource_key("resource.owner")],
+                epoch(1_000),
+            )
+            .await
+            .expect("resolve missing");
+        assert!(
+            matches!(missing, ResourceAttributeResolution::Missing(key) if key.as_str() == "resource.owner")
+        );
+
+        let stale = repo
+            .resolve_effective(
+                tenant,
+                resource_scope(),
+                resource_id(),
+                vec![stale_key],
+                epoch(1_000),
+            )
+            .await
+            .expect("resolve stale");
+        assert!(
+            matches!(stale, ResourceAttributeResolution::Stale(key) if key.as_str() == "resource.stale_owner")
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_attribute_upsert_and_expire_use_cas_versions() {
+        let tenant = tid(TENANT_A);
+        let key = resource_key("resource.owner");
+        let repo = InMemResourceAttributeRepo::new();
+
+        let created = repo
+            .upsert(
+                tenant,
+                resource_attribute(tenant, key.clone(), 0, None),
+                None,
+            )
+            .await
+            .expect("create resource attribute");
+        assert_eq!(created.version(), ResourceAttributeVersion::first());
+
+        let conflict = repo
+            .upsert(
+                tenant,
+                resource_attribute(tenant, key.clone(), 0, None),
+                Some(ResourceAttributeVersion::new(99).expect("version")),
+            )
+            .await;
+        assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
+
+        let updated = repo
+            .upsert(
+                tenant,
+                resource_attribute(tenant, key.clone(), 0, None),
+                Some(created.version()),
+            )
+            .await
+            .expect("update resource attribute");
+        assert_eq!(updated.version().get(), 2);
+
+        let expired = repo
+            .expire(
+                tenant,
+                resource_scope(),
+                resource_id(),
+                key.clone(),
+                updated.version(),
+            )
+            .await
+            .expect("expire resource attribute");
+        assert!(expired);
+
+        let after_expire = repo
+            .resolve_effective(tenant, resource_scope(), resource_id(), vec![key], epoch(1))
+            .await
+            .expect("resolve after expire");
+        assert!(matches!(
+            after_expire,
+            ResourceAttributeResolution::Missing(_)
+        ));
+
+        let failed_write = InMemResourceAttributeRepo::failing_writes()
+            .upsert(
+                tenant,
+                resource_attribute(tenant, resource_key("resource.fail"), 0, None),
+                None,
+            )
+            .await;
+        assert!(matches!(failed_write, Err(IdentityError::Storage(_))));
     }
 
     #[tokio::test]

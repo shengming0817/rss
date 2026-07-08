@@ -194,6 +194,10 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
     },
     resource: None,
     self_scoped: false,
+    resource_sharing: super::HttpResourceSharingSpec {
+        mode: super::HttpResourceSharingMode::TenantScoped,
+        reason: None,
+    },
     projection_fields: PROJECTION_FIELDS,
     headers: &[],
 };

@@ -71,8 +71,9 @@ use generated::http::identity_v1::{
     },
 };
 use generated::http::{
-    HttpAuthMode, HttpHeaderMode, HttpSpec, audit_v1::SPEC as AUDIT_LIST_HTTP_SPEC,
-    settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
+    HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
+    audit_v1::SPEC as AUDIT_LIST_HTTP_SPEC, settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC,
+    settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
 };
 use httpserve::{
     AuthorizedSubject, Primary, PrimaryRoute, RouteAuthorizationDecision,
@@ -89,14 +90,16 @@ use crate::domain::{
     AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, PermissionId,
-    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
-    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RoleId, Session, SessionId,
-    evaluate_policies_for_tenant,
+    Policy, PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
+    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
+    Session, SessionId, evaluate_policies_for_tenant,
 };
 use crate::ports::{
-    CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynRoleBindingLifecycle, DynRoleRepo,
-    DynSessionLifecycle, PolicyPage, PolicyRepo, RefreshTokenStore, RoleBindingLifecycle, RolePage,
-    RoleRepo, SessionLifecycle,
+    CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeRepo,
+    DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, Operator, PolicyPage, PolicyRepo,
+    RefreshTokenStore, ResourceAttributeRepo, RoleBindingLifecycle, RolePage, RoleRepo,
+    SessionLifecycle,
 };
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
@@ -1000,6 +1003,7 @@ struct ContractAuthorizer {
     roles: Arc<DynRoleRepo<'static>>,
     bindings: Arc<DynRoleBindingLifecycle<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
+    resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -1087,10 +1091,7 @@ fn contract_auth_policy(
             permission_from_request(request, &POLICIES_LIST_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        _ if request.resource.is_none() => {
-            Ok(ContractAuthPolicy::RolePermission(request.permission))
-        }
-        _ => Err(AuthReject::Forbidden),
+        _ => Ok(ContractAuthPolicy::RolePermission(request.permission)),
     }
 }
 
@@ -1099,12 +1100,14 @@ impl ContractAuthorizer {
         roles: Arc<DynRoleRepo<'static>>,
         bindings: Arc<DynRoleBindingLifecycle<'static>>,
         policies: Arc<DynPolicyRepo<'static>>,
+        resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             roles,
             bindings,
             policies,
+            resource_attrs,
             clock,
         }
     }
@@ -1155,9 +1158,10 @@ impl ContractAuthorizer {
     ) -> Result<PolicyEvaluation, AuthReject> {
         let scope = PolicyRouteScope::parse(request.contract_id, request.permission)
             .map_err(|_| AuthReject::Forbidden)?;
+        let now = self.clock.now();
         let policies = self
             .policies
-            .list_effective(ctx.tenant, scope, self.clock.now())
+            .list_effective(ctx.tenant, scope.clone(), now)
             .await
             .map_err(|err| {
                 tracing::warn!(
@@ -1169,11 +1173,69 @@ impl ContractAuthorizer {
                 );
                 AuthReject::Forbidden
             })?;
+        let mut attrs = route_policy_attributes(ctx, request);
+        let required_keys = required_resource_attribute_keys(&policies)?;
+        if !required_keys.is_empty() {
+            attrs.extend(
+                self.resolve_resource_policy_attributes(ctx, request, scope, required_keys, now)
+                    .await?,
+            );
+        }
         Ok(evaluate_policies_for_tenant(
             Some(ctx.tenant),
-            &route_policy_attributes(ctx, request),
+            &attrs,
             &policies,
         ))
+    }
+
+    async fn resolve_resource_policy_attributes(
+        &self,
+        ctx: &AuthSubjectContext,
+        request: &RouteAuthorizationRequest,
+        scope: PolicyRouteScope,
+        required_keys: Vec<ResourceAttributeKey>,
+        now: SystemTime,
+    ) -> Result<Vec<AbacAttribute>, AuthReject> {
+        let resource_id = request_resource_attribute_id(ctx, request)?;
+        let resolved = self
+            .resource_attrs
+            .resolve_effective(
+                ctx.tenant,
+                scope.clone(),
+                resource_id.clone(),
+                required_keys.clone(),
+                now,
+            )
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %ctx.tenant,
+                    contract_id = request.contract_id,
+                    permission = request.permission,
+                    "identity contract authorizer resource attribute lookup failed"
+                );
+                AuthReject::Forbidden
+            })?;
+        match resolved {
+            ResourceAttributeResolution::Known(attrs) => known_resource_attributes_to_abac(
+                ctx,
+                request,
+                &scope,
+                &resource_id,
+                &required_keys,
+                attrs,
+            ),
+            ResourceAttributeResolution::Missing(key) => {
+                log_resource_attribute_resolution_failure(ctx, request, &key, "missing");
+                Err(AuthReject::Forbidden)
+            }
+            ResourceAttributeResolution::Stale(key) => {
+                log_resource_attribute_resolution_failure(ctx, request, &key, "stale");
+                Err(AuthReject::Forbidden)
+            }
+        }
     }
 
     async fn authorize_role_permission(
@@ -1373,6 +1435,151 @@ fn route_policy_attributes(
         attrs.push(policy_attr(POLICY_ATTR_RESOURCE_ID, resource.id()));
     }
     attrs
+}
+
+fn required_resource_attribute_keys(
+    policies: &[Policy],
+) -> Result<Vec<ResourceAttributeKey>, AuthReject> {
+    let mut keys = Vec::new();
+    for policy in policies {
+        for rule in policy.rules() {
+            collect_resource_attribute_key(rule.attribute_key(), &mut keys)?;
+            if let Operator::EqAttr(key) = rule.operator() {
+                collect_resource_attribute_key(key, &mut keys)?;
+            }
+        }
+    }
+    Ok(keys)
+}
+
+fn collect_resource_attribute_key(
+    key: &AttributeKey,
+    keys: &mut Vec<ResourceAttributeKey>,
+) -> Result<(), AuthReject> {
+    let Some(parsed) = ResourcePolicyAttributeKey::classify(key)
+        .map_err(|_| AuthReject::Forbidden)?
+        .into_dynamic()
+    else {
+        return Ok(());
+    };
+    if !keys.iter().any(|existing| existing == &parsed) {
+        keys.push(parsed);
+    }
+    Ok(())
+}
+
+fn request_resource_attribute_id(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+) -> Result<ResourceAttributeResourceId, AuthReject> {
+    request_resource_attribute_id_in(ctx, request, HTTP_SPECS)
+}
+
+fn request_resource_attribute_id_in(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+    specs: &[HttpSpec],
+) -> Result<ResourceAttributeResourceId, AuthReject> {
+    if route_resource_sharing_is_global_in(request, specs) {
+        tracing::warn!(
+            tenant_id = %ctx.tenant,
+            contract_id = request.contract_id,
+            permission = request.permission,
+            "identity contract authorizer rejects dynamic resource attributes on global resource route"
+        );
+        return Err(AuthReject::Forbidden);
+    }
+    let Some(resource) = request.resource.as_ref() else {
+        tracing::warn!(
+            tenant_id = %ctx.tenant,
+            contract_id = request.contract_id,
+            permission = request.permission,
+            "identity contract authorizer resource attributes required without route resource"
+        );
+        return Err(AuthReject::Forbidden);
+    };
+    ResourceAttributeResourceId::parse(resource.id()).map_err(|_| AuthReject::Forbidden)
+}
+
+fn known_resource_attributes_to_abac(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+    scope: &PolicyRouteScope,
+    resource_id: &ResourceAttributeResourceId,
+    required_keys: &[ResourceAttributeKey],
+    attrs: Vec<crate::domain::ResourceAttribute>,
+) -> Result<Vec<AbacAttribute>, AuthReject> {
+    let mut seen = Vec::with_capacity(attrs.len());
+    let mut out = Vec::with_capacity(attrs.len());
+    for attr in attrs {
+        if attr.tenant() != ctx.tenant
+            || attr.route_scope() != scope
+            || attr.resource_id() != resource_id
+        {
+            log_resource_attribute_known_invalid(ctx, request, attr.key(), "scope-mismatch");
+            return Err(AuthReject::Forbidden);
+        }
+        if !required_keys.iter().any(|required| required == attr.key()) {
+            log_resource_attribute_known_invalid(ctx, request, attr.key(), "unexpected-key");
+            return Err(AuthReject::Forbidden);
+        }
+        if seen.iter().any(|existing| existing == attr.key()) {
+            log_resource_attribute_known_invalid(ctx, request, attr.key(), "duplicate-key");
+            return Err(AuthReject::Forbidden);
+        }
+        seen.push(attr.key().clone());
+        out.push(attr.to_abac_attribute());
+    }
+    for key in required_keys {
+        if !seen.iter().any(|seen_key| seen_key == key) {
+            log_resource_attribute_resolution_failure(ctx, request, key, "missing");
+            return Err(AuthReject::Forbidden);
+        }
+    }
+    Ok(out)
+}
+
+fn log_resource_attribute_resolution_failure(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+    key: &ResourceAttributeKey,
+    reason: &'static str,
+) {
+    tracing::warn!(
+        tenant_id = %ctx.tenant,
+        contract_id = request.contract_id,
+        permission = request.permission,
+        attribute_key = key.as_str(),
+        reason,
+        "identity contract authorizer resource attribute resolution failed"
+    );
+}
+
+fn log_resource_attribute_known_invalid(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+    key: &ResourceAttributeKey,
+    reason: &'static str,
+) {
+    tracing::warn!(
+        tenant_id = %ctx.tenant,
+        contract_id = request.contract_id,
+        permission = request.permission,
+        attribute_key = key.as_str(),
+        reason,
+        "identity contract authorizer resource attribute repo returned invalid known set"
+    );
+}
+
+fn route_resource_sharing_is_global_in(
+    request: &RouteAuthorizationRequest,
+    specs: &[HttpSpec],
+) -> bool {
+    specs.iter().any(|spec| {
+        spec.contract_id == request.contract_id
+            && spec.auth.permission == Some(request.permission)
+            && spec.resource_sharing.mode == HttpResourceSharingMode::Global
+    })
 }
 
 fn policy_attr(key: &str, value: &str) -> AbacAttribute {
@@ -2158,6 +2365,7 @@ pub struct IdentityDomainDeps<S> {
     pub roles: Arc<DynRoleRepo<'static>>,
     pub bindings: Arc<DynRoleBindingLifecycle<'static>>,
     pub policies: Arc<DynPolicyRepo<'static>>,
+    pub resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -2180,12 +2388,14 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             roles,
             bindings,
             policies,
+            resource_attrs,
             clock,
         } = deps;
         let authorizer = Arc::new(ContractAuthorizer::new(
             Arc::clone(&roles),
             bindings,
             policies,
+            resource_attrs,
             clock,
         ));
         Self {
@@ -2304,6 +2514,7 @@ mod tests {
     const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
     // 未种子化的 canonical user id（change_password 未知主体 → NotFound，#1277 F2）。
     const GHOST_USER: &str = "99999999-8888-4777-8666-555544443333";
+    const RESOURCE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：SessionLifecycle / Clock 替身在此手写。
     // CapturingSessionLifecycle 双职能：① 捕获 co-tx 写入（Session + Entry + envelope）供 outbox 断言（test 1-5）；
@@ -2457,6 +2668,7 @@ mod tests {
             roles: roles_for_list,
             bindings,
             policies,
+            resource_attrs: empty_resource_attribute_repo(),
             clock: make_shared_clock(now_secs),
         })
     }
@@ -2500,6 +2712,59 @@ mod tests {
     fn empty_policy_repo() -> Arc<DynPolicyRepo<'static>> {
         Arc::from(DynPolicyRepo::new_box(
             crate::internal::mem::InMemPolicyRepo::new(),
+        ))
+    }
+
+    fn empty_resource_attribute_repo() -> Arc<DynResourceAttributeRepo<'static>> {
+        resource_attribute_repo(crate::internal::mem::InMemResourceAttributeRepo::new())
+    }
+
+    fn resource_attribute_repo(
+        repo: crate::internal::mem::InMemResourceAttributeRepo,
+    ) -> Arc<DynResourceAttributeRepo<'static>> {
+        Arc::from(DynResourceAttributeRepo::new_box(repo))
+    }
+
+    struct IncompleteKnownResourceAttributeRepo;
+
+    impl ResourceAttributeRepo for IncompleteKnownResourceAttributeRepo {
+        async fn resolve_effective(
+            &self,
+            _tenant: TenantId,
+            _scope: PolicyRouteScope,
+            _resource_id: ResourceAttributeResourceId,
+            _required_keys: Vec<ResourceAttributeKey>,
+            _at: SystemTime,
+        ) -> Result<ResourceAttributeResolution, IdentityError> {
+            Ok(ResourceAttributeResolution::Known(Vec::new()))
+        }
+
+        async fn upsert(
+            &self,
+            _tenant: TenantId,
+            _attribute: crate::domain::ResourceAttribute,
+            _expected: Option<crate::domain::ResourceAttributeVersion>,
+        ) -> Result<crate::domain::ResourceAttribute, IdentityError> {
+            Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "test repo",
+            ))))
+        }
+
+        async fn expire(
+            &self,
+            _tenant: TenantId,
+            _scope: PolicyRouteScope,
+            _resource_id: ResourceAttributeResourceId,
+            _key: ResourceAttributeKey,
+            _expected: crate::domain::ResourceAttributeVersion,
+        ) -> Result<bool, IdentityError> {
+            Ok(false)
+        }
+    }
+
+    fn incomplete_known_resource_attribute_repo() -> Arc<DynResourceAttributeRepo<'static>> {
+        Arc::from(DynResourceAttributeRepo::new_box(
+            IncompleteKnownResourceAttributeRepo,
         ))
     }
 
@@ -2572,6 +2837,7 @@ mod tests {
             roles,
             bindings,
             policies,
+            empty_resource_attribute_repo(),
             make_shared_clock(now_secs),
         ));
         (
@@ -2668,14 +2934,29 @@ mod tests {
         effect: PolicyEffect,
         obligations: PolicyObligations,
     ) -> Policy {
-        let rule = PolicyRule::with_obligations(
+        route_policy_with_condition(
+            id,
+            contract_id,
+            permission,
             PolicyCondition::new(
                 AttributeKey::new(POLICY_ATTR_PRINCIPAL_KIND),
                 Operator::Eq(AttributeValue::new("admin")),
             ),
             effect,
             obligations,
-        );
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn route_policy_with_condition(
+        id: &str,
+        contract_id: &'static str,
+        permission: &str,
+        condition: PolicyCondition,
+        effect: PolicyEffect,
+        obligations: PolicyObligations,
+    ) -> Policy {
+        let rule = PolicyRule::with_obligations(condition, effect, obligations);
         Policy::build(
             id,
             tid(CANON_TENANT),
@@ -2685,6 +2966,74 @@ mod tests {
             vec![rule],
         )
         .expect("valid policy")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn resource_id() -> ResourceAttributeResourceId {
+        ResourceAttributeResourceId::parse(RESOURCE_ID).expect("resource id")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn route_resource() -> httpserve::RouteResource {
+        httpserve::RouteResource::new(RESOURCE_ID).expect("route resource")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn owner_resource_attribute(
+        effective_from_secs: u64,
+        effective_until_secs: Option<u64>,
+    ) -> crate::domain::ResourceAttribute {
+        crate::domain::ResourceAttribute::build(
+            tid(CANON_TENANT),
+            PolicyRouteScope::parse("other.contract", "other:read").expect("scope"),
+            resource_id(),
+            ResourceAttributeKey::parse("resource.owner").expect("key"),
+            AttributeValue::new(CANON_USER),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(effective_from_secs),
+            effective_until_secs.map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+        )
+        .expect("resource attribute")
+    }
+
+    fn owner_policy(id: &str) -> Policy {
+        route_policy_with_condition(
+            id,
+            "other.contract",
+            "other:read",
+            PolicyCondition::new(
+                AttributeKey::new("resource.owner"),
+                Operator::EqAttr(AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID)),
+            ),
+            PolicyEffect::Allow,
+            PolicyObligations::empty(),
+        )
+    }
+
+    fn synthetic_global_spec() -> HttpSpec {
+        HttpSpec {
+            contract_id: "other.contract",
+            contract: vocab::ContractBinding::from_static(
+                "other",
+                "other.contract",
+                "v1",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            path: "/api/v1/other/{resourceId}",
+            method: "GET",
+            auth: generated::http::HttpAuthSpec {
+                mode: generated::http::HttpAuthMode::Permission,
+                reason: None,
+                permission: Some("other:read"),
+            },
+            resource: Some("resourceId"),
+            self_scoped: false,
+            resource_sharing: generated::http::HttpResourceSharingSpec {
+                mode: HttpResourceSharingMode::Global,
+                reason: Some("shared synthetic test route"),
+            },
+            projection_fields: &[],
+            headers: &[],
+        }
     }
 
     #[allow(clippy::expect_used)]
@@ -3591,6 +3940,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
         let decision = authorizer
@@ -3620,6 +3970,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -3657,6 +4008,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -3692,8 +4044,13 @@ mod tests {
                 PolicyObligations::empty(),
             ),
         ));
-        let authorizer =
-            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -3706,6 +4063,247 @@ mod tests {
             })
             .await;
         assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_resource_attr_allow_permits_owner_policy_without_rbac_binding() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(
+            crate::internal::mem::InMemPolicyRepo::new().with_policy(owner_policy("policy-owner")),
+        );
+        let resource_attrs = resource_attribute_repo(
+            crate::internal::mem::InMemResourceAttributeRepo::new()
+                .with_attribute(owner_resource_attribute(0, None)),
+        );
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            resource_attrs,
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(route_resource()),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_missing_resource_attr_denies_before_rbac_baseline() {
+        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role_id = baseline_role.id().clone();
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), baseline_role),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &baseline_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let policies = policy_repo(
+            crate::internal::mem::InMemPolicyRepo::new()
+                .with_policy(owner_policy("policy-missing-resource-attr")),
+        );
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(route_resource()),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_stale_resource_attr_denies_before_rbac_baseline() {
+        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role_id = baseline_role.id().clone();
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), baseline_role),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &baseline_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let policies = policy_repo(
+            crate::internal::mem::InMemPolicyRepo::new()
+                .with_policy(owner_policy("policy-stale-resource-attr")),
+        );
+        let resource_attrs = resource_attribute_repo(
+            crate::internal::mem::InMemResourceAttributeRepo::new()
+                .with_attribute(owner_resource_attribute(0, Some(500))),
+        );
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            resource_attrs,
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(route_resource()),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_resource_attr_store_error_denies_before_rbac_baseline() {
+        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role_id = baseline_role.id().clone();
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), baseline_role),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &baseline_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let policies = policy_repo(
+            crate::internal::mem::InMemPolicyRepo::new()
+                .with_policy(owner_policy("policy-resource-attr-store-error")),
+        );
+        let resource_attrs = resource_attribute_repo(
+            crate::internal::mem::InMemResourceAttributeRepo::failing_reads(),
+        );
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            resource_attrs,
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(route_resource()),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_incomplete_known_resource_attrs_denies_before_rbac_baseline() {
+        let baseline_role = role("role-resource-admin", "Resource Admin", &["other:read"]);
+        let baseline_role_id = baseline_role.id().clone();
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new()
+                .with_role_entity(tid(CANON_TENANT), baseline_role),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &baseline_role_id,
+                    CANON_USER,
+                ),
+            ));
+        let policies = policy_repo(
+            crate::internal::mem::InMemPolicyRepo::new()
+                .with_policy(owner_policy("policy-incomplete-known-resource-attr")),
+        );
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            incomplete_known_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: "other:read",
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(route_resource()),
+            })
+            .await;
+        assert_eq!(
+            decision,
+            RouteAuthorizationDecision::Deny,
+            "repo Known payloads must still cover every required resource attr before baseline"
+        );
+    }
+
+    #[test]
+    fn resource_attribute_global_route_spec_denies_dynamic_attr_resolution() {
+        let ctx = AuthSubjectContext {
+            tenant: tid(CANON_TENANT),
+            subject: CANON_USER.to_string(),
+            kind: vocab::PrincipalKind::User,
+        };
+        let request = RouteAuthorizationRequest {
+            contract_id: "other.contract",
+            permission: "other:read",
+            tenant_id: Some(tid(CANON_TENANT)),
+            principal_kind: vocab::PrincipalKind::User,
+            principal_id: CANON_USER.to_string(),
+            resource: Some(route_resource()),
+        };
+        let specs = [synthetic_global_spec()];
+
+        assert!(route_resource_sharing_is_global_in(&request, &specs));
+        assert!(matches!(
+            request_resource_attribute_id_in(&ctx, &request, &specs),
+            Err(AuthReject::Forbidden)
+        ));
     }
 
     #[tokio::test]
@@ -3731,8 +4329,13 @@ mod tests {
                 PolicyObligations::empty(),
             ),
         ));
-        let authorizer =
-            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -3770,8 +4373,13 @@ mod tests {
                 PolicyObligations::new(Some(vocab::ScopedTenant::Tenant), vec![]),
             ),
         ));
-        let authorizer =
-            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -3817,6 +4425,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -3863,6 +4472,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -3894,6 +4504,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -3950,8 +4561,13 @@ mod tests {
                 ),
             ),
         ));
-        let authorizer =
-            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -3992,8 +4608,13 @@ mod tests {
                 PolicyObligations::new(None, vec![AttributeKey::new("audit.email")]),
             ),
         ));
-        let authorizer =
-            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -4020,8 +4641,13 @@ mod tests {
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::failing_reads());
-        let authorizer =
-            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
         let permission = SETTINGS_CONFIG_HTTP_SPEC
             .auth
             .permission
@@ -4064,6 +4690,7 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
+            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
         let decision = authorizer

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
-    ContractKind, HttpAuthMode, HttpHeaderMode, Lifecycle, WorkflowMode,
+    ContractKind, HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode, Lifecycle, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -116,6 +116,9 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
     }
     for (kind_dir, (modules, mod_kind)) in &kinds {
         let mut mod_rs = render_mod_rs(modules, *mod_kind);
+        if *mod_kind == ModKind::Http {
+            mod_rs.push_str(&render_http_root_specs(contracts)?);
+        }
         if *mod_kind == ModKind::Event {
             mod_rs.push_str(&render_event_root_subscriptions(contracts)?);
             mod_rs.push_str(&render_event_root_projection_inputs(contracts)?);
@@ -482,6 +485,52 @@ pub const CONTRACT: ::vocab::ContractBinding =
     let permission = render_option_str(auth.permission.as_deref(), "permission")?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
+    let resource_present = http
+        .resource
+        .as_deref()
+        .is_some_and(|resource| !resource.trim().is_empty());
+    let (resource_sharing_mode, resource_sharing_reason) = match http.resource_sharing.as_ref() {
+        Some(sharing) => match sharing.mode {
+            HttpResourceSharingMode::Global => {
+                let reason = sharing
+                    .reason
+                    .as_deref()
+                    .filter(|reason| !reason.trim().is_empty())
+                    .with_context(|| {
+                        format!(
+                            "契约 {}/{}/{} resourceSharing mode=global 必须声明非空 reason（codegen fail-closed）",
+                            c.manifest.kind.as_dir(),
+                            c.manifest.domain,
+                            c.manifest.version,
+                        )
+                    })?;
+                if !resource_present {
+                    bail!(
+                        "契约 {}/{}/{} resourceSharing mode=global 必须声明 endpoints.http.resource（codegen fail-closed）",
+                        c.manifest.kind.as_dir(),
+                        c.manifest.domain,
+                        c.manifest.version,
+                    );
+                }
+                (
+                    "Global",
+                    render_option_str(Some(reason), "resourceSharing.reason")?,
+                )
+            }
+            HttpResourceSharingMode::TenantScoped => {
+                if sharing.reason.is_some() {
+                    bail!(
+                        "契约 {}/{}/{} resourceSharing mode=tenantScoped 禁止 reason（codegen fail-closed）",
+                        c.manifest.kind.as_dir(),
+                        c.manifest.domain,
+                        c.manifest.version,
+                    );
+                }
+                ("TenantScoped", "None".to_string())
+            }
+        },
+        None => ("TenantScoped", "None".to_string()),
+    };
     let mut projection_fields = Vec::new();
     if let Some(projection) = &http.projection {
         for field in &projection.fields {
@@ -555,6 +604,10 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     }},
     resource: {resource},
     self_scoped: {self_scoped},
+    resource_sharing: {sup}HttpResourceSharingSpec {{
+        mode: {sup}HttpResourceSharingMode::{resource_sharing_mode},
+        reason: {resource_sharing_reason},
+    }},
     projection_fields: PROJECTION_FIELDS,
     headers: &[{headers_body}],
 }};
@@ -1093,6 +1146,7 @@ pub struct HttpSpec {
     pub auth: HttpAuthSpec,
     pub resource: Option<&'static str>,
     pub self_scoped: bool,
+    pub resource_sharing: HttpResourceSharingSpec,
     pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
 }
@@ -1111,6 +1165,18 @@ pub enum HttpAuthMode {
     Bootstrap,
     ClientsOnly,
     ServiceOwned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpResourceSharingSpec {
+    pub mode: HttpResourceSharingMode,
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpResourceSharingMode {
+    TenantScoped,
+    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1285,6 +1351,33 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
         s.push_str(&format!("pub mod {m};\n"));
     }
     s
+}
+
+fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
+    let mut entries = Vec::new();
+    for c in contracts
+        .iter()
+        .filter(|c| c.manifest.kind == ContractKind::Http)
+        .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
+    {
+        let module = module_name(&c.manifest.domain, &c.manifest.version);
+        let path = match c.slug.as_deref() {
+            Some(slug) => format!("{module}::{}::SPEC", slug_module_ident(slug)?),
+            None => format!("{module}::SPEC"),
+        };
+        entries.push(format!("    {path}"));
+    }
+    let body = if entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", entries.join(",\n"))
+    };
+    Ok(format!(
+        r#"
+/// Root registry for active HTTP specs generated from every HTTP contract.
+pub const SPECS: &[HttpSpec] = &[{body}];
+"#
+    ))
 }
 
 fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<String> {
@@ -1551,6 +1644,32 @@ mod tests {
         std::fs::write(
             dir.join("response.schema.json"),
             schema.replace("\"T\"", "\"SeedEchoResponse\""),
+        )?;
+        Ok(())
+    }
+
+    fn write_seed_active_http(root: &Path, endpoints_http: &str) -> Result<()> {
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::write(
+            dir.join("contract.toml"),
+            format!(
+                "{}{}",
+                concat!(
+                    "id = \"seed.echo\"\n",
+                    "kind = \"http\"\n",
+                    "domain = \"_seed\"\n",
+                    "version = \"v1\"\n",
+                    "owner = \"_framework\"\n",
+                    "consistencyLevel = \"LocalOnly\"\n",
+                    "lifecycle = \"active\"\n",
+                    "path = \"/api/v1/_seed/echo/{resourceId}\"\n",
+                    "method = \"POST\"\n",
+                    "[schemas]\n",
+                    "request = \"request.schema.json\"\n",
+                    "response = \"response.schema.json\"\n",
+                ),
+                endpoints_http,
+            ),
         )?;
         Ok(())
     }
@@ -2077,6 +2196,99 @@ mod tests {
         assert!(
             result.is_err(),
             "active HTTP 缺 auth 时 codegen 须 fail-closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_invalid_resource_sharing_without_validate_first() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http]\n",
+                "resource = \"resourceId\"\n",
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"seed.echo\"\n",
+                "[endpoints.http.resourceSharing]\n",
+                "mode = \"tenantScoped\"\n",
+                "reason = \"tenant-scoped routes must not carry opt-out reasons\"\n",
+            ),
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("tenantScoped")),
+            "tenantScoped + reason 须被 codegen 自守拒绝: {result:?}"
+        );
+
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"seed.echo\"\n",
+                "[endpoints.http.resourceSharing]\n",
+                "mode = \"global\"\n",
+                "reason = \"shared route\"\n",
+            ),
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("mode=global")),
+            "global resourceSharing 缺 resource 须被 codegen 自守拒绝: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_global_resource_sharing_into_root_specs() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http]\n",
+                "resource = \"resourceId\"\n",
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"seed.echo\"\n",
+                "[endpoints.http.resourceSharing]\n",
+                "mode = \"global\"\n",
+                "reason = \"shared route\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &rendered,
+            "mode: super::HttpResourceSharingMode::Global",
+            "endpoint SPEC 应携带 global resourceSharing mode",
+        );
+        assert_generated_contains(
+            &rendered,
+            "reason: Some(\"shared route\")",
+            "endpoint SPEC 应携带 global opt-out reason",
+        );
+        assert_generated_contains(
+            &root_mod,
+            "_seed_v1::SPEC",
+            "active global HTTP spec 应进入 root SPECS registry",
         );
         Ok(())
     }

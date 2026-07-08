@@ -35,6 +35,7 @@ pub(crate) const FIELD_SAGA: &str = "[saga]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_PROJECTION: &str = "[endpoints.http.projection]";
+pub(crate) const FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING: &str = "[endpoints.http.resourceSharing]";
 
 /// `contract.toml` 的解析目标。字段集冻结——见模块 INVARIANT。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -359,10 +360,27 @@ pub(crate) struct HttpEndpoint {
     pub(crate) resource: Option<String>,
     #[serde(default, rename = "selfScoped")]
     pub(crate) self_scoped: bool,
+    #[serde(default, rename = "resourceSharing")]
+    pub(crate) resource_sharing: Option<HttpResourceSharing>,
     #[serde(default)]
     pub(crate) headers: BTreeMap<String, HttpHeaderMode>,
     #[serde(default)]
     pub(crate) projection: Option<HttpProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HttpResourceSharing {
+    pub(crate) mode: HttpResourceSharingMode,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum HttpResourceSharingMode {
+    TenantScoped,
+    Global,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

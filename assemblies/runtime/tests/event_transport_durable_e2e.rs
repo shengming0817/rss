@@ -36,10 +36,10 @@ use generated::event::settings_v1;
 use generated::http::identity_v1::login::IdentityLoginRequest;
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use identity::ports::{
-    AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle,
-    DynRoleRepo, DynSessionLifecycle, Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy,
-    PolicyCondition, PolicyEffect, PolicyLifecycle, PolicyObligations, PolicyRouteScope,
-    PolicyRule, TenantId,
+    AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo,
+    DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, Operator,
+    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
+    PolicyObligations, PolicyRouteScope, PolicyRule, TenantId,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
@@ -540,6 +540,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let roles_for_admin = Arc::from(DynRoleRepo::new_box(id.role_repo()));
     let roles_for_list = Arc::from(DynRoleRepo::new_box(id.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
+    let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
+        id.resource_attribute_repo(),
+    ));
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         id.policy_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
@@ -565,6 +568,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         roles: roles_for_list,
         bindings,
         policies,
+        resource_attrs,
         clock: Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     });
     let (settings_configs, settings_writer, settings_secrets) = settings_pg

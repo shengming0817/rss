@@ -42,6 +42,7 @@ mod projection_events;
 mod readiness;
 mod reconcile;
 mod refresh_token_store;
+mod resource_attribute_repo;
 mod role_binding_lifecycle;
 mod role_repo;
 mod saga;
@@ -89,6 +90,7 @@ pub use reconcile::{
     ReconcileTargetKey,
 };
 pub use refresh_token_store::PgRefreshTokenStore;
+pub use resource_attribute_repo::PgResourceAttributeRepo;
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaInstanceStore, PgSagaJournal};

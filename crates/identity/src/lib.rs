@@ -102,8 +102,10 @@ mod smoke {
     use crate::domain::{
         AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, Credential,
         IdentityError, Operator, Permission, PermissionId, Policy, PolicyCondition, PolicyEffect,
-        PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion, ResourcePattern,
-        Role, RoleBinding, RoleId, Session, SessionId, authorize_rbac, evaluate_abac,
+        PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
+        ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
+        ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, Session, SessionId,
+        authorize_rbac, evaluate_abac,
     };
 
     // 证明主要类型是 Send（跨 await 点传播）。
@@ -127,6 +129,10 @@ mod smoke {
         _assert_send::<PolicyCondition>();
         _assert_send::<PolicyRule>();
         _assert_send::<PolicyObligations>();
+        _assert_send::<ResourceAttributeKey>();
+        _assert_send::<ResourceAttributeResourceId>();
+        _assert_send::<ResourceAttributeVersion>();
+        _assert_send::<ResourceAttribute>();
         _assert_send::<Credential>();
         _assert_send::<AccountLockout>();
         _assert_send::<SessionId>();

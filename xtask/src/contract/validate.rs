@@ -60,10 +60,11 @@ use syn::visit::Visit;
 use super::manifest::{
     Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
     FIELD_DELIVERY, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
-    FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_METHOD, FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS,
-    FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode, Lifecycle, LocalTxBoundary,
-    OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
-    WorkflowMode, WorkflowOrdering, WorkflowRequirement,
+    FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
+    FIELD_PATH, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint,
+    HttpHeaderMode, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, OutboxAtomicity,
+    OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, WorkflowMode,
+    WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -1231,6 +1232,7 @@ fn rule_http_auth(m: &ContractManifest, label: &str) -> Vec<Finding> {
         .as_ref()
         .is_some_and(|s| !s.trim().is_empty());
     rule_http_resource_shape(http, label, &mut out);
+    rule_http_resource_sharing(http, label, &mut out);
     match auth.mode {
         HttpAuthMode::Permission => {
             rule_http_permission_auth(m, http, auth, permission_present, label, &mut out)
@@ -1344,6 +1346,51 @@ fn rule_http_resource_shape(http: &HttpEndpoint, label: &str, out: &mut Vec<Find
             label,
             "endpoints.http.resource 与 endpoints.http.selfScoped 互斥".to_string(),
         ));
+    }
+}
+
+fn rule_http_resource_sharing(http: &HttpEndpoint, label: &str, out: &mut Vec<Finding>) {
+    let Some(sharing) = &http.resource_sharing else {
+        return;
+    };
+    match sharing.mode {
+        HttpResourceSharingMode::Global => {
+            let reason_present = sharing
+                .reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty());
+            if !reason_present {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    format!(
+                        "{FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING} mode=global 必须声明非空 reason"
+                    ),
+                ));
+            }
+            if http
+                .resource
+                .as_ref()
+                .is_none_or(|resource| resource.trim().is_empty())
+            {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    format!("{FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING} mode=global 必须声明 endpoints.http.resource"),
+                ));
+            }
+        }
+        HttpResourceSharingMode::TenantScoped => {
+            if sharing.reason.is_some() {
+                out.push(finding(
+                    Rule::HttpAuth,
+                    label,
+                    format!(
+                        "{FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING} mode=tenantScoped 禁止 reason"
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -1861,9 +1908,10 @@ mod tests {
         Capabilities, CompensationOrder, Delivery, DeviceLatentCapability, DeviceLatentFencing,
         DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentTenancy, DeviceLatentTrigger,
         Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod,
-        HttpProjection, HttpProjectionField, HttpProjectionFieldName, Lifecycle, LocalTxCapability,
-        OutboxCapability, PartitionKeyStrategy, SagaBlock, SagaStep, Schemas, SubscriberReadiness,
-        Subscription, SubscriptionTopology, WorkflowCapability,
+        HttpProjection, HttpProjectionField, HttpProjectionFieldName, HttpResourceSharing,
+        HttpResourceSharingMode, Lifecycle, LocalTxCapability, OutboxCapability,
+        PartitionKeyStrategy, SagaBlock, SagaStep, Schemas, SubscriberReadiness, Subscription,
+        SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -1905,6 +1953,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::PopulateOnly,
@@ -2771,6 +2820,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::PopulateOnly,
@@ -2807,6 +2857,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -2838,6 +2889,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: true,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -2865,6 +2917,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: Some(HttpProjection {
                     fields: vec![
@@ -2905,6 +2958,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: Some(HttpProjection {
                     fields: vec![
@@ -2951,6 +3005,7 @@ mod tests {
                 }),
                 resource: Some("subject".to_string()),
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -2982,6 +3037,7 @@ mod tests {
                 }),
                 resource: Some("roleId".to_string()),
                 self_scoped: true,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -3013,6 +3069,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: true,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -3046,6 +3103,7 @@ mod tests {
                 }),
                 resource: Some("id".to_string()),
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -3077,6 +3135,7 @@ mod tests {
                 }),
                 resource: Some(" ".to_string()),
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -3084,6 +3143,86 @@ mod tests {
         let findings = rule_http_auth(&m, "x");
         assert!(
             findings.iter().any(|f| f.detail.contains("必须为非空")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_global_resource_sharing_requires_reason_and_resource() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/roles/{roleId}".to_string());
+        m.method = Some(HttpMethod::Delete);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.role.delete".to_string()),
+                }),
+                resource: None,
+                self_scoped: false,
+                resource_sharing: Some(HttpResourceSharing {
+                    mode: HttpResourceSharingMode::Global,
+                    reason: Some(" ".to_string()),
+                }),
+                headers: BTreeMap::new(),
+                projection: None,
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("mode=global") && f.detail.contains("reason")),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("必须声明 endpoints.http.resource")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn r18_resource_sharing_tenant_scoped_forbids_reason() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.lifecycle = Lifecycle::Active;
+        m.path = Some("/api/v1/_seed/roles/{roleId}".to_string());
+        m.method = Some(HttpMethod::Delete);
+        m.endpoints = Some(Endpoints {
+            http: Some(HttpEndpoint {
+                auth: Some(HttpAuth {
+                    mode: HttpAuthMode::Permission,
+                    reason: None,
+                    permission: Some("seed.role.delete".to_string()),
+                }),
+                resource: Some("roleId".to_string()),
+                self_scoped: false,
+                resource_sharing: Some(HttpResourceSharing {
+                    mode: HttpResourceSharingMode::TenantScoped,
+                    reason: Some("redundant".to_string()),
+                }),
+                headers: BTreeMap::new(),
+                projection: None,
+            }),
+        });
+        let findings = rule_http_auth(&m, "x");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail.contains("mode=tenantScoped") && f.detail.contains("禁止 reason")),
             "{findings:?}"
         );
     }
@@ -3108,6 +3247,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
@@ -3138,6 +3278,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::from([(
                     "X-Tenant-ID".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
@@ -3174,6 +3315,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),
@@ -3207,6 +3349,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::from([(
                     "X-Other-Tenant".to_string(),
                     HttpHeaderMode::ServiceTokenTenantBound,
@@ -3243,6 +3386,7 @@ mod tests {
                 }),
                 resource: None,
                 self_scoped: false,
+                resource_sharing: None,
                 headers: BTreeMap::new(),
                 projection: None,
             }),

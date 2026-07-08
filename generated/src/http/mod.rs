@@ -10,6 +10,7 @@ pub struct HttpSpec {
     pub auth: HttpAuthSpec,
     pub resource: Option<&'static str>,
     pub self_scoped: bool,
+    pub resource_sharing: HttpResourceSharingSpec,
     pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
 }
@@ -28,6 +29,18 @@ pub enum HttpAuthMode {
     Bootstrap,
     ClientsOnly,
     ServiceOwned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpResourceSharingSpec {
+    pub mode: HttpResourceSharingMode,
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpResourceSharingMode {
+    TenantScoped,
+    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,3 +66,23 @@ pub mod audit_v1;
 pub mod identity_v1;
 pub mod settings_v1;
 pub mod settings_v2;
+
+/// Root registry for active HTTP specs generated from every HTTP contract.
+pub const SPECS: &[HttpSpec] = &[
+    audit_v1::SPEC,
+    identity_v1::login::SPEC,
+    identity_v1::logout::SPEC,
+    identity_v1::password_change::SPEC,
+    identity_v1::policies_create::SPEC,
+    identity_v1::policies_deactivate::SPEC,
+    identity_v1::policies_get::SPEC,
+    identity_v1::policies_list::SPEC,
+    identity_v1::policies_update::SPEC,
+    identity_v1::profile::SPEC,
+    identity_v1::refresh::SPEC,
+    identity_v1::roles_assign::SPEC,
+    identity_v1::roles_list::SPEC,
+    identity_v1::roles_revoke::SPEC,
+    settings_v1::SPEC,
+    settings_v2::SPEC,
+];

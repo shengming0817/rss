@@ -209,6 +209,10 @@ pub mod login {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[super::super::HttpHeaderSpec {
             name: "X-Tenant-ID",
@@ -367,6 +371,10 @@ pub mod logout {
         },
         resource: None,
         self_scoped: true,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -529,6 +537,10 @@ pub mod password_change {
         },
         resource: None,
         self_scoped: true,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -2384,6 +2396,10 @@ pub mod policies_create {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -2553,6 +2569,10 @@ pub mod policies_deactivate {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -3452,6 +3472,10 @@ pub mod policies_get {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -4406,6 +4430,10 @@ pub mod policies_list {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -6263,6 +6291,10 @@ pub mod policies_update {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -6541,6 +6573,10 @@ pub mod profile {
         },
         resource: None,
         self_scoped: true,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -6726,6 +6762,10 @@ pub mod refresh {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[super::super::HttpHeaderSpec {
             name: "X-Tenant-ID",
@@ -6882,6 +6922,10 @@ pub mod roles_assign {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -7111,6 +7155,10 @@ pub mod roles_list {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
@@ -7258,6 +7306,10 @@ pub mod roles_revoke {
         },
         resource: None,
         self_scoped: false,
+        resource_sharing: super::super::HttpResourceSharingSpec {
+            mode: super::super::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };

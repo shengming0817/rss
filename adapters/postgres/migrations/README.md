@@ -90,6 +90,11 @@ tenant-isolation policy。
 `0034` 新增 `abac_policies` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；policy delete 经 versioned
 tombstone UPDATE，不授表级 DELETE，防止同 id 删除后重建把 CAS version 水位重置。
 
+`0046` 新增 `resource_attributes` tenant 表并授予 `rss_app` SELECT/INSERT/UPDATE；resource attribute
+expire 经 versioned tombstone UPDATE，不授表级 DELETE。主键为
+`(tenant_id, contract_id, permission, resource_id, attribute_key)`，只允许动态 `resource.*` key，且
+`resource.id` 保留给 HTTP route synthetic resource id，不可落库。
+
 `0038` 新增 `inbox_receipts` tenant 表作为 runtime durable consumer 的 receipt schema：tenant-first
 主键、contract/schema header、trace/correlation、lease CAS 状态与 `FORCE RLS` 同迁移落地。该表是可变
 claim/commit 状态，不是 append-only ledger，因此授予 `rss_app` SELECT/INSERT/UPDATE/DELETE。

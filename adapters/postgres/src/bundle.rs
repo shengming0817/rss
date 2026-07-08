@@ -68,9 +68,9 @@ use crate::{
     PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
     PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance,
     PgPolicyLifecycle, PgPolicyRepo, PgProjectionControl, PgProjectionEvents, PgReadinessSampler,
-    PgReconcileStore, PgRefreshTokenStore, PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore,
-    PgSagaJournal, PgSecretRepo, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx,
-    PgStore, PgStoreGuard, ProjectionMaintenanceCapability,
+    PgReconcileStore, PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle,
+    PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo, PgSessionLifecycle,
+    PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard, ProjectionMaintenanceCapability,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -630,6 +630,12 @@ impl PgDomainDeps<caps::Identity> {
         PgPolicyRepo::new(&self.store)
     }
 
+    /// durable resource attribute store / resolver（resource_attributes 表 + tenant scope）。
+    #[must_use]
+    pub fn resource_attribute_repo(&self) -> PgResourceAttributeRepo {
+        PgResourceAttributeRepo::new(&self.store)
+    }
+
     /// durable ABAC policy lifecycle（policy mutation + policy-updated outbox co-tx）。
     #[must_use]
     pub fn policy_lifecycle(&self, clock: Box<dyn Clock>) -> PgPolicyLifecycle {
@@ -1098,6 +1104,7 @@ mod tests {
         let _ = i.credential_repo();
         let _ = i.role_repo();
         let _ = i.policy_repo();
+        let _ = i.resource_attribute_repo();
         let _ = i.refresh_token_store();
     }
 

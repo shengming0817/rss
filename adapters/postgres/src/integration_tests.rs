@@ -11545,11 +11545,15 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
 use identity::ports::{
     AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Operator,
     POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyLifecycle,
-    PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, Role,
-    RoleBinding, RoleBindingLifecycle, RolePage, RoleRepo,
+    PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion,
+    ResourceAttribute, ResourceAttributeKey, ResourceAttributeRepo, ResourceAttributeResolution,
+    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle,
+    RolePage, RoleRepo,
 };
 
-use crate::{PgPolicyLifecycle, PgPolicyRepo, PgRoleBindingLifecycle, PgRoleRepo};
+use crate::{
+    PgPolicyLifecycle, PgPolicyRepo, PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleRepo,
+};
 
 const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -11560,6 +11564,7 @@ fn role_tenant(raw: &str) -> Result<TenantId, Box<dyn std::error::Error + Send +
 
 const POLICY_CONTRACT_ID: &str = "identity.roles";
 const POLICY_PERMISSION: &str = "identity:role:read";
+const RESOURCE_ATTRIBUTE_ID: &str = "11111111-2222-4333-8444-555555555555";
 const POLICY_UPDATED_TOPIC: &str = "identity.policy-updated";
 const POLICY_UPDATED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
     "identity",
@@ -11574,6 +11579,32 @@ fn policy_time(secs: u64) -> SystemTime {
 
 fn policy_scope() -> Result<PolicyRouteScope, IdentityError> {
     PolicyRouteScope::parse(POLICY_CONTRACT_ID, POLICY_PERMISSION)
+}
+
+fn resource_attribute_id() -> Result<ResourceAttributeResourceId, IdentityError> {
+    ResourceAttributeResourceId::parse(RESOURCE_ATTRIBUTE_ID)
+}
+
+fn resource_attribute_key(raw: &str) -> Result<ResourceAttributeKey, IdentityError> {
+    ResourceAttributeKey::parse(raw).map_err(|_| IdentityError::InvalidPolicy)
+}
+
+fn resource_attribute_fixture(
+    tenant: TenantId,
+    key: &str,
+    value: &str,
+    effective_from: u64,
+    effective_until: Option<u64>,
+) -> Result<ResourceAttribute, IdentityError> {
+    ResourceAttribute::build(
+        tenant,
+        policy_scope()?,
+        resource_attribute_id()?,
+        resource_attribute_key(key)?,
+        AttributeValue::new(value),
+        policy_time(effective_from),
+        effective_until.map(policy_time),
+    )
 }
 
 fn policy_id(raw: &str) -> Result<PolicyId, IdentityError> {
@@ -12558,6 +12589,297 @@ async fn policy_repo_active_window_conformance() -> TestResult {
         },
     )
     .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// resource attribute repo：Known/Missing/Stale 是闭枚举，CAS 写入与 tombstone 均 fail-closed。
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgResourceAttributeRepo::new(&store);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+
+    let created = repo
+        .upsert(
+            tenant,
+            resource_attribute_fixture(tenant, "resource.owner", "owner-a", 10, None)?,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        created.version(),
+        ResourceAttributeVersion::first(),
+        "new resource attribute version starts at 1"
+    );
+
+    let known = repo
+        .resolve_effective(
+            tenant,
+            policy_scope()?,
+            resource_attribute_id()?,
+            vec![resource_attribute_key("resource.owner")?],
+            policy_time(20),
+        )
+        .await?;
+    match known {
+        ResourceAttributeResolution::Known(attrs) => {
+            assert_eq!(attrs.len(), 1);
+            assert_eq!(attrs[0].value().as_str(), "owner-a");
+        }
+        other => panic!("expected known resource attribute, got {other:?}"),
+    }
+
+    let missing = repo
+        .resolve_effective(
+            tenant,
+            policy_scope()?,
+            resource_attribute_id()?,
+            vec![resource_attribute_key("resource.missing")?],
+            policy_time(20),
+        )
+        .await?;
+    assert!(
+        matches!(missing, ResourceAttributeResolution::Missing(key) if key.as_str() == "resource.missing")
+    );
+
+    repo.upsert(
+        tenant,
+        resource_attribute_fixture(tenant, "resource.stale_owner", "owner-a", 1, Some(5))?,
+        None,
+    )
+    .await?;
+    let stale = repo
+        .resolve_effective(
+            tenant,
+            policy_scope()?,
+            resource_attribute_id()?,
+            vec![resource_attribute_key("resource.stale_owner")?],
+            policy_time(20),
+        )
+        .await?;
+    assert!(
+        matches!(stale, ResourceAttributeResolution::Stale(key) if key.as_str() == "resource.stale_owner")
+    );
+
+    let conflict = repo
+        .upsert(
+            tenant,
+            resource_attribute_fixture(tenant, "resource.owner", "owner-b", 10, None)?,
+            Some(ResourceAttributeVersion::new(99)?),
+        )
+        .await;
+    assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
+
+    let updated = repo
+        .upsert(
+            tenant,
+            resource_attribute_fixture(tenant, "resource.owner", "owner-b", 10, None)?,
+            Some(created.version()),
+        )
+        .await?;
+    assert_eq!(updated.version().get(), 2);
+
+    let stale_expire = repo
+        .expire(
+            tenant,
+            policy_scope()?,
+            resource_attribute_id()?,
+            resource_attribute_key("resource.owner")?,
+            ResourceAttributeVersion::first(),
+        )
+        .await;
+    assert!(matches!(stale_expire, Err(IdentityError::VersionConflict)));
+
+    assert!(
+        repo.expire(
+            tenant,
+            policy_scope()?,
+            resource_attribute_id()?,
+            resource_attribute_key("resource.owner")?,
+            updated.version(),
+        )
+        .await?,
+        "expire at current version succeeds"
+    );
+    let after_expire = repo
+        .resolve_effective(
+            tenant,
+            policy_scope()?,
+            resource_attribute_id()?,
+            vec![resource_attribute_key("resource.owner")?],
+            policy_time(20),
+        )
+        .await?;
+    assert!(matches!(
+        after_expire,
+        ResourceAttributeResolution::Missing(_)
+    ));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// migration 0046：resource_attributes 必须授予 rss_app 窄 DML 权限，并由 FORCE RLS 执行 tenant isolation。
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let (rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, \
+                has_table_privilege('rss_app', 'resource_attributes', 'SELECT'), \
+                has_table_privilege('rss_app', 'resource_attributes', 'INSERT'), \
+                has_table_privilege('rss_app', 'resource_attributes', 'UPDATE'), \
+                has_table_privilege('rss_app', 'resource_attributes', 'DELETE') \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'resource_attributes'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(rls_enabled, "resource_attributes must ENABLE RLS");
+    assert!(rls_forced, "resource_attributes must FORCE RLS");
+    assert!(can_select, "rss_app must SELECT resource_attributes");
+    assert!(can_insert, "rss_app must INSERT resource_attributes");
+    assert!(can_update, "rss_app must UPDATE resource_attributes");
+    assert!(
+        !can_delete,
+        "rss_app must not DELETE resource_attributes; expire is versioned tombstone UPDATE"
+    );
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let resource_id = uuid::Uuid::new_v4().to_string();
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO resource_attributes \
+             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
+             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', 'owner-a', 1, now(), NULL)",
+        )
+        .bind(&tenant_a)
+        .bind(POLICY_CONTRACT_ID)
+        .bind(POLICY_PERMISSION)
+        .bind(&resource_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM resource_attributes WHERE attribute_key = 'resource.owner'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(cnt.0, 1, "tenant A scope must see tenant A attribute");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM resource_attributes WHERE attribute_key = 'resource.owner'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        assert_eq!(cnt.0, 0, "tenant B scope must not see tenant A attribute");
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "INSERT INTO resource_attributes \
+             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
+             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', 'owner-b', 1, now(), NULL)",
+        )
+        .bind(&tenant_b)
+        .bind(POLICY_CONTRACT_ID)
+        .bind(POLICY_PERMISSION)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            result.is_err(),
+            "WITH CHECK must reject tenant B row while rss.tenant_id is tenant A"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM resource_attributes")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(
+            cnt.0, 0,
+            "missing rss.tenant_id must make resource_attributes invisible"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let result = sqlx::query(
+            "INSERT INTO resource_attributes \
+             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
+             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.id', 'reserved', 1, now(), NULL)",
+        )
+        .bind(&tenant_a)
+        .bind(POLICY_CONTRACT_ID)
+        .bind(POLICY_PERMISSION)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&store.pool)
+        .await;
+        assert!(result.is_err(), "resource.id is synthetic and reserved");
+    }
 
     store.shutdown().await?;
     Ok(())

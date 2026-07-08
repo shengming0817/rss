@@ -63,7 +63,7 @@ use identity::{
     RefreshService,
     ports::{
         DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-        DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
+        DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
     },
 };
 use oidc::{JwksReadinessHandle, OidcProvider};
@@ -4134,6 +4134,9 @@ pub fn wire_identity_with(
     let roles_for_admin = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
     let roles_for_list = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(identity_pg.policy_repo()));
+    let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
+        identity_pg.resource_attribute_repo(),
+    ));
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         identity_pg.policy_lifecycle(Box::new(SystemClock)),
     ));
@@ -4184,6 +4187,7 @@ pub fn wire_identity_with(
         roles: roles_for_list,
         bindings,
         policies,
+        resource_attrs,
         clock: Arc::new(SystemClock),
     }))
 }
@@ -5391,6 +5395,48 @@ mod tests {
         }
     }
 
+    struct EmptyResourceAttributeRepo;
+
+    impl identity::ports::ResourceAttributeRepo for EmptyResourceAttributeRepo {
+        async fn resolve_effective(
+            &self,
+            _tenant: vocab::TenantId,
+            _scope: identity::ports::PolicyRouteScope,
+            _resource_id: identity::ports::ResourceAttributeResourceId,
+            _required_keys: Vec<identity::ports::ResourceAttributeKey>,
+            _at: SystemTime,
+        ) -> Result<identity::ports::ResourceAttributeResolution, identity::ports::IdentityError>
+        {
+            Ok(identity::ports::ResourceAttributeResolution::Known(
+                Vec::new(),
+            ))
+        }
+
+        async fn upsert(
+            &self,
+            _tenant: vocab::TenantId,
+            _attribute: identity::ports::ResourceAttribute,
+            _expected: Option<identity::ports::ResourceAttributeVersion>,
+        ) -> Result<identity::ports::ResourceAttribute, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test resource attribute repo must not be called",
+            ))
+        }
+
+        async fn expire(
+            &self,
+            _tenant: vocab::TenantId,
+            _scope: identity::ports::PolicyRouteScope,
+            _resource_id: identity::ports::ResourceAttributeResourceId,
+            _key: identity::ports::ResourceAttributeKey,
+            _expected: identity::ports::ResourceAttributeVersion,
+        ) -> Result<bool, identity::ports::IdentityError> {
+            Err(identity_storage_error(
+                "runtime test resource attribute repo must not be called",
+            ))
+        }
+    }
+
     struct EmptyPolicyLifecycle;
 
     impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
@@ -5645,6 +5691,9 @@ mod tests {
             Box::new(SystemClock),
         ));
         let policies = Arc::from(identity::ports::DynPolicyRepo::new_box(EmptyPolicyRepo));
+        let resource_attrs = Arc::from(identity::ports::DynResourceAttributeRepo::new_box(
+            EmptyResourceAttributeRepo,
+        ));
         let policy_lifecycle = Arc::from(identity::ports::DynPolicyLifecycle::new_box(
             EmptyPolicyLifecycle,
         ));
@@ -5661,6 +5710,7 @@ mod tests {
             roles,
             bindings,
             policies,
+            resource_attrs,
             clock: Arc::new(SystemClock),
         })
     }

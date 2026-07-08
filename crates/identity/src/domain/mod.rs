@@ -31,6 +31,7 @@ mod abac;
 mod account;
 mod rbac;
 mod refresh;
+mod resource_attr;
 mod session;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
@@ -58,6 +59,11 @@ pub use abac::{
 };
 #[allow(unused_imports)]
 pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
+pub use resource_attr::{
+    ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
+    ResourcePolicyAttributeKey,
+};
 // Credential（find/authenticate/save/bump 签名实体）/ LoginIdentifier（查找键签名实体）/ AuthOutcome
 // （authenticate 返回）/ AccountStatus 是 pub——经 ports facade 跨 crate 收发；字段私有 + 构造器 pub(crate)
 // funnel，外部不可伪造（ADR-005 Option 2）。AccountLockout 虽不在 port 签名（锁定推进折叠进 authenticate /

@@ -80,7 +80,7 @@ NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前�
 
 app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
 （sessions / config_entries / roles / secret_refs / credentials / refresh_tokens / abac_policies /
-inbox_receipts；audit_entries 仅 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
+resource_attributes / inbox_receipts；audit_entries 仅 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
 不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
 bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving pool 必须以 `rss_app`
 连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非 `rss_app` serving role。
@@ -229,6 +229,17 @@ path-param resource / self subject resource——业务 handler / 域 crate 不�
 非 UUID、非 canonical UUID 在 route gate 内 fail-closed，且不调用 PDP。按 contract 声明不同
 resource type 的 typed parser/codegen 是后续架构项。
 
+resource ownership 的动态 `resource.*` 属性来自 tenant-scoped durable resource attribute store，而不是
+handler 本地拼接。store key 空间固定为 `(tenant_id, contract_id, permission, resource_id, attribute_key)`；
+`resource.id` 是 route gate synthetic attribute，不能作为动态属性落库。resolver 只返回闭枚举
+`Known(attrs)` / `Missing(key)` / `Stale(key)`，缺失、过期、store 不可用、reserved key 冲突或非 canonical
+resource id 都在 RBAC/builtin baseline 前 deny，不用空集合表达失败，也不回退跨租户默认值。
+
+契约可通过 `[endpoints.http.resourceSharing] mode = "global"` 显式声明 shared/global resource opt-out；
+该模式必须带非空 `reason` 且仍声明 canonical route resource。global route 不读全局属性表，不支持
+tenant_id NULL fallback，也不允许租户 durable policy 条件使用动态 `resource.*` 属性。默认模式是
+tenant-scoped（未声明 block 等同 tenant-scoped）。
+
 - baseline ownership 用 `subject.sub == resource.id` 判定。
 - **owner vs admin 同 permission**：同一 owner-scoped action（如 `user:write`）既用于带
   resource 的 owner 路由（改自己），也用于不带 resource 的 admin 路由（coarse，改任意）。
@@ -304,6 +315,12 @@ policy load 必须 fail-closed：缺租户、store 不可用、反序列化失�
 版本窗口非法或 storage error 都视为不可用 / 无有效 permit，PDP 和 route gate 返回 deny，不回退到
 内置 allow-all、旧缓存 allow 或跨租户默认值。malformed / unknown-field 输入必须在写侧拒绝落库；
 读侧遇到既有坏数据也必须拒绝授权。
+
+durable policy 若引用动态 `resource.*` 条件（不含 synthetic `resource.id`），Authorizer 必须先按
+route scope + canonical UUID resource id 从 `resource_attributes` resolver 取当前有效属性，再进入 ABAC
+规则求值。resolver 返回 `Missing` / `Stale` 或存储错误时直接 deny，且发生在 self/RBAC/builtin baseline
+之前；只有 `Known(attrs)` 才把属性注入 PDP context。`resourceSharing.global` route 禁止动态
+`resource.*` 条件，防止 shared/global 资源通过 tenant-local PIP 数据得到伪隔离判断。
 
 baseline semantics 保持最小允许面：durable active set 为空或没有命中时不授予权限，只允许既有
 self/RBAC/builtin baseline 独立判定；RBAC baseline 仍是 action-scoped + role-conditioned allow。
