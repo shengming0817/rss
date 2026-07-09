@@ -1237,9 +1237,11 @@ mod tests {
         assert!(!primary.pool.is_closed(), "primary starts open");
         assert!(!audit_admin.pool.is_closed(), "audit admin starts open");
 
-        deps.shutdown()
-            .await
-            .expect("lazy maintenance stores close cleanly");
+        let shutdown_result = deps.shutdown().await;
+        assert!(
+            shutdown_result.is_ok(),
+            "lazy maintenance stores close cleanly: {shutdown_result:?}"
+        );
 
         assert!(primary.pool.is_closed(), "primary store must be closed");
         assert!(
