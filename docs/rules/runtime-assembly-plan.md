@@ -20,7 +20,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 ### Phase 2
 
 - Guard `SharedRuntimeDeps` against becoming a domain service locator.
-- Infra-only wiring is enforced by `WIRING-DEPS-INFRA-ONLY-01` via `cargo xtask runtime-deps guard`.
+- Infra-only wiring is enforced by `WIRING-DEPS-INFRA-ONLY-01` via `cargo xtask runtime-deps guard`; its allowlist and extension flow are governed by `docs/rules/runtime-wiring.md`.
 - Changes to the guard must keep a Medium or Hard carrier plus red/green tests.
 
 ## PR Size Planning Budget

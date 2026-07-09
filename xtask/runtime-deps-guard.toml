@@ -1,0 +1,6 @@
+# SharedRuntimeDeps infra-only field guard configuration.
+#
+# INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "config" }.
+schemaVersion = 1
+allowedRoots = ["postgres", "redis", "s3", "vault", "diport", "primitives", "secure", "vocab"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]

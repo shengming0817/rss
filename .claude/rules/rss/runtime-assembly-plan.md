@@ -4,3 +4,4 @@
 >
 > Runtime assembly optimization PRs must read this with `docs/spec/001-runtime-assembly-plan/`.
 > The document separates machine-enforced gates from planning and review guidance.
+> Shared runtime dependency allowlist changes must also read [`docs/rules/runtime-wiring.md`](../../../docs/rules/runtime-wiring.md).

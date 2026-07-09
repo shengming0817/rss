@@ -2,11 +2,12 @@
 //!
 //! INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use quote::ToTokens as _;
+use serde::Deserialize;
 use syn::{
     Fields, GenericArgument, Item, PathArguments, ReturnType, Type, TypeParamBound, TypePath,
     UseTree,
@@ -14,19 +15,11 @@ use syn::{
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 
+const CONFIG_PATH: &str = "xtask/runtime-deps-guard.toml";
 const MODULE_PATH: &str = "assemblies/runtime/src/module.rs";
 const STRUCT_NAME: &str = "SharedRuntimeDeps";
-const ALLOWED_ROOTS: &[&str] = &[
-    "postgres",
-    "redis",
-    "s3",
-    "vault",
-    "diport",
-    "primitives",
-    "secure",
-    "vocab",
-];
-const EXACT_ARC_EXCEPTION: &str = "Arc<dyn distributed::DomainTransport>";
+const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
+const FORBIDDEN_BROAD_ROOTS: &[&str] = &["std", "core", "alloc"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -47,10 +40,11 @@ impl GovernanceCheck for RuntimeDepsGuard {
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
         let root = crate::workspace_root()?;
+        let policy = RuntimeDepsPolicy::from_workspace(&root)?;
         let path = root.join(MODULE_PATH);
         let content = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("runtime-deps-guard: read {}: {e}", path.display()))?;
-        let findings = scan_source(Path::new(MODULE_PATH), &content)?;
+        let findings = scan_source_with_policy(Path::new(MODULE_PATH), &content, &policy)?;
         Ok((
             "SharedRuntimeDeps fields are restricted to infrastructure/value-object types"
                 .to_string(),
@@ -59,7 +53,18 @@ impl GovernanceCheck for RuntimeDepsGuard {
     }
 }
 
+#[cfg(test)]
 fn scan_source(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
+    let root = crate::workspace_root()?;
+    let policy = RuntimeDepsPolicy::from_workspace(&root)?;
+    scan_source_with_policy(path, content, &policy)
+}
+
+fn scan_source_with_policy(
+    path: &Path,
+    content: &str,
+    policy: &RuntimeDepsPolicy,
+) -> Result<Vec<Finding<Rule>>> {
     let file = syn::parse_file(content)
         .with_context(|| format!("runtime-deps-guard: parse {}", path.display()))?;
     let resolver = collect_type_resolver(&file);
@@ -92,20 +97,153 @@ fn scan_source(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_else(|| "<unnamed>".to_string());
-        if !is_allowed_field_type(&field.ty, &resolver) {
+        if !is_allowed_field_type(&field.ty, &resolver, policy) {
             let rendered = render_type(&field.ty);
             let resolved = resolved_type_summary(&field.ty, &resolver);
             findings.push(finding(
                 Rule::DisallowedFieldType,
                 format!("{}:{STRUCT_NAME}.{name}", path.display()),
                 format!(
-                    "field `{name}` has type `{rendered}` (resolved `{resolved}`); allowed roots: {}; exact exception: {EXACT_ARC_EXCEPTION}",
-                    ALLOWED_ROOTS.join(", ")
+                    "field `{name}` has type `{rendered}` (resolved `{resolved}`); allowed roots: {}; exact exceptions: {}",
+                    policy.allowed_roots().join(", "),
+                    policy.exact_exceptions().join(", ")
                 ),
             ));
         }
     }
     Ok(findings)
+}
+
+#[derive(Debug)]
+struct RuntimeDepsPolicy {
+    allowed_roots: BTreeSet<String>,
+    exact_exceptions: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeDepsPolicyToml {
+    schema_version: u32,
+    allowed_roots: Vec<String>,
+    exact_exceptions: Vec<String>,
+}
+
+impl RuntimeDepsPolicy {
+    fn from_workspace(root: &Path) -> Result<Self> {
+        let path = root.join(CONFIG_PATH);
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("runtime-deps-guard: read {}", path.display()))?;
+        Self::from_toml_str_with_root(&raw, root)
+            .with_context(|| format!("runtime-deps-guard: validate {}", path.display()))
+    }
+
+    #[cfg(test)]
+    fn from_toml_str(raw: &str) -> Result<Self> {
+        let root = crate::workspace_root()?;
+        Self::from_toml_str_with_root(raw, &root)
+    }
+
+    fn from_toml_str_with_root(raw: &str, root: &Path) -> Result<Self> {
+        let config: RuntimeDepsPolicyToml =
+            toml::from_str(raw).context("runtime-deps-guard: parse config TOML")?;
+        if config.schema_version != 1 {
+            bail!(
+                "runtime-deps-guard: schemaVersion must be 1, got {}",
+                config.schema_version
+            );
+        }
+        if config.allowed_roots.is_empty() {
+            bail!("runtime-deps-guard: allowedRoots must not be empty");
+        }
+
+        let mut allowed_roots = BTreeSet::new();
+        for root_name in config.allowed_roots {
+            validate_root_name(&root_name)?;
+            if !allowed_roots.insert(root_name.clone()) {
+                bail!("runtime-deps-guard: duplicate allowed root `{root_name}`");
+            }
+            validate_allowed_root(root, &root_name)?;
+        }
+
+        let mut exact_exceptions = BTreeSet::new();
+        for exception in config.exact_exceptions {
+            if exception.trim() != exception || exception.is_empty() {
+                bail!("runtime-deps-guard: exact exception must not be empty or padded");
+            }
+            if exception != EXACT_DOMAIN_TRANSPORT_ARC {
+                bail!("runtime-deps-guard: unsupported exact exception `{exception}`");
+            }
+            if !exact_exceptions.insert(exception.clone()) {
+                bail!("runtime-deps-guard: duplicate exact exception `{exception}`");
+            }
+        }
+
+        Ok(Self {
+            allowed_roots,
+            exact_exceptions,
+        })
+    }
+
+    fn allowed_roots(&self) -> Vec<&str> {
+        self.allowed_roots.iter().map(String::as_str).collect()
+    }
+
+    fn exact_exceptions(&self) -> Vec<&str> {
+        self.exact_exceptions.iter().map(String::as_str).collect()
+    }
+
+    fn allows_root(&self, root: &str) -> bool {
+        self.allowed_roots.contains(root)
+    }
+
+    fn allows_domain_transport_arc(&self) -> bool {
+        self.exact_exceptions.contains(EXACT_DOMAIN_TRANSPORT_ARC)
+    }
+}
+
+fn validate_root_name(root: &str) -> Result<()> {
+    if root.is_empty() || root.trim() != root {
+        bail!("runtime-deps-guard: allowed root must not be empty or padded");
+    }
+    let mut chars = root.chars();
+    let Some(first) = chars.next() else {
+        bail!("runtime-deps-guard: allowed root must not be empty");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        bail!("runtime-deps-guard: allowed root `{root}` is not a Rust path segment");
+    }
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        bail!("runtime-deps-guard: allowed root `{root}` is not a Rust path segment");
+    }
+    Ok(())
+}
+
+fn validate_allowed_root(workspace_root: &Path, root: &str) -> Result<()> {
+    if FORBIDDEN_BROAD_ROOTS.contains(&root) {
+        bail!("runtime-deps-guard: `{root}` is too broad for allowedRoots");
+    }
+    if crate::layers::DOMAIN_CRATES.contains(&root) {
+        bail!("runtime-deps-guard: domain crate `{root}` is forbidden in allowedRoots");
+    }
+    if crate::layers::SERVICE_CRATES.contains(&root) {
+        bail!("runtime-deps-guard: service crate `{root}` is forbidden in allowedRoots");
+    }
+    if crate::layers::BASIS_CRATES.contains(&root)
+        || crate::layers::ENGINE_CRATES.contains(&root)
+        || crate::layers::DIPORT_CRATES.contains(&root)
+    {
+        return Ok(());
+    }
+    let adapter_manifest = workspace_root
+        .join("adapters")
+        .join(root)
+        .join("Cargo.toml");
+    if adapter_manifest.exists() {
+        return Ok(());
+    }
+    bail!(
+        "runtime-deps-guard: allowed root `{root}` is neither basis/engine/diport nor an adapter crate"
+    );
 }
 
 fn shared_runtime_deps_struct(file: &syn::File) -> Option<&syn::ItemStruct> {
@@ -201,15 +339,16 @@ fn collect_use_tree_aliases(
     }
 }
 
-fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver) -> bool {
-    if is_exact_domain_transport_arc(ty, resolver, &mut Vec::new()) {
+fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDepsPolicy) -> bool {
+    if policy.allows_domain_transport_arc()
+        && is_exact_domain_transport_arc(ty, resolver, &mut Vec::new())
+    {
         return true;
     }
-    if contains_domain_service_or_repo_type(ty, resolver, &mut Vec::new()) {
+    if contains_forbidden_runtime_dep_type(ty, resolver, &mut Vec::new()) {
         return false;
     }
-    canonical_type_root(ty, resolver, &mut Vec::new())
-        .is_some_and(|root| ALLOWED_ROOTS.contains(&root.as_str()))
+    canonical_type_root(ty, resolver, &mut Vec::new()).is_some_and(|root| policy.allows_root(&root))
 }
 
 fn canonical_type_root(
@@ -286,24 +425,24 @@ fn is_exact_domain_transport_arc(
     canonical_path_segments(&bound.path, resolver) == ["distributed", "DomainTransport"]
 }
 
-fn contains_domain_service_or_repo_type(
+fn contains_forbidden_runtime_dep_type(
     ty: &Type,
     resolver: &TypeResolver,
     alias_stack: &mut Vec<String>,
 ) -> bool {
     match ty {
-        Type::Array(ty) => contains_domain_service_or_repo_type(&ty.elem, resolver, alias_stack),
+        Type::Array(ty) => contains_forbidden_runtime_dep_type(&ty.elem, resolver, alias_stack),
         Type::BareFn(ty) => {
             ty.inputs
                 .iter()
-                .any(|arg| contains_domain_service_or_repo_type(&arg.ty, resolver, alias_stack))
-                || return_type_contains_domain_service_or_repo(&ty.output, resolver, alias_stack)
+                .any(|arg| contains_forbidden_runtime_dep_type(&arg.ty, resolver, alias_stack))
+                || return_type_contains_forbidden_runtime_dep(&ty.output, resolver, alias_stack)
         }
-        Type::Group(ty) => contains_domain_service_or_repo_type(&ty.elem, resolver, alias_stack),
+        Type::Group(ty) => contains_forbidden_runtime_dep_type(&ty.elem, resolver, alias_stack),
         Type::ImplTrait(ty) => {
-            bounds_contain_domain_service_or_repo(&ty.bounds, resolver, alias_stack)
+            bounds_contain_forbidden_runtime_dep(&ty.bounds, resolver, alias_stack)
         }
-        Type::Paren(ty) => contains_domain_service_or_repo_type(&ty.elem, resolver, alias_stack),
+        Type::Paren(ty) => contains_forbidden_runtime_dep_type(&ty.elem, resolver, alias_stack),
         Type::Path(ty) => match resolver.type_alias_target(ty, alias_stack) {
             TypeAliasTarget::Found {
                 name,
@@ -311,47 +450,46 @@ fn contains_domain_service_or_repo_type(
             } => {
                 alias_stack.push(name);
                 let contains =
-                    contains_domain_service_or_repo_type(aliased_ty, resolver, alias_stack);
+                    contains_forbidden_runtime_dep_type(aliased_ty, resolver, alias_stack);
                 alias_stack.pop();
                 contains
             }
             TypeAliasTarget::Cycle => true,
             TypeAliasTarget::NotAlias => {
                 ty.qself.as_ref().is_some_and(|qself| {
-                    contains_domain_service_or_repo_type(&qself.ty, resolver, alias_stack)
-                }) || path_is_domain_service_or_repo(&ty.path, resolver)
-                    || path_args_contain_domain_service_or_repo(&ty.path, resolver, alias_stack)
+                    contains_forbidden_runtime_dep_type(&qself.ty, resolver, alias_stack)
+                }) || path_is_forbidden_runtime_dep(&ty.path, resolver)
+                    || path_args_contain_forbidden_runtime_dep(&ty.path, resolver, alias_stack)
             }
         },
-        Type::Ptr(ty) => contains_domain_service_or_repo_type(&ty.elem, resolver, alias_stack),
-        Type::Reference(ty) => {
-            contains_domain_service_or_repo_type(&ty.elem, resolver, alias_stack)
-        }
-        Type::Slice(ty) => contains_domain_service_or_repo_type(&ty.elem, resolver, alias_stack),
+        Type::Ptr(ty) => contains_forbidden_runtime_dep_type(&ty.elem, resolver, alias_stack),
+        Type::Reference(ty) => contains_forbidden_runtime_dep_type(&ty.elem, resolver, alias_stack),
+        Type::Slice(ty) => contains_forbidden_runtime_dep_type(&ty.elem, resolver, alias_stack),
         Type::TraitObject(ty) => {
-            bounds_contain_domain_service_or_repo(&ty.bounds, resolver, alias_stack)
+            bounds_contain_forbidden_runtime_dep(&ty.bounds, resolver, alias_stack)
         }
         Type::Tuple(ty) => ty
             .elems
             .iter()
-            .any(|elem| contains_domain_service_or_repo_type(elem, resolver, alias_stack)),
+            .any(|elem| contains_forbidden_runtime_dep_type(elem, resolver, alias_stack)),
         _ => false,
     }
 }
 
-fn path_is_domain_service_or_repo(path: &syn::Path, resolver: &TypeResolver) -> bool {
+fn path_is_forbidden_runtime_dep(path: &syn::Path, resolver: &TypeResolver) -> bool {
     let segments = canonical_path_segments(path, resolver);
     let Some(root) = segments.first() else {
         return false;
     };
-    let Some(last) = segments.last() else {
-        return false;
-    };
-    crate::layers::DOMAIN_CRATES.contains(&root.as_str())
-        && (last.contains("Service") || last.contains("Repo"))
+    if crate::layers::SERVICE_CRATES.contains(&root.as_str())
+        || crate::layers::DOMAIN_CRATES.contains(&root.as_str())
+    {
+        return true;
+    }
+    false
 }
 
-fn path_args_contain_domain_service_or_repo(
+fn path_args_contain_forbidden_runtime_dep(
     path: &syn::Path,
     resolver: &TypeResolver,
     alias_stack: &mut Vec<String>,
@@ -362,21 +500,21 @@ fn path_args_contain_domain_service_or_repo(
             PathArguments::None => false,
             PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| match arg {
                 GenericArgument::Type(ty) => {
-                    contains_domain_service_or_repo_type(ty, resolver, alias_stack)
+                    contains_forbidden_runtime_dep_type(ty, resolver, alias_stack)
                 }
                 GenericArgument::AssocType(assoc) => {
-                    contains_domain_service_or_repo_type(&assoc.ty, resolver, alias_stack)
+                    contains_forbidden_runtime_dep_type(&assoc.ty, resolver, alias_stack)
                 }
                 GenericArgument::Constraint(constraint) => {
-                    bounds_contain_domain_service_or_repo(&constraint.bounds, resolver, alias_stack)
+                    bounds_contain_forbidden_runtime_dep(&constraint.bounds, resolver, alias_stack)
                 }
                 _ => false,
             }),
             PathArguments::Parenthesized(args) => {
                 args.inputs
                     .iter()
-                    .any(|input| contains_domain_service_or_repo_type(input, resolver, alias_stack))
-                    || return_type_contains_domain_service_or_repo(
+                    .any(|input| contains_forbidden_runtime_dep_type(input, resolver, alias_stack))
+                    || return_type_contains_forbidden_runtime_dep(
                         &args.output,
                         resolver,
                         alias_stack,
@@ -385,28 +523,28 @@ fn path_args_contain_domain_service_or_repo(
         })
 }
 
-fn bounds_contain_domain_service_or_repo(
+fn bounds_contain_forbidden_runtime_dep(
     bounds: &syn::punctuated::Punctuated<TypeParamBound, syn::token::Plus>,
     resolver: &TypeResolver,
     alias_stack: &mut Vec<String>,
 ) -> bool {
     bounds.iter().any(|bound| match bound {
         TypeParamBound::Trait(bound) => {
-            path_is_domain_service_or_repo(&bound.path, resolver)
-                || path_args_contain_domain_service_or_repo(&bound.path, resolver, alias_stack)
+            path_is_forbidden_runtime_dep(&bound.path, resolver)
+                || path_args_contain_forbidden_runtime_dep(&bound.path, resolver, alias_stack)
         }
         _ => false,
     })
 }
 
-fn return_type_contains_domain_service_or_repo(
+fn return_type_contains_forbidden_runtime_dep(
     output: &ReturnType,
     resolver: &TypeResolver,
     alias_stack: &mut Vec<String>,
 ) -> bool {
     match output {
         ReturnType::Default => false,
-        ReturnType::Type(_, ty) => contains_domain_service_or_repo_type(ty, resolver, alias_stack),
+        ReturnType::Type(_, ty) => contains_forbidden_runtime_dep_type(ty, resolver, alias_stack),
     }
 }
 
@@ -482,8 +620,168 @@ fn compact_tokens(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    const VALID_CONFIG: &str = include_str!("../runtime-deps-guard.toml");
+
+    fn valid_policy() -> Result<RuntimeDepsPolicy> {
+        RuntimeDepsPolicy::from_toml_str(VALID_CONFIG)
+    }
+
     fn findings(src: &str) -> Result<Vec<Finding<Rule>>> {
         scan_source(Path::new("fixture.rs"), src)
+    }
+
+    fn findings_with_policy(src: &str) -> Result<Vec<Finding<Rule>>> {
+        scan_source_with_policy(Path::new("fixture.rs"), src, &valid_policy()?)
+    }
+
+    fn policy_err(result: Result<RuntimeDepsPolicy>, message: &str) -> Result<anyhow::Error> {
+        match result {
+            Ok(_) => anyhow::bail!("{message}"),
+            Err(err) => Ok(err),
+        }
+    }
+
+    #[test]
+    fn config_accepts_current_policy() -> Result<()> {
+        let policy = valid_policy()?;
+        assert_eq!(
+            policy.allowed_roots(),
+            [
+                "diport",
+                "postgres",
+                "primitives",
+                "redis",
+                "s3",
+                "secure",
+                "vault",
+                "vocab"
+            ]
+        );
+        assert_eq!(
+            policy.exact_exceptions(),
+            ["Arc<dyn distributed::DomainTransport>"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_unknown_fields() -> Result<()> {
+        let err = policy_err(
+            RuntimeDepsPolicy::from_toml_str(
+                r#"
+schemaVersion = 1
+allowedRoots = ["postgres"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+extra = true
+"#,
+            ),
+            "unknown config fields must fail closed",
+        )?;
+        assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn config_file_is_required_and_malformed_toml_fails_closed() -> Result<()> {
+        let missing_root = std::env::temp_dir().join(format!(
+            "rss-runtime-deps-guard-missing-{}",
+            std::process::id()
+        ));
+        let missing = policy_err(
+            RuntimeDepsPolicy::from_workspace(&missing_root),
+            "missing config file must fail closed",
+        )?;
+        assert!(format!("{missing:#}").contains("read"), "{missing:#}");
+
+        let malformed = policy_err(
+            RuntimeDepsPolicy::from_toml_str("schemaVersion ="),
+            "malformed TOML must fail closed",
+        )?;
+        assert!(
+            format!("{malformed:#}").contains("parse config TOML"),
+            "{malformed:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_empty_duplicate_and_overbroad_roots() -> Result<()> {
+        for (label, raw) in [
+            (
+                "empty",
+                r#"
+schemaVersion = 1
+allowedRoots = []
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+"#,
+            ),
+            (
+                "duplicate",
+                r#"
+schemaVersion = 1
+allowedRoots = ["postgres", "postgres"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+"#,
+            ),
+            (
+                "domain",
+                r#"
+schemaVersion = 1
+allowedRoots = ["settings"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+"#,
+            ),
+            (
+                "service",
+                r#"
+schemaVersion = 1
+allowedRoots = ["distributed"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+"#,
+            ),
+            (
+                "std",
+                r#"
+schemaVersion = 1
+allowedRoots = ["std"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+"#,
+            ),
+            (
+                "typo",
+                r#"
+schemaVersion = 1
+allowedRoots = ["postgress"]
+exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+"#,
+            ),
+        ] {
+            let err = policy_err(
+                RuntimeDepsPolicy::from_toml_str(raw),
+                &format!("{label} root config must fail closed"),
+            )?;
+            assert!(
+                err.to_string().contains("runtime-deps-guard"),
+                "{label}: {err:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_unknown_exact_exception() -> Result<()> {
+        let err = policy_err(
+            RuntimeDepsPolicy::from_toml_str(
+                r#"
+schemaVersion = 1
+allowedRoots = ["postgres"]
+exactExceptions = ["Arc<dyn distributed::Other>"]
+"#,
+            ),
+            "unknown exact exception must fail closed",
+        )?;
+        assert!(err.to_string().contains("exact exception"), "{err:#}");
+        Ok(())
     }
 
     #[test]
@@ -552,6 +850,57 @@ mod tests {
     }
 
     #[test]
+    fn exact_exception_accepts_aliases_but_does_not_generalize() -> Result<()> {
+        let accepted = findings_with_policy(
+            r#"
+use std::sync::Arc as SharedArc;
+use distributed::DomainTransport;
+
+pub struct SharedRuntimeDeps {
+    pub domain_transport: SharedArc<dyn DomainTransport>,
+}
+"#,
+        )?;
+        assert!(accepted.is_empty(), "{accepted:?}");
+
+        for (label, src) in [
+            (
+                "different trait",
+                r#"
+use std::sync::Arc;
+
+pub struct SharedRuntimeDeps {
+    pub domain_transport: Arc<dyn distributed::Other>,
+}
+"#,
+            ),
+            (
+                "different wrapper",
+                r#"
+pub struct SharedRuntimeDeps {
+    pub domain_transport: Box<dyn distributed::DomainTransport>,
+}
+"#,
+            ),
+            (
+                "extra bound",
+                r#"
+use std::sync::Arc;
+
+pub struct SharedRuntimeDeps {
+    pub domain_transport: Arc<dyn distributed::DomainTransport + Send>,
+}
+"#,
+            ),
+        ] {
+            let rejected = findings_with_policy(src)?;
+            assert_eq!(rejected.len(), 1, "{label}: {rejected:?}");
+            assert_eq!(rejected[0].rule, Rule::DisallowedFieldType);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn allowed_root_generic_does_not_hide_domain_service() -> Result<()> {
         let findings = findings(include_str!(
             "../tests/fixtures/runtime_deps_guard/allowed_root_domain_generic_red.rs"
@@ -562,6 +911,84 @@ mod tests {
             findings[0]
                 .detail
                 .contains("diport::Boxed<settings::SettingsService>")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_domain_service_or_repo_types_are_rejected() -> Result<()> {
+        let findings = findings_with_policy(
+            r#"
+use std::sync::Arc;
+type RuntimeSettings = settings::SettingsService;
+type RuntimeDomain = settings::SettingsDomain;
+type AliasA = AliasB;
+type AliasB = AliasA;
+
+    pub struct SharedRuntimeDeps {
+        pub optional: diport::Boxed<Option<Arc<settings::SettingsService>>>,
+        pub repo_result: diport::Boxed<Result<Box<dyn identity::CredentialRepo>, vocab::Error>>,
+        pub tupled: diport::Boxed<(contractreg::ContractRegistryService, &'static audit::AuditRepo)>,
+        pub callback: diport::Boxed<fn() -> syshealth::HealthRepo>,
+        pub alias: diport::Boxed<RuntimeSettings>,
+        pub domain_output: diport::Boxed<settings::SettingsDomain>,
+        pub domain_alias: diport::Boxed<RuntimeDomain>,
+        pub locker: diport::Boxed<distributed::Locker>,
+        pub module_result: diport::Boxed<bootstrap::DomainModuleResult>,
+        pub cycle: AliasA,
+    }
+    "#,
+        )?;
+        assert_eq!(findings.len(), 10, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".optional"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".repo_result"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".tupled"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".callback"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".alias"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".domain_output"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".domain_alias"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".locker"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".module_result"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject.ends_with(".cycle"))
         );
         Ok(())
     }

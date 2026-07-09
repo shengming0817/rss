@@ -103,6 +103,13 @@ fn build_index(root: &Path) -> Result<Index> {
     scan_dylint(root, &mut index)?;
     scan_config(root, &mut index, "deny.toml", "deny", "verify,ci,audit")?;
     scan_config(root, &mut index, "clippy.toml", "clippy", "verify,ci")?;
+    scan_config(
+        root,
+        &mut index,
+        "xtask/runtime-deps-guard.toml",
+        "runtime-deps-config",
+        "verify,ci",
+    )?;
     scan_public_api(root, &mut index)?;
     scan_source_invariants(root, &mut index)?;
     scan_trybuild_and_native(root, &mut index)?;
@@ -784,7 +791,7 @@ impl SourceKind {
         match carrier {
             "xtask" => matches!(self, Self::Code | Self::Codegen),
             "dylint" => self == Self::Dylint,
-            "deny" | "clippy" => self == Self::Config,
+            "deny" | "clippy" | "runtime-deps-config" => self == Self::Config,
             "public-api" => self == Self::PublicApi,
             "native-hard" => matches!(self, Self::Code | Self::Rustdoc | Self::Trybuild),
             _ => false,
@@ -2006,6 +2013,10 @@ members = ["rss_demo"]
         )?;
         write(&root.join("clippy.toml"), "# synthetic clippy carrier\n")?;
         write(
+            &root.join("xtask/runtime-deps-guard.toml"),
+            "# INVARIANT: RUNTIME-DEPS-CONFIG-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"config\" }\n",
+        )?;
+        write(
             &root.join("xtask/src/layerdeps.rs"),
             "//! INVARIANT: XTASK-DEMO-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
         )?;
@@ -2032,6 +2043,7 @@ members = ["rss_demo"]
             "DENY-DEMO-01",
             "LINT-DEMO-01",
             "PUBLICAPI-DEMO-01",
+            "RUNTIME-DEPS-CONFIG-DEMO-01",
             "XTASK-DEMO-01",
         ] {
             assert!(index.records.iter().any(|r| r.id == id), "missing {id}");

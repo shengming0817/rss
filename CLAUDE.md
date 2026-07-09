@@ -3,8 +3,8 @@
 > 架构：domain-native 治理（bounded context 只经 contract 通信 + L0–L4 一致性 + journeys 验收），惯用扁平 Rust
 > workspace。
 > 本文件是项目最高协作规范（无独立宪法文件）；完整 workspace 结构树 / 分层 / 架构单源见
-> `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga·runtime-assembly-plan）
-> 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api·runtime-assembly-plan）。
+> `docs/rules/architecture.md`，规则分布于 `docs/rules/`（architecture·eventbus·tenancy·observability·reconcile·saga·runtime-assembly-plan·runtime-wiring）
+> 与 `.claude/rules/rss/`（ai-robust·rust-standards·error-handling·contract-fanout·domain-patterns·api-versioning·runtime-api·runtime-assembly-plan·runtime-wiring）。
 
 domain-native 治理 + 惯用 Rust workspace 工程底座。只保留稳定的开发规则和架构约束。
 
@@ -43,6 +43,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 - **服务**（`httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`）依赖基础 + 引擎；不依赖域 / adapters。
 - **域**（`identity`/`settings`/…）依赖基础 + 引擎 + 服务 + `generated`；**互不依赖**（跨域只经 contract）；不依赖 adapters。
 - **adapters/** 实现上层 trait，不被域依赖（经组合根注入）；**bins/** / **xtask/** / **assemblies/** 是组合根，可依赖所有库 crate。
+- `SharedRuntimeDeps` 只能放共享基础设施 / provider value object；不得放 domain service / repo。允许根由 `xtask/runtime-deps-guard.toml` 单源配置，并由 `cargo xtask runtime-deps guard` 强制，规则细节见 `docs/rules/runtime-wiring.md`。
 - cargo 拒绝循环依赖 → 分层无环天然成立；`cargo-deny`(deny.toml) 表达禁依赖、`cargo-udeps` 抓多余/未声明、`cargo public-api` 守封装面。
 
 > 关键：跨域只经 contract 通信，由 crate 依赖图**自动守住**——域 crate

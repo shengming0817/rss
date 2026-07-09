@@ -162,7 +162,7 @@ rss/
 | L0–L4 一致性声明 + typed capability evidence + L4 `[reconcile]` block(拓扑/引用完整性/active producer readiness/格式/能力门) | `xtask` | Medium(CI 门) |
 | wire contract 版本目录(轴 B) | `xtask` | Medium(CI 门) |
 | 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml [dependencies] 按 §分层 矩阵校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..07) | Medium(CI 门) |
-| `SharedRuntimeDeps` 字段仅基础设施 / value object（禁域 service / repo） | `cargo xtask runtime-deps guard`(syn 字段扫描，精确允许列表 + synthetic red；接入 `verify`) | Medium(CI 门) |
+| `SharedRuntimeDeps` 字段仅基础设施 / value object（禁域 service / repo） | `cargo xtask runtime-deps guard`(syn 字段扫描 + `xtask/runtime-deps-guard.toml` 配置单源 + synthetic red；接入 `verify`) | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
 | outbox/saga/reconcile/projection 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 
@@ -204,8 +204,9 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   编译期不可表达。**首切与 ADR-010 §2.2 的差异(字段未冻,随 #1421 细化)**:`DomainModuleResult` 暂为独立 struct(未演进
   `DomainModule`)、暂无 `name/domain` 与 `services/routes` 字段(域 service 留 `wire_X` 内部经 route 闭包捕获、不出向)。
   **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }**:
-  `cargo xtask runtime-deps guard` 解析字段类型，允许 provider bundle / infra value object 与精确
-  `Arc<dyn distributed::DomainTransport>` 例外，拒绝域 service / repo 经 deps bag 跨 module handoff。
+  `cargo xtask runtime-deps guard` 解析字段类型，按 `xtask/runtime-deps-guard.toml` 读取 provider bundle / infra
+  value object 允许根与精确 `Arc<dyn distributed::DomainTransport>` 例外，拒绝域 service / repo 经 deps bag 跨
+  module handoff。规则细节 / 盲区 / 扩展流程见 `docs/rules/runtime-wiring.md`。
 - **Transaction retry policy([PERSIST-018] #1439)**:`consistency::tx_retry` 持有闭值集
   `TxRetryClass::{Transient, Conflict, Permanent, OwnershipLost}` + `TxRetryPolicy` + runtime-neutral
   `run_tx_retry`。adapter 只在明确 UoW 边界套 retry（当前 postgres `settings.config` /
