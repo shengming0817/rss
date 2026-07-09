@@ -11,6 +11,9 @@ lifecycle = "draft"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[effectProfile]
+effects = ["reconcile", "worker"]
+
 [capabilities.deviceLatent]
 loop = "reconcile"
 

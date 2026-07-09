@@ -26,3 +26,6 @@ permission = "settings.config-publish"
 role = "producer"
 atomicity = "same-transaction"
 emits = ["settings.config-version-changed"]
+
+[effectProfile]
+effects = ["auth", "write", "transaction", "outbox", "publish"]

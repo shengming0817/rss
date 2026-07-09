@@ -23,3 +23,9 @@ permission = "settings.secret-publish"
 
 [capabilities.localTx]
 boundary = "single-domain"
+txModel = "tenant-scoped-uow"
+retry = "bounded-transient"
+commitUnknown = "not-retryable"
+
+[effectProfile]
+effects = ["auth", "write", "transaction"]

@@ -25,3 +25,6 @@ fields = [
   { field = "identityProfileSubject", permission = "identity:profile:field:subject", obligationKey = "identity.profile.subject", responsePath = "data.subject" },
   { field = "identityProfileTenantId", permission = "identity:profile:field:tenant_id", obligationKey = "identity.profile.tenant_id", responsePath = "data.tenantId" },
 ]
+
+[effectProfile]
+effects = ["auth", "read", "projection"]

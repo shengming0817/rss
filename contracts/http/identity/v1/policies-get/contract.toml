@@ -16,3 +16,6 @@ response = "response.schema.json"
 [endpoints.http.auth]
 mode = "permission"
 permission = "identity:policy:read"
+
+[effectProfile]
+effects = ["auth", "read"]

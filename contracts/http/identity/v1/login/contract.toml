@@ -25,3 +25,6 @@ reason = "login is pre-auth; tenant scope is populated from X-Tenant-ID"
 role = "producer"
 atomicity = "same-transaction"
 emits = ["identity.session-created"]
+
+[effectProfile]
+effects = ["auth", "write", "transaction", "outbox", "publish"]

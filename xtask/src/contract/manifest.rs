@@ -33,6 +33,7 @@ pub(crate) const FIELD_TOPIC: &str = "topic";
 pub(crate) const FIELD_DELIVERY: &str = "delivery";
 pub(crate) const FIELD_SAGA: &str = "[saga]";
 pub(crate) const FIELD_RECONCILE: &str = "[reconcile]";
+pub(crate) const FIELD_EFFECT_PROFILE: &str = "[effectProfile]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_HEADERS: &str = "[endpoints.http.headers]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_PROJECTION: &str = "[endpoints.http.projection]";
@@ -76,6 +77,10 @@ pub(crate) struct ContractManifest {
     /// L4 reconcile 结构语义：`[reconcile]` 顶层 block。DeviceLatent 必填（R22）；字段闭值由类型层守。
     #[serde(default)]
     pub(crate) reconcile: Option<ReconcileBlock>,
+    /// HTTP route effect vocabulary. This is a declarative carrier for codegen
+    /// and later L0/L1 gates; R22 ensures every HTTP contract declares it.
+    #[serde(default, rename = "effectProfile")]
+    pub(crate) effect_profile: Option<EffectProfile>,
     /// event 订阅声明（#1120）：`[[subscriptions]]` 数组，每项声明一个消费者域 + consumer group。
     /// `#[serde(default)]` ⇒ 无 subscriptions 字段的既有契约仍解析（空 vec，不破坏 CONTRACT-FREEZE-01）。
     /// active event 必须非空（EVENT-ACTIVE-SUB-01，R14）；draft/deprecated 豁免。
@@ -155,15 +160,59 @@ pub(crate) struct Capabilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct LocalTxCapability {
     pub(crate) boundary: LocalTxBoundary,
+    pub(crate) tx_model: LocalTxModel,
+    pub(crate) retry: LocalTxRetry,
+    pub(crate) commit_unknown: LocalTxCommitUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum LocalTxBoundary {
     SingleDomain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LocalTxModel {
+    TenantScopedUow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LocalTxRetry {
+    BoundedTransient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LocalTxCommitUnknown {
+    NotRetryable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EffectProfile {
+    pub(crate) effects: Vec<EffectKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EffectKind {
+    Read,
+    Auth,
+    Projection,
+    Write,
+    Transaction,
+    Outbox,
+    Publish,
+    Workflow,
+    Saga,
+    Reconcile,
+    Worker,
+    CrossTenantAudit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -777,6 +826,9 @@ mod tests {
 
             [capabilities.localTx]
             boundary = "single-domain"
+            txModel = "tenant-scoped-uow"
+            retry = "bounded-transient"
+            commitUnknown = "not-retryable"
 
             [capabilities.outbox]
             role = "producer"
@@ -793,6 +845,9 @@ mod tests {
             [capabilities.deviceLatent]
             loop = "reconcile"
 
+            [effectProfile]
+            effects = ["auth", "read", "cross-tenant-audit"]
+
             [reconcile]
             tenancy = "tenant-scoped"
             trigger = "interval"
@@ -801,10 +856,28 @@ mod tests {
         "#
         );
         let m = ContractManifest::from_toml_str(&toml)?;
-        assert_eq!(
-            m.capabilities.local_tx.as_ref().map(|c| c.boundary),
-            Some(LocalTxBoundary::SingleDomain)
-        );
+        assert_local_tx_capability(&m)?;
+        assert_outbox_capability(&m)?;
+        assert_workflow_capability(&m)?;
+        assert_device_reconcile_capability(&m)?;
+        assert_effect_profile(&m);
+        Ok(())
+    }
+
+    fn assert_local_tx_capability(m: &ContractManifest) -> anyhow::Result<()> {
+        let local_tx = m
+            .capabilities
+            .local_tx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("localTx capability should parse"))?;
+        assert_eq!(local_tx.boundary, LocalTxBoundary::SingleDomain);
+        assert_eq!(local_tx.tx_model, LocalTxModel::TenantScopedUow);
+        assert_eq!(local_tx.retry, LocalTxRetry::BoundedTransient);
+        assert_eq!(local_tx.commit_unknown, LocalTxCommitUnknown::NotRetryable);
+        Ok(())
+    }
+
+    fn assert_outbox_capability(m: &ContractManifest) -> anyhow::Result<()> {
         let outbox = m
             .capabilities
             .outbox
@@ -813,6 +886,10 @@ mod tests {
         assert_eq!(outbox.role, OutboxRole::Producer);
         assert_eq!(outbox.atomicity, Some(OutboxAtomicity::SameTransaction));
         assert_eq!(outbox.emits, vec!["identity.session-created"]);
+        Ok(())
+    }
+
+    fn assert_workflow_capability(m: &ContractManifest) -> anyhow::Result<()> {
         let workflow = m
             .capabilities
             .workflow
@@ -822,6 +899,10 @@ mod tests {
         assert_eq!(workflow.ordering, Some(WorkflowOrdering::SerialInOrder));
         assert_eq!(workflow.checkpoint, Some(WorkflowRequirement::Required));
         assert_eq!(workflow.replay, Some(WorkflowRequirement::Required));
+        Ok(())
+    }
+
+    fn assert_device_reconcile_capability(m: &ContractManifest) -> anyhow::Result<()> {
         let device = m
             .capabilities
             .device_latent
@@ -838,6 +919,53 @@ mod tests {
         assert_eq!(
             reconcile.late_message_policy,
             DeviceLatentLateMessagePolicy::Idempotent
+        );
+        Ok(())
+    }
+
+    fn assert_effect_profile(m: &ContractManifest) {
+        assert_eq!(
+            m.effect_profile.as_ref().map(|p| p.effects.as_slice()),
+            Some(
+                [
+                    EffectKind::Auth,
+                    EffectKind::Read,
+                    EffectKind::CrossTenantAudit
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn parses_effect_profile() -> anyhow::Result<()> {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [effectProfile]
+            effects = ["auth", "read", "projection", "write", "transaction", "outbox", "publish", "workflow", "saga", "reconcile", "worker", "cross-tenant-audit"]
+        "#
+        );
+        let m = ContractManifest::from_toml_str(&toml)?;
+        let profile = m
+            .effect_profile
+            .ok_or_else(|| anyhow::anyhow!("effectProfile should parse"))?;
+        assert_eq!(
+            profile.effects,
+            vec![
+                EffectKind::Auth,
+                EffectKind::Read,
+                EffectKind::Projection,
+                EffectKind::Write,
+                EffectKind::Transaction,
+                EffectKind::Outbox,
+                EffectKind::Publish,
+                EffectKind::Workflow,
+                EffectKind::Saga,
+                EffectKind::Reconcile,
+                EffectKind::Worker,
+                EffectKind::CrossTenantAudit,
+            ]
         );
         Ok(())
     }
@@ -867,6 +995,71 @@ mod tests {
 
             [capabilities.outbox]
             role = "maybe"
+        "#
+        );
+        assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_local_tx_capability() {
+        for missing_line in [
+            r#"txModel = "tenant-scoped-uow""#,
+            r#"retry = "bounded-transient""#,
+            r#"commitUnknown = "not-retryable""#,
+        ] {
+            let toml = format!(
+                r#"{VALID_HTTP}
+
+                [capabilities.localTx]
+                boundary = "single-domain"
+                txModel = "tenant-scoped-uow"
+                retry = "bounded-transient"
+                commitUnknown = "not-retryable"
+            "#
+            )
+            .replace(missing_line, "");
+            assert!(
+                ContractManifest::from_toml_str(&toml).is_err(),
+                "missing localTx field should fail parse: {missing_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_local_tx_value() {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [capabilities.localTx]
+            boundary = "multi-domain"
+            txModel = "tenant-scoped-uow"
+            retry = "bounded-transient"
+            commitUnknown = "not-retryable"
+        "#
+        );
+        assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_effect_profile_field() {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [effectProfile]
+            effects = ["auth"]
+            confidence = "claimed"
+        "#
+        );
+        assert!(ContractManifest::from_toml_str(&toml).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_effect_kind() {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [effectProfile]
+            effects = ["auth", "network"]
         "#
         );
         assert!(ContractManifest::from_toml_str(&toml).is_err());

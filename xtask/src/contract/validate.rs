@@ -63,12 +63,13 @@ use syn::visit::Visit;
 
 use super::manifest::{
     Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
-    FIELD_DELIVERY, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
+    FIELD_DELIVERY, FIELD_EFFECT_PROFILE, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
     FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
     FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth,
     HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod, HttpResourceSharingMode, Lifecycle,
-    LocalTxBoundary, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST,
-    SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
+    LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole,
+    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering,
+    WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -101,6 +102,7 @@ const CAP_WORKFLOW_CHECKPOINT: &str = "capabilities.workflow.checkpoint";
 const CAP_WORKFLOW_REPLAY: &str = "capabilities.workflow.replay";
 const CAP_WORKFLOW_FIELD_SCOPE: &str = "capabilities.workflow.field-scope";
 const CAP_CAPABILITY_SCOPE: &str = "capability-scope";
+const CAP_EFFECT_PROFILE_EFFECTS: &str = "effectProfile.effects";
 const RUNTIME_EVENT_TRANSPORT_RS: &str = "assemblies/runtime/src/event_transport.rs";
 
 /// 被违反的规则（供测试精确断言）。
@@ -420,6 +422,7 @@ fn rule_consistency_capability_one(
 ) -> Vec<Finding> {
     let m = &c.manifest;
     let mut out = Vec::new();
+    out.extend(rule_effect_profile(m, label));
     match m.consistency_level {
         ConsistencyLevel::LocalOnly => {
             if m.kind != ContractKind::Http {
@@ -442,12 +445,16 @@ fn rule_consistency_capability_one(
                 ));
             }
             match &m.capabilities.local_tx {
-                Some(local_tx) if local_tx.boundary == LocalTxBoundary::SingleDomain => {}
+                Some(local_tx)
+                    if local_tx.boundary == LocalTxBoundary::SingleDomain
+                        && local_tx.tx_model == LocalTxModel::TenantScopedUow
+                        && local_tx.retry == LocalTxRetry::BoundedTransient
+                        && local_tx.commit_unknown == LocalTxCommitUnknown::NotRetryable => {}
                 _ => out.push(consistency_capability_finding(
                     m,
                     label,
                     CAP_LOCAL_TX,
-                    "LocalTx 须声明 boundary=\"single-domain\"",
+                    "LocalTx 须声明 boundary=\"single-domain\" + txModel=\"tenant-scoped-uow\" + retry=\"bounded-transient\" + commitUnknown=\"not-retryable\"",
                 )),
             }
             out.extend(unexpected_capabilities(m, label, &[CAP_LOCAL_TX]));
@@ -472,6 +479,49 @@ fn rule_consistency_capability_one(
             CAP_CAPABILITY_SCOPE,
             "[reconcile] 仅允许用于 consistencyLevel=DeviceLatent",
         ));
+    }
+    out
+}
+
+fn rule_effect_profile(m: &ContractManifest, label: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let Some(profile) = &m.effect_profile else {
+        if m.kind == ContractKind::Http {
+            out.push(consistency_capability_finding(
+                m,
+                label,
+                FIELD_EFFECT_PROFILE,
+                "kind=http 契约必须声明 [effectProfile] effects 作为 L0/L1 共享 effect carrier",
+            ));
+        }
+        return out;
+    };
+    if m.kind != ContractKind::Http {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            FIELD_EFFECT_PROFILE,
+            "[effectProfile] 仅允许用于 kind=http 契约",
+        ));
+    }
+    if profile.effects.is_empty() {
+        out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_EFFECT_PROFILE_EFFECTS,
+            "[effectProfile].effects 必须至少声明一个 effect",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for effect in &profile.effects {
+        if !seen.insert(*effect) {
+            out.push(consistency_capability_finding(
+                m,
+                label,
+                CAP_EFFECT_PROFILE_EFFECTS,
+                &format!("[effectProfile].effects 不得重复声明 effect={effect:?}"),
+            ));
+        }
     }
     out
 }
@@ -2174,11 +2224,11 @@ mod tests {
     use crate::contract::manifest::{
         Capabilities, CompensationOrder, Delivery, DeviceLatentCapability, DeviceLatentFencing,
         DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentTenancy, DeviceLatentTrigger,
-        Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod,
-        HttpProjection, HttpProjectionField, HttpProjectionFieldName, HttpResourceSharing,
-        HttpResourceSharingMode, Lifecycle, LocalTxCapability, OutboxCapability,
-        PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas, SubscriberReadiness,
-        Subscription, SubscriptionTopology, WorkflowCapability,
+        EffectKind, EffectProfile, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
+        HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
+        HttpResourceSharing, HttpResourceSharingMode, Lifecycle, LocalTxCapability,
+        OutboxCapability, PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas,
+        SubscriberReadiness, Subscription, SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -2206,6 +2256,7 @@ mod tests {
             delivery: None,
             saga: None,
             reconcile: None,
+            effect_profile: None,
             subscriptions: Vec::new(),
             capabilities: Capabilities::default(),
         }
@@ -2261,9 +2312,18 @@ mod tests {
         Capabilities {
             local_tx: Some(LocalTxCapability {
                 boundary: LocalTxBoundary::SingleDomain,
+                tx_model: LocalTxModel::TenantScopedUow,
+                retry: LocalTxRetry::BoundedTransient,
+                commit_unknown: LocalTxCommitUnknown::NotRetryable,
             }),
             ..Capabilities::default()
         }
+    }
+
+    fn effect_profile(effects: &[EffectKind]) -> Option<EffectProfile> {
+        Some(EffectProfile {
+            effects: effects.to_vec(),
+        })
     }
 
     fn outbox_fact_capability() -> Capabilities {
@@ -4790,6 +4850,62 @@ mod tests {
     }
 
     #[test]
+    fn r22_consistency_http_requires_effect_profile() {
+        let mut m = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        m.id = "seed.local".to_string();
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "seed.local", FIELD_EFFECT_PROFILE);
+    }
+
+    #[test]
+    fn r22_consistency_effect_profile_forbidden_on_non_http() {
+        let mut m = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Domain("identity".to_string()),
+            payload_schemas(),
+        );
+        m.id = "identity.session-created".to_string();
+        m.capabilities = outbox_fact_capability();
+        m.effect_profile = effect_profile(&[EffectKind::Read]);
+        let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
+        assert_r22_detail(&findings, "identity.session-created", FIELD_EFFECT_PROFILE);
+    }
+
+    #[test]
+    fn r22_consistency_effect_profile_requires_effects_and_no_duplicates() {
+        let mut empty = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        empty.id = "seed.empty".to_string();
+        empty.effect_profile = effect_profile(&[]);
+
+        let mut duplicate = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        duplicate.id = "seed.duplicate".to_string();
+        duplicate.effect_profile = effect_profile(&[EffectKind::Auth, EffectKind::Auth]);
+
+        let findings = rule_consistency_capability(&[
+            discovered(empty, PathBuf::from("/empty")),
+            discovered(duplicate, PathBuf::from("/duplicate")),
+        ]);
+        assert_r22_detail(&findings, "seed.empty", CAP_EFFECT_PROFILE_EFFECTS);
+        assert_r22_detail(&findings, "seed.duplicate", CAP_EFFECT_PROFILE_EFFECTS);
+    }
+
+    #[test]
     fn r22_consistency_localonly_event_and_stray_outbox_rejected() {
         let mut m = manifest(
             ContractKind::Event,
@@ -5078,6 +5194,8 @@ mod tests {
         );
         projection.id = "audit.session-projection".to_string();
         projection.capabilities = workflow_projection_capability();
+        projection.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
 
         let findings = rule_consistency_capability(&[
             discovered(saga, PathBuf::from("/saga")),
@@ -5155,6 +5273,7 @@ mod tests {
             http_schemas(),
         );
         local.id = "seed.local".to_string();
+        local.effect_profile = effect_profile(&[EffectKind::Auth, EffectKind::Read]);
 
         let mut local_tx = manifest(
             ContractKind::Http,
@@ -5164,6 +5283,8 @@ mod tests {
         );
         local_tx.id = "identity.logout".to_string();
         local_tx.capabilities = local_tx_capability();
+        local_tx.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Write, EffectKind::Transaction]);
 
         let mut fact = manifest(
             ContractKind::Event,
@@ -5185,6 +5306,13 @@ mod tests {
         );
         producer.id = "identity.login".to_string();
         producer.capabilities = outbox_producer_capability(&["identity.session-created"]);
+        producer.effect_profile = effect_profile(&[
+            EffectKind::Auth,
+            EffectKind::Write,
+            EffectKind::Transaction,
+            EffectKind::Outbox,
+            EffectKind::Publish,
+        ]);
 
         let mut saga = saga_manifest(Some(valid_saga_block()));
         saga.capabilities = workflow_saga_capability();
@@ -5197,6 +5325,8 @@ mod tests {
         );
         projection.id = "audit.session-projection".to_string();
         projection.capabilities = workflow_projection_capability();
+        projection.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
 
         let mut device = manifest(
             ContractKind::Http,
@@ -5207,6 +5337,8 @@ mod tests {
         device.id = "device.cert-reconcile".to_string();
         device.capabilities = device_latent_capability();
         device.reconcile = Some(valid_reconcile_block());
+        device.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Reconcile, EffectKind::Worker]);
 
         let contracts = vec![
             discovered(local, PathBuf::from("/x")),

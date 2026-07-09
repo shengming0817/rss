@@ -11,6 +11,9 @@ lifecycle = "draft"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[effectProfile]
+effects = ["read", "projection"]
+
 [capabilities.workflow]
 mode = "projection"
 inputs = ["identity.session-created"]

@@ -21,3 +21,6 @@ permission = "identity:policy:deactivate"
 role = "producer"
 atomicity = "same-transaction"
 emits = ["identity.policy-updated"]
+
+[effectProfile]
+effects = ["auth", "write", "transaction", "outbox", "publish"]

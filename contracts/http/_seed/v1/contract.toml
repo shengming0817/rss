@@ -14,3 +14,6 @@ method = "POST"
 [schemas]
 request = "request.schema.json"
 response = "response.schema.json"
+
+[effectProfile]
+effects = ["read"]

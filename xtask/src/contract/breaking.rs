@@ -31,6 +31,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::{Result, bail};
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::discover;
@@ -680,6 +681,62 @@ fn slot_files(m: &ContractManifest) -> Vec<(String, String)> {
     v
 }
 
+#[derive(Debug, Deserialize)]
+struct BaseContractManifest {
+    id: String,
+    lifecycle: Lifecycle,
+    #[serde(default)]
+    schemas: BaseSchemas,
+    #[serde(default)]
+    saga: Option<BaseSagaBlock>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BaseSchemas {
+    #[serde(default)]
+    request: Option<String>,
+    #[serde(default)]
+    response: Option<String>,
+    #[serde(default)]
+    payload: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BaseSagaBlock {
+    #[serde(default)]
+    steps: Vec<BaseSagaStep>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BaseSagaStep {
+    name: String,
+    output_schema: String,
+}
+
+/// Base refs may carry an older authoring schema. Wire-breaking only needs
+/// identity, lifecycle and schema slot filenames, so keep this projection narrow
+/// instead of accepting legacy manifests in the current full manifest parser.
+fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for (slot, file) in [
+        ("request", m.schemas.request.as_deref()),
+        ("response", m.schemas.response.as_deref()),
+        ("payload", m.schemas.payload.as_deref()),
+    ] {
+        if let Some(f) = file {
+            v.push((slot.to_string(), f.to_string()));
+        }
+    }
+    if let Some(saga) = &m.saga {
+        for s in &saga.steps {
+            v.push((format!("saga:{}", s.name), s.output_schema.clone()));
+        }
+    }
+    v
+}
+
 /// working-tree 侧契约投影：discover + 逐 slot 读磁盘 schema。
 fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
     let discovered = discover(contracts_root)?;
@@ -708,7 +765,7 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
         let Some(text) = read_text_at_ref(root, against, &manifest_rel)? else {
             continue; // 竞态 / 罕见：ls-tree 列了但 show 不到，跳过
         };
-        let manifest = ContractManifest::from_toml_str(&text)
+        let manifest = toml::from_str::<BaseContractManifest>(&text)
             .map_err(|e| anyhow::anyhow!("解析 base {manifest_rel} 失败: {e}"))?;
         let Some(label) = label_from_manifest_path(&manifest_rel) else {
             continue; // 非 contracts/{kind}/{domain}/{version}/contract.toml 形态
@@ -717,7 +774,7 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
             continue;
         };
         let mut slots = BTreeMap::new();
-        for (slot, file) in slot_files(&manifest) {
+        for (slot, file) in base_slot_files(&manifest) {
             let schema_rel = format!("{dir_rel}/{file}");
             if let Some(schema_text) = read_text_at_ref(root, against, &schema_rel)? {
                 let v = serde_json::from_str(&schema_text)
@@ -726,7 +783,7 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
             }
         }
         sides.push(ContractSide {
-            identity: contract_identity(&manifest),
+            identity: manifest.id,
             label,
             lifecycle: manifest.lifecycle,
             slots,
@@ -1274,6 +1331,75 @@ mod tests {
             None,
             "五段嵌套不是合法 contract path"
         );
+    }
+
+    #[test]
+    fn base_manifest_projection_accepts_legacy_authoring_shape() -> anyhow::Result<()> {
+        let manifest: BaseContractManifest = toml::from_str(
+            r#"
+id = "identity.logout"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+
+[capabilities.localTx]
+boundary = "single-domain"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+"#,
+        )?;
+        assert_eq!(manifest.id, "identity.logout");
+        assert_eq!(manifest.lifecycle, Lifecycle::Active);
+        assert_eq!(
+            base_slot_files(&manifest),
+            vec![
+                ("request".to_string(), "request.schema.json".to_string()),
+                ("response".to_string(), "response.schema.json".to_string()),
+            ]
+        );
+        let saga: BaseContractManifest = toml::from_str(
+            r#"
+id = "billing.checkout"
+kind = "saga"
+domain = "billing"
+version = "v1"
+owner = "billing"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
+
+[saga]
+compensationOrder = "reverse"
+retryMillis = 5000
+timeoutMillis = 30000
+steps = [
+    { name = "reserve_funds", outputSchema = "reserve.schema.json" },
+    { name = "capture", outputSchema = "capture.schema.json" },
+]
+"#,
+        )?;
+        assert_eq!(
+            base_slot_files(&saga),
+            vec![
+                ("payload".to_string(), "payload.schema.json".to_string()),
+                (
+                    "saga:reserve_funds".to_string(),
+                    "reserve.schema.json".to_string()
+                ),
+                (
+                    "saga:capture".to_string(),
+                    "capture.schema.json".to_string()
+                ),
+            ]
+        );
+        Ok(())
     }
 
     #[test]

@@ -23,3 +23,9 @@ reason = "refresh presents the refresh token as its own credential; access token
 
 [capabilities.localTx]
 boundary = "single-domain"
+txModel = "tenant-scoped-uow"
+retry = "bounded-transient"
+commitUnknown = "not-retryable"
+
+[effectProfile]
+effects = ["auth", "write", "transaction"]

@@ -7,7 +7,8 @@ kind = "http"
 domain = "audit"
 version = "v1"
 owner = "audit"
-# 纯读无事务无 outbox ⇒ LocalOnly(L0)；升 postgres adapter（读时链验证 + 池）时须复核是否升 L1。
+# 过渡保留旧 LocalOnly bucket；真实风险以 effectProfile 为准（write + cross-tenant-audit），非 strict L0。
+# 拆分或重分级留给 #1692。
 consistencyLevel = "LocalOnly"
 lifecycle = "active"
 # per-kind http 字段（#1035）：挂 Admin listener 的 operator 审计读取。
@@ -28,3 +29,6 @@ fields = [
 [schemas]
 request = "request.schema.json"
 response = "response.schema.json"
+
+[effectProfile]
+effects = ["auth", "read", "projection", "write", "cross-tenant-audit"]

@@ -21,3 +21,6 @@ permission = "identity:role:assign"
 role = "producer"
 atomicity = "same-transaction"
 emits = ["identity.role-assigned"]
+
+[effectProfile]
+effects = ["auth", "write", "transaction", "outbox", "publish"]

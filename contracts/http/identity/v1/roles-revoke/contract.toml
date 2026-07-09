@@ -21,3 +21,6 @@ permission = "identity:role:revoke"
 role = "producer"
 atomicity = "same-transaction"
 emits = ["identity.role-revoked"]
+
+[effectProfile]
+effects = ["auth", "write", "transaction", "outbox", "publish"]
