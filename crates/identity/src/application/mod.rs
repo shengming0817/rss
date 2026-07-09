@@ -3265,6 +3265,7 @@ mod tests {
                 "v1",
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             ),
+            consistency_level: generated::http::HttpConsistencyLevel::LocalOnly,
             path: "/api/v1/other/{resourceId}",
             method: "GET",
             auth: generated::http::HttpAuthSpec {

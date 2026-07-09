@@ -28,7 +28,7 @@ contracts/{kind}/{domain}/{version}/
 | `domain` | 域名或 `_` 前缀保留段 | 是 |
 | `version` | `v{N}` | 是 |
 | `owner` | 域名 或 `_framework`（provider-agnostic 中立契约归框架） | 是 |
-| `consistencyLevel` | `LocalOnly`/`LocalTx`/`OutboxFact`/`WorkflowEventual`/`DeviceLatent`（L0–L4） | 是 |
+| `consistencyLevel` | `LocalOnly`/`LocalTx`/`OutboxFact`/`WorkflowEventual`/`DeviceLatent`（L0–L4）；active HTTP codegen 同源派生为 `HttpSpec::consistency_level` | 是 |
 | `lifecycle` | `draft`/`active`/`deprecated`（`active` 才需 assembly 接线，见 contract-fanout.md） | 是 |
 | `[capabilities.localTx]` | L1 本地事务证据：`boundary = "single-domain"` | `consistencyLevel=LocalTx` 必填（R22）；其它等级禁止 stray block |
 | `[capabilities.outbox]` | L2 outbox 证据：`role = "fact"`（event）/`"command"`（command）/`"producer"`（http）。producer 还必须声明 `atomicity = "same-transaction"` 与非空 `emits = ["<event-contract-id>"]`；fact/command 禁止 producer-only `atomicity`/`emits` | `consistencyLevel=OutboxFact` 必填（R22）；HTTP producer 的 `emits` 必须指向存在的 L2 event；active HTTP producer 还要求目标 event 为 active 且声明 subscriber readiness |
@@ -154,7 +154,7 @@ contracts/{kind}/{domain}/{version}/
 
 per-kind 扩展字段（http 的 `path`/`method`、event 的 `topic`/`delivery`、saga 的 `[saga]` block、command 的 `topic`）已随 #1035 + #1124 落地（见上 §contract.toml 字段 + 校验规则 R8–R10 / R15）；属预期附加演进（新增 optional 字段不破坏既有契约解析），非破坏冻结。
 
-**codegen 消费面（例外）**：多数 per-kind 字段 codegen **不**消费（只读 `*.schema.json`），故 `generated/` 不受影响——但以下字段是 codegen 输入：① event `topic` + `[[subscriptions]]`/`[subscriptions.topology]` 派生 `generated/src/event/{domain}_{version}.rs` 的 `TOPIC` 与 `SUBSCRIPTIONS`（含 consumer group、partition key 策略、readiness gate）；② command `topic` 派生 `generated/src/command/{domain}_{version}.rs` 的 `pub const TOPIC`；③ active HTTP `path`/`method`/`endpoints.http.auth`/`endpoints.http.headers`/`endpoints.http.projection`/`endpoints.http.resourceSharing` 派生 `generated/src/http/{domain}_{version}.rs` 的 `SPEC: super::HttpSpec`（含 `CONTRACT`/`PATH`/auth/header/projection/resource sharing metadata），供 route code 与 Authorizer 消费。改这些字段必须跑 `cargo xtask codegen --check`（漂移门）并更新已提交 `generated/`。
+**codegen 消费面（例外）**：多数 per-kind 字段 codegen **不**消费（只读 `*.schema.json`），故 `generated/` 不受影响——但以下字段是 codegen 输入：① event `topic` + `[[subscriptions]]`/`[subscriptions.topology]` 派生 `generated/src/event/{domain}_{version}.rs` 的 `TOPIC` 与 `SUBSCRIPTIONS`（含 consumer group、partition key 策略、readiness gate）；② command `topic` 派生 `generated/src/command/{domain}_{version}.rs` 的 `pub const TOPIC`；③ active HTTP `consistencyLevel`/`path`/`method`/`endpoints.http.auth`/`endpoints.http.headers`/`endpoints.http.projection`/`endpoints.http.resourceSharing` 派生 `generated/src/http/{domain}_{version}.rs` 的 `SPEC: super::HttpSpec`（含 `CONTRACT`/`PATH`/consistency/auth/header/projection/resource sharing metadata），供 route code 与 Authorizer 消费。改这些字段必须跑 `cargo xtask codegen --check`（漂移门）并更新已提交 `generated/`。
 
 ### 字段级脱敏派生（codegen 单源，`INVARIANT: CONTRACT-REDACTION-POLICY-01`）
 

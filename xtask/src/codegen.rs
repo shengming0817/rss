@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
-    ContractKind, HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode, Lifecycle, WorkflowMode,
+    ConsistencyLevel, ContractKind, HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode,
+    Lifecycle, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -481,6 +482,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ClientsOnly => "ClientsOnly",
         HttpAuthMode::ServiceOwned => "ServiceOwned",
     };
+    let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
     let reason = render_option_str(auth.reason.as_deref(), "reason")?;
     let permission = render_option_route_permission_expr(auth.permission.as_deref(), "permission")?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
@@ -598,6 +600,7 @@ pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fie
 pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     contract_id: CONTRACT_ID,
     contract: CONTRACT,
+    consistency_level: {sup}HttpConsistencyLevel::{consistency_level},
     path: PATH,
     method: "{method}",
     auth: {sup}HttpAuthSpec {{
@@ -618,6 +621,16 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
         method = method.as_wire(),
     ));
     Ok(out)
+}
+
+fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
+    match level {
+        ConsistencyLevel::LocalOnly => "LocalOnly",
+        ConsistencyLevel::LocalTx => "LocalTx",
+        ConsistencyLevel::OutboxFact => "OutboxFact",
+        ConsistencyLevel::WorkflowEventual => "WorkflowEventual",
+        ConsistencyLevel::DeviceLatent => "DeviceLatent",
+    }
 }
 
 fn render_option_str(value: Option<&str>, field: &str) -> Result<String> {
@@ -1166,6 +1179,7 @@ const HTTP_SPEC_DEF: &str = r#"
 pub struct HttpSpec {
     pub contract_id: &'static str,
     pub contract: ::vocab::ContractBinding,
+    pub consistency_level: HttpConsistencyLevel,
     pub path: &'static str,
     pub method: &'static str,
     pub auth: HttpAuthSpec,
@@ -1174,6 +1188,15 @@ pub struct HttpSpec {
     pub resource_sharing: HttpResourceSharingSpec,
     pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpConsistencyLevel {
+    LocalOnly,
+    LocalTx,
+    OutboxFact,
+    WorkflowEventual,
+    DeviceLatent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2317,6 +2340,54 @@ mod tests {
             "active global HTTP spec 应进入 root SPECS registry",
         );
         Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_http_consistency_level_into_spec() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &root_mod,
+            "pub enum HttpConsistencyLevel",
+            "HTTP root module should expose closed consistency metadata enum",
+        );
+        assert_generated_contains(
+            &rendered,
+            "consistency_level: super::HttpConsistencyLevel::LocalOnly",
+            "endpoint SPEC should carry manifest consistencyLevel",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_all_http_consistency_level_variants() {
+        for (level, expected) in [
+            (ConsistencyLevel::LocalOnly, "LocalOnly"),
+            (ConsistencyLevel::LocalTx, "LocalTx"),
+            (ConsistencyLevel::OutboxFact, "OutboxFact"),
+            (ConsistencyLevel::WorkflowEventual, "WorkflowEventual"),
+            (ConsistencyLevel::DeviceLatent, "DeviceLatent"),
+        ] {
+            assert_eq!(
+                render_http_consistency_level(level),
+                expected,
+                "HTTP consistencyLevel manifest variant should map to generated enum variant"
+            );
+        }
     }
 
     #[test]

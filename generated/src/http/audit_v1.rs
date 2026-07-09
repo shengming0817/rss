@@ -327,6 +327,7 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
 pub const SPEC: super::HttpSpec = super::HttpSpec {
     contract_id: CONTRACT_ID,
     contract: CONTRACT,
+    consistency_level: super::HttpConsistencyLevel::LocalOnly,
     path: PATH,
     method: "GET",
     auth: super::HttpAuthSpec {

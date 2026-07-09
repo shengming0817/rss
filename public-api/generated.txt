@@ -1430,6 +1430,137 @@ pub const generated::http::audit_v1::CONTRACT_ID: &str
 pub const generated::http::audit_v1::PATH: &str
 pub const generated::http::audit_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::audit_v1::SPEC: generated::http::HttpSpec
+pub mod generated::http::audit_v2
+pub mod generated::http::audit_v2::error
+pub struct generated::http::audit_v2::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::audit_v2::error::ConversionError
+pub fn generated::http::audit_v2::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::audit_v2::error::ConversionError
+pub fn generated::http::audit_v2::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::audit_v2::error::ConversionError
+impl core::fmt::Debug for generated::http::audit_v2::error::ConversionError
+pub fn generated::http::audit_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::audit_v2::error::ConversionError
+pub fn generated::http::audit_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::audit_v2::error::ConversionError
+impl core::marker::Send for generated::http::audit_v2::error::ConversionError
+impl core::marker::Sync for generated::http::audit_v2::error::ConversionError
+impl core::marker::Unpin for generated::http::audit_v2::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::audit_v2::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v2::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::error::ConversionError
+impl<T, U> core::convert::Into<U> for generated::http::audit_v2::error::ConversionError where U: core::convert::From<T>
+pub fn generated::http::audit_v2::error::ConversionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v2::error::ConversionError where U: core::convert::Into<T>
+pub type generated::http::audit_v2::error::ConversionError::Error = core::convert::Infallible
+pub fn generated::http::audit_v2::error::ConversionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v2::error::ConversionError where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v2::error::ConversionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v2::error::ConversionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for generated::http::audit_v2::error::ConversionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::http::audit_v2::error::ConversionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::http::audit_v2::error::ConversionError where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v2::error::ConversionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v2::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::audit_v2::error::ConversionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v2::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::audit_v2::error::ConversionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for generated::http::audit_v2::error::ConversionError
+pub fn generated::http::audit_v2::error::ConversionError::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::audit_v2::error::ConversionError
+pub type generated::http::audit_v2::error::ConversionError::Output = T
+pub struct generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::clone::Clone for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::clone(&self) -> generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::default::Default for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::default() -> Self
+impl core::fmt::Debug for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::marker::Send for generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::marker::Sync for generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::marker::Unpin for generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::marker::UnsafeUnpin for generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v2::AuditSessionProjectionRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::AuditSessionProjectionRequest
+impl<T, U> core::convert::Into<U> for generated::http::audit_v2::AuditSessionProjectionRequest where U: core::convert::From<T>
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v2::AuditSessionProjectionRequest where U: core::convert::Into<T>
+pub type generated::http::audit_v2::AuditSessionProjectionRequest::Error = core::convert::Infallible
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v2::AuditSessionProjectionRequest where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v2::AuditSessionProjectionRequest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v2::AuditSessionProjectionRequest where T: core::clone::Clone
+pub type generated::http::audit_v2::AuditSessionProjectionRequest::Owned = T
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::clone_into(&self, &mut T)
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v2::AuditSessionProjectionRequest where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v2::AuditSessionProjectionRequest where T: ?core::marker::Sized
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v2::AuditSessionProjectionRequest where T: ?core::marker::Sized
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v2::AuditSessionProjectionRequest where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v2::AuditSessionProjectionRequest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v2::AuditSessionProjectionRequest
+pub fn generated::http::audit_v2::AuditSessionProjectionRequest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v2::AuditSessionProjectionRequest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v2::AuditSessionProjectionRequest
+pub type generated::http::audit_v2::AuditSessionProjectionRequest::Output = T
+pub struct generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::clone::Clone for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::clone(&self) -> generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::default::Default for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::default() -> Self
+impl core::fmt::Debug for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::marker::Send for generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::marker::Sync for generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::marker::Unpin for generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::marker::UnsafeUnpin for generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v2::AuditSessionProjectionResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::AuditSessionProjectionResponse
+impl<T, U> core::convert::Into<U> for generated::http::audit_v2::AuditSessionProjectionResponse where U: core::convert::From<T>
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v2::AuditSessionProjectionResponse where U: core::convert::Into<T>
+pub type generated::http::audit_v2::AuditSessionProjectionResponse::Error = core::convert::Infallible
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v2::AuditSessionProjectionResponse where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v2::AuditSessionProjectionResponse::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v2::AuditSessionProjectionResponse where T: core::clone::Clone
+pub type generated::http::audit_v2::AuditSessionProjectionResponse::Owned = T
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::clone_into(&self, &mut T)
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v2::AuditSessionProjectionResponse where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v2::AuditSessionProjectionResponse where T: ?core::marker::Sized
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v2::AuditSessionProjectionResponse where T: ?core::marker::Sized
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v2::AuditSessionProjectionResponse where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v2::AuditSessionProjectionResponse::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v2::AuditSessionProjectionResponse
+pub fn generated::http::audit_v2::AuditSessionProjectionResponse::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v2::AuditSessionProjectionResponse where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v2::AuditSessionProjectionResponse
+pub type generated::http::audit_v2::AuditSessionProjectionResponse::Output = T
+pub const generated::http::audit_v2::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v2::CONTRACT_ID: &str
 pub mod generated::http::identity_v1
 pub mod generated::http::identity_v1::login
 pub mod generated::http::identity_v1::login::error
@@ -6119,6 +6250,137 @@ pub const generated::http::identity_v1::roles_revoke::CONTRACT_ID: &str
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
 pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
+pub mod generated::http::identity_v2
+pub mod generated::http::identity_v2::error
+pub struct generated::http::identity_v2::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::identity_v2::error::ConversionError
+pub fn generated::http::identity_v2::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::identity_v2::error::ConversionError
+pub fn generated::http::identity_v2::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::identity_v2::error::ConversionError
+impl core::fmt::Debug for generated::http::identity_v2::error::ConversionError
+pub fn generated::http::identity_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::identity_v2::error::ConversionError
+pub fn generated::http::identity_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::identity_v2::error::ConversionError
+impl core::marker::Send for generated::http::identity_v2::error::ConversionError
+impl core::marker::Sync for generated::http::identity_v2::error::ConversionError
+impl core::marker::Unpin for generated::http::identity_v2::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::error::ConversionError
+impl<T, U> core::convert::Into<U> for generated::http::identity_v2::error::ConversionError where U: core::convert::From<T>
+pub fn generated::http::identity_v2::error::ConversionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::identity_v2::error::ConversionError where U: core::convert::Into<T>
+pub type generated::http::identity_v2::error::ConversionError::Error = core::convert::Infallible
+pub fn generated::http::identity_v2::error::ConversionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::identity_v2::error::ConversionError where U: core::convert::TryFrom<T>
+pub type generated::http::identity_v2::error::ConversionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::identity_v2::error::ConversionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for generated::http::identity_v2::error::ConversionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::http::identity_v2::error::ConversionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::http::identity_v2::error::ConversionError where T: 'static + ?core::marker::Sized
+pub fn generated::http::identity_v2::error::ConversionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::identity_v2::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::identity_v2::error::ConversionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::identity_v2::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::identity_v2::error::ConversionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for generated::http::identity_v2::error::ConversionError
+pub fn generated::http::identity_v2::error::ConversionError::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::identity_v2::error::ConversionError
+pub type generated::http::identity_v2::error::ConversionError::Output = T
+pub struct generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::clone::Clone for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::clone(&self) -> generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::default::Default for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::default() -> Self
+impl core::fmt::Debug for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::marker::Send for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::marker::Sync for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::marker::Unpin for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::IdentityReconcileLoopRequest
+impl<T, U> core::convert::Into<U> for generated::http::identity_v2::IdentityReconcileLoopRequest where U: core::convert::From<T>
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::identity_v2::IdentityReconcileLoopRequest where U: core::convert::Into<T>
+pub type generated::http::identity_v2::IdentityReconcileLoopRequest::Error = core::convert::Infallible
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::identity_v2::IdentityReconcileLoopRequest where U: core::convert::TryFrom<T>
+pub type generated::http::identity_v2::IdentityReconcileLoopRequest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::identity_v2::IdentityReconcileLoopRequest where T: core::clone::Clone
+pub type generated::http::identity_v2::IdentityReconcileLoopRequest::Owned = T
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::clone_into(&self, &mut T)
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::identity_v2::IdentityReconcileLoopRequest where T: 'static + ?core::marker::Sized
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::identity_v2::IdentityReconcileLoopRequest where T: ?core::marker::Sized
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::identity_v2::IdentityReconcileLoopRequest where T: ?core::marker::Sized
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::identity_v2::IdentityReconcileLoopRequest where T: core::clone::Clone
+pub unsafe fn generated::http::identity_v2::IdentityReconcileLoopRequest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub fn generated::http::identity_v2::IdentityReconcileLoopRequest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::identity_v2::IdentityReconcileLoopRequest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::identity_v2::IdentityReconcileLoopRequest
+pub type generated::http::identity_v2::IdentityReconcileLoopRequest::Output = T
+pub struct generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::clone::Clone for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::clone(&self) -> generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::default::Default for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::default() -> Self
+impl core::fmt::Debug for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::marker::Send for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::marker::Sync for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::marker::Unpin for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::IdentityReconcileLoopResponse
+impl<T, U> core::convert::Into<U> for generated::http::identity_v2::IdentityReconcileLoopResponse where U: core::convert::From<T>
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::identity_v2::IdentityReconcileLoopResponse where U: core::convert::Into<T>
+pub type generated::http::identity_v2::IdentityReconcileLoopResponse::Error = core::convert::Infallible
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::identity_v2::IdentityReconcileLoopResponse where U: core::convert::TryFrom<T>
+pub type generated::http::identity_v2::IdentityReconcileLoopResponse::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::identity_v2::IdentityReconcileLoopResponse where T: core::clone::Clone
+pub type generated::http::identity_v2::IdentityReconcileLoopResponse::Owned = T
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::clone_into(&self, &mut T)
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::identity_v2::IdentityReconcileLoopResponse where T: 'static + ?core::marker::Sized
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::identity_v2::IdentityReconcileLoopResponse where T: ?core::marker::Sized
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::identity_v2::IdentityReconcileLoopResponse where T: ?core::marker::Sized
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::identity_v2::IdentityReconcileLoopResponse where T: core::clone::Clone
+pub unsafe fn generated::http::identity_v2::IdentityReconcileLoopResponse::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub fn generated::http::identity_v2::IdentityReconcileLoopResponse::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::identity_v2::IdentityReconcileLoopResponse where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::identity_v2::IdentityReconcileLoopResponse
+pub type generated::http::identity_v2::IdentityReconcileLoopResponse::Output = T
+pub const generated::http::identity_v2::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::identity_v2::CONTRACT_ID: &str
 pub mod generated::http::settings_v1
 pub mod generated::http::settings_v1::error
 pub struct generated::http::settings_v1::error::ConversionError(_)
@@ -6479,6 +6741,137 @@ pub const generated::http::settings_v2::CONTRACT_ID: &str
 pub const generated::http::settings_v2::PATH: &str
 pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v2::SPEC: generated::http::HttpSpec
+pub mod generated::http::settings_v3
+pub mod generated::http::settings_v3::error
+pub struct generated::http::settings_v3::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::settings_v3::error::ConversionError
+pub fn generated::http::settings_v3::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::settings_v3::error::ConversionError
+pub fn generated::http::settings_v3::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::settings_v3::error::ConversionError
+impl core::fmt::Debug for generated::http::settings_v3::error::ConversionError
+pub fn generated::http::settings_v3::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::settings_v3::error::ConversionError
+pub fn generated::http::settings_v3::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::settings_v3::error::ConversionError
+impl core::marker::Send for generated::http::settings_v3::error::ConversionError
+impl core::marker::Sync for generated::http::settings_v3::error::ConversionError
+impl core::marker::Unpin for generated::http::settings_v3::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::settings_v3::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v3::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v3::error::ConversionError
+impl<T, U> core::convert::Into<U> for generated::http::settings_v3::error::ConversionError where U: core::convert::From<T>
+pub fn generated::http::settings_v3::error::ConversionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::settings_v3::error::ConversionError where U: core::convert::Into<T>
+pub type generated::http::settings_v3::error::ConversionError::Error = core::convert::Infallible
+pub fn generated::http::settings_v3::error::ConversionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::settings_v3::error::ConversionError where U: core::convert::TryFrom<T>
+pub type generated::http::settings_v3::error::ConversionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::settings_v3::error::ConversionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for generated::http::settings_v3::error::ConversionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::http::settings_v3::error::ConversionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::http::settings_v3::error::ConversionError where T: 'static + ?core::marker::Sized
+pub fn generated::http::settings_v3::error::ConversionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::settings_v3::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::settings_v3::error::ConversionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::settings_v3::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::settings_v3::error::ConversionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for generated::http::settings_v3::error::ConversionError
+pub fn generated::http::settings_v3::error::ConversionError::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::settings_v3::error::ConversionError
+pub type generated::http::settings_v3::error::ConversionError::Output = T
+pub struct generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::clone::Clone for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::clone(&self) -> generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::default::Default for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::default() -> Self
+impl core::fmt::Debug for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::marker::Send for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::marker::Sync for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::marker::Unpin for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::marker::UnsafeUnpin for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v3::SettingsConfigProjectionRequest
+impl<T, U> core::convert::Into<U> for generated::http::settings_v3::SettingsConfigProjectionRequest where U: core::convert::From<T>
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::settings_v3::SettingsConfigProjectionRequest where U: core::convert::Into<T>
+pub type generated::http::settings_v3::SettingsConfigProjectionRequest::Error = core::convert::Infallible
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::settings_v3::SettingsConfigProjectionRequest where U: core::convert::TryFrom<T>
+pub type generated::http::settings_v3::SettingsConfigProjectionRequest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::settings_v3::SettingsConfigProjectionRequest where T: core::clone::Clone
+pub type generated::http::settings_v3::SettingsConfigProjectionRequest::Owned = T
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::clone_into(&self, &mut T)
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::settings_v3::SettingsConfigProjectionRequest where T: 'static + ?core::marker::Sized
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::settings_v3::SettingsConfigProjectionRequest where T: ?core::marker::Sized
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::settings_v3::SettingsConfigProjectionRequest where T: ?core::marker::Sized
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::settings_v3::SettingsConfigProjectionRequest where T: core::clone::Clone
+pub unsafe fn generated::http::settings_v3::SettingsConfigProjectionRequest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::settings_v3::SettingsConfigProjectionRequest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::settings_v3::SettingsConfigProjectionRequest
+pub type generated::http::settings_v3::SettingsConfigProjectionRequest::Output = T
+pub struct generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::clone::Clone for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::clone(&self) -> generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::default::Default for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::default() -> Self
+impl core::fmt::Debug for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::marker::Send for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::marker::Sync for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::marker::Unpin for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::marker::UnsafeUnpin for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v3::SettingsConfigProjectionResponse
+impl<T, U> core::convert::Into<U> for generated::http::settings_v3::SettingsConfigProjectionResponse where U: core::convert::From<T>
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::settings_v3::SettingsConfigProjectionResponse where U: core::convert::Into<T>
+pub type generated::http::settings_v3::SettingsConfigProjectionResponse::Error = core::convert::Infallible
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::settings_v3::SettingsConfigProjectionResponse where U: core::convert::TryFrom<T>
+pub type generated::http::settings_v3::SettingsConfigProjectionResponse::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::settings_v3::SettingsConfigProjectionResponse where T: core::clone::Clone
+pub type generated::http::settings_v3::SettingsConfigProjectionResponse::Owned = T
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::clone_into(&self, &mut T)
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::settings_v3::SettingsConfigProjectionResponse where T: 'static + ?core::marker::Sized
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::settings_v3::SettingsConfigProjectionResponse where T: ?core::marker::Sized
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::settings_v3::SettingsConfigProjectionResponse where T: ?core::marker::Sized
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::settings_v3::SettingsConfigProjectionResponse where T: core::clone::Clone
+pub unsafe fn generated::http::settings_v3::SettingsConfigProjectionResponse::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::settings_v3::SettingsConfigProjectionResponse where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::settings_v3::SettingsConfigProjectionResponse
+pub type generated::http::settings_v3::SettingsConfigProjectionResponse::Output = T
+pub const generated::http::settings_v3::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::settings_v3::CONTRACT_ID: &str
 pub enum generated::http::HttpAuthMode
 pub generated::http::HttpAuthMode::Bootstrap
 pub generated::http::HttpAuthMode::ClientsOnly
@@ -6525,6 +6918,52 @@ impl<T> core::convert::From<T> for generated::http::HttpAuthMode
 pub fn generated::http::HttpAuthMode::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::http::HttpAuthMode
 pub type generated::http::HttpAuthMode::Output = T
+pub enum generated::http::HttpConsistencyLevel
+pub generated::http::HttpConsistencyLevel::DeviceLatent
+pub generated::http::HttpConsistencyLevel::LocalOnly
+pub generated::http::HttpConsistencyLevel::LocalTx
+pub generated::http::HttpConsistencyLevel::OutboxFact
+pub generated::http::HttpConsistencyLevel::WorkflowEventual
+impl core::clone::Clone for generated::http::HttpConsistencyLevel
+pub fn generated::http::HttpConsistencyLevel::clone(&self) -> generated::http::HttpConsistencyLevel
+impl core::cmp::Eq for generated::http::HttpConsistencyLevel
+impl core::cmp::PartialEq for generated::http::HttpConsistencyLevel
+pub fn generated::http::HttpConsistencyLevel::eq(&self, &generated::http::HttpConsistencyLevel) -> bool
+impl core::fmt::Debug for generated::http::HttpConsistencyLevel
+pub fn generated::http::HttpConsistencyLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::HttpConsistencyLevel
+impl core::marker::StructuralPartialEq for generated::http::HttpConsistencyLevel
+impl core::marker::Freeze for generated::http::HttpConsistencyLevel
+impl core::marker::Send for generated::http::HttpConsistencyLevel
+impl core::marker::Sync for generated::http::HttpConsistencyLevel
+impl core::marker::Unpin for generated::http::HttpConsistencyLevel
+impl core::marker::UnsafeUnpin for generated::http::HttpConsistencyLevel
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpConsistencyLevel
+impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpConsistencyLevel
+impl<T, U> core::convert::Into<U> for generated::http::HttpConsistencyLevel where U: core::convert::From<T>
+pub fn generated::http::HttpConsistencyLevel::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::HttpConsistencyLevel where U: core::convert::Into<T>
+pub type generated::http::HttpConsistencyLevel::Error = core::convert::Infallible
+pub fn generated::http::HttpConsistencyLevel::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::HttpConsistencyLevel where U: core::convert::TryFrom<T>
+pub type generated::http::HttpConsistencyLevel::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::HttpConsistencyLevel::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::HttpConsistencyLevel where T: core::clone::Clone
+pub type generated::http::HttpConsistencyLevel::Owned = T
+pub fn generated::http::HttpConsistencyLevel::clone_into(&self, &mut T)
+pub fn generated::http::HttpConsistencyLevel::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::HttpConsistencyLevel where T: 'static + ?core::marker::Sized
+pub fn generated::http::HttpConsistencyLevel::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::HttpConsistencyLevel where T: ?core::marker::Sized
+pub fn generated::http::HttpConsistencyLevel::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::HttpConsistencyLevel where T: ?core::marker::Sized
+pub fn generated::http::HttpConsistencyLevel::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::HttpConsistencyLevel where T: core::clone::Clone
+pub unsafe fn generated::http::HttpConsistencyLevel::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::HttpConsistencyLevel
+pub fn generated::http::HttpConsistencyLevel::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::HttpConsistencyLevel
+pub type generated::http::HttpConsistencyLevel::Output = T
 pub enum generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderMode::PopulateOnly
 pub generated::http::HttpHeaderMode::ServiceTokenTenantBound
@@ -6788,6 +7227,7 @@ impl<T> typenum::type_operators::Same for generated::http::HttpResourceSharingSp
 pub type generated::http::HttpResourceSharingSpec::Output = T
 pub struct generated::http::HttpSpec
 pub generated::http::HttpSpec::auth: generated::http::HttpAuthSpec
+pub generated::http::HttpSpec::consistency_level: generated::http::HttpConsistencyLevel
 pub generated::http::HttpSpec::contract: vocab::contract::binding::ContractBinding
 pub generated::http::HttpSpec::contract_id: &'static str
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]

@@ -5,6 +5,7 @@
 pub struct HttpSpec {
     pub contract_id: &'static str,
     pub contract: ::vocab::ContractBinding,
+    pub consistency_level: HttpConsistencyLevel,
     pub path: &'static str,
     pub method: &'static str,
     pub auth: HttpAuthSpec,
@@ -13,6 +14,15 @@ pub struct HttpSpec {
     pub resource_sharing: HttpResourceSharingSpec,
     pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpConsistencyLevel {
+    LocalOnly,
+    LocalTx,
+    OutboxFact,
+    WorkflowEventual,
+    DeviceLatent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

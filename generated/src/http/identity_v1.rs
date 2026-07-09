@@ -200,6 +200,7 @@ pub mod login {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -362,6 +363,7 @@ pub mod logout {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalTx,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -528,6 +530,7 @@ pub mod password_change {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalTx,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -2387,6 +2390,7 @@ pub mod policies_create {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -2560,6 +2564,7 @@ pub mod policies_deactivate {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -3463,6 +3468,7 @@ pub mod policies_get {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -4421,6 +4427,7 @@ pub mod policies_list {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -6282,6 +6289,7 @@ pub mod policies_update {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
         path: PATH,
         method: "PUT",
         auth: super::super::HttpAuthSpec {
@@ -6577,6 +6585,7 @@ pub mod profile {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -6764,6 +6773,7 @@ pub mod refresh {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalTx,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -6926,6 +6936,7 @@ pub mod roles_assign {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -7159,6 +7170,7 @@ pub mod roles_list {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -7310,6 +7322,7 @@ pub mod roles_revoke {
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
+        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
         path: PATH,
         method: "DELETE",
         auth: super::super::HttpAuthSpec {

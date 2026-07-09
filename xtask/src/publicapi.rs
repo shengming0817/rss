@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_public_api_golden_exposes_protection_metadata_only() -> anyhow::Result<()> {
+    fn generated_public_api_golden_exposes_generated_metadata_surfaces() -> anyhow::Result<()> {
         let baseline = std::fs::read_to_string(baseline_dir()?.join("generated.txt"))?;
         for required in [
             "pub trait generated::FieldProtectionMetadata",
@@ -380,10 +380,17 @@ mod tests {
             "pub enum generated::ProtectionAadDim",
             "pub enum generated::ProtectionAtRest",
             "pub enum generated::ProtectionMode",
+            "pub enum generated::http::HttpConsistencyLevel",
+            "pub generated::http::HttpConsistencyLevel::LocalOnly",
+            "pub generated::http::HttpConsistencyLevel::LocalTx",
+            "pub generated::http::HttpConsistencyLevel::OutboxFact",
+            "pub generated::http::HttpConsistencyLevel::WorkflowEventual",
+            "pub generated::http::HttpConsistencyLevel::DeviceLatent",
+            "pub generated::http::HttpSpec::consistency_level: generated::http::HttpConsistencyLevel",
         ] {
             assert!(
                 baseline.contains(required),
-                "generated public-api golden 缺少字段保护 metadata API: {required}"
+                "generated public-api golden 缺少 metadata API: {required}"
             );
         }
         for forbidden in [
