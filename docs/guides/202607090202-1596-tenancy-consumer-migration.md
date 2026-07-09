@@ -1,0 +1,135 @@
+# Tenancy / ABAC consumer migration guide
+
+本指南面向下游 HTTP/gRPC route、domain service、read-model 和 operator consumer。规则单源仍是
+`docs/rules/tenancy.md`；本文件只把当前可消费模式和反例收敛到一个迁移入口。可编译示例见
+`examples/tenancy-consumer`。
+
+## AuthZ mode
+
+active HTTP contract 必须声明一个 AuthZ mode。缺 mode、同时声明 mode、或 permission/reason 组合不合法时，
+`cargo xtask contract validate` 和 codegen 都 fail-closed。
+
+```toml
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:profile:read"
+```
+
+`permission` mode 进入 `generated::http::*::SPEC.auth.permission`，route 装配用
+`httpserve::PrimaryRoute::permission` 和 `httpserve::RoutePermission`。运行时由
+`RouteAuthorizer` 做 coarse route/resource allow/deny，handler 只消费 gate 插入的
+`AuthorizedSubject`，不得回读 `Authenticated` 或手写 role literal。
+
+public/pre-auth endpoint 只能用显式 opt-out，并且必须写 reason：
+
+```toml
+[endpoints.http.auth]
+mode = "public"
+reason = "login is pre-auth; tenant scope is populated from X-Tenant-ID"
+
+[endpoints.http.headers]
+"X-Tenant-ID" = "populate-only"
+```
+
+这是 `identity.login` 的模式。`populate-only` 只把 tenant 填入 pre-auth login 上下文，不代表 header
+本身有 cryptographic authenticity。
+
+service-owned endpoint 使用 service token 时必须声明 tenant-bound header：
+
+```toml
+[endpoints.http.auth]
+mode = "serviceOwned"
+reason = "internal service endpoint"
+
+[endpoints.http.headers]
+"X-Tenant-ID" = "service-token-tenant-bound"
+```
+
+`service-token-tenant-bound` 走 `diport::ServiceTokenTenantBinding` 和 `service_token_mac_input`，把 canonical
+`X-Tenant-ID` 纳入 HS256 MAC 输入。缺 header、重复 header、非 canonical tenant、旧未绑定 token 或绑定
+tenant 不一致都必须 401。
+
+## Tenant source
+
+tenant scope 只能来自已声明入口：
+
+- JWT tenant claim，经 auth bridge 写入 request context。
+- `X-Tenant-ID = "populate-only"`，仅 public/pre-auth 填充路径使用。
+- `X-Tenant-ID = "service-token-tenant-bound"`，仅 serviceOwned service-token MAC 绑定路径使用。
+
+request body `tenantId` 不是 tenant source。body 不在 service-token tenant header MAC 绑定输入内，因此
+HTTP request schema 不得声明 `tenantId`。唯一当前例外是 `audit.list-entries` 的 GET query `tenantId`，
+它表示 audited SuperAdmin 读取的 target tenant，不是 ambient tenant。
+
+## HTTP examples
+
+`identity.login`:
+
+- `mode = "public"`，带 `reason`。
+- header 声明 `"X-Tenant-ID" = "populate-only"`。
+- request body 只有 `username` / `password`，不含 tenant。
+
+`identity.profile`:
+
+- `mode = "permission"`，permission 为 `identity:profile:read`。
+- `[endpoints.http] selfScoped = true`。
+- protected response fields `data.subject` 和 `data.tenantId` enroll 到 `[endpoints.http.projection]`。
+
+`audit.list-entries`:
+
+- `mode = "permission"`，permission 为 `audit:read`。
+- `audit.list-entries` 的 query `tenantId` 只用于 audited SuperAdmin target tenant。
+- response 中 `data[].tenantId`、`data[].actor`、`data[].resourceId` 通过 `ResourceProjection` 默认 mask。
+
+role assign/revoke:
+
+- `identity.roles-assign` permission 为 `identity:role:assign`。
+- `identity.roles-revoke` permission 为 `identity:role:revoke`。
+- handler 不能比较 role name 或 `PrincipalKind::Admin` 来绕过 route permission。
+
+## Row and field obligations
+
+`RowVisibility` 是 sealed row obligation。普通 user/device/admin 分别映射到 self/device/tenant scope。
+`RowScope::All` 不从普通 `Principal::row_visibility` 签发；跨租户读必须经 audited
+`Principal::audited_cross_tenant_visibility(...)`，先 durable audit append 成功，再发 sealed capability。
+
+`ResourceProjection` 是 field obligation carrier。coarse allow 不等于字段明文 allow：
+
+- 缺 projection 时 protected fields 默认渲染为 `"<redacted>"`。
+- explicit unmask 只能来自 `RouteAuthorizationDecision::AllowWithProjection`。
+- handler/rendering layer 消费 `AuthorizedSubject::projection()` 或 admin read 中同等 projection，不读取 role、
+  permission string 或 durable policy 细节。
+
+## gRPC target pattern
+
+gRPC 当前以 `docs/rules/tenancy.md` 为目标规则：非 public RPC 要通过契约 overlay 声明 permission；
+owner-scoped RPC 要声明 resource extraction；deny response 使用 sealed ErrorInfo，metadata 不带 subject、
+token 或 resource value。#1596 不新增 `contracts/grpc` 或 runtime gRPC implementation。
+
+## Anti-patterns
+
+- Do not put tenant in body: request body `tenantId` is rejected by contract validate/codegen.
+- Do not compare role literals: use `GrantPermission::Route(...)` and `RoutePermissionId`.
+- Do not make handler-local authz decisions from `Principal.roles`, `PrincipalKind`, `authn::any_role`,
+  `authn::self_or`, or `authn::require_any_role`.
+- Do not treat ABAC as the tenant boundary. Tenant isolation remains typed `TenantId`, service-token tenant binding,
+  `SET LOCAL rss.tenant_id`, FORCE RLS, and non-bypass serving role.
+- Do not treat RLS as `RouteAuthorizer`. RLS protects rows; route permission/resource decisions stay in
+  `RouteAuthorizer`.
+
+## Verification
+
+For consumer-facing changes run:
+
+```bash
+cargo check -p tenancyconsumer
+cargo run -p tenancyconsumer
+cargo test -p xtask tenancy_closeout
+cargo xtask tenancy-closeout
+cargo xtask contract validate
+```
+
+`cargo check -p tenancyconsumer` is the Hard compile check for shipped example code. `cargo test -p xtask
+tenancy_closeout` compiles the generated-spec smoke test from the allowed `xtask -> generated` wrapper instead of adding
+an `examples/** -> generated` dependency. `cargo xtask tenancy-closeout` is the Medium reverse self-check that keeps this
+guide, the example, and the closeout docs linked.

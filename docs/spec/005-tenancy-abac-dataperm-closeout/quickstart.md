@@ -13,6 +13,8 @@ cargo test --workspace
 
 ```bash
 cargo test -p xtask tenancy_closeout
+cargo check -p tenancyconsumer
+cargo run -p tenancyconsumer
 cargo xtask tenancy-closeout
 cargo xtask doc-contracts
 cargo xtask archrules verify
@@ -31,6 +33,8 @@ For documentation boundary PBIs such as #1587, use the no-compile governance lan
 
 ```bash
 cargo test -p xtask tenancy_closeout
+cargo check -p tenancyconsumer
+cargo run -p tenancyconsumer
 cargo xtask tenancy-closeout
 cargo xtask doc-contracts
 cargo xtask archrules verify

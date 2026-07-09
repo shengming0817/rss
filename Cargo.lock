@@ -5840,6 +5840,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tenancyconsumer"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "httpserve",
+ "vocab",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7113,6 +7122,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "consistency",
+ "generated",
  "prettyplease",
  "proc-macro2",
  "quote",

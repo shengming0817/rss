@@ -52,6 +52,7 @@ const AUTHZ_PARITY_DOCS: &[&str] = &[
     AUTHZ_PARITY_ADR_PATH,
     "docs/rules/tenancy.md",
     "docs/architecture/202606232318-006-pdp-internal-authplan-vs-external-opa.md",
+    TENANCY_CONSUMER_GUIDE_PATH,
     "docs/spec/005-tenancy-abac-dataperm-closeout/research.md",
     "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
     "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
@@ -109,6 +110,12 @@ const AUTHZ_PARITY_FORBIDDEN_CLAIMS: &[&str] = &[
     "FieldMask equals encryption",
 ];
 
+const TENANCY_CONSUMER_GUIDE_PATH: &str =
+    "docs/guides/202607090202-1596-tenancy-consumer-migration.md";
+const TENANCY_CONSUMER_EXAMPLE_PATH: &str = "examples/tenancy-consumer/src/main.rs";
+const TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH: &str =
+    "xtask/tests/tenancy_closeout_generated_specs.rs";
+
 const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
     RequiredAnchor {
         rule: Rule::DocAnchor,
@@ -157,6 +164,114 @@ const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
         path: "docs/rules/tenancy.md",
         needle: "ResourceProjection",
         detail: "tenancy rule doc must keep the ResourceProjection anchor",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "Cargo.toml",
+        needle: "\"examples/tenancy-consumer\"",
+        detail: "tenancy consumer example must be a workspace member",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "docs/rules/tenancy.md",
+        needle: TENANCY_CONSUMER_GUIDE_PATH,
+        detail: "tenancy rule doc must link the consumer migration guide",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: AUTHZ_PARITY_ADR_PATH,
+        needle: TENANCY_CONSUMER_GUIDE_PATH,
+        detail: "authz parity ADR must link the consumer migration guide",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
+        needle: "#1596",
+        detail: "tenancy closeout tasks must track the consumer migration guide",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
+        needle: "cargo check -p tenancyconsumer",
+        detail: "tenancy closeout quickstart must include the compilable consumer example check",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
+        needle: "cargo test -p xtask tenancy_closeout",
+        detail: "tenancy closeout quickstart must include the generated-spec smoke test lane",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "service-token-tenant-bound",
+        detail: "consumer guide must document service-token tenant binding",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "populate-only",
+        detail: "consumer guide must document populate-only tenant header mode",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "RouteAuthorizer",
+        detail: "consumer guide must document route authorization entrypoint",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "AuthorizedSubject",
+        detail: "consumer guide must document handler authorization evidence",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "RowVisibility",
+        detail: "consumer guide must document row visibility consumption",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "ResourceProjection",
+        detail: "consumer guide must document field projection consumption",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "audit.list-entries",
+        detail: "consumer guide must document audit admin read semantics",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "request body `tenantId`",
+        detail: "consumer guide must reject request-body tenant source",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH,
+        needle: "generated::http::identity_v1::login::SPEC",
+        detail: "tenancy closeout generated-spec smoke test must compile against generated login spec",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_EXAMPLE_PATH,
+        needle: "PrimaryRoute::permission",
+        detail: "consumer example must compile against PrimaryRoute permission wiring",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_EXAMPLE_PATH,
+        needle: "RouteResourceScope::SelfSubject",
+        detail: "consumer example must compile against self-scoped route declaration",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_EXAMPLE_PATH,
+        needle: "ProjectionField::AuditActor",
+        detail: "consumer example must compile against projection field vocabulary",
     },
 ];
 
@@ -785,7 +900,14 @@ fn check_required_anchors(root: &Path) -> Result<Vec<Finding>> {
 }
 
 fn scan_required_anchor(anchor: &RequiredAnchor, content: &str) -> Vec<Finding> {
-    if content.contains(anchor.needle) {
+    let stripped;
+    let searchable = if anchor.path.ends_with(".rs") {
+        stripped = strip_rust_line_comments(content);
+        stripped.as_str()
+    } else {
+        content
+    };
+    if searchable.contains(anchor.needle) {
         Vec::new()
     } else {
         vec![finding(
@@ -1205,6 +1327,29 @@ members = [
         let findings = scan_required_anchor(&anchor, "ProjectionField::Other");
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::ProjectionAnchor);
+    }
+
+    #[test]
+    fn rust_source_required_anchor_ignores_line_comment_only() {
+        let anchor = RequiredAnchor {
+            rule: Rule::DocAnchor,
+            path: TENANCY_CONSUMER_EXAMPLE_PATH,
+            needle: "PrimaryRoute::permission",
+            detail: "must exist",
+        };
+        let findings = scan_required_anchor(
+            &anchor,
+            r#"
+fn main() {
+    // PrimaryRoute::permission
+}
+"#,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].subject.contains("PrimaryRoute::permission"),
+            "{findings:?}"
+        );
     }
 
     #[test]

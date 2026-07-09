@@ -8,7 +8,7 @@
 
 **Organization**: Each user story maps to one or more PR-sized PBI work items. Every PBI is independently trackable in Azure Boards.
 
-**Tracking**: Feature #1576; child PBI #1577, #1579, #1580, #1581, #1582, #1583, #1584, #1585, #1586, #1587.
+**Tracking**: Feature #1576; child PBI #1577, #1579, #1580, #1581, #1582, #1583, #1584, #1585, #1586, #1587, #1596.
 
 ## Phase 1: Setup (Shared Infrastructure)
 
@@ -126,6 +126,14 @@
 - [x] T038 [US6] Link ADR-014 from `docs/rules/tenancy.md` and ADR-006, locking `diport::Pdp` vs `RouteAuthorizer` terminology
 - [x] T039 [US6] Extend `xtask/src/tenancy_closeout.rs` with required ADR/matrix anchors and misleading-claim checks
 - [x] T040 [US6] Record the #1587 research/verification path in this spec artifact
+
+## Phase 10: User Story 6 - Consumer Migration Guide (Priority: P3)
+
+**Goal**: Make the completed tenancy/AuthZ/projection model consumable by downstream route, service, and read-model authors.
+
+**Independent Test**: `cargo xtask tenancy-closeout` fails if the consumer guide, compilable example, or required AuthZ/tenant/projection anchors disappear; `cargo check -p tenancyconsumer` proves shipped example code uses current public types; `cargo test -p xtask tenancy_closeout` compiles the generated-spec smoke test.
+
+- [x] T041 [US6] Add #1596 consumer migration guide and `examples/tenancy-consumer` compile check
 
 ## Dependencies
 

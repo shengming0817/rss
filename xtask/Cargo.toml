@@ -25,6 +25,7 @@ semver = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+generated = { path = "../generated" }
 rstest = { workspace = true }
 
 [lints]

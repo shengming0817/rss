@@ -3,6 +3,9 @@
 本文件只保留当前行为约束。设计历史、分阶段计划和未来工作归 ADR、spec 或
 GitHub Issues。
 
+下游消费者迁移示例见 `docs/guides/202607090202-1596-tenancy-consumer-migration.md`；该指南和
+`examples/tenancy-consumer` 由 `cargo xtask tenancy-closeout` 反向自检锁定。
+
 ## TenantID
 
 `tenant::TenantId` 是隔离域边界类型。空值和 nil UUID 非法；非空必须是 canonical
