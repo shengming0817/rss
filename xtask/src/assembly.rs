@@ -26,6 +26,7 @@ const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
 const LOCK_STORE_PORT: &str = "diport::LockStore";
 const CAS_STORE_PORT: &str = "diport::CasStore";
 const OBJECT_STORE_PORT: &str = "diport::ObjectStore";
+const AUDIT_SINK_PORT: &str = "diport::AuditSink";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -70,6 +71,13 @@ pub(crate) enum Rule {
     ProductionSecurityJwksCloseout,
     /// production security closeout 必须有 SPIFFE/mTLS 证据且不得保留 service-token 迁移口。
     ProductionSecuritySpiffeCloseout,
+    /// domain/topology required capability 必须有 active persistent provider 或 exact Cargo dependency 事实。
+    ///
+    /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
+    /// domain→capability 静态表由 xtask 单源锁定；assembly 声明 domain/topology 后，缺失能力、draft
+    /// provider、ephemeral critical provider 必须被机器拒。anti-vacuity red/green tests 以
+    /// `assembly_capabilities_*` 前缀覆盖。
+    RequiredCapability,
 }
 
 pub(crate) struct AssemblyValidate;
@@ -233,6 +241,8 @@ pub(crate) enum DiportPort {
     Cas,
     #[serde(rename = "diport::ObjectStore")]
     ObjectStore,
+    #[serde(rename = "diport::AuditSink")]
+    AuditSink,
 }
 
 impl DiportPort {
@@ -248,6 +258,7 @@ impl DiportPort {
             Self::Lock => LOCK_STORE_PORT,
             Self::Cas => CAS_STORE_PORT,
             Self::ObjectStore => OBJECT_STORE_PORT,
+            Self::AuditSink => AUDIT_SINK_PORT,
         }
     }
 }
@@ -264,6 +275,16 @@ pub(crate) enum ProviderLifecycle {
     Draft,
     Active,
     Deprecated,
+}
+
+impl fmt::Display for ProviderLifecycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Draft => f.write_str("draft"),
+            Self::Active => f.write_str("active"),
+            Self::Deprecated => f.write_str("deprecated"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -372,7 +393,6 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
             &a.manifest_label,
             "field=diportProviders 至少声明一个 provider，避免 assembly fact source 空转通过",
         ));
-        return findings;
     }
 
     for (index, provider) in a.manifest.diport_providers.iter().enumerate() {
@@ -479,6 +499,7 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
             }
         }
     }
+    validate_required_capabilities(a, &mut findings);
     if a.manifest.profile == AssemblyProfile::Production {
         validate_production_security_closeout(a, &mut findings);
     }
@@ -545,6 +566,304 @@ fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>)
             ));
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct DomainCapabilitySpec {
+    domain: &'static str,
+    capabilities: &'static [RequiredCapabilitySpec],
+}
+
+#[derive(Clone, Copy)]
+struct RequiredCapabilitySpec {
+    capability: &'static str,
+    expectation: RequiredCapabilityExpectation,
+}
+
+#[derive(Clone, Copy)]
+enum RequiredCapabilityExpectation {
+    CargoDependency {
+        dependency: &'static str,
+    },
+    ActivePersistentProvider {
+        port: DiportPort,
+        provider: &'static str,
+        provider_crate: &'static str,
+        consumer: &'static str,
+    },
+}
+
+const IDENTITY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
+    RequiredCapabilitySpec {
+        capability: "Pg",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "postgres",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "Signer",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::Signer,
+            provider: "vault::VaultSigner",
+            provider_crate: "vault",
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "Pdp",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::Pdp,
+            provider: "oidc::OidcProvider",
+            provider_crate: "oidc",
+            consumer: "httpserve",
+        },
+    },
+];
+
+const SETTINGS_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
+    RequiredCapabilitySpec {
+        capability: "Pg",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "postgres",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "VaultKeyProvider",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::KeyProvider,
+            provider: "vault::VaultKeyProvider",
+            provider_crate: "vault",
+            consumer: "settings",
+        },
+    },
+];
+
+const AUDIT_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
+    RequiredCapabilitySpec {
+        capability: "Pg",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "postgres",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "MacVerifier",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "crypto-adapter",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "AuthAuditSink",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::AuditSink,
+            provider: "postgres::PgAuthAuditSink",
+            provider_crate: "postgres",
+            consumer: "httpserve",
+        },
+    },
+];
+
+const EMPTY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[];
+
+const DURABLE_TOPOLOGY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
+    RequiredCapabilitySpec {
+        capability: "Publisher",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::Publisher,
+            provider: "amqp::AmqpPublisher",
+            provider_crate: "amqp",
+            consumer: "eventexec",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "AckableSubscriber",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::AckableSubscriber,
+            provider: "amqp::AmqpSubscriber",
+            provider_crate: "amqp",
+            consumer: "eventexec",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "LockStore",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::Lock,
+            provider: "redis::RedisLockStore",
+            provider_crate: "redis",
+            consumer: "distributed",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "CasStore",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            port: DiportPort::Cas,
+            provider: "postgres::PgCasStore",
+            provider_crate: "postgres",
+            consumer: "distributed",
+        },
+    },
+];
+
+const REQUIRED_CAPABILITY_DOMAINS: &[DomainCapabilitySpec] = &[
+    DomainCapabilitySpec {
+        domain: "identity",
+        capabilities: IDENTITY_REQUIRED_CAPABILITIES,
+    },
+    DomainCapabilitySpec {
+        domain: "settings",
+        capabilities: SETTINGS_REQUIRED_CAPABILITIES,
+    },
+    DomainCapabilitySpec {
+        domain: "audit",
+        capabilities: AUDIT_REQUIRED_CAPABILITIES,
+    },
+    DomainCapabilitySpec {
+        domain: "contractreg",
+        capabilities: EMPTY_REQUIRED_CAPABILITIES,
+    },
+    DomainCapabilitySpec {
+        domain: "syshealth",
+        capabilities: EMPTY_REQUIRED_CAPABILITIES,
+    },
+];
+
+#[cfg(test)]
+fn required_capability_domain_specs() -> &'static [DomainCapabilitySpec] {
+    REQUIRED_CAPABILITY_DOMAINS
+}
+
+fn validate_required_capabilities(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+    // INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
+    // assembly.toml 的 domains/topology 声明必须闭合到最小 provider/Cargo capability 事实。此 guard
+    // 不改变 runtime 接线，不新增兼容路径；缺失、draft、ephemeral critical 均 fail-closed。
+    for domain in &a.manifest.domains {
+        let domain = domain.as_str();
+        let Some(spec) = REQUIRED_CAPABILITY_DOMAINS
+            .iter()
+            .find(|spec| spec.domain == domain)
+        else {
+            findings.push(finding(
+                Rule::RequiredCapability,
+                &a.manifest_label,
+                format!(
+                    "field=domains domain={domain} capability=DomainCapabilityTable expected domain present in xtask required capability table; actual=missing-domain-spec"
+                ),
+            ));
+            continue;
+        };
+        for capability in spec.capabilities {
+            validate_required_capability(a, spec.domain, capability, findings);
+        }
+    }
+
+    if requires_distributed_capabilities(a) {
+        for capability in DURABLE_TOPOLOGY_REQUIRED_CAPABILITIES {
+            validate_required_capability(a, "distributed", capability, findings);
+        }
+    }
+}
+
+fn validate_required_capability(
+    a: &DiscoveredAssembly,
+    domain: &str,
+    spec: &RequiredCapabilitySpec,
+    findings: &mut Vec<Finding>,
+) {
+    match spec.expectation {
+        RequiredCapabilityExpectation::CargoDependency { dependency } => {
+            if dependency_features(&a.cargo_toml, dependency).is_none() {
+                findings.push(finding(
+                    Rule::RequiredCapability,
+                    &a.cargo_label,
+                    format!(
+                        "field=dependencies domain={domain} capability={} expected exact [dependencies].{dependency} in {}; actual=missing-dependency",
+                        spec.capability, a.cargo_label
+                    ),
+                ));
+            }
+        }
+        RequiredCapabilityExpectation::ActivePersistentProvider {
+            port,
+            provider,
+            provider_crate,
+            consumer,
+        } => {
+            if !has_active_persistent_provider(a, port, provider, provider_crate, consumer) {
+                findings.push(finding(
+                    Rule::RequiredCapability,
+                    &a.manifest_label,
+                    format!(
+                        "field=diportProviders domain={domain} capability={} expected active persistent `{provider}` for `{port}` providerCrate `{provider_crate}` consumer `{consumer}`; actual={}",
+                        spec.capability,
+                        provider_actual(a, port, provider, provider_crate, consumer)
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn requires_distributed_capabilities(a: &DiscoveredAssembly) -> bool {
+    a.manifest.profile == AssemblyProfile::Production
+        || matches!(
+            a.manifest.topology,
+            AssemblyTopology::DurableShared | AssemblyTopology::DurableIsolated
+        )
+}
+
+fn has_active_persistent_provider(
+    a: &DiscoveredAssembly,
+    port: DiportPort,
+    provider: &str,
+    provider_crate: &str,
+    consumer: &str,
+) -> bool {
+    a.manifest.diport_providers.iter().any(|candidate| {
+        candidate.lifecycle == ProviderLifecycle::Active
+            && candidate.durability == ProviderDurability::Persistent
+            && candidate.port == port
+            && candidate.provider == provider
+            && candidate.provider_crate == provider_crate
+            && candidate.consumer == consumer
+    })
+}
+
+fn provider_actual(
+    a: &DiscoveredAssembly,
+    port: DiportPort,
+    provider: &str,
+    provider_crate: &str,
+    consumer: &str,
+) -> String {
+    let actual = a
+        .manifest
+        .diport_providers
+        .iter()
+        .filter(|candidate| {
+            candidate.port == port
+                || candidate.provider == provider
+                || candidate.provider_crate == provider_crate
+                || candidate.consumer == consumer
+        })
+        .map(provider_state)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if actual.is_empty() {
+        "missing-provider".to_string()
+    } else {
+        actual
+    }
+}
+
+fn provider_state(provider: &DiportProvider) -> String {
+    format!(
+        "port={} provider={} providerCrate={} consumer={} lifecycle={} durability={}",
+        provider.port,
+        provider.provider,
+        provider.provider_crate,
+        provider.consumer,
+        provider.lifecycle,
+        provider.durability
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1351,6 +1670,12 @@ fn provider_spec(provider: &str) -> Option<ProviderSpec> {
             required_features: &[],
             provider_crate: "postgres",
         }),
+        "postgres::PgAuthAuditSink" => Some(ProviderSpec {
+            port: DiportPort::AuditSink,
+            durability: ProviderDurability::Persistent,
+            required_features: &[],
+            provider_crate: "postgres",
+        }),
         "vault::VaultSigner" => Some(ProviderSpec {
             port: DiportPort::Signer,
             durability: ProviderDurability::Persistent,
@@ -1479,8 +1804,8 @@ mod tests {
             r#"
 name = "runtime"
 profile = "{profile}"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -1637,12 +1962,17 @@ name = "runtime"
         include_vault_signer: bool,
         include_vault_keyprovider: bool,
     ) -> String {
+        let topology = if profile == "production" {
+            "durable-shared"
+        } else {
+            "demo"
+        };
         let mut manifest = format!(
             r#"
 name = "runtime"
 profile = "{profile}"
 domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+topology = "{topology}"
 
 [[listeners]]
 kind = "primary"
@@ -1699,6 +2029,61 @@ purpose = "settings-configvalue-at-rest-encryption"
 "#,
             );
         }
+        manifest.push_str(
+            r#"
+[[diportProviders]]
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "http-auth-decision-audit"
+"#,
+        );
+        if profile == "production" {
+            manifest.push_str(
+                r#"
+[[diportProviders]]
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "outbox event publishing"
+
+[[diportProviders]]
+port = "diport::AckableSubscriber"
+provider = "amqp::AmqpSubscriber"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "manual-ack event subscriber workers"
+
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+
+[[diportProviders]]
+port = "diport::CasStore"
+provider = "postgres::PgCasStore"
+providerCrate = "postgres"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-state-cas"
+"#,
+            );
+        }
         manifest
     }
 
@@ -1708,7 +2093,466 @@ name = "runtime"
 [dependencies]
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
 vault = { path = "../../adapters/vault", features = ["backend"] }
+postgres = { path = "../../adapters/postgres" }
+crypto-adapter = { path = "../../adapters/crypto" }
+redis = { path = "../../adapters/redis", features = ["backend"] }
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
 "#;
+
+    fn capability_manifest(
+        profile: &str,
+        topology: &str,
+        domains: &[&str],
+        providers: &str,
+    ) -> String {
+        let rendered_domains = domains
+            .iter()
+            .map(|domain| format!(r#""{domain}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let empty_providers = if providers.trim().is_empty() {
+            "diportProviders = []\n"
+        } else {
+            ""
+        };
+        format!(
+            r#"
+name = "runtime"
+profile = "{profile}"
+domains = [{rendered_domains}]
+topology = "{topology}"
+{empty_providers}
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
+{providers}
+"#
+        )
+    }
+
+    const CAPABILITY_CARGO_FULL: &str = r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+crypto-adapter = { path = "../../adapters/crypto" }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
+redis = { path = "../../adapters/redis", features = ["backend"] }
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
+"#;
+
+    const CAPABILITY_DOMAIN_PROVIDERS: &str = r#"
+[[diportProviders]]
+port = "diport::Signer"
+provider = "vault::VaultSigner"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-access-token-signing"
+
+[[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-configvalue-at-rest-encryption"
+
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+
+[[diportProviders]]
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "http-auth-decision-audit"
+"#;
+
+    const CAPABILITY_EVENT_TRANSPORT_PROVIDERS: &str = r#"
+[[diportProviders]]
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "outbox event publishing"
+
+[[diportProviders]]
+port = "diport::AckableSubscriber"
+provider = "amqp::AmqpSubscriber"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "manual-ack event subscriber workers"
+"#;
+
+    const CAPABILITY_DISTRIBUTED_PROVIDERS: &str = r#"
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+
+[[diportProviders]]
+port = "diport::CasStore"
+provider = "postgres::PgCasStore"
+providerCrate = "postgres"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-state-cas"
+"#;
+
+    fn required_capability_findings(manifest: &str, cargo: &str) -> anyhow::Result<Vec<Finding>> {
+        let root = unique_tmp("assembly-capabilities");
+        write_assembly(&root, manifest, cargo)?;
+        let (_count, findings) = validate_root(&root)?;
+        Ok(findings
+            .into_iter()
+            .filter(|finding| finding.rule == Rule::RequiredCapability)
+            .collect())
+    }
+
+    fn assert_required_capability(findings: &[Finding], domain: &str, capability: &str) {
+        assert!(
+            findings.iter().any(|finding| {
+                finding.detail.contains(&format!("domain={domain}"))
+                    && finding.detail.contains(&format!("capability={capability}"))
+            }),
+            "missing RequiredCapability finding for domain={domain} capability={capability}: {findings:?}"
+        );
+    }
+
+    /// INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" } —
+    /// required capability 表必须显式覆盖每个 workspace domain；新增 domain 不得静默漏管。
+    #[test]
+    fn assembly_capabilities_table_covers_all_domain_crates() {
+        let domains: Vec<_> = required_capability_domain_specs()
+            .iter()
+            .map(|spec| spec.domain)
+            .collect();
+        assert_eq!(domains, crate::layers::DOMAIN_CRATES);
+    }
+
+    #[test]
+    fn assembly_capabilities_runtime_like_manifest_passes() -> anyhow::Result<()> {
+        let manifest = capability_manifest(
+            "demo",
+            "durable-shared",
+            &["identity", "settings", "audit"],
+            &format!(
+                "{CAPABILITY_DOMAIN_PROVIDERS}{CAPABILITY_EVENT_TRANSPORT_PROVIDERS}{CAPABILITY_DISTRIBUTED_PROVIDERS}"
+            ),
+        );
+        let findings = required_capability_findings(&manifest, CAPABILITY_CARGO_FULL)?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_settings_requires_vault_keyprovider() -> anyhow::Result<()> {
+        let manifest = capability_manifest("demo", "demo", &["settings"], "");
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+"#,
+        )?;
+        assert_required_capability(&findings, "settings", "VaultKeyProvider");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_identity_requires_signer() -> anyhow::Result<()> {
+        let manifest = capability_manifest(
+            "demo",
+            "demo",
+            &["identity"],
+            r#"
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+"#,
+        );
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
+"#,
+        )?;
+        assert_required_capability(&findings, "identity", "Signer");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_audit_requires_crypto_adapter_dependency() -> anyhow::Result<()> {
+        let manifest = capability_manifest(
+            "demo",
+            "demo",
+            &["audit"],
+            r#"
+[[diportProviders]]
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "http-auth-decision-audit"
+"#,
+        );
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+"#,
+        )?;
+        assert_required_capability(&findings, "audit", "MacVerifier");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_audit_requires_pg_auth_audit_sink() -> anyhow::Result<()> {
+        let manifest = capability_manifest("demo", "demo", &["audit"], "");
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+crypto-adapter = { path = "../../adapters/crypto" }
+"#,
+        )?;
+        assert_required_capability(&findings, "audit", "AuthAuditSink");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_required_provider_consumer_must_match() -> anyhow::Result<()> {
+        let manifest = capability_manifest(
+            "demo",
+            "demo",
+            &["identity"],
+            r#"
+[[diportProviders]]
+port = "diport::Signer"
+provider = "vault::VaultSigner"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-access-token-signing"
+
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification"
+"#,
+        );
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
+"#,
+        )?;
+        assert_required_capability(&findings, "identity", "Signer");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("consumer=settings")),
+            "wrong consumer detail must be present: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_durable_topology_requires_distributed_lock_and_cas()
+    -> anyhow::Result<()> {
+        let manifest = capability_manifest("demo", "durable-shared", &["contractreg"], "");
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+"#,
+        )?;
+        assert_required_capability(&findings, "distributed", "LockStore");
+        assert_required_capability(&findings, "distributed", "CasStore");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_durable_topology_requires_event_transport() -> anyhow::Result<()> {
+        let manifest = capability_manifest(
+            "demo",
+            "durable-shared",
+            &["contractreg"],
+            CAPABILITY_DISTRIBUTED_PROVIDERS,
+        );
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+redis = { path = "../../adapters/redis", features = ["backend"] }
+"#,
+        )?;
+        assert_required_capability(&findings, "distributed", "Publisher");
+        assert_required_capability(&findings, "distributed", "AckableSubscriber");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_durable_topology_requires_exact_pg_cas() -> anyhow::Result<()> {
+        let manifest = capability_manifest(
+            "demo",
+            "durable-shared",
+            &["contractreg"],
+            &format!(
+                r#"{CAPABILITY_EVENT_TRANSPORT_PROVIDERS}
+[[diportProviders]]
+port = "diport::LockStore"
+provider = "redis::RedisLockStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-lock-fencing"
+
+[[diportProviders]]
+port = "diport::CasStore"
+provider = "redis::RedisCasStore"
+providerCrate = "redis"
+consumer = "distributed"
+lifecycle = "active"
+durability = "persistent"
+purpose = "distributed-state-cas-redis-alternative"
+"#
+            ),
+        );
+        let findings = required_capability_findings(
+            &manifest,
+            r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+redis = { path = "../../adapters/redis", features = ["backend"] }
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
+"#,
+        )?;
+        assert_required_capability(&findings, "distributed", "CasStore");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("redis::RedisCasStore")),
+            "wrong CAS provider detail must be present: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_required_provider_must_be_active_persistent() -> anyhow::Result<()> {
+        for (case, lifecycle, durability) in [
+            ("draft", "draft", "persistent"),
+            ("ephemeral", "active", "ephemeral-memory"),
+        ] {
+            let manifest = capability_manifest(
+                "demo",
+                "demo",
+                &["settings"],
+                &format!(
+                    r#"
+[[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "{lifecycle}"
+durability = "{durability}"
+purpose = "settings-configvalue-at-rest-encryption"
+"#
+                ),
+            );
+            let findings = required_capability_findings(
+                &manifest,
+                r#"[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres" }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+"#,
+            )?;
+            assert_required_capability(&findings, "settings", "VaultKeyProvider");
+            assert!(
+                findings.iter().any(|finding| finding.detail.contains(case)),
+                "{case} detail must be present: {findings:?}"
+            );
+        }
+        Ok(())
+    }
 
     const SECURITY_CLOSEOUT_FULL_SOURCE: &str = r#"
 fn build_runtime_oidc_provider() {
@@ -1795,6 +2639,11 @@ fn run() {
     let domain_transport = wire_domain_transport_from();
     module.merge(domain_transport.module_result().unwrap());
     let _ = mtls_config_from_env();
+    let pg = ();
+    let subscribers = Vec::new();
+    let cfg = ();
+    let distributed = wire_distributed(deps);
+    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
     let _ = assemble_authed_routers(provider);
 }
 "#;
@@ -1829,6 +2678,11 @@ fn run() {
     ).unwrap();
     let domain_transport = wire_domain_transport_from();
     module.merge(domain_transport.module_result().unwrap());
+    let pg = ();
+    let subscribers = Vec::new();
+    let cfg = ();
+    let distributed = wire_distributed(deps);
+    let _ = wire_event_transport(&pg, distributed, subscribers, cfg);
     let _ = assemble_authed_routers(provider);
     launch();
 }
@@ -2765,8 +3619,8 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -2825,8 +3679,8 @@ ratelimit = { path = "../../adapters/ratelimit" }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -2901,8 +3755,8 @@ pub struct DistributedRuntimeDeps;
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -2976,8 +3830,8 @@ fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3028,8 +3882,8 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3080,8 +3934,8 @@ softca = { path = "../../adapters/softca" }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3151,8 +4005,8 @@ name = "runtime"
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3239,8 +4093,8 @@ amqp = { path = "../../adapters/amqp" }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3286,8 +4140,8 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3332,8 +4186,8 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"
@@ -3379,8 +4233,8 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
-topology = "durable-shared"
+domains = ["contractreg"]
+topology = "demo"
 
 [[listeners]]
 kind = "primary"

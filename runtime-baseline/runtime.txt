@@ -69,11 +69,12 @@ listeners = [primary,internal,admin,health]
 04 | port=diport::Signer | provider=vault::VaultSigner | providerCrate=vault | requiredFeatures=[backend] | consumer=identity | lifecycle=active | durability=persistent | purpose=jwt-access-token-signing
 05 | port=diport::KeyProvider | provider=vault::VaultKeyProvider | providerCrate=vault | requiredFeatures=[backend] | consumer=settings | lifecycle=active | durability=persistent | purpose=settings-configvalue-at-rest-encryption
 06 | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=jwt-credential-verification
-07 | port=diport::RateLimiter | provider=ratelimit::GovernorLimiter | providerCrate=ratelimit | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=ephemeral-memory | purpose=per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)
-08 | port=diport::LockStore | provider=redis::RedisLockStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-lock-fencing
-09 | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-state-cas
-10 | port=diport::CasStore | provider=redis::RedisCasStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=draft | durability=persistent | purpose=distributed-state-cas-redis-alternative
-11 | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | purpose=runtime-s3-readiness-canary
+07 | port=diport::AuditSink | provider=postgres::PgAuthAuditSink | providerCrate=postgres | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=http-auth-decision-audit
+08 | port=diport::RateLimiter | provider=ratelimit::GovernorLimiter | providerCrate=ratelimit | requiredFeatures=[] | consumer=httpserve | lifecycle=active | durability=ephemeral-memory | purpose=per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)
+09 | port=diport::LockStore | provider=redis::RedisLockStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-lock-fencing
+10 | port=diport::CasStore | provider=postgres::PgCasStore | providerCrate=postgres | requiredFeatures=[] | consumer=distributed | lifecycle=active | durability=persistent | purpose=distributed-state-cas
+11 | port=diport::CasStore | provider=redis::RedisCasStore | providerCrate=redis | requiredFeatures=[] | consumer=distributed | lifecycle=draft | durability=persistent | purpose=distributed-state-cas-redis-alternative
+12 | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | purpose=runtime-s3-readiness-canary
 
 [sharedRuntimeDeps.fields]
 pg = PgRuntimeDeps

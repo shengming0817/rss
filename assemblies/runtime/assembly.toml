@@ -79,6 +79,16 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
 
+# HTTP auth 决策审计 sink：runtime 经 audit domain 注入 postgres durable flat sink（PgAuthAuditSink）。
+[[diportProviders]]
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "http-auth-decision-audit"
+
 # edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
 port = "diport::RateLimiter"
