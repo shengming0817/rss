@@ -279,7 +279,12 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
     );
     let mut redaction_policies: StructPolicies = BTreeMap::new();
     let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
-    for schema_file in c.manifest.schemas.declared_files() {
+    let schema_files = if c.manifest.kind == ContractKind::Saga {
+        c.manifest.declared_schema_files()
+    } else {
+        c.manifest.schemas.declared_files()
+    };
+    for schema_file in schema_files {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
             .with_context(|| format!("契约 {source} 的 schema 文件名不安全: {schema_file}"))?;
@@ -387,6 +392,53 @@ fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     }
     let retry_millis = saga.retry_millis;
     let timeout_millis = saga.timeout_millis;
+    let mut step_consts = Vec::new();
+    let mut step_entries = Vec::new();
+    for (idx, step) in saga.steps.iter().enumerate() {
+        for (field, value) in [
+            ("saga step name", step.name.as_str()),
+            ("saga step outputSchema", step.output_schema.as_str()),
+        ] {
+            if !is_safe_codegen_string(value) {
+                bail!(
+                    "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                    c.manifest.kind.as_dir(),
+                    c.manifest.domain,
+                    c.manifest.version,
+                );
+            }
+        }
+        validate_schema_filename(&step.output_schema).with_context(|| {
+            format!(
+                "契约 {}/{}/{} 的 saga step outputSchema 不安全: {}",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+                step.output_schema
+            )
+        })?;
+        let const_name = format!("STEP_{idx}");
+        let output_ty = schema_root_type_name(c, &step.output_schema, "saga step outputSchema")?;
+        step_consts.push(format!(
+            r#"
+/// Saga step `{}` binding generated from `[saga].steps[{idx}]`.
+pub const {const_name}: ::vocab::SagaStepBinding =
+    ::vocab::SagaStepBinding::from_static(CONTRACT, "{}", "{}");
+
+impl ::vocab::SagaStepOutputBinding for {output_ty} {{
+    const BINDING: ::vocab::SagaStepBinding = {const_name};
+}}
+"#,
+            step.name, step.name, step.output_schema
+        ));
+        step_entries.push(const_name);
+    }
+    let steps_body = if step_entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", step_entries.join(",\n"))
+    };
+    let step_consts = step_consts.join("");
     Ok(format!(
         r#"
 /// Saga 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -399,9 +451,12 @@ pub const CONTRACT: ::vocab::ContractBinding =
 /// Saga runtime policy spec（来自 `[saga].retryMillis` / `[saga].timeoutMillis`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const POLICY: ::vocab::SagaRuntimePolicySpec =
     ::vocab::SagaRuntimePolicySpec::from_millis({retry_millis}, {timeout_millis});
+{step_consts}
+/// Ordered saga step bindings generated from `[saga].steps`.
+pub const STEPS: &[::vocab::SagaStepBinding] = &[{steps_body}];
 
-/// Saga contract spec（契约绑定 + runtime policy spec）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SPEC: {sup}SagaSpec = {sup}SagaSpec::from_parts(CONTRACT, POLICY);
+/// Saga contract spec（契约绑定 + runtime policy spec + ordered steps）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: {sup}SagaSpec = {sup}SagaSpec::from_parts(CONTRACT, POLICY, STEPS);
 "#
     ))
 }
@@ -757,23 +812,38 @@ fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
         .request
         .as_deref()
         .context("command 契约缺 [schemas].request（R4 应已守）")?;
-    validate_schema_filename(file)?;
-    let path = c.dir.join(file);
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("读 request schema {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("解析 request schema {}", path.display()))?;
+    schema_root_type_name(c, file, "command request schema")
+}
+
+fn schema_root_type_name(
+    c: &DiscoveredContract,
+    schema_file: &str,
+    label: &'static str,
+) -> Result<String> {
+    validate_schema_filename(schema_file).with_context(|| {
+        format!(
+            "契约 {}/{}/{} 的 {label} 文件名不安全: {schema_file}",
+            c.manifest.kind.as_dir(),
+            c.manifest.domain,
+            c.manifest.version
+        )
+    })?;
+    let path = c.dir.join(schema_file);
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("读 {label} {}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("解析 {label} {}", path.display()))?;
     let title = value
         .get("title")
         .and_then(serde_json::Value::as_str)
         .with_context(|| {
             format!(
-                "request schema {} 缺 title（codegen 派生类型名所需）",
+                "{label} {} 缺 title（codegen 派生类型名所需）",
                 path.display()
             )
         })?;
     if title.starts_with("r#") || syn::parse_str::<syn::Ident>(title).is_err() {
-        bail!("command request schema title 非法 Rust 类型标识符（防注入生成代码）: {title:?}");
+        bail!("{label} title 非法 Rust 类型标识符（防注入生成代码）: {title:?}");
     }
     Ok(title.to_string())
 }
@@ -2649,8 +2719,32 @@ mod tests {
             "缺 saga runtime policy spec:\n{rendered}"
         );
         assert!(
+            rendered.contains("pub struct ReserveFundsOutput")
+                && rendered.contains("pub struct CaptureOutput"),
+            "缺 saga step output DTO:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("impl ::vocab::SagaStepOutputBinding for ReserveFundsOutput")
+                && rendered.contains("impl ::vocab::SagaStepOutputBinding for CaptureOutput"),
+            "缺 saga step output DTO binding marker:\n{rendered}"
+        );
+        assert!(
             rendered.contains(
-                "pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY);"
+                r#"pub const STEP_0: ::vocab::SagaStepBinding =
+    ::vocab::SagaStepBinding::from_static(CONTRACT, "reserve_funds", "reserve.schema.json");"#
+            ) && rendered.contains(
+                r#"pub const STEP_1: ::vocab::SagaStepBinding =
+    ::vocab::SagaStepBinding::from_static(CONTRACT, "capture", "capture.schema.json");"#
+            ),
+            "缺 saga step binding constants:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("pub const STEPS: &[::vocab::SagaStepBinding] = &[STEP_0, STEP_1];"),
+            "缺 ordered saga STEPS:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY, STEPS);"
             ),
             "缺 SagaSpec 常量:\n{rendered}"
         );

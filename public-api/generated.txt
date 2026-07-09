@@ -7318,6 +7318,52 @@ impl<T> core::convert::From<T> for generated::saga::billing_v1::error::Conversio
 pub fn generated::saga::billing_v1::error::ConversionError::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::saga::billing_v1::error::ConversionError
 pub type generated::saga::billing_v1::error::ConversionError::Output = T
+pub struct generated::saga::billing_v1::BillingCaptureResult
+pub generated::saga::billing_v1::BillingCaptureResult::capture_id: alloc::string::String
+impl core::clone::Clone for generated::saga::billing_v1::BillingCaptureResult
+pub fn generated::saga::billing_v1::BillingCaptureResult::clone(&self) -> generated::saga::billing_v1::BillingCaptureResult
+impl core::fmt::Debug for generated::saga::billing_v1::BillingCaptureResult
+pub fn generated::saga::billing_v1::BillingCaptureResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::saga::billing_v1::BillingCaptureResult
+pub fn generated::saga::billing_v1::BillingCaptureResult::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::billing_v1::BillingCaptureResult
+pub fn generated::saga::billing_v1::BillingCaptureResult::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::SagaStepOutputBinding for generated::saga::billing_v1::BillingCaptureResult
+pub const generated::saga::billing_v1::BillingCaptureResult::BINDING: vocab::contract::binding::SagaStepBinding
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::billing_v1::BillingCaptureResult
+pub fn generated::saga::billing_v1::BillingCaptureResult::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::billing_v1::BillingCaptureResult
+impl core::marker::Send for generated::saga::billing_v1::BillingCaptureResult
+impl core::marker::Sync for generated::saga::billing_v1::BillingCaptureResult
+impl core::marker::Unpin for generated::saga::billing_v1::BillingCaptureResult
+impl core::marker::UnsafeUnpin for generated::saga::billing_v1::BillingCaptureResult
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v1::BillingCaptureResult
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v1::BillingCaptureResult
+impl<T, U> core::convert::Into<U> for generated::saga::billing_v1::BillingCaptureResult where U: core::convert::From<T>
+pub fn generated::saga::billing_v1::BillingCaptureResult::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::saga::billing_v1::BillingCaptureResult where U: core::convert::Into<T>
+pub type generated::saga::billing_v1::BillingCaptureResult::Error = core::convert::Infallible
+pub fn generated::saga::billing_v1::BillingCaptureResult::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::saga::billing_v1::BillingCaptureResult where U: core::convert::TryFrom<T>
+pub type generated::saga::billing_v1::BillingCaptureResult::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::saga::billing_v1::BillingCaptureResult::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::saga::billing_v1::BillingCaptureResult where T: core::clone::Clone
+pub type generated::saga::billing_v1::BillingCaptureResult::Owned = T
+pub fn generated::saga::billing_v1::BillingCaptureResult::clone_into(&self, &mut T)
+pub fn generated::saga::billing_v1::BillingCaptureResult::to_owned(&self) -> T
+impl<T> core::any::Any for generated::saga::billing_v1::BillingCaptureResult where T: 'static + ?core::marker::Sized
+pub fn generated::saga::billing_v1::BillingCaptureResult::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::saga::billing_v1::BillingCaptureResult where T: ?core::marker::Sized
+pub fn generated::saga::billing_v1::BillingCaptureResult::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::saga::billing_v1::BillingCaptureResult where T: ?core::marker::Sized
+pub fn generated::saga::billing_v1::BillingCaptureResult::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::saga::billing_v1::BillingCaptureResult where T: core::clone::Clone
+pub unsafe fn generated::saga::billing_v1::BillingCaptureResult::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::saga::billing_v1::BillingCaptureResult
+pub fn generated::saga::billing_v1::BillingCaptureResult::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::saga::billing_v1::BillingCaptureResult where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::saga::billing_v1::BillingCaptureResult
+pub type generated::saga::billing_v1::BillingCaptureResult::Output = T
 pub struct generated::saga::billing_v1::BillingCheckoutSagaPayload
 pub generated::saga::billing_v1::BillingCheckoutSagaPayload::amount_minor: i64
 pub generated::saga::billing_v1::BillingCheckoutSagaPayload::currency: alloc::string::String
@@ -7364,10 +7410,59 @@ pub fn generated::saga::billing_v1::BillingCheckoutSagaPayload::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for generated::saga::billing_v1::BillingCheckoutSagaPayload where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> typenum::type_operators::Same for generated::saga::billing_v1::BillingCheckoutSagaPayload
 pub type generated::saga::billing_v1::BillingCheckoutSagaPayload::Output = T
+pub struct generated::saga::billing_v1::BillingReserveFundsResult
+pub generated::saga::billing_v1::BillingReserveFundsResult::reservation_id: alloc::string::String
+impl core::clone::Clone for generated::saga::billing_v1::BillingReserveFundsResult
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::clone(&self) -> generated::saga::billing_v1::BillingReserveFundsResult
+impl core::fmt::Debug for generated::saga::billing_v1::BillingReserveFundsResult
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::saga::billing_v1::BillingReserveFundsResult
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::billing_v1::BillingReserveFundsResult
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl vocab::contract::binding::SagaStepOutputBinding for generated::saga::billing_v1::BillingReserveFundsResult
+pub const generated::saga::billing_v1::BillingReserveFundsResult::BINDING: vocab::contract::binding::SagaStepBinding
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::billing_v1::BillingReserveFundsResult
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::billing_v1::BillingReserveFundsResult
+impl core::marker::Send for generated::saga::billing_v1::BillingReserveFundsResult
+impl core::marker::Sync for generated::saga::billing_v1::BillingReserveFundsResult
+impl core::marker::Unpin for generated::saga::billing_v1::BillingReserveFundsResult
+impl core::marker::UnsafeUnpin for generated::saga::billing_v1::BillingReserveFundsResult
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v1::BillingReserveFundsResult
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v1::BillingReserveFundsResult
+impl<T, U> core::convert::Into<U> for generated::saga::billing_v1::BillingReserveFundsResult where U: core::convert::From<T>
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::saga::billing_v1::BillingReserveFundsResult where U: core::convert::Into<T>
+pub type generated::saga::billing_v1::BillingReserveFundsResult::Error = core::convert::Infallible
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::saga::billing_v1::BillingReserveFundsResult where U: core::convert::TryFrom<T>
+pub type generated::saga::billing_v1::BillingReserveFundsResult::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::saga::billing_v1::BillingReserveFundsResult where T: core::clone::Clone
+pub type generated::saga::billing_v1::BillingReserveFundsResult::Owned = T
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::clone_into(&self, &mut T)
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::to_owned(&self) -> T
+impl<T> core::any::Any for generated::saga::billing_v1::BillingReserveFundsResult where T: 'static + ?core::marker::Sized
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::saga::billing_v1::BillingReserveFundsResult where T: ?core::marker::Sized
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::saga::billing_v1::BillingReserveFundsResult where T: ?core::marker::Sized
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::saga::billing_v1::BillingReserveFundsResult where T: core::clone::Clone
+pub unsafe fn generated::saga::billing_v1::BillingReserveFundsResult::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::saga::billing_v1::BillingReserveFundsResult
+pub fn generated::saga::billing_v1::BillingReserveFundsResult::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::saga::billing_v1::BillingReserveFundsResult where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::saga::billing_v1::BillingReserveFundsResult
+pub type generated::saga::billing_v1::BillingReserveFundsResult::Output = T
 pub const generated::saga::billing_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::saga::billing_v1::CONTRACT_ID: &str
 pub const generated::saga::billing_v1::POLICY: vocab::contract::binding::SagaRuntimePolicySpec
 pub const generated::saga::billing_v1::SPEC: generated::saga::SagaSpec
+pub const generated::saga::billing_v1::STEPS: &[vocab::contract::binding::SagaStepBinding]
+pub const generated::saga::billing_v1::STEP_0: vocab::contract::binding::SagaStepBinding
+pub const generated::saga::billing_v1::STEP_1: vocab::contract::binding::SagaStepBinding
 pub type generated::saga::SagaSpec = vocab::contract::binding::SagaContractBinding
 pub enum generated::ProtectionAadDim
 pub generated::ProtectionAadDim::ConfigKey

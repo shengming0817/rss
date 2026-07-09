@@ -30,3 +30,14 @@ fn projection_ui() {
     // 第 5 参传非 SerialInOrderGuarantor 类型 `()` → E0277（bound load-bearing anti-vacuity）。
     t.compile_fail("tests/ui/projection_non_serial_guarantor_fail.rs");
 }
+
+#[test]
+fn typed_saga_ui() {
+    let t = trybuild::TestCases::new();
+    // generated SPEC + policy + ordered step binding + required compensation → 编译通过。
+    t.pass("tests/ui/typed_saga_wrapper_pass.rs");
+    // 漏 compensate required method → 编译错（Hard compensation requirement）。
+    t.compile_fail("tests/ui/typed_saga_missing_compensation_fail.rs");
+    // builder 必须接收 generated SagaContractBinding；漏参即编译错。
+    t.compile_fail("tests/ui/typed_saga_missing_spec_fail.rs");
+}

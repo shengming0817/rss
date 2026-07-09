@@ -386,9 +386,10 @@ impl vocab::contract::binding::SagaContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec) -> Self
+pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec, &'static [vocab::contract::binding::SagaStepBinding]) -> Self
 pub const fn vocab::contract::binding::SagaContractBinding::policy(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
 pub const fn vocab::contract::binding::SagaContractBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::steps(&self) -> &'static [vocab::contract::binding::SagaStepBinding]
 pub const fn vocab::contract::binding::SagaContractBinding::version(&self) -> &'static str
 impl core::clone::Clone for vocab::contract::binding::SagaContractBinding
 pub fn vocab::contract::binding::SagaContractBinding::clone(&self) -> vocab::contract::binding::SagaContractBinding
@@ -471,6 +472,56 @@ impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaRuntimePoli
 pub unsafe fn vocab::contract::binding::SagaRuntimePolicySpec::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::contract::binding::SagaRuntimePolicySpec
 pub fn vocab::contract::binding::SagaRuntimePolicySpec::from(T) -> T
+pub struct vocab::contract::binding::SagaStepBinding
+impl vocab::contract::binding::SagaStepBinding
+pub const fn vocab::contract::binding::SagaStepBinding::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::SagaStepBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::SagaStepBinding::name(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::output_schema(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::version(&self) -> &'static str
+impl core::clone::Clone for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::clone(&self) -> vocab::contract::binding::SagaStepBinding
+impl core::cmp::Eq for vocab::contract::binding::SagaStepBinding
+impl core::cmp::PartialEq for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::eq(&self, &vocab::contract::binding::SagaStepBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::SagaStepBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaStepBinding
+impl core::marker::Freeze for vocab::contract::binding::SagaStepBinding
+impl core::marker::Send for vocab::contract::binding::SagaStepBinding
+impl core::marker::Sync for vocab::contract::binding::SagaStepBinding
+impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::From<T>
+pub fn vocab::contract::binding::SagaStepBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::Into<T>
+pub type vocab::contract::binding::SagaStepBinding::Error = core::convert::Infallible
+pub fn vocab::contract::binding::SagaStepBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::SagaStepBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::SagaStepBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
+pub type vocab::contract::binding::SagaStepBinding::Owned = T
+pub fn vocab::contract::binding::SagaStepBinding::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::SagaStepBinding::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::SagaStepBinding where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::SagaStepBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaStepBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaStepBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::SagaStepBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::from(T) -> T
+pub trait vocab::contract::binding::SagaStepOutputBinding
+pub const vocab::contract::binding::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding
 pub mod vocab::contract::owner
 #[non_exhaustive] pub enum vocab::contract::owner::DomainNameError
 pub vocab::contract::owner::DomainNameError::Empty
@@ -2478,9 +2529,10 @@ impl vocab::contract::binding::SagaContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract_id(&self) -> &'static str
 pub const fn vocab::contract::binding::SagaContractBinding::domain(&self) -> &'static str
-pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec) -> Self
+pub const fn vocab::contract::binding::SagaContractBinding::from_parts(vocab::contract::binding::ContractBinding, vocab::contract::binding::SagaRuntimePolicySpec, &'static [vocab::contract::binding::SagaStepBinding]) -> Self
 pub const fn vocab::contract::binding::SagaContractBinding::policy(&self) -> vocab::contract::binding::SagaRuntimePolicySpec
 pub const fn vocab::contract::binding::SagaContractBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaContractBinding::steps(&self) -> &'static [vocab::contract::binding::SagaStepBinding]
 pub const fn vocab::contract::binding::SagaContractBinding::version(&self) -> &'static str
 impl core::clone::Clone for vocab::contract::binding::SagaContractBinding
 pub fn vocab::contract::binding::SagaContractBinding::clone(&self) -> vocab::contract::binding::SagaContractBinding
@@ -2563,6 +2615,54 @@ impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaRuntimePoli
 pub unsafe fn vocab::contract::binding::SagaRuntimePolicySpec::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for vocab::contract::binding::SagaRuntimePolicySpec
 pub fn vocab::contract::binding::SagaRuntimePolicySpec::from(T) -> T
+pub struct vocab::SagaStepBinding
+impl vocab::contract::binding::SagaStepBinding
+pub const fn vocab::contract::binding::SagaStepBinding::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::contract::binding::SagaStepBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str) -> Self
+pub const fn vocab::contract::binding::SagaStepBinding::name(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::output_schema(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::schema_hash(&self) -> &'static str
+pub const fn vocab::contract::binding::SagaStepBinding::version(&self) -> &'static str
+impl core::clone::Clone for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::clone(&self) -> vocab::contract::binding::SagaStepBinding
+impl core::cmp::Eq for vocab::contract::binding::SagaStepBinding
+impl core::cmp::PartialEq for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::eq(&self, &vocab::contract::binding::SagaStepBinding) -> bool
+impl core::fmt::Debug for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::contract::binding::SagaStepBinding
+impl core::marker::StructuralPartialEq for vocab::contract::binding::SagaStepBinding
+impl core::marker::Freeze for vocab::contract::binding::SagaStepBinding
+impl core::marker::Send for vocab::contract::binding::SagaStepBinding
+impl core::marker::Sync for vocab::contract::binding::SagaStepBinding
+impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
+impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
+impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::From<T>
+pub fn vocab::contract::binding::SagaStepBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::Into<T>
+pub type vocab::contract::binding::SagaStepBinding::Error = core::convert::Infallible
+pub fn vocab::contract::binding::SagaStepBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::TryFrom<T>
+pub type vocab::contract::binding::SagaStepBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn vocab::contract::binding::SagaStepBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
+pub type vocab::contract::binding::SagaStepBinding::Owned = T
+pub fn vocab::contract::binding::SagaStepBinding::clone_into(&self, &mut T)
+pub fn vocab::contract::binding::SagaStepBinding::to_owned(&self) -> T
+impl<T> core::any::Any for vocab::contract::binding::SagaStepBinding where T: 'static + ?core::marker::Sized
+pub fn vocab::contract::binding::SagaStepBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaStepBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
+pub fn vocab::contract::binding::SagaStepBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
+pub unsafe fn vocab::contract::binding::SagaStepBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for vocab::contract::binding::SagaStepBinding
+pub fn vocab::contract::binding::SagaStepBinding::from(T) -> T
 pub struct vocab::TenantId(_)
 impl vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
@@ -2623,3 +2723,5 @@ pub const vocab::IDENTITY_PROFILE_FIELD_TENANT_ID_PERMISSION: vocab::authz::Rout
 pub const vocab::IDENTITY_PROFILE_SUBJECT_FIELD_OBLIGATION: &str
 pub const vocab::IDENTITY_PROFILE_TENANT_ID_FIELD_OBLIGATION: &str
 pub const vocab::POLICY_MANAGE_PERMISSION_PREFIX: &str
+pub trait vocab::SagaStepOutputBinding
+pub const vocab::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding

@@ -3305,6 +3305,50 @@ impl<T> core::clone::CloneToUninit for consistency::saga::SagaLease where T: cor
 pub unsafe fn consistency::saga::SagaLease::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::SagaLease
 pub fn consistency::saga::SagaLease::from(T) -> T
+pub struct consistency::saga::SagaStepCtx
+impl consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::instance(&self) -> consistency::saga::SagaInstanceRef
+pub fn consistency::saga::SagaStepCtx::new(consistency::saga::SagaInstanceRef, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaStepCtx::saga_id(&self) -> consistency::saga::SagaId
+pub fn consistency::saga::SagaStepCtx::step_name(&self) -> &consistency::saga::StepName
+pub fn consistency::saga::SagaStepCtx::tenant(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::clone(&self) -> consistency::saga::SagaStepCtx
+impl core::cmp::Eq for consistency::saga::SagaStepCtx
+impl core::cmp::PartialEq for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::eq(&self, &consistency::saga::SagaStepCtx) -> bool
+impl core::fmt::Debug for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaStepCtx
+impl core::marker::Freeze for consistency::saga::SagaStepCtx
+impl core::marker::Send for consistency::saga::SagaStepCtx
+impl core::marker::Sync for consistency::saga::SagaStepCtx
+impl core::marker::Unpin for consistency::saga::SagaStepCtx
+impl core::marker::UnsafeUnpin for consistency::saga::SagaStepCtx
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaStepCtx
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaStepCtx
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaStepCtx where U: core::convert::From<T>
+pub fn consistency::saga::SagaStepCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaStepCtx where U: core::convert::Into<T>
+pub type consistency::saga::SagaStepCtx::Error = core::convert::Infallible
+pub fn consistency::saga::SagaStepCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaStepCtx where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaStepCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaStepCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaStepCtx where T: core::clone::Clone
+pub type consistency::saga::SagaStepCtx::Owned = T
+pub fn consistency::saga::SagaStepCtx::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaStepCtx::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaStepCtx where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaStepCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaStepCtx where T: ?core::marker::Sized
+pub fn consistency::saga::SagaStepCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaStepCtx where T: ?core::marker::Sized
+pub fn consistency::saga::SagaStepCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaStepCtx where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaStepCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::from(T) -> T
 pub struct consistency::saga::StepName(_)
 impl consistency::saga::StepName
 pub fn consistency::saga::StepName::as_str(&self) -> &str
@@ -3348,10 +3392,11 @@ impl<T> core::clone::CloneToUninit for consistency::saga::StepName where T: core
 pub unsafe fn consistency::saga::StepName::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::StepName
 pub fn consistency::saga::StepName::from(T) -> T
-pub trait consistency::saga::SagaStep
-pub async fn consistency::saga::SagaStep::compensate(&self) -> core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>
-pub async fn consistency::saga::SagaStep::execute(&self) -> core::result::Result<consistency::saga::SagaOutcome, consistency::error::EngineError>
-pub fn consistency::saga::SagaStep::name(&self) -> &consistency::saga::StepName
+pub trait consistency::saga::SagaStep: core::marker::Send + core::marker::Sync
+pub type consistency::saga::SagaStep::Output: vocab::contract::binding::SagaStepOutputBinding + core::marker::Send + 'static
+pub const consistency::saga::SagaStep::BINDING: vocab::contract::binding::SagaStepBinding
+pub fn consistency::saga::SagaStep::compensate(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>> + core::marker::Send
+pub fn consistency::saga::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, consistency::error::EngineError>> + core::marker::Send
 pub mod consistency::tx_retry
 #[non_exhaustive] pub enum consistency::tx_retry::TxRetryClass
 pub consistency::tx_retry::TxRetryClass::Conflict
@@ -6895,6 +6940,50 @@ impl<T> core::clone::CloneToUninit for consistency::saga::SagaLease where T: cor
 pub unsafe fn consistency::saga::SagaLease::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for consistency::saga::SagaLease
 pub fn consistency::saga::SagaLease::from(T) -> T
+pub struct consistency::SagaStepCtx
+impl consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::instance(&self) -> consistency::saga::SagaInstanceRef
+pub fn consistency::saga::SagaStepCtx::new(consistency::saga::SagaInstanceRef, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaStepCtx::saga_id(&self) -> consistency::saga::SagaId
+pub fn consistency::saga::SagaStepCtx::step_name(&self) -> &consistency::saga::StepName
+pub fn consistency::saga::SagaStepCtx::tenant(&self) -> vocab::tenant::TenantId
+impl core::clone::Clone for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::clone(&self) -> consistency::saga::SagaStepCtx
+impl core::cmp::Eq for consistency::saga::SagaStepCtx
+impl core::cmp::PartialEq for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::eq(&self, &consistency::saga::SagaStepCtx) -> bool
+impl core::fmt::Debug for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for consistency::saga::SagaStepCtx
+impl core::marker::Freeze for consistency::saga::SagaStepCtx
+impl core::marker::Send for consistency::saga::SagaStepCtx
+impl core::marker::Sync for consistency::saga::SagaStepCtx
+impl core::marker::Unpin for consistency::saga::SagaStepCtx
+impl core::marker::UnsafeUnpin for consistency::saga::SagaStepCtx
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaStepCtx
+impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaStepCtx
+impl<T, U> core::convert::Into<U> for consistency::saga::SagaStepCtx where U: core::convert::From<T>
+pub fn consistency::saga::SagaStepCtx::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for consistency::saga::SagaStepCtx where U: core::convert::Into<T>
+pub type consistency::saga::SagaStepCtx::Error = core::convert::Infallible
+pub fn consistency::saga::SagaStepCtx::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for consistency::saga::SagaStepCtx where U: core::convert::TryFrom<T>
+pub type consistency::saga::SagaStepCtx::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn consistency::saga::SagaStepCtx::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for consistency::saga::SagaStepCtx where T: core::clone::Clone
+pub type consistency::saga::SagaStepCtx::Owned = T
+pub fn consistency::saga::SagaStepCtx::clone_into(&self, &mut T)
+pub fn consistency::saga::SagaStepCtx::to_owned(&self) -> T
+impl<T> core::any::Any for consistency::saga::SagaStepCtx where T: 'static + ?core::marker::Sized
+pub fn consistency::saga::SagaStepCtx::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for consistency::saga::SagaStepCtx where T: ?core::marker::Sized
+pub fn consistency::saga::SagaStepCtx::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for consistency::saga::SagaStepCtx where T: ?core::marker::Sized
+pub fn consistency::saga::SagaStepCtx::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for consistency::saga::SagaStepCtx where T: core::clone::Clone
+pub unsafe fn consistency::saga::SagaStepCtx::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for consistency::saga::SagaStepCtx
+pub fn consistency::saga::SagaStepCtx::from(T) -> T
 pub struct consistency::SerialInOrder(_)
 impl consistency::projection::SerialInOrder
 pub fn consistency::projection::SerialInOrder::from_source<S: consistency::projection::PartitionSerialDelivery>(&S) -> Self
@@ -7142,10 +7231,11 @@ pub trait consistency::Reconciler
 pub async fn consistency::Reconciler::reconcile(&self, &consistency::reconcile::Context, consistency::reconcile::Request) -> core::result::Result<consistency::reconcile::Outcome, consistency::reconcile::ReconcileError>
 pub trait consistency::RetentionSweeper
 pub async fn consistency::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
-pub trait consistency::SagaStep
-pub async fn consistency::SagaStep::compensate(&self) -> core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>
-pub async fn consistency::SagaStep::execute(&self) -> core::result::Result<consistency::saga::SagaOutcome, consistency::error::EngineError>
-pub fn consistency::SagaStep::name(&self) -> &consistency::saga::StepName
+pub trait consistency::SagaStep: core::marker::Send + core::marker::Sync
+pub type consistency::SagaStep::Output: vocab::contract::binding::SagaStepOutputBinding + core::marker::Send + 'static
+pub const consistency::SagaStep::BINDING: vocab::contract::binding::SagaStepBinding
+pub fn consistency::SagaStep::compensate(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>> + core::marker::Send
+pub fn consistency::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, consistency::error::EngineError>> + core::marker::Send
 pub trait consistency::SerialInOrderGuarantor: consistency::projection::sealed::Sealed + core::marker::Copy
 impl consistency::projection::SerialInOrderGuarantor for consistency::projection::SerialInOrder
 pub async fn consistency::run_tx_retry<T, E, Op, OpFut, Classify, Sleep, SleepFut>(consistency::tx_retry::TxRetryPolicy, Op, Classify, Sleep) -> (core::result::Result<T, E>, consistency::tx_retry::TxRetryReport) where Op: core::ops::function::FnMut(u32) -> OpFut, OpFut: core::future::future::Future<Output = core::result::Result<T, E>>, Classify: core::ops::function::Fn(&E) -> consistency::tx_retry::TxRetryClass, Sleep: core::ops::function::FnMut(core::time::Duration) -> SleepFut, SleepFut: core::future::future::Future<Output = ()>

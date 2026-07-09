@@ -9,8 +9,9 @@
 //! 偏离其 serde output 持久化，journal record 不承载 step output）。
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 
-use vocab::TenantId;
+use vocab::{SagaStepBinding, SagaStepOutputBinding, TenantId};
 
 /// saga step 名 newtype（私有字段；可生成 Rust 标识符且唯一 —— saga.md §Governance）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1013,21 +1014,70 @@ pub enum CompensationOutcome {
     Failed,
 }
 
+/// Typed saga step execution context.
+///
+/// The runtime owns journal/checkpoint handles; step code receives only tenant-scoped identity and
+/// the validated generated step name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaStepCtx {
+    instance: SagaInstanceRef,
+    step_name: StepName,
+}
+
+impl SagaStepCtx {
+    /// Build a typed step context from the executor-owned saga instance and generated step name.
+    pub fn new(instance: SagaInstanceRef, step_name: StepName) -> Self {
+        Self {
+            instance,
+            step_name,
+        }
+    }
+
+    /// Tenant-scoped saga instance.
+    pub fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// Tenant boundary.
+    pub fn tenant(&self) -> TenantId {
+        self.instance.tenant()
+    }
+
+    /// Saga id.
+    pub fn saga_id(&self) -> SagaId {
+        self.instance.saga_id()
+    }
+
+    /// Current generated step name.
+    pub fn step_name(&self) -> &StepName {
+        &self.step_name
+    }
+}
+
 /// Saga step 策略（L3 引擎策略 trait，native AFIT）。
 ///
-/// `execute` 前向动作；`compensate` 其逆操作（对标 steno do_it/undo_it）。执行器持已完成 step 栈，
-/// 失败时**逆序** `compensate`（saga.md）。native AFIT ⇒ 非 object-safe，执行器泛型 `<S: SagaStep>` 消费。
-#[allow(async_fn_in_trait)]
-// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
-pub trait SagaStep {
-    /// 稳定 step 名（codegen 派生唯一标识；saga.md governance）。
-    fn name(&self) -> &StepName;
+/// `BINDING` 是 generated step metadata 单源；`execute` 前向动作返回 typed output，由 service runtime
+/// wrapper 编码成既有 executor action bytes，**不**进入 durable journal。`compensate` 是必填逆操作；
+/// 缺 compensation 即编译失败。RPITIT `impl Future + Send` 保持 native 静态分发且可被 runtime 包进
+/// `BoxFuture`。
+pub trait SagaStep: Send + Sync {
+    /// Generated step binding from the saga contract.
+    const BINDING: SagaStepBinding;
 
-    /// 前向执行此 step。
-    async fn execute(&self) -> Result<SagaOutcome, crate::error::EngineError>;
+    /// Typed step output. Runtime wrapper serializes it for the existing erased action interface.
+    type Output: SagaStepOutputBinding + Send + 'static;
 
-    /// 补偿此 step（逆操作）。仅对已 `Completed` 的 step 由执行器逆序调用。
-    async fn compensate(&self) -> Result<CompensationOutcome, crate::error::EngineError>;
+    /// Forward execution for this step.
+    fn execute(
+        &self,
+        ctx: SagaStepCtx,
+    ) -> impl Future<Output = Result<Self::Output, crate::error::EngineError>> + Send;
+
+    /// Compensation for this step. Called in reverse order for completed steps only.
+    fn compensate(
+        &self,
+        ctx: SagaStepCtx,
+    ) -> impl Future<Output = Result<CompensationOutcome, crate::error::EngineError>> + Send;
 }
 
 #[cfg(test)]
@@ -1203,6 +1253,24 @@ mod tests {
                 next_seq: 3,
                 pending: vec![(1, step("step2")), (0, step("step1"))],
                 failed_step: None,
+            })
+        );
+    }
+
+    #[test]
+    fn replay_compensates_post_effect_failure_intent_for_executing_step() {
+        let def = definition(&["step1"]);
+        let records = vec![
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Executing),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Compensating),
+        ];
+
+        assert_eq!(
+            def.replay(&records),
+            Ok(SagaReplayDecision::Compensating {
+                next_seq: 2,
+                pending: vec![(0, step("step1"))],
+                failed_step: Some(step("step1")),
             })
         );
     }

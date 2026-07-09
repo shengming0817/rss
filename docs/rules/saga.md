@@ -26,7 +26,8 @@ saga ADR 和 runbook 中。
 ## Runtime policy
 
 `cargo xtask codegen` 从 `[saga].retryMillis` / `[saga].timeoutMillis` 派生
-`vocab::SagaRuntimePolicySpec`；组合根必须把它转换为 `eventexec::saga::SagaPolicy` 后注入执行器。
+`vocab::SagaRuntimePolicySpec`；生成的 `SPEC` 同时携带 contract、policy 和 ordered `STEPS`。
+组合根从同一个 `SPEC` 构造 `SagaExecutorConfig` 和 `TypedSagaActionFactory`。
 
 - `retryMillis = 0` 且 `timeoutMillis = 0`：禁用 retry/timeout，动作直接 await。
 - `retryMillis > 0` 且 `timeoutMillis = 0`：非法，`SagaPolicy::try_from` 拒绝。
@@ -35,11 +36,28 @@ saga ADR 和 runbook 中。
 - `SerializeFailed` 不重试。
 - 前向 timeout / 预算耗尽触发既有逆序补偿；补偿 timeout / 预算耗尽走既有 saga dead-letter 路径。
 
+## Typed step wrapper
+
+`cargo xtask codegen` 对 saga payload 和每个 step `outputSchema` 生成 DTO，同时生成
+`STEP_*: vocab::SagaStepBinding`、`STEPS` 和 `SPEC = SagaSpec::from_parts(CONTRACT, POLICY, STEPS)`。
+
+业务实现 `consistency::SagaStep`：
+
+- `BINDING` 必须指向生成的 step binding。
+- `Output` 是该 step 的 typed output DTO；`eventexec` wrapper 负责序列化为 runtime `Vec<u8>`。
+- `compensate(ctx)` 是必填 trait method；缺失即编译失败。
+- `execute` 返回 `EngineErrorKind::Transient` 时映射为可重试 action error；`Permanent` / `Invariant` 映射为非重试 action failure。
+
+外部组合根只能通过 `eventexec::TypedSagaActionFactory::builder(SPEC)` 按生成顺序注册 typed step factory。
+`finish()` 校验 step 数量、顺序、名称和 output schema；缺步、多步或重排均 fail-closed。raw
+`SagaAction` / `SagaActionFactory` 是 `eventexec` 内部 erased primitive，不从 crate root re-export。
+
 ## 构造器
 
 `eventexec` crate 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /
-trait 对象），缺失即编译错误。`SagaExecutorConfig::new` 必须接收 `SagaPolicy` 位置参，禁止无策略
-constructor、builder option 或兼容 shim。
+trait 对象），缺失即编译错误。`SagaExecutorDeps::new` 必须接收 `TypedSagaActionFactory`，禁止外部注入
+raw erased factory。`SagaExecutorConfig::new` 必须接收 `SagaPolicy` 位置参，禁止无策略 constructor、builder
+option 或兼容 shim。
 
 ## 参考
 

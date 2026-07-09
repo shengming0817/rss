@@ -26,9 +26,10 @@
 
 新增 `contracts/saga/<domain>/v1/`：
 - `contract.toml`：`kind="saga"`、`consistencyLevel="WorkflowEventual"`(L3)、非空 `[saga]` block（TOML 键 **camelCase**，`deny_unknown_fields`）：`steps=[{name, outputSchema}...]`（≥1）+ `compensationOrder="reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，**block 级、非 per-step**）。完整形态见 `xtask` 解析测试 `VALID_SAGA` 与 `contracts/README.md` §[saga]。
-- codegen 派生 `CONTRACT_ID` / `CONTRACT` / `POLICY` / `SPEC`；`POLICY` 是 `vocab::SagaRuntimePolicySpec`，组合根转成 `eventexec::saga::SagaPolicy` 后注入 executor。
+- codegen 派生 step output DTO、`STEP_*`、ordered `STEPS`、`CONTRACT_ID` / `CONTRACT` / `POLICY` / `SPEC`；`POLICY` 是 `vocab::SagaRuntimePolicySpec`，`SPEC` 同源携带 contract + policy + steps。
 - runtime policy 语义：`retryMillis=0 && timeoutMillis=0` 禁用；`retryMillis>0 && timeoutMillis=0` 非法；`timeoutMillis>0` 是单 step phase 总预算（覆盖 do/undo，各自包含重试与 backoff）；`retryMillis>0` 是固定 backoff，重试由总预算约束。
-- step `outputSchema` 引用 `*.schema.json`。
+- step `outputSchema` 引用 `*.schema.json`，并进入 typify 生成对应 output DTO。
+- 组合根经 `eventexec::TypedSagaActionFactory::builder(SPEC)` 按 `STEPS` 顺序注册 typed `consistency::SagaStep` factory；`finish()` 校验 step 数量、顺序、名称和 output schema。raw erased action glue 不作为公开 API。
 
 **治理**（xtask，SAGA-CONTRACT-01，对齐 saga.md §Governance）：
 - 非空 saga block + ≥1 step；step name = 合法 Rust 标识符且唯一；每步声明 output schema；compensation order 仅 reverse；consistencyLevel=L3；retry/timeout 合法非负 duration。

@@ -64,7 +64,7 @@ pub use saga::{
     SagaInstanceRef, SagaInstanceRefError, SagaInstanceStatus, SagaInterruption,
     SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
     SagaLease, SagaLeaseError, SagaLeaseOutcome, SagaModelError, SagaOutcome, SagaReplayDecision,
-    SagaStep, StepName, StepNameError,
+    SagaStep, SagaStepCtx, StepName, StepNameError,
 };
 pub use tx_retry::{
     TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError, TxRetryReport,

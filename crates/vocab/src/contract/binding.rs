@@ -193,21 +193,110 @@ impl SagaRuntimePolicySpec {
     }
 }
 
+/// Static saga step binding generated from `[saga].steps`.
+///
+/// The parent saga contract and the step fields are carried as one atom so typed runtime
+/// registration cannot bind a same-shaped step from a different saga contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaStepBinding {
+    contract: ContractBinding,
+    name: &'static str,
+    output_schema: &'static str,
+}
+
+impl SagaStepBinding {
+    /// Construct a generated saga step binding from static manifest literals.
+    #[must_use]
+    pub const fn from_static(
+        contract: ContractBinding,
+        name: &'static str,
+        output_schema: &'static str,
+    ) -> Self {
+        Self {
+            contract,
+            name,
+            output_schema,
+        }
+    }
+
+    /// Parent saga contract binding.
+    #[must_use]
+    pub const fn contract(&self) -> ContractBinding {
+        self.contract
+    }
+
+    /// Parent saga domain.
+    #[must_use]
+    pub const fn domain(&self) -> &'static str {
+        self.contract.domain()
+    }
+
+    /// Parent saga contract id.
+    #[must_use]
+    pub const fn contract_id(&self) -> &'static str {
+        self.contract.contract_id()
+    }
+
+    /// Parent saga contract version.
+    #[must_use]
+    pub const fn version(&self) -> &'static str {
+        self.contract.version()
+    }
+
+    /// Parent saga schema bundle hash.
+    #[must_use]
+    pub const fn schema_hash(&self) -> &'static str {
+        self.contract.schema_hash()
+    }
+
+    /// Stable saga step name from `contract.toml`.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Step output schema file from `contract.toml`.
+    #[must_use]
+    pub const fn output_schema(&self) -> &'static str {
+        self.output_schema
+    }
+}
+
+/// Marker generated for the DTO that corresponds to one saga step output schema.
+///
+/// Production implementations are emitted by contract codegen next to the DTO. Runtime registration
+/// compares this binding against the step's generated binding, so a typed step cannot silently
+/// return another step's output DTO.
+pub trait SagaStepOutputBinding {
+    /// Generated saga step binding for this output DTO.
+    const BINDING: SagaStepBinding;
+}
+
 /// Saga contract binding generated from a saga `contract.toml`.
 ///
-/// `contract` and `policy` are carried as one atom so runtime composition does not hand-author a
-/// contract id separately from the policy spec.
+/// `contract`, `policy`, and ordered `steps` are carried as one atom so runtime composition does
+/// not hand-author contract id, runtime policy, or action order independently from the generated
+/// saga contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SagaContractBinding {
     contract: ContractBinding,
     policy: SagaRuntimePolicySpec,
+    steps: &'static [SagaStepBinding],
 }
 
 impl SagaContractBinding {
     /// Construct a generated saga binding from static manifest-derived parts.
     #[must_use]
-    pub const fn from_parts(contract: ContractBinding, policy: SagaRuntimePolicySpec) -> Self {
-        Self { contract, policy }
+    pub const fn from_parts(
+        contract: ContractBinding,
+        policy: SagaRuntimePolicySpec,
+        steps: &'static [SagaStepBinding],
+    ) -> Self {
+        Self {
+            contract,
+            policy,
+            steps,
+        }
     }
 
     /// Contract metadata binding.
@@ -220,6 +309,12 @@ impl SagaContractBinding {
     #[must_use]
     pub const fn policy(&self) -> SagaRuntimePolicySpec {
         self.policy
+    }
+
+    /// Ordered saga step bindings generated from `[saga].steps`.
+    #[must_use]
+    pub const fn steps(&self) -> &'static [SagaStepBinding] {
+        self.steps
     }
 
     /// Saga contract id.
@@ -249,7 +344,7 @@ impl SagaContractBinding {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractBinding, SagaContractBinding, SagaRuntimePolicySpec};
+    use super::{ContractBinding, SagaContractBinding, SagaRuntimePolicySpec, SagaStepBinding};
 
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -318,14 +413,24 @@ mod tests {
         const CONTRACT: ContractBinding =
             ContractBinding::from_static("billing", "billing.checkout", "v1", HASH);
         const POLICY: SagaRuntimePolicySpec = SagaRuntimePolicySpec::from_millis(5000, 30000);
-        const BINDING: SagaContractBinding = SagaContractBinding::from_parts(CONTRACT, POLICY);
+        const STEPS: &[SagaStepBinding] = &[
+            SagaStepBinding::from_static(CONTRACT, "reserve_funds", "reserve.schema.json"),
+            SagaStepBinding::from_static(CONTRACT, "capture", "capture.schema.json"),
+        ];
+        const BINDING: SagaContractBinding =
+            SagaContractBinding::from_parts(CONTRACT, POLICY, STEPS);
 
+        assert_eq!(BINDING.steps()[0].contract(), CONTRACT);
+        assert_eq!(BINDING.steps()[0].contract_id(), "billing.checkout");
         assert_eq!(BINDING.domain(), "billing");
         assert_eq!(BINDING.contract_id(), "billing.checkout");
         assert_eq!(BINDING.version(), "v1");
         assert_eq!(BINDING.schema_hash(), HASH);
         assert_eq!(BINDING.contract(), CONTRACT);
         assert_eq!(BINDING.policy(), POLICY);
+        assert_eq!(BINDING.steps(), STEPS);
+        assert_eq!(BINDING.steps()[0].name(), "reserve_funds");
+        assert_eq!(BINDING.steps()[0].output_schema(), "reserve.schema.json");
     }
 
     #[test]

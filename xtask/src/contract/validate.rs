@@ -12,7 +12,7 @@
 //! （Medium，CI 门，#1121）。
 //! INVARIANT: CONTRACT-IDUNIQ-01 { level = "Medium", exec = "verify", source = "code" }— contract `id` 跨契约全局唯一（R12，`validate_cross` 跨契约扫描；
 //! 依据 api-versioning.md：破坏式 wire 变更新建版本目录 **且** 新 contract ID ⇒ id 是全局注册标识，须唯一）。
-//! INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "verify", source = "code" }— declared schema（喂 codegen TypeSpace 的 request/response/payload）的
+//! INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "verify", source = "code" }— declared schema（喂 codegen TypeSpace 的 request/response/payload；saga 另含 step outputSchema）的
 //! root 须有 string `title`（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部
 //! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
 //! title **未必**被 codegen 兜底（前者可能被合并 / 类型歧义、后者直接丢根类型，均非 compile error、非
@@ -1908,14 +1908,15 @@ fn rule_active_subscriber(m: &ContractManifest, label: &str) -> Option<Finding> 
     None
 }
 
-/// R13：每个喂 codegen TypeSpace 的 declared schema（`[schemas]` request/response/payload）的 `title`
+/// R13：每个喂 codegen TypeSpace 的 declared schema（`[schemas]` request/response/payload；saga 另含 step
+/// outputSchema）的 `title`
 /// 须 PascalCase 且**契约内**唯一（INVARIANT: CONTRACT-TITLE-01 { level = "Medium", exec = "verify", source = "code" }）。title 是 typify 生成的 Rust 类型名
 /// （顶层 + 嵌套对象都成类型）：非 PascalCase 产生非惯用类型名；契约内重复（一契约的全部 declared schema
 /// 喂同一 TypeSpace）产生类型冲突。
 ///
-/// schema 文件口径**严格对齐 codegen** `render_contract`（`xtask/src/codegen.rs` 用 `Schemas::declared_files()`）
-/// ——**不是** [`super::manifest::ContractManifest::declared_schema_files`]：后者含 saga step `outputSchema`，
-/// 那些文件**从不喂 typify**（不成类型），纳入会误报「契约内重复」且「title→类型名」依据不成立。
+/// schema 文件口径**严格对齐 codegen** `render_contract_body`：saga 用
+/// [`super::manifest::ContractManifest::declared_schema_files`]（payload + step outputSchema），其它 kind 用
+/// `Schemas::declared_files()`。
 /// reason: 校验口径锚定「实际生成类型的那批 schema」，勿误把两个 accessor 统一。
 ///
 /// 读不到 / JSON parse 失败 → skip（不报）：文件缺失由 R5（MissingSchema）报，JSON 良构由 codegen parse
@@ -1970,13 +1971,18 @@ fn rule_schema_title(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
     out
 }
 
-/// 读契约的全部 declared schema（口径 = codegen `Schemas::declared_files()`，request/response/payload），
+/// 读契约的全部 declared schema（口径 = codegen `render_contract_body` 的 schema 文件集），
 /// 返回（`(title, 来源文件名)` 全集, root title 缺失的文件名集）。读不到 / parse 失败的文件 skip
 /// （见 [`rule_schema_title`] doc）；能解析但 root 无 string title 的文件计入第二项（供 ⓪ root 必填门）。
 fn collect_contract_titles(c: &DiscoveredContract) -> (Vec<(String, String)>, Vec<String>) {
     let mut titles = Vec::new();
     let mut missing_root = Vec::new();
-    for file in c.manifest.schemas.declared_files() {
+    let schema_files = if c.manifest.kind == ContractKind::Saga {
+        c.manifest.declared_schema_files()
+    } else {
+        c.manifest.schemas.declared_files()
+    };
+    for file in schema_files {
         if pathsafe::is_unsafe_segment(file) {
             // 防御性 fail-safe：含路径分量的文件名由 R6 报；R13 不主动 `join` 读它（不依赖
             // 文件系统拒绝来保护自身），与 R6 意图一致。
@@ -5237,6 +5243,22 @@ mod tests {
         Ok((discovered(m, dir.clone()), dir))
     }
 
+    /// 写一个 saga 契约目录（payload + reserve step output schema 内容自定），返回 (DiscoveredContract, dir)。
+    /// 调用方负责 `remove_dir_all` 清理。
+    fn saga_contract_with_schemas(
+        payload: &str,
+        reserve: &str,
+    ) -> anyhow::Result<(DiscoveredContract, PathBuf)> {
+        let dir = unique_tmp("validate-title-saga");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("payload.schema.json"), payload)?;
+        std::fs::write(dir.join("reserve.schema.json"), reserve)?;
+        Ok((
+            discovered(saga_manifest(Some(valid_saga_block())), dir.clone()),
+            dir,
+        ))
+    }
+
     fn make_active_get(
         m: &mut ContractManifest,
         path: &str,
@@ -5485,6 +5507,60 @@ mod tests {
                 .iter()
                 .any(|f| f.rule == Rule::SchemaTitle && f.detail.contains("root title")),
             "非 string root title 须报 SchemaTitle: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_saga_step_output_missing_root_title_detected() -> anyhow::Result<()> {
+        let (c, dir) = saga_contract_with_schemas(
+            r#"{"title":"BillingCheckoutSagaPayload"}"#,
+            r#"{"type":"object","properties":{"reservationId":{"type":"string"}}}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::SchemaTitle
+                    && f.detail.contains("root title")
+                    && f.detail.contains("reserve.schema.json")
+            }),
+            "saga step outputSchema 缺 root title 须报 SchemaTitle: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_saga_step_output_non_pascal_title_detected() -> anyhow::Result<()> {
+        let (c, dir) = saga_contract_with_schemas(
+            r#"{"title":"BillingCheckoutSagaPayload"}"#,
+            r#"{"title":"reserve_output","type":"object"}"#,
+        )?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::SchemaTitle
+                    && f.detail.contains("reserve_output")
+                    && f.detail.contains("reserve.schema.json")
+            }),
+            "saga step outputSchema 非 PascalCase title 须报 SchemaTitle: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn r13_saga_step_output_duplicate_title_detected() -> anyhow::Result<()> {
+        let (c, dir) = saga_contract_with_schemas(r#"{"title":"Dup"}"#, r#"{"title":"Dup"}"#)?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::SchemaTitle
+                    && f.detail.contains("契约内重复")
+                    && f.detail.contains("reserve.schema.json")
+            }),
+            "saga payload + step outputSchema 重复 title 须报 SchemaTitle: {findings:?}"
         );
         Ok(())
     }

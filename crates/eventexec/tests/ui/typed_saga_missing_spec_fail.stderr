@@ -1,0 +1,15 @@
+error[E0061]: this function takes 1 argument but 0 arguments were supplied
+ --> tests/ui/typed_saga_missing_spec_fail.rs:6:20
+  |
+6 |     let _builder = TypedSagaActionFactory::builder();
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-- argument #1 of type `vocab::contract::binding::SagaContractBinding` is missing
+  |
+note: associated function defined here
+ --> src/saga.rs
+  |
+  |     pub fn builder(spec: vocab::SagaContractBinding) -> TypedSagaActionFactoryBuilder {
+  |            ^^^^^^^
+help: provide the argument
+  |
+6 |     let _builder = TypedSagaActionFactory::builder(/* vocab::contract::binding::SagaContractBinding */);
+  |                                                    +++++++++++++++++++++++++++++++++++++++++++++++++++

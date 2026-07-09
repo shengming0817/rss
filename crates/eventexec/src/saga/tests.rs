@@ -12,9 +12,13 @@ use std::time::Duration;
 use super::{
     SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaCommand, SagaExecStatus,
     SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaPolicy,
-    SagaRuntimeLock, SagaTailer,
+    SagaRuntimeLock, SagaTailer, TypedSagaActionFactory, TypedSagaFactoryError,
+    is_saga_action_retryable,
 };
-use consistency::{Lsn, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName};
+use consistency::{
+    CompensationOutcome, EngineError, EngineErrorKind, Lsn, SagaJournalAppendRecord,
+    SagaJournalRecord, SagaJournalStatus, SagaStep, SagaStepCtx, StepName,
+};
 use consistency::{
     SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaInterruption,
     SagaJournalAppendOutcome, SagaLease, SagaLeaseOutcome,
@@ -739,8 +743,13 @@ fn executor_config_from_contract_spec_derives_contract_and_policy() {
     );
     const POLICY_SPEC: vocab::SagaRuntimePolicySpec =
         vocab::SagaRuntimePolicySpec::from_millis(5000, 30000);
+    const STEPS: &[vocab::SagaStepBinding] = &[vocab::SagaStepBinding::from_static(
+        CONTRACT_BINDING,
+        "step1",
+        "step1.schema.json",
+    )];
     const SPEC: vocab::SagaContractBinding =
-        vocab::SagaContractBinding::from_parts(CONTRACT_BINDING, POLICY_SPEC);
+        vocab::SagaContractBinding::from_parts(CONTRACT_BINDING, POLICY_SPEC, STEPS);
 
     let config = SagaExecutorConfig::from_contract_spec(
         CheckpointOwner::new(OWNER),
@@ -752,6 +761,558 @@ fn executor_config_from_contract_spec_derives_contract_and_policy() {
 
     assert_eq!(config.contract_id, CONTRACT);
     assert!(matches!(config.policy, SagaPolicy::Bounded(_)));
+}
+
+const TYPED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
+    OWNER,
+    CONTRACT,
+    "v1",
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+);
+const TYPED_STEP_RESERVE: vocab::SagaStepBinding =
+    vocab::SagaStepBinding::from_static(TYPED_CONTRACT, "reserve_funds", "reserve.schema.json");
+const TYPED_STEP_CAPTURE: vocab::SagaStepBinding =
+    vocab::SagaStepBinding::from_static(TYPED_CONTRACT, "capture", "capture.schema.json");
+const TYPED_STEPS_ONE: &[vocab::SagaStepBinding] = &[TYPED_STEP_RESERVE];
+const TYPED_STEPS_TWO: &[vocab::SagaStepBinding] = &[TYPED_STEP_RESERVE, TYPED_STEP_CAPTURE];
+const TYPED_POLICY: vocab::SagaRuntimePolicySpec = vocab::SagaRuntimePolicySpec::from_millis(0, 0);
+const TYPED_SPEC_ONE: vocab::SagaContractBinding =
+    vocab::SagaContractBinding::from_parts(TYPED_CONTRACT, TYPED_POLICY, TYPED_STEPS_ONE);
+const TYPED_SPEC_TWO: vocab::SagaContractBinding =
+    vocab::SagaContractBinding::from_parts(TYPED_CONTRACT, TYPED_POLICY, TYPED_STEPS_TWO);
+const OTHER_TYPED_CONTRACT: vocab::ContractBinding = vocab::ContractBinding::from_static(
+    "orders",
+    "orders.checkout",
+    "v1",
+    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+);
+const OTHER_TYPED_STEP_RESERVE: vocab::SagaStepBinding = vocab::SagaStepBinding::from_static(
+    OTHER_TYPED_CONTRACT,
+    "reserve_funds",
+    "reserve.schema.json",
+);
+
+#[derive(Debug, serde::Serialize)]
+struct TypedReserveOutput {
+    step: &'static str,
+    saga_id: String,
+}
+
+impl vocab::SagaStepOutputBinding for TypedReserveOutput {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TypedCaptureOutput {
+    step: &'static str,
+    saga_id: String,
+}
+
+impl vocab::SagaStepOutputBinding for TypedCaptureOutput {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
+}
+
+#[derive(Debug)]
+struct TypedReserveStep {
+    execute_count: Arc<AtomicU32>,
+    compensate_count: Arc<AtomicU32>,
+    execute_error: Option<EngineErrorKind>,
+    compensate_failed: bool,
+}
+
+impl SagaStep for TypedReserveStep {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
+
+    type Output = TypedReserveOutput;
+
+    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        let count = self.execute_count.clone();
+        let execute_error = self.execute_error;
+        count.fetch_add(1, Ordering::SeqCst);
+        if let Some(kind) = execute_error {
+            return Err(EngineError::new(kind));
+        }
+        Ok(TypedReserveOutput {
+            step: "reserve_funds",
+            saga_id: ctx.saga_id().as_uuid().to_string(),
+        })
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        let count = self.compensate_count.clone();
+        let compensate_failed = self.compensate_failed;
+        count.fetch_add(1, Ordering::SeqCst);
+        if compensate_failed {
+            Ok(CompensationOutcome::Failed)
+        } else {
+            Ok(CompensationOutcome::Compensated)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TypedCaptureStep;
+
+impl SagaStep for TypedCaptureStep {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
+
+    type Output = TypedCaptureOutput;
+
+    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(TypedCaptureOutput {
+            step: "capture",
+            saga_id: ctx.saga_id().as_uuid().to_string(),
+        })
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+#[derive(Debug)]
+struct TypedFailingCaptureStep;
+
+impl SagaStep for TypedFailingCaptureStep {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
+
+    type Output = TypedCaptureOutput;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Err(EngineError::new(EngineErrorKind::Transient))
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+struct FailingSerialize;
+
+impl vocab::SagaStepOutputBinding for FailingSerialize {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
+}
+
+impl serde::Serialize for FailingSerialize {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom("intentional serialize failure"))
+    }
+}
+
+#[derive(Debug)]
+struct SerializeFailStep;
+
+impl SagaStep for SerializeFailStep {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
+
+    type Output = FailingSerialize;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(FailingSerialize)
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+#[derive(Debug)]
+struct CountingSerializeFailStep {
+    compensate_count: Arc<AtomicU32>,
+}
+
+impl SagaStep for CountingSerializeFailStep {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
+
+    type Output = FailingSerialize;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(FailingSerialize)
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        self.compensate_count.fetch_add(1, Ordering::SeqCst);
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WrongStepOutput;
+
+impl vocab::SagaStepOutputBinding for WrongStepOutput {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_CAPTURE;
+}
+
+#[derive(Debug, serde::Serialize)]
+struct OtherContractReserveOutput;
+
+impl vocab::SagaStepOutputBinding for OtherContractReserveOutput {
+    const BINDING: vocab::SagaStepBinding = OTHER_TYPED_STEP_RESERVE;
+}
+
+#[derive(Debug)]
+struct WrongOutputReserveStep;
+
+impl SagaStep for WrongOutputReserveStep {
+    const BINDING: vocab::SagaStepBinding = TYPED_STEP_RESERVE;
+
+    type Output = WrongStepOutput;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(WrongStepOutput)
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+#[derive(Debug)]
+struct OtherContractReserveStep;
+
+impl SagaStep for OtherContractReserveStep {
+    const BINDING: vocab::SagaStepBinding = OTHER_TYPED_STEP_RESERVE;
+
+    type Output = OtherContractReserveOutput;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(OtherContractReserveOutput)
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: typed wrapper regression test setup
+async fn typed_saga_action_wraps_execute_compensate_and_serializes_output() {
+    let execute_count = Arc::new(AtomicU32::new(0));
+    let compensate_count = Arc::new(AtomicU32::new(0));
+    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    builder
+        .register_step::<TypedReserveStep, _>({
+            let execute_count = execute_count.clone();
+            let compensate_count = compensate_count.clone();
+            move || TypedReserveStep {
+                execute_count: execute_count.clone(),
+                compensate_count: compensate_count.clone(),
+                execute_error: None,
+                compensate_failed: false,
+            }
+        })
+        .expect("register typed step");
+    let factory = builder.finish().expect("typed factory");
+    let actions = factory.build();
+    assert_eq!(actions.len(), 1);
+
+    let output = actions[0]
+        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
+        .await
+        .expect("typed execute succeeds");
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("json output");
+    assert_eq!(json["step"], "reserve_funds");
+    assert_eq!(execute_count.load(Ordering::SeqCst), 1);
+
+    actions[0]
+        .undo_it(SagaActionCtx::new(instance(), "reserve_funds"))
+        .await
+        .expect("typed compensate succeeds");
+    assert_eq!(compensate_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: typed wrapper regression test setup
+async fn typed_saga_action_maps_engine_errors_and_serialization_failures() {
+    let mut transient = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    transient
+        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
+            execute_count: Arc::new(AtomicU32::new(0)),
+            compensate_count: Arc::new(AtomicU32::new(0)),
+            execute_error: Some(EngineErrorKind::Transient),
+            compensate_failed: false,
+        })
+        .expect("register transient step");
+    let transient_factory = transient.finish().expect("factory");
+    let transient_actions = transient_factory.build();
+    let err = transient_actions[0]
+        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
+        .await
+        .expect_err("transient should fail action");
+    assert!(matches!(err, SagaActionError::ActionFailed));
+    assert!(is_saga_action_retryable(&err));
+
+    let mut permanent = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    permanent
+        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
+            execute_count: Arc::new(AtomicU32::new(0)),
+            compensate_count: Arc::new(AtomicU32::new(0)),
+            execute_error: Some(EngineErrorKind::Permanent),
+            compensate_failed: false,
+        })
+        .expect("register permanent step");
+    let permanent_factory = permanent.finish().expect("factory");
+    let permanent_actions = permanent_factory.build();
+    let err = permanent_actions[0]
+        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
+        .await
+        .expect_err("permanent should fail action");
+    assert!(matches!(err, SagaActionError::NonRetryableActionFailed));
+    assert!(!is_saga_action_retryable(&err));
+
+    let mut serialize = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    serialize
+        .register_step::<SerializeFailStep, _>(|| SerializeFailStep)
+        .expect("register serialize step");
+    let serialize_factory = serialize.finish().expect("factory");
+    let serialize_actions = serialize_factory.build();
+    let err = serialize_actions[0]
+        .do_it(SagaActionCtx::new(instance(), "reserve_funds"))
+        .await
+        .expect_err("serialization should fail action");
+    assert!(matches!(err, SagaActionError::SerializeFailed));
+    assert!(!is_saga_action_retryable(&err));
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: typed executor regression test setup
+async fn typed_saga_output_serialize_failure_compensates_current_step() {
+    let compensate_count = Arc::new(AtomicU32::new(0));
+    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    builder
+        .register_step::<CountingSerializeFailStep, _>({
+            let compensate_count = compensate_count.clone();
+            move || CountingSerializeFailStep {
+                compensate_count: compensate_count.clone(),
+            }
+        })
+        .expect("register serialize-failing step");
+    let factory = builder.finish().expect("typed factory");
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let exec = SagaExecutorImpl::new(
+        SagaExecutorDeps::new(
+            journal.clone(),
+            ready_instance_store(),
+            cp,
+            dlx,
+            factory,
+            runtime_lock(),
+        ),
+        executor_config_with_policy_and_lease_ttl(disabled_policy(), Duration::from_secs(30)),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Failed {
+                error: SagaActionError::SerializeFailed,
+                ..
+            }
+        ),
+        "output serialization must fail the saga: {outcome:?}"
+    );
+    assert_eq!(
+        compensate_count.load(Ordering::SeqCst),
+        1,
+        "post-execute serialization failure must compensate the current step"
+    );
+    let log = journal.log();
+    assert_eq!(
+        log,
+        vec![
+            ("reserve_funds".to_string(), SagaJournalStatus::Executing),
+            ("reserve_funds".to_string(), SagaJournalStatus::Compensating),
+            ("reserve_funds".to_string(), SagaJournalStatus::Compensated),
+        ],
+        "serialization failure must persist compensation intent before completion"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: typed executor regression test setup
+#[allow(clippy::panic)] // reason: explicit outcome branch assertion
+async fn typed_saga_compensation_failed_writes_failed_journal_and_dead_letter() {
+    let execute_count = Arc::new(AtomicU32::new(0));
+    let compensate_count = Arc::new(AtomicU32::new(0));
+    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_TWO);
+    builder
+        .register_step::<TypedReserveStep, _>({
+            let execute_count = execute_count.clone();
+            let compensate_count = compensate_count.clone();
+            move || TypedReserveStep {
+                execute_count: execute_count.clone(),
+                compensate_count: compensate_count.clone(),
+                execute_error: None,
+                compensate_failed: true,
+            }
+        })
+        .expect("register reserve step");
+    builder
+        .register_step::<TypedFailingCaptureStep, _>(|| TypedFailingCaptureStep)
+        .expect("register failing capture step");
+    let factory = builder.finish().expect("typed factory");
+    let journal = Arc::new(FakeJournal::default());
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let exec = SagaExecutorImpl::new(
+        SagaExecutorDeps::new(
+            journal.clone(),
+            ready_instance_store(),
+            cp,
+            dlx.clone(),
+            factory,
+            runtime_lock(),
+        ),
+        executor_config_with_policy_and_lease_ttl(disabled_policy(), Duration::from_secs(30)),
+    );
+
+    let outcome = exec.run(instance()).await;
+
+    match outcome {
+        SagaOutcome::Failed { failed_node, error } => {
+            assert_eq!(failed_node, "reserve_funds");
+            assert!(matches!(error, SagaActionError::NonRetryableActionFailed));
+        }
+        other => panic!("expected typed compensation failure, got {other:?}"),
+    }
+    assert_eq!(execute_count.load(Ordering::SeqCst), 1);
+    assert_eq!(compensate_count.load(Ordering::SeqCst), 1);
+    let log = journal.log();
+    assert!(
+        log.contains(&("reserve_funds".to_string(), SagaJournalStatus::Failed)),
+        "typed compensation failure must write Failed journal row: {log:?}"
+    );
+    let records = dlx.records();
+    assert_eq!(
+        records.len(),
+        1,
+        "typed compensation failure must write DLX"
+    );
+    let payload = &records[0].5;
+    assert!(
+        payload.contains("capture"),
+        "DLX payload must keep original forward failure step: {payload}"
+    );
+    assert!(
+        payload.contains("reserve_funds"),
+        "DLX payload must keep failed compensation step: {payload}"
+    );
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: typed factory regression test setup
+fn typed_saga_factory_finish_rejects_missing_extra_and_reordered_steps() {
+    let missing = TypedSagaActionFactory::builder(TYPED_SPEC_ONE).finish();
+    assert!(matches!(
+        missing,
+        Err(TypedSagaFactoryError::StepCountMismatch {
+            expected: 1,
+            actual: 0
+        })
+    ));
+
+    let mut extra = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    extra
+        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
+            execute_count: Arc::new(AtomicU32::new(0)),
+            compensate_count: Arc::new(AtomicU32::new(0)),
+            execute_error: None,
+            compensate_failed: false,
+        })
+        .expect("register reserve");
+    extra
+        .register_step::<TypedCaptureStep, _>(|| TypedCaptureStep)
+        .expect("register capture");
+    let extra = extra.finish();
+    assert!(matches!(
+        extra,
+        Err(TypedSagaFactoryError::StepCountMismatch {
+            expected: 1,
+            actual: 2
+        })
+    ));
+
+    let mut reordered = TypedSagaActionFactory::builder(TYPED_SPEC_TWO);
+    reordered
+        .register_step::<TypedCaptureStep, _>(|| TypedCaptureStep)
+        .expect("register capture first");
+    reordered
+        .register_step::<TypedReserveStep, _>(|| TypedReserveStep {
+            execute_count: Arc::new(AtomicU32::new(0)),
+            compensate_count: Arc::new(AtomicU32::new(0)),
+            execute_error: None,
+            compensate_failed: false,
+        })
+        .expect("register reserve second");
+    let reordered = reordered.finish();
+    assert!(matches!(
+        reordered,
+        Err(TypedSagaFactoryError::StepBindingMismatch { index: 0, .. })
+    ));
+
+    let mut wrong_output = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    let err = wrong_output
+        .register_step::<WrongOutputReserveStep, _>(|| WrongOutputReserveStep)
+        .expect_err("wrong output binding must fail registration");
+    assert!(matches!(
+        err,
+        TypedSagaFactoryError::StepOutputBindingMismatch { .. }
+    ));
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: typed factory regression test setup
+fn typed_saga_factory_rejects_cross_contract_step_binding() {
+    assert_ne!(OTHER_TYPED_CONTRACT, TYPED_CONTRACT);
+
+    let mut builder = TypedSagaActionFactory::builder(TYPED_SPEC_ONE);
+    builder
+        .register_step::<OtherContractReserveStep, _>(|| OtherContractReserveStep)
+        .expect("register same-shaped foreign step");
+
+    assert!(matches!(
+        builder.finish(),
+        Err(TypedSagaFactoryError::StepBindingMismatch { index: 0, .. })
+    ));
+}
+
+#[test]
+fn typed_saga_factory_error_display_includes_diagnostic_context() {
+    let count = TypedSagaFactoryError::StepCountMismatch {
+        expected: 1,
+        actual: 2,
+    }
+    .to_string();
+    assert!(count.contains("expected=1"), "{count}");
+    assert!(count.contains("actual=2"), "{count}");
+
+    let binding = TypedSagaFactoryError::StepBindingMismatch {
+        index: 0,
+        expected: Box::new(TYPED_STEP_RESERVE),
+        actual: Box::new(TYPED_STEP_CAPTURE),
+    }
+    .to_string();
+    assert!(binding.contains("index=0"), "{binding}");
+    assert!(binding.contains("reserve_funds"), "{binding}");
+    assert!(binding.contains("capture.schema.json"), "{binding}");
+
+    let output = TypedSagaFactoryError::StepOutputBindingMismatch {
+        step: Box::new(TYPED_STEP_RESERVE),
+        output: Box::new(TYPED_STEP_CAPTURE),
+    }
+    .to_string();
+    assert!(output.contains("reserve.schema.json"), "{output}");
+    assert!(output.contains("capture.schema.json"), "{output}");
+
+    let invalid = TypedSagaFactoryError::InvalidStepName { name: "not-valid!" }.to_string();
+    assert!(invalid.contains("not-valid!"), "{invalid}");
 }
 
 fn ready_instance_store() -> Arc<FakeInstanceStore> {
@@ -817,7 +1378,7 @@ where
     J: SagaJournal + Send + Sync + 'static,
 {
     SagaExecutorImpl::new(
-        SagaExecutorDeps::new(
+        SagaExecutorDeps::new_erased(
             journal,
             instance_store,
             cp,
@@ -1966,6 +2527,59 @@ fn policy_retry_warning_logs_error_kind() {
     );
 }
 
+#[test]
+#[allow(clippy::expect_used)] // reason: missing event is the assertion failure
+fn policy_non_retryable_warning_logs_not_retrying() {
+    let events = capture_tracing_events(tracing::Level::WARN, true, || async {
+        let journal = Arc::new(FakeJournal::default());
+        let cp = Arc::new(FakeCheckpointStore::default());
+        let dlx = Arc::new(FakeDeadLetterStore::default());
+        let (factory, _counts) = FakeFactory::behaviors(&[(
+            "step1",
+            FakeBehavior::SerializeFail,
+            FakeBehavior::Succeed,
+        )]);
+        let exec = executor_with_policy(journal, cp, dlx, factory, policy_from_millis(1, 20));
+
+        let outcome = exec.run(instance()).await;
+        assert!(
+            matches!(
+                outcome,
+                SagaOutcome::Failed {
+                    error: SagaActionError::SerializeFailed,
+                    ..
+                }
+            ),
+            "test must drive non-retryable forward failure: {outcome:?}"
+        );
+    });
+
+    let not_retrying = events
+        .iter()
+        .find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: action failed, not retrying"))
+        })
+        .expect("non-retryable action warning event must be captured");
+    assert_eq!(
+        not_retrying.get("phase").map(String::as_str),
+        Some("forward")
+    );
+    assert_eq!(
+        not_retrying.get("error_kind").map(String::as_str),
+        Some("serialize_failed")
+    );
+    assert!(
+        events.iter().all(|event| {
+            !event
+                .get("message")
+                .is_some_and(|message| message.contains("saga: action failed, retrying"))
+        }),
+        "non-retryable error must not emit retrying warning: {events:?}"
+    );
+}
+
 // ── T009.6：补偿失败 → 写 dead-letter（domain/contract_id 取 saga owner）─────────
 
 #[tokio::test]
@@ -2657,6 +3271,37 @@ async fn resume_retries_step_with_only_executing_journal_record() {
             ("step1".to_string(), SagaJournalStatus::Completed),
             ("step2".to_string(), SagaJournalStatus::Executing),
             ("step2".to_string(), SagaJournalStatus::Completed),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn resume_compensates_post_effect_failure_intent_without_rerunning_forward() {
+    let journal = Arc::new(FakeJournal::default());
+    journal.seed(0, "step1", SagaJournalStatus::Executing);
+    journal.seed(1, "step1", SagaJournalStatus::Compensating);
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
+    let exec = executor(journal.clone(), cp, dlx, factory);
+
+    let outcome = exec.resume(instance()).await;
+
+    assert!(
+        matches!(outcome, SagaOutcome::Failed { .. }),
+        "post-effect compensation intent should resume compensation: {outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 0, "step1 forward must not rerun");
+    assert_eq!(counts[0].undos(), 1, "step1 compensation must resume");
+    assert_eq!(counts[1].dos(), 0, "later steps must not run");
+    assert_eq!(counts[1].undos(), 0, "later steps were never completed");
+    assert_eq!(
+        journal.log(),
+        vec![
+            ("step1".to_string(), SagaJournalStatus::Executing),
+            ("step1".to_string(), SagaJournalStatus::Compensating),
+            ("step1".to_string(), SagaJournalStatus::Compensating),
+            ("step1".to_string(), SagaJournalStatus::Compensated),
         ]
     );
 }

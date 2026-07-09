@@ -1,0 +1,7 @@
+error[E0046]: not all trait items implemented, missing: `compensate`
+  --> tests/ui/typed_saga_missing_compensation_fail.rs:26:1
+   |
+26 | impl SagaStep for ReserveFundsStep {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `compensate` in implementation
+   |
+   = help: implement the missing item: `fn compensate(&self, _: SagaStepCtx) -> impl Future<Output = Result<CompensationOutcome, EngineError>> + Send { todo!() }`

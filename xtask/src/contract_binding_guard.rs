@@ -1,15 +1,17 @@
-//! `contract-binding-guard` —— 生产源中禁止裸 mint generated contract/projection binding，并守
+//! `contract-binding-guard` —— 生产源中禁止裸 mint generated contract/projection/saga binding，并守
 //! projection DB fixed function callsite 收口。
 //!
 //! `ContractBinding` 的正确生产来源是 `generated::{http,event,command}::*::CONTRACT`。`from_static`
 //! 必须保持 `pub const fn`，否则 codegen 无法跨 crate 发射常量；因此跨 crate sealing 不能做到 Hard。
-//! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`。本 guard 把残余面
-//! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 `*Binding::from_static` 都 fail-fast。
+//! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`；saga binding / policy /
+//! output marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 generated output DTO。本 guard 把残余面
+//! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 或手写
+//! `SagaStepOutputBinding` 都 fail-fast。
 //! 测试 fixture 与 generated/xtask 不在本扫描范围内。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -17,8 +19,8 @@ use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprCall, ExprPath, ItemFn, ItemMod, ItemType, ItemUse, Lit, Meta, Token,
-    Type, TypePath, UseTree,
+    Attribute, Expr, ExprCall, ExprPath, ItemFn, ItemImpl, ItemMod, ItemType, ItemUse, Lit, Meta,
+    Token, Type, TypePath, UseTree,
 };
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
@@ -27,13 +29,17 @@ use crate::workspace_root;
 
 const SCAN_ROOTS: &[&str] = &["crates", "adapters", "bins", "assemblies"];
 const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
+const SAGA_BINDING_TEST_SUPPORT_FILES: &[&str] =
+    &["adapters/postgres/src/fault_matrix/saga_fixture.rs"];
 const PROJECTION_DB_FUNCTIONS: &[&str] =
     &["rss_append_projection_event", "rss_read_projection_events"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
-    /// 生产代码直接调用 `ContractBinding::from_static`，绕过 generated `CONTRACT` 常量。
+    /// 生产代码直接调用 generated binding constructor，绕过 generated 常量。
     BareFromStatic,
+    /// 生产代码手写 saga output DTO marker，绕过 generated output DTO。
+    SagaStepOutputBindingImpl,
     /// 生产代码绕过 sanctioned projection_events wrapper 直接调用 DB fixed function。
     ProjectionDbFunctionCallsite,
 }
@@ -52,7 +58,7 @@ impl GovernanceCheck for ContractBindingGuard {
         let (scanned, findings) = scan_sources(&root)?;
         Ok((
             format!(
-                "扫描 {scanned} 个生产 Rust 源文件；contract/projection binding 生产 mint 仅允许 generated 常量；projection DB functions 仅允许 sanctioned wrapper"
+                "扫描 {scanned} 个生产 Rust 源文件；contract/projection/saga binding 生产 mint 仅允许 generated 常量；projection DB functions 仅允许 sanctioned wrapper"
             ),
             findings,
         ))
@@ -85,7 +91,8 @@ fn scan_file(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
     let aliases = collect_contract_binding_aliases(&ast);
     let mut visitor = BindingVisitor {
         path,
-        aliases,
+        binding_aliases: aliases.binding_constructors,
+        saga_output_binding_aliases: aliases.saga_output_binding_traits,
         in_test: 0,
         findings: Vec::new(),
     };
@@ -127,7 +134,8 @@ fn expr_contains_projection_db_function(expr: &Expr) -> bool {
 
 struct BindingVisitor<'a> {
     path: &'a Path,
-    aliases: BTreeSet<String>,
+    binding_aliases: BindingConstructorAliases,
+    saga_output_binding_aliases: BTreeSet<String>,
     in_test: usize,
     findings: Vec<Finding<Rule>>,
 }
@@ -146,14 +154,33 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if self.in_test == 0 && is_binding_from_static(&node.func, &self.aliases) {
+        if self.in_test == 0
+            && !is_saga_binding_test_support_file(self.path)
+            && is_binding_constructor_call(&node.func, &self.binding_aliases)
+        {
             self.findings.push(finding(
                 Rule::BareFromStatic,
                 self.path.display().to_string(),
-                "生产代码不得直接调用 binding `from_static`；请使用 generated `CONTRACT` / `PROJECTION_INPUTS` 常量",
+                "生产代码不得直接调用 generated binding constructor；请使用 generated `CONTRACT` / `PROJECTION_INPUTS` / saga `SPEC` / `STEPS` 常量",
             ));
         }
         visit::visit_expr_call(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        self.with_test_scope(is_test_like(&node.attrs), |this| {
+            if this.in_test == 0
+                && !is_saga_binding_test_support_file(this.path)
+                && is_saga_step_output_binding_impl(node, &this.saga_output_binding_aliases)
+            {
+                this.findings.push(finding(
+                    Rule::SagaStepOutputBindingImpl,
+                    this.path.display().to_string(),
+                    "生产代码不得手写 `SagaStepOutputBinding`；请使用 generated saga output DTO",
+                ));
+            }
+            visit::visit_item_impl(this, node);
+        });
     }
 
     fn visit_expr(&mut self, node: &'ast Expr) {
@@ -184,64 +211,139 @@ impl BindingVisitor<'_> {
 }
 
 struct AliasCollector {
-    aliases: BTreeSet<String>,
+    binding_constructors: BindingConstructorAliases,
+    saga_output_binding_traits: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for AliasCollector {
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
-        collect_use_tree_aliases(&node.tree, &mut self.aliases);
+        collect_use_tree_aliases(
+            &node.tree,
+            &mut self.binding_constructors,
+            &mut self.saga_output_binding_traits,
+        );
         visit::visit_item_use(self, node);
     }
 
     fn visit_item_type(&mut self, node: &'ast ItemType) {
-        if is_contract_binding_type(&node.ty) {
-            self.aliases.insert(node.ident.to_string());
+        if let Some(type_ident) = binding_type_ident(&node.ty) {
+            insert_binding_alias(
+                &mut self.binding_constructors,
+                &node.ident.to_string(),
+                &type_ident,
+            );
         }
         visit::visit_item_type(self, node);
     }
 }
 
-fn collect_contract_binding_aliases(file: &syn::File) -> BTreeSet<String> {
-    let mut aliases = BTreeSet::new();
-    aliases.insert("ContractBinding".to_string());
-    aliases.insert("ProjectionInputBinding".to_string());
-    let mut collector = AliasCollector { aliases };
-    collector.visit_file(file);
-    collector.aliases
+struct SourceAliases {
+    binding_constructors: BindingConstructorAliases,
+    saga_output_binding_traits: BTreeSet<String>,
 }
 
-fn collect_use_tree_aliases(tree: &UseTree, aliases: &mut BTreeSet<String>) {
+fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
+    let mut binding_constructors = BindingConstructorAliases::new();
+    insert_binding_alias(
+        &mut binding_constructors,
+        "ContractBinding",
+        "ContractBinding",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "ProjectionInputBinding",
+        "ProjectionInputBinding",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "SagaStepBinding",
+        "SagaStepBinding",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "SagaRuntimePolicySpec",
+        "SagaRuntimePolicySpec",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "SagaContractBinding",
+        "SagaContractBinding",
+    );
+    let saga_output_binding_traits = BTreeSet::from(["SagaStepOutputBinding".to_string()]);
+    let mut collector = AliasCollector {
+        binding_constructors,
+        saga_output_binding_traits,
+    };
+    collector.visit_file(file);
+    SourceAliases {
+        binding_constructors: collector.binding_constructors,
+        saga_output_binding_traits: collector.saga_output_binding_traits,
+    }
+}
+
+type BindingConstructorAliases = BTreeMap<String, BTreeSet<&'static str>>;
+
+fn collect_use_tree_aliases(
+    tree: &UseTree,
+    aliases: &mut BindingConstructorAliases,
+    output_binding_aliases: &mut BTreeSet<String>,
+) {
     match tree {
-        UseTree::Path(path) => collect_use_tree_aliases(&path.tree, aliases),
-        UseTree::Name(name) if name.ident == "ContractBinding" => {
-            aliases.insert("ContractBinding".to_string());
+        UseTree::Path(path) => {
+            collect_use_tree_aliases(&path.tree, aliases, output_binding_aliases);
         }
-        UseTree::Name(name) if name.ident == "ProjectionInputBinding" => {
-            aliases.insert("ProjectionInputBinding".to_string());
+        UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            insert_binding_alias(aliases, &ident, &ident);
+            if ident == "SagaStepOutputBinding" {
+                output_binding_aliases.insert(ident);
+            }
         }
-        UseTree::Rename(rename) if rename.ident == "ContractBinding" => {
-            aliases.insert(rename.rename.to_string());
-        }
-        UseTree::Rename(rename) if rename.ident == "ProjectionInputBinding" => {
-            aliases.insert(rename.rename.to_string());
+        UseTree::Rename(rename) => {
+            insert_binding_alias(
+                aliases,
+                &rename.rename.to_string(),
+                &rename.ident.to_string(),
+            );
+            if rename.ident == "SagaStepOutputBinding" {
+                output_binding_aliases.insert(rename.rename.to_string());
+            }
         }
         UseTree::Group(group) => {
             for tree in &group.items {
-                collect_use_tree_aliases(tree, aliases);
+                collect_use_tree_aliases(tree, aliases, output_binding_aliases);
             }
         }
         _ => {}
     }
 }
 
-fn is_contract_binding_type(ty: &Type) -> bool {
-    matches!(ty, Type::Path(TypePath { path, .. }) if path
-        .segments
-        .last()
-        .is_some_and(|seg| seg.ident == "ContractBinding" || seg.ident == "ProjectionInputBinding"))
+fn binding_type_ident(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(TypePath { path, .. }) => {
+            let ident = path.segments.last()?.ident.to_string();
+            binding_constructor_methods(&ident).map(|_| ident)
+        }
+        _ => None,
+    }
 }
 
-fn is_binding_from_static(func: &Expr, aliases: &BTreeSet<String>) -> bool {
+fn insert_binding_alias(aliases: &mut BindingConstructorAliases, alias: &str, type_name: &str) {
+    if let Some(methods) = binding_constructor_methods(type_name) {
+        aliases.insert(alias.to_string(), methods.iter().copied().collect());
+    }
+}
+
+fn binding_constructor_methods(type_name: &str) -> Option<&'static [&'static str]> {
+    match type_name {
+        "ContractBinding" | "ProjectionInputBinding" | "SagaStepBinding" => Some(&["from_static"]),
+        "SagaRuntimePolicySpec" => Some(&["from_millis"]),
+        "SagaContractBinding" => Some(&["from_parts"]),
+        _ => None,
+    }
+}
+
+fn is_binding_constructor_call(func: &Expr, aliases: &BindingConstructorAliases) -> bool {
     let Expr::Path(ExprPath { path, .. }) = func else {
         return false;
     };
@@ -253,7 +355,25 @@ fn is_binding_from_static(func: &Expr, aliases: &BTreeSet<String>) -> bool {
         return false;
     };
     let prev_ident = prev.ident.to_string();
-    last.ident == "from_static" && aliases.contains(prev_ident.as_str())
+    let method = last.ident.to_string();
+    aliases
+        .get(prev_ident.as_str())
+        .is_some_and(|methods| methods.contains(method.as_str()))
+}
+
+fn is_saga_step_output_binding_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
+    let Some((_, path, _)) = &node.trait_ else {
+        return false;
+    };
+    path.segments
+        .last()
+        .is_some_and(|seg| aliases.contains(&seg.ident.to_string()))
+}
+
+fn is_saga_binding_test_support_file(path: &Path) -> bool {
+    SAGA_BINDING_TEST_SUPPORT_FILES
+        .iter()
+        .any(|allowed| path == Path::new(allowed))
 }
 
 fn is_test_like(attrs: &[Attribute]) -> bool {
@@ -368,6 +488,149 @@ mod tests {
         let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_saga_step_from_static_call() -> anyhow::Result<()> {
+        let src = r#"
+            use vocab::SagaStepBinding;
+
+            fn mint() {
+                let _ = SagaStepBinding::from_static(
+                    generated::saga::billing_v1::CONTRACT,
+                    "reserve_funds",
+                    "reserve.schema.json",
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_saga_policy_from_millis_call() -> anyhow::Result<()> {
+        let src = r#"
+            use vocab::SagaRuntimePolicySpec as Policy;
+
+            fn mint() {
+                let _ = Policy::from_millis(5000, 30000);
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_saga_contract_from_parts_call() -> anyhow::Result<()> {
+        let src = r#"
+            type Spec = vocab::SagaContractBinding;
+
+            fn mint(
+                contract: vocab::ContractBinding,
+                policy: vocab::SagaRuntimePolicySpec,
+                steps: &'static [vocab::SagaStepBinding],
+            ) {
+                let _ = Spec::from_parts(contract, policy, steps);
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_saga_output_marker_impl() -> anyhow::Result<()> {
+        let src = r#"
+            struct Output;
+
+            impl vocab::SagaStepOutputBinding for Output {
+                const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_0;
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::SagaStepOutputBindingImpl);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_saga_output_marker_impl_alias() -> anyhow::Result<()> {
+        let src = r#"
+            use vocab::SagaStepOutputBinding as Marker;
+
+            struct Output;
+
+            impl Marker for Output {
+                const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_0;
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::SagaStepOutputBindingImpl);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_feature_gated_fault_matrix_binding_mint() -> anyhow::Result<()> {
+        let src = r#"
+            const STEP: vocab::SagaStepBinding =
+                vocab::SagaStepBinding::from_static(
+                    generated::saga::billing_v1::CONTRACT,
+                    "reserve_funds",
+                    "reserve.schema.json",
+                );
+
+            struct Output;
+
+            impl vocab::SagaStepOutputBinding for Output {
+                const BINDING: vocab::SagaStepBinding = STEP;
+            }
+        "#;
+        let findings = scan_file(Path::new("adapters/postgres/src/fault_matrix.rs"), src)?;
+        assert_eq!(
+            findings.len(),
+            2,
+            "feature-gated public fault_matrix.rs must still be scanned: {findings:?}"
+        );
+        assert!(findings.iter().any(|f| f.rule == Rule::BareFromStatic));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::SagaStepOutputBindingImpl)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn allows_dedicated_saga_fixture_binding_mint() -> anyhow::Result<()> {
+        let src = r#"
+            const STEP: vocab::SagaStepBinding =
+                vocab::SagaStepBinding::from_static(
+                    generated::saga::billing_v1::CONTRACT,
+                    "reserve_funds",
+                    "reserve.schema.json",
+                );
+
+            struct Output;
+
+            impl vocab::SagaStepOutputBinding for Output {
+                const BINDING: vocab::SagaStepBinding = STEP;
+            }
+        "#;
+        let findings = scan_file(
+            Path::new("adapters/postgres/src/fault_matrix/saga_fixture.rs"),
+            src,
+        )?;
+        assert!(
+            findings.is_empty(),
+            "only the dedicated fault-matrix saga fixture file may hand-author typed saga bindings: {findings:?}"
+        );
         Ok(())
     }
 

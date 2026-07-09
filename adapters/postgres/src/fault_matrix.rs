@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use consistency::{
-    ConsumerGroup, ConvergeAction, EngineError, EngineErrorKind, IdemKey, InboxReceiptContext,
-    InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay, OutboxSource, PartitionSerialDelivery,
-    PendingEntry, ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata,
-    ProjectionEventRecord, Projector, SagaId, SagaInstanceRef, SagaJournalAppendRecord, SeenState,
-    SerialInOrder, StepName, Topic,
+    CompensationOutcome, ConsumerGroup, ConvergeAction, EngineError, EngineErrorKind, IdemKey,
+    InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay, OutboxSource,
+    PartitionSerialDelivery, PendingEntry, ProjectionApplyOutcome, ProjectionEvent,
+    ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaId, SagaInstanceRef,
+    SagaJournalAppendRecord, SagaStep, SagaStepCtx, SeenState, SerialInOrder, StepName, Topic,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -35,17 +35,17 @@ use eventexec::reconcile::{
     StableDispatchKey,
 };
 use eventexec::{
-    ProjectionHarness, ProjectionStop, SagaAction, SagaActionCtx, SagaActionError,
-    SagaActionFactory, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl,
-    SagaOutcome, SagaRuntimeLock, TenantAuthority,
+    ProjectionHarness, ProjectionStop, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
+    SagaExecutorImpl, SagaOutcome, SagaRuntimeLock, TenantAuthority, TypedSagaActionFactory,
 };
-use futures::future::BoxFuture;
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use sqlx::{PgPool, Row};
 
 use crate::{DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
+
+mod saga_fixture;
 
 const RSS_APP_ROLE: &str = "rss_app";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -480,17 +480,15 @@ impl PgFaultMatrixHarness {
             .acquire_lease(&instance, "fault-matrix", Duration::from_secs(60))
             .await?
             .ok_or_else(|| anyhow!("saga lease not acquired"))?;
-        let step = StepName::parse("reserve")?;
+        let step = StepName::parse("reserve_funds")?;
         journal
             .append(&lease, SagaJournalAppendRecord::completed(0, step))
             .await?;
         instances.release_lease(&lease).await?;
 
-        let factory = Arc::new(FaultMatrixSagaFactory::new(&[
-            ("reserve", false),
-            ("charge", false),
-        ]));
-        let exec = self.saga_executor(journal, instances, factory.clone(), spec, runtime_lock)?;
+        let factory = FaultMatrixSagaFactory::new(false, false);
+        let typed_factory = factory.typed_factory(spec)?;
+        let exec = self.saga_executor(journal, instances, typed_factory, runtime_lock)?;
         let outcome = exec.resume(instance).await;
         if !matches!(outcome, SagaOutcome::Succeeded { .. }) {
             bail!("saga resume should succeed after completed first step, got {outcome:?}");
@@ -524,8 +522,8 @@ impl PgFaultMatrixHarness {
             .acquire_lease(&instance, "fault-matrix", Duration::from_secs(60))
             .await?
             .ok_or_else(|| anyhow!("saga lease not acquired"))?;
-        let reserve = StepName::parse("reserve")?;
-        let charge = StepName::parse("charge")?;
+        let reserve = StepName::parse("reserve_funds")?;
+        let capture = StepName::parse("capture")?;
         journal
             .append(
                 &lease,
@@ -535,19 +533,17 @@ impl PgFaultMatrixHarness {
         journal
             .append(
                 &lease,
-                SagaJournalAppendRecord::completed(1, charge.clone()),
+                SagaJournalAppendRecord::completed(1, capture.clone()),
             )
             .await?;
         journal
-            .append(&lease, SagaJournalAppendRecord::compensating(2, charge))
+            .append(&lease, SagaJournalAppendRecord::compensating(2, capture))
             .await?;
         instances.release_lease(&lease).await?;
 
-        let factory = Arc::new(FaultMatrixSagaFactory::new(&[
-            ("reserve", false),
-            ("charge", false),
-        ]));
-        let exec = self.saga_executor(journal, instances, factory.clone(), spec, runtime_lock)?;
+        let factory = FaultMatrixSagaFactory::new(false, false);
+        let typed_factory = factory.typed_factory(spec)?;
+        let exec = self.saga_executor(journal, instances, typed_factory, runtime_lock)?;
         let outcome = exec.resume(instance).await;
         if !matches!(outcome, SagaOutcome::Failed { .. }) {
             bail!(
@@ -725,8 +721,7 @@ impl PgFaultMatrixHarness {
         &self,
         journal: crate::PgSagaJournal,
         instances: crate::PgSagaInstanceStore,
-        factory: Arc<dyn SagaActionFactory>,
-        spec: vocab::SagaContractBinding,
+        factory: TypedSagaActionFactory,
         runtime_lock: L,
     ) -> FaultMatrixResult<
         SagaExecutorImpl<
@@ -740,6 +735,12 @@ impl PgFaultMatrixHarness {
         L: LockStore + Send + Sync + 'static,
     {
         let infra = self.deps.infra();
+        let config = SagaExecutorConfig::from_typed_factory(
+            CheckpointOwner::new("billing"),
+            "fault-matrix",
+            Duration::from_secs(60),
+            &factory,
+        )?;
         Ok(SagaExecutorImpl::new(
             SagaExecutorDeps::new(
                 Arc::new(journal),
@@ -749,12 +750,7 @@ impl PgFaultMatrixHarness {
                 factory,
                 SagaRuntimeLock::new(runtime_lock),
             ),
-            SagaExecutorConfig::from_contract_spec(
-                CheckpointOwner::new("billing"),
-                "fault-matrix",
-                Duration::from_secs(60),
-                spec,
-            )?,
+            config,
         ))
     }
 }
@@ -971,104 +967,115 @@ fn saga_instance(
 }
 
 struct FaultMatrixSagaFactory {
-    steps: Vec<FaultMatrixSagaStepSpec>,
+    reserve: FaultMatrixSagaStepState,
+    capture: FaultMatrixSagaStepState,
 }
 
 impl FaultMatrixSagaFactory {
-    fn new(specs: &[(&'static str, bool)]) -> Self {
+    fn new(reserve_forward_fails: bool, capture_forward_fails: bool) -> Self {
         Self {
-            steps: specs
-                .iter()
-                .map(|(name, forward_fails)| FaultMatrixSagaStepSpec {
-                    name,
-                    forward_fails: *forward_fails,
-                    forward_count: Arc::new(AtomicU32::new(0)),
-                    compensation_count: Arc::new(AtomicU32::new(0)),
-                })
-                .collect(),
+            reserve: FaultMatrixSagaStepState::new(reserve_forward_fails),
+            capture: FaultMatrixSagaStepState::new(capture_forward_fails),
         }
+    }
+
+    fn typed_factory(
+        &self,
+        spec: vocab::SagaContractBinding,
+    ) -> FaultMatrixResult<TypedSagaActionFactory> {
+        let mut builder = TypedSagaActionFactory::builder(spec);
+        let reserve = self.reserve.clone();
+        builder.register_step::<FaultMatrixReserveFundsStep, _>(move || {
+            FaultMatrixReserveFundsStep {
+                state: reserve.clone(),
+            }
+        })?;
+        let capture = self.capture.clone();
+        builder.register_step::<FaultMatrixCaptureStep, _>(move || FaultMatrixCaptureStep {
+            state: capture.clone(),
+        })?;
+        Ok(builder.finish()?)
     }
 
     fn probe(&self) -> FaultMatrixSagaProbe {
-        let counts = |name: &str| {
-            self.steps
-                .iter()
-                .find(|step| step.name == name)
-                .map(|step| {
-                    (
-                        step.forward_count.load(Ordering::SeqCst),
-                        step.compensation_count.load(Ordering::SeqCst),
-                    )
-                })
-                .unwrap_or((0, 0))
-        };
-        let (reserve_forward_count, reserve_compensation_count) = counts("reserve");
-        let (charge_forward_count, charge_compensation_count) = counts("charge");
         FaultMatrixSagaProbe {
-            reserve_forward_count,
-            charge_forward_count,
-            reserve_compensation_count,
-            charge_compensation_count,
+            reserve_forward_count: self.reserve.forward_count.load(Ordering::SeqCst),
+            charge_forward_count: self.capture.forward_count.load(Ordering::SeqCst),
+            reserve_compensation_count: self.reserve.compensation_count.load(Ordering::SeqCst),
+            charge_compensation_count: self.capture.compensation_count.load(Ordering::SeqCst),
         }
     }
 }
 
-impl SagaActionFactory for FaultMatrixSagaFactory {
-    fn build(&self) -> Vec<Box<dyn SagaAction>> {
-        self.steps
-            .iter()
-            .map(|step| {
-                Box::new(FaultMatrixSagaStep {
-                    name: step.name,
-                    forward_fails: step.forward_fails,
-                    forward_count: step.forward_count.clone(),
-                    compensation_count: step.compensation_count.clone(),
-                }) as Box<dyn SagaAction>
-            })
-            .collect()
-    }
-}
-
-struct FaultMatrixSagaStepSpec {
-    name: &'static str,
+#[derive(Debug, Clone)]
+struct FaultMatrixSagaStepState {
     forward_fails: bool,
     forward_count: Arc<AtomicU32>,
     compensation_count: Arc<AtomicU32>,
+}
+
+impl FaultMatrixSagaStepState {
+    fn new(forward_fails: bool) -> Self {
+        Self {
+            forward_fails,
+            forward_count: Arc::new(AtomicU32::new(0)),
+            compensation_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
 }
 
 #[derive(Debug)]
-struct FaultMatrixSagaStep {
-    name: &'static str,
-    forward_fails: bool,
-    forward_count: Arc<AtomicU32>,
-    compensation_count: Arc<AtomicU32>,
+struct FaultMatrixReserveFundsStep {
+    state: FaultMatrixSagaStepState,
 }
 
-impl SagaAction for FaultMatrixSagaStep {
-    fn name(&self) -> &str {
-        self.name
+impl SagaStep for FaultMatrixReserveFundsStep {
+    const BINDING: vocab::SagaStepBinding = saga_fixture::RESERVE_STEP;
+
+    type Output = saga_fixture::ReserveFundsOutput;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        let state = self.state.clone();
+        fault_matrix_saga_execute(state)?;
+        Ok(saga_fixture::ReserveFundsOutput::new("reserve_funds"))
     }
 
-    fn do_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>> {
-        let name = self.name;
-        let forward_fails = self.forward_fails;
-        let forward_count = self.forward_count.clone();
-        Box::pin(async move {
-            forward_count.fetch_add(1, Ordering::SeqCst);
-            if forward_fails {
-                Err(SagaActionError::ActionFailed)
-            } else {
-                Ok(format!("{name}-ok").into_bytes())
-            }
-        })
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        let state = self.state.clone();
+        state.compensation_count.fetch_add(1, Ordering::SeqCst);
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+#[derive(Debug)]
+struct FaultMatrixCaptureStep {
+    state: FaultMatrixSagaStepState,
+}
+
+impl SagaStep for FaultMatrixCaptureStep {
+    const BINDING: vocab::SagaStepBinding = saga_fixture::CAPTURE_STEP;
+
+    type Output = saga_fixture::CaptureOutput;
+
+    async fn execute(&self, _ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        let state = self.state.clone();
+        fault_matrix_saga_execute(state)?;
+        Ok(saga_fixture::CaptureOutput::new("capture"))
     }
 
-    fn undo_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>> {
-        let compensation_count = self.compensation_count.clone();
-        Box::pin(async move {
-            compensation_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        let state = self.state.clone();
+        state.compensation_count.fetch_add(1, Ordering::SeqCst);
+        Ok(CompensationOutcome::Compensated)
+    }
+}
+
+fn fault_matrix_saga_execute(state: FaultMatrixSagaStepState) -> Result<(), EngineError> {
+    state.forward_count.fetch_add(1, Ordering::SeqCst);
+    if state.forward_fails {
+        Err(EngineError::new(EngineErrorKind::Transient))
+    } else {
+        Ok(())
     }
 }
 

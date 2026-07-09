@@ -25,6 +25,33 @@ pub mod error {
         }
     }
 }
+///`BillingCaptureResult`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "BillingCaptureResult",
+///  "type": "object",
+///  "required": [
+///    "captureId"
+///  ],
+///  "properties": {
+///    "captureId": {
+///      "type": "string"
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+#[serde(deny_unknown_fields)]
+pub struct BillingCaptureResult {
+    #[serde(rename = "captureId")]
+    #[redact(sensitivity = public)]
+    pub capture_id: ::std::string::String,
+}
 ///`BillingCheckoutSagaPayload`
 ///
 /// <details><summary>JSON schema</summary>
@@ -66,6 +93,33 @@ pub struct BillingCheckoutSagaPayload {
     #[redact(sensitivity = public)]
     pub order_id: ::std::string::String,
 }
+///`BillingReserveFundsResult`
+///
+/// <details><summary>JSON schema</summary>
+///
+/// ```json
+///{
+///  "title": "BillingReserveFundsResult",
+///  "type": "object",
+///  "required": [
+///    "reservationId"
+///  ],
+///  "properties": {
+///    "reservationId": {
+///      "type": "string"
+///    }
+///  },
+///  "additionalProperties": false
+///}
+/// ```
+/// </details>
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+#[serde(deny_unknown_fields)]
+pub struct BillingReserveFundsResult {
+    #[serde(rename = "reservationId")]
+    #[redact(sensitivity = public)]
+    pub reservation_id: ::std::string::String,
+}
 
 /// Saga 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const CONTRACT_ID: &str = "billing.checkout";
@@ -82,5 +136,24 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
 pub const POLICY: ::vocab::SagaRuntimePolicySpec =
     ::vocab::SagaRuntimePolicySpec::from_millis(5000, 30000);
 
-/// Saga contract spec（契约绑定 + runtime policy spec）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY);
+/// Saga step `reserve_funds` binding generated from `[saga].steps[0]`.
+pub const STEP_0: ::vocab::SagaStepBinding =
+    ::vocab::SagaStepBinding::from_static(CONTRACT, "reserve_funds", "reserve.schema.json");
+
+impl ::vocab::SagaStepOutputBinding for BillingReserveFundsResult {
+    const BINDING: ::vocab::SagaStepBinding = STEP_0;
+}
+
+/// Saga step `capture` binding generated from `[saga].steps[1]`.
+pub const STEP_1: ::vocab::SagaStepBinding =
+    ::vocab::SagaStepBinding::from_static(CONTRACT, "capture", "capture.schema.json");
+
+impl ::vocab::SagaStepOutputBinding for BillingCaptureResult {
+    const BINDING: ::vocab::SagaStepBinding = STEP_1;
+}
+
+/// Ordered saga step bindings generated from `[saga].steps`.
+pub const STEPS: &[::vocab::SagaStepBinding] = &[STEP_0, STEP_1];
+
+/// Saga contract spec（契约绑定 + runtime policy spec + ordered steps）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const SPEC: super::SagaSpec = super::SagaSpec::from_parts(CONTRACT, POLICY, STEPS);

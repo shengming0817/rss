@@ -6,14 +6,13 @@ use bootstrap::Topology;
 use bootstrap::sagaprojectiondeps::{
     PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError, resolve,
 };
-use consistency::SagaInstanceRef;
+use consistency::{CompensationOutcome, EngineError, SagaInstanceRef, SagaStep, SagaStepCtx};
 use diport::CheckpointOwner;
 use eventexec::{
-    SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaExecStatus, SagaExecutor,
-    SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaId, SagaOutcome, SagaRuntimeLock,
-    SagaTailer,
+    SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaId,
+    SagaOutcome, SagaRuntimeLock, SagaTailer, TypedSagaActionFactory,
 };
-use futures::future::BoxFuture;
+use generated::saga::billing_v1::{BillingCaptureResult, BillingReserveFundsResult};
 use memory::{MemCheckpointStore, MemDeadLetterStore, MemLockStore, MemSagaInstanceStore};
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -31,33 +30,40 @@ struct DemoHarness {
 }
 
 #[derive(Debug)]
-struct DemoAction {
-    name: &'static str,
+struct DemoReserveFundsStep;
+
+impl SagaStep for DemoReserveFundsStep {
+    const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_0;
+
+    type Output = BillingReserveFundsResult;
+
+    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(BillingReserveFundsResult {
+            reservation_id: format!("{}:reserve_funds", ctx.saga_id().as_uuid()),
+        })
+    }
+
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
+    }
 }
 
-impl SagaAction for DemoAction {
-    fn name(&self) -> &str {
-        self.name
+#[derive(Debug)]
+struct DemoCaptureStep;
+
+impl SagaStep for DemoCaptureStep {
+    const BINDING: vocab::SagaStepBinding = generated::saga::billing_v1::STEP_1;
+
+    type Output = BillingCaptureResult;
+
+    async fn execute(&self, ctx: SagaStepCtx) -> Result<Self::Output, EngineError> {
+        Ok(BillingCaptureResult {
+            capture_id: format!("{}:capture", ctx.saga_id().as_uuid()),
+        })
     }
 
-    fn do_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>> {
-        let node = self.name.to_string();
-        Box::pin(async move { Ok(format!("{}:{}", ctx.saga_id().as_uuid(), node).into_bytes()) })
-    }
-
-    fn undo_it(&self, _ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct DemoFactory;
-
-impl SagaActionFactory for DemoFactory {
-    fn build(&self) -> Vec<Box<dyn SagaAction>> {
-        vec![
-            Box::new(DemoAction { name: "reserve" }),
-            Box::new(DemoAction { name: "capture" }),
-        ]
+    async fn compensate(&self, _ctx: SagaStepCtx) -> Result<CompensationOutcome, EngineError> {
+        Ok(CompensationOutcome::Compensated)
     }
 }
 
@@ -70,7 +76,16 @@ fn demo_harness() -> Result<DemoHarness> {
             let checkpoint = Arc::new(MemCheckpointStore::new());
             let dead_letter = Arc::new(MemDeadLetterStore::new());
             let runtime_lock = SagaRuntimeLock::new(MemLockStore::new());
-            let factory = Arc::new(DemoFactory);
+            let mut factory = TypedSagaActionFactory::builder(generated::saga::billing_v1::SPEC);
+            factory.register_step::<DemoReserveFundsStep, _>(|| DemoReserveFundsStep)?;
+            factory.register_step::<DemoCaptureStep, _>(|| DemoCaptureStep)?;
+            let factory = factory.finish()?;
+            let config = SagaExecutorConfig::from_typed_factory(
+                CheckpointOwner::new("billing"),
+                "journey-runner",
+                Duration::from_secs(30),
+                &factory,
+            )?;
             let deps = SagaExecutorDeps::new(
                 journal,
                 instances,
@@ -79,12 +94,6 @@ fn demo_harness() -> Result<DemoHarness> {
                 factory,
                 runtime_lock,
             );
-            let config = SagaExecutorConfig::from_contract_spec(
-                CheckpointOwner::new("billing"),
-                "journey-runner",
-                Duration::from_secs(30),
-                generated::saga::billing_v1::SPEC,
-            )?;
             Ok(DemoHarness {
                 exec: SagaExecutorImpl::new(deps, config),
                 dead_letter,

@@ -28,6 +28,7 @@ pub use authz::{
 };
 pub use contract::binding::{
     ContractBinding, ProjectionInputBinding, SagaContractBinding, SagaRuntimePolicySpec,
+    SagaStepBinding, SagaStepOutputBinding,
 };
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;

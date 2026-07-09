@@ -74,9 +74,10 @@ pub use projection::{
 
 pub mod saga;
 pub use saga::{
-    SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaExecStatus, SagaExecutor,
-    SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome,
-    SagaPolicy, SagaPolicyError, SagaRuntimeLock, SagaTailer,
+    SagaActionError, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
+    SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome, SagaPolicy, SagaPolicyError,
+    SagaRuntimeLock, SagaTailer, TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
+    TypedSagaFactoryError,
 };
 
 use std::sync::Arc;

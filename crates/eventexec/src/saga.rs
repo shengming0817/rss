@@ -5,9 +5,10 @@
 //!   ([`SagaExecutorImpl`]) 驱动 [`SagaActionFactory`] 产出的 `Vec<Box<dyn SagaAction>>`，前向
 //!   `do_it` / 逆序 `undo_it`。
 //! - `consistency::saga::SagaStep`（native AFIT，`execute`/`compensate`）= **typed authoring / codegen
-//!   目标** trait。P9 执行器**不**消费它（待 codegen 把 typed step wrap 成 `SagaAction`）。
+//!   目标** trait。外部组合根只注册 typed step factory；[`TypedSagaActionFactory`] 在构造期校验 generated
+//!   saga spec 的 step 数量、顺序、名称与 output schema，再擦除成内部 [`SagaAction`]。
 //!
-//! resume 真正崩溃恢复：journal 只存 step 名，执行器经注入的 [`SagaActionFactory`]（saga 模板，对标
+//! resume 真正崩溃恢复：journal 只存 step 名，执行器经注入的 typed factory（saga 模板，对标
 //! steno saga template registry）按声明序重物化整个 action 序，再据 journal 已完成前缀跳过、续跑或续补偿。
 //!
 //! 本 executor 无 background worker、不注册 readyz probe（on-demand 调用）；若未来封装为 worker 形态
@@ -17,15 +18,18 @@
 //! ref: oxidecomputer/steno src/saga_log.rs@main（journal event replay 到 load status）。
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use serde::Serialize;
 
 use consistency::{
-    Lsn, SagaDefinition, SagaDurableStatus, SagaInstanceRef, SagaInstanceStatus,
-    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
-    SagaLeaseOutcome, SagaModelError, SagaReplayDecision, StepName,
+    CompensationOutcome, EngineError, EngineErrorKind, Lsn, SagaDefinition, SagaDurableStatus,
+    SagaInstanceRef, SagaInstanceStatus, SagaJournalAppendOutcome, SagaJournalAppendRecord,
+    SagaJournalRecord, SagaLease, SagaLeaseOutcome, SagaModelError, SagaReplayDecision, SagaStep,
+    SagaStepCtx, StepName,
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
@@ -43,8 +47,10 @@ pub use consistency::SagaInterruption;
 
 /// saga 动作上下文：标识动作运行所在的 saga + 节点。私有字段（F6 funnel，外部不可字面构造，只经
 /// [`SagaActionCtx::new`]）。journal / checkpoint 句柄归执行器，**不**入 ctx（保单写者不变式）。
-pub struct SagaActionCtx {
+pub(crate) struct SagaActionCtx {
     instance: SagaInstanceRef,
+    #[allow(dead_code)]
+    // reason: erased action tests inspect node identity; typed runtime uses SagaStepCtx
     node_name: String,
 }
 
@@ -63,30 +69,41 @@ impl SagaActionCtx {
     }
 
     /// 所属租户。
+    #[allow(dead_code)] // reason: retained for internal erased-action tests while public entry is typed
     pub fn tenant(&self) -> vocab::TenantId {
         self.instance.tenant()
     }
 
     /// 所属 saga 实例。
+    #[allow(dead_code)] // reason: retained for internal erased-action tests while public entry is typed
     pub fn saga_id(&self) -> SagaId {
         self.instance.saga_id()
     }
 
     /// 当前节点（step）名。
+    #[allow(dead_code)] // reason: retained for internal erased-action tests while public entry is typed
     pub fn node_name(&self) -> &str {
         &self.node_name
     }
 }
 
-/// saga 动作（erased 运行时接口；用户 / codegen 实现，执行器经 [`SagaActionFactory`] 驱动）。
+/// saga 动作（erased runtime primitive；外部代码经 [`TypedSagaActionFactory`] 注册 typed
+/// [`consistency::SagaStep`]，不直接实现本 trait）。
 ///
 /// 对标 steno `Action`：`do_it` 前向（返回输出字节），`undo_it` 补偿（幂等，逆序调用）。
-pub trait SagaAction: std::fmt::Debug + Send + Sync {
+pub(crate) trait SagaAction: std::fmt::Debug + Send + Sync {
     /// step 名（须为合法 Rust 标识符；执行器据此落 journal + resume 时由 factory 重物化）。
     fn name(&self) -> &str;
 
     /// 前向执行；`Ok(output)` 完成（output 仅作为 run 路径末步结果，不进入 durable journal）。
     fn do_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>>;
+
+    /// Whether this action's failed `do_it` means forward side effects already ran and must be
+    /// compensated. Erased test actions default to fail-before-complete; typed actions use this for
+    /// post-execute output serialization failures.
+    fn failed_after_forward_effect(&self, _error: &SagaActionError) -> bool {
+        false
+    }
 
     /// 补偿（撤销 `do_it` 副作用）；仅对**已完成**步逆序调用。
     fn undo_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>>;
@@ -146,14 +163,18 @@ pub enum SagaExecStatus {
 /// 错 → dead-letter；变体保留进 [`SagaOutcome::Failed`] 供调用方）。
 ///
 /// 各变体均可出现在 [`SagaOutcome::Failed`]`.error`；consumer 若需区分是否已触发补偿，须查 journal 是否有
-/// `Compensating`/`Compensated` 行（`SerializeFailed` = step 名非法 → fail-fast 未 journal、未补偿）。
+/// `Compensating`/`Compensated` 行（`SerializeFailed` 可表示 step 名非法的 fail-fast，也可表示 typed output
+/// 在 `execute` 后 JSON 编码失败并已触发当前 step 补偿）。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SagaActionError {
     /// 动作执行失败。
     #[error("action failed")]
     ActionFailed,
-    /// 输出 / 标识序列化失败（含 step 名非法标识符）——fail-fast，不 journal、不补偿。
+    /// Non-retryable action failure.
+    #[error("non-retryable action failed")]
+    NonRetryableActionFailed,
+    /// 输出 / 标识序列化失败（含 step 名非法标识符）。
     #[error("serialize failed")]
     SerializeFailed,
     /// 子 saga 创建失败。
@@ -168,10 +189,222 @@ impl SagaActionError {
     fn as_label(&self) -> &'static str {
         match self {
             Self::ActionFailed => "action_failed",
+            Self::NonRetryableActionFailed => "non_retryable_action_failed",
             Self::SerializeFailed => "serialize_failed",
             Self::SubsagaCreateFailed => "subsaga_create_failed",
             Self::ActionTimedOut => "action_timed_out",
         }
+    }
+}
+
+/// Error constructing a typed saga action factory from generated contract metadata.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TypedSagaFactoryError {
+    /// Generated step name failed runtime `StepName` validation.
+    #[error("typed saga step name is invalid: name={name:?}")]
+    InvalidStepName { name: &'static str },
+    /// Registered typed steps do not match the generated contract step count.
+    #[error(
+        "typed saga step count does not match generated contract: expected={expected} actual={actual}"
+    )]
+    StepCountMismatch { expected: usize, actual: usize },
+    /// Registered typed step binding differs from the generated ordered binding.
+    #[error(
+        "typed saga step binding does not match generated contract: index={index} expected={expected:?} actual={actual:?}"
+    )]
+    StepBindingMismatch {
+        index: usize,
+        expected: Box<vocab::SagaStepBinding>,
+        actual: Box<vocab::SagaStepBinding>,
+    },
+    /// Registered typed step output DTO binding differs from the step binding.
+    #[error(
+        "typed saga step output binding does not match step binding: step={step:?} output={output:?}"
+    )]
+    StepOutputBindingMismatch {
+        step: Box<vocab::SagaStepBinding>,
+        output: Box<vocab::SagaStepBinding>,
+    },
+}
+
+/// Typed saga action factory consumed by [`SagaExecutorDeps::new`].
+///
+/// It is built from one generated [`vocab::SagaContractBinding`] and typed
+/// [`consistency::SagaStep`] factories. `finish` validates exact step count/order/contract/name/schema
+/// before any executor can be constructed.
+pub struct TypedSagaActionFactory {
+    spec: vocab::SagaContractBinding,
+    steps: Vec<Box<dyn TypedSagaStepSlot>>,
+}
+
+impl TypedSagaActionFactory {
+    /// Start building a typed saga action factory from generated saga contract metadata.
+    pub fn builder(spec: vocab::SagaContractBinding) -> TypedSagaActionFactoryBuilder {
+        TypedSagaActionFactoryBuilder::new(spec)
+    }
+
+    /// Generated saga contract binding used to build this typed factory.
+    #[must_use]
+    pub fn spec(&self) -> vocab::SagaContractBinding {
+        self.spec
+    }
+}
+
+/// Builder for [`TypedSagaActionFactory`].
+pub struct TypedSagaActionFactoryBuilder {
+    spec: vocab::SagaContractBinding,
+    steps: Vec<Box<dyn TypedSagaStepSlot>>,
+}
+
+impl TypedSagaActionFactoryBuilder {
+    /// Create a builder tied to one generated saga contract binding.
+    pub fn new(spec: vocab::SagaContractBinding) -> Self {
+        Self {
+            spec,
+            steps: Vec::new(),
+        }
+    }
+
+    /// Register one typed step factory in generated contract order.
+    pub fn register_step<S, F>(&mut self, factory: F) -> Result<(), TypedSagaFactoryError>
+    where
+        S: SagaStep + std::fmt::Debug + Send + Sync + 'static,
+        S::Output: Serialize + Send + 'static,
+        F: Fn() -> S + Send + Sync + 'static,
+    {
+        let step_name = parse_binding_name(S::BINDING)?;
+        let output_binding = <S::Output as vocab::SagaStepOutputBinding>::BINDING;
+        if output_binding != S::BINDING {
+            return Err(TypedSagaFactoryError::StepOutputBindingMismatch {
+                step: Box::new(S::BINDING),
+                output: Box::new(output_binding),
+            });
+        }
+        self.steps.push(Box::new(RegisteredSagaStep::<S, F> {
+            factory,
+            step_name,
+            _marker: PhantomData,
+        }));
+        Ok(())
+    }
+
+    /// Validate exact generated step parity and produce a runtime factory.
+    pub fn finish(self) -> Result<TypedSagaActionFactory, TypedSagaFactoryError> {
+        let expected = self.spec.steps();
+        if expected.len() != self.steps.len() {
+            return Err(TypedSagaFactoryError::StepCountMismatch {
+                expected: expected.len(),
+                actual: self.steps.len(),
+            });
+        }
+        for (index, (expected, actual)) in expected.iter().zip(&self.steps).enumerate() {
+            let actual = actual.binding();
+            if *expected != actual {
+                return Err(TypedSagaFactoryError::StepBindingMismatch {
+                    index,
+                    expected: Box::new(*expected),
+                    actual: Box::new(actual),
+                });
+            }
+        }
+        Ok(TypedSagaActionFactory {
+            spec: self.spec,
+            steps: self.steps,
+        })
+    }
+}
+
+trait TypedSagaStepSlot: Send + Sync {
+    fn binding(&self) -> vocab::SagaStepBinding;
+    fn build_action(&self) -> Box<dyn SagaAction>;
+}
+
+struct RegisteredSagaStep<S, F> {
+    factory: F,
+    step_name: StepName,
+    _marker: PhantomData<fn() -> S>,
+}
+
+impl<S, F> TypedSagaStepSlot for RegisteredSagaStep<S, F>
+where
+    S: SagaStep + std::fmt::Debug + Send + Sync + 'static,
+    S::Output: Serialize + Send + 'static,
+    F: Fn() -> S + Send + Sync + 'static,
+{
+    fn binding(&self) -> vocab::SagaStepBinding {
+        S::BINDING
+    }
+
+    fn build_action(&self) -> Box<dyn SagaAction> {
+        Box::new(TypedSagaStepAction {
+            step: Arc::new((self.factory)()),
+            step_name: self.step_name.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct TypedSagaStepAction<S> {
+    step: Arc<S>,
+    step_name: StepName,
+}
+
+impl<S> SagaAction for TypedSagaStepAction<S>
+where
+    S: SagaStep + std::fmt::Debug + Send + Sync + 'static,
+    S::Output: Serialize + Send + 'static,
+{
+    fn name(&self) -> &str {
+        self.step_name.as_str()
+    }
+
+    fn do_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<Vec<u8>, SagaActionError>> {
+        let step = self.step.clone();
+        let step_name = self.step_name.clone();
+        Box::pin(async move {
+            let output = step
+                .execute(SagaStepCtx::new(ctx.instance(), step_name))
+                .await
+                .map_err(engine_error_to_action_error)?;
+            serde_json::to_vec(&output).map_err(|_| SagaActionError::SerializeFailed)
+        })
+    }
+
+    fn failed_after_forward_effect(&self, error: &SagaActionError) -> bool {
+        matches!(error, SagaActionError::SerializeFailed)
+    }
+
+    fn undo_it(&self, ctx: SagaActionCtx) -> BoxFuture<'static, Result<(), SagaActionError>> {
+        let step = self.step.clone();
+        let step_name = self.step_name.clone();
+        Box::pin(async move {
+            match step
+                .compensate(SagaStepCtx::new(ctx.instance(), step_name))
+                .await
+                .map_err(engine_error_to_action_error)?
+            {
+                CompensationOutcome::Compensated => Ok(()),
+                CompensationOutcome::Failed => Err(SagaActionError::NonRetryableActionFailed),
+                _ => Err(SagaActionError::NonRetryableActionFailed),
+            }
+        })
+    }
+}
+
+fn parse_binding_name(binding: vocab::SagaStepBinding) -> Result<StepName, TypedSagaFactoryError> {
+    StepName::parse(binding.name()).map_err(|_| TypedSagaFactoryError::InvalidStepName {
+        name: binding.name(),
+    })
+}
+
+fn engine_error_to_action_error(error: EngineError) -> SagaActionError {
+    match error.kind() {
+        EngineErrorKind::Transient => SagaActionError::ActionFailed,
+        EngineErrorKind::Permanent | EngineErrorKind::Invariant => {
+            SagaActionError::NonRetryableActionFailed
+        }
+        _ => SagaActionError::NonRetryableActionFailed,
     }
 }
 
@@ -531,12 +764,18 @@ fn saga_runtime_lock_key(instance: SagaInstanceRef) -> String {
 
 /// saga 模板：按声明序产出全部 [`SagaAction`]。resume 用——执行器仅持 `saga_id`，须经此重物化整个
 /// action 序（journal 只存 step 名，无法重建闭包）。对标 steno saga template / dag registry。
-pub trait SagaActionFactory: Send + Sync {
+pub(crate) trait SagaActionFactory: Send + Sync {
     /// 构造该 saga 类型的有序 action 序（每次新建实例；执行器据 journal 已完成前缀决定跳过 / 续跑）。
     ///
     /// 实现必须每次返回**相同的完整有序 action 序**（与 `run` 传入序的 step 名 + 顺序一致）。
     /// resume 靠 journal step 名与 action index 一一对应重建状态，缺步 / 重排即导致错跳 / 补偿错乱。
     fn build(&self) -> Vec<Box<dyn SagaAction>>;
+}
+
+impl SagaActionFactory for TypedSagaActionFactory {
+    fn build(&self) -> Vec<Box<dyn SagaAction>> {
+        self.steps.iter().map(|step| step.build_action()).collect()
+    }
 }
 
 /// 补偿失败安全摘要（`&'static str` const literal；进 journal `Failed` 行 + DLX 摘要 + tracing，不携 runtime
@@ -587,6 +826,25 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
         instance_store: Arc<S>,
         checkpoint: Arc<C>,
         dead_letter: Arc<D>,
+        factory: TypedSagaActionFactory,
+        runtime_lock: SagaRuntimeLock,
+    ) -> Self {
+        Self {
+            journal,
+            instance_store,
+            checkpoint,
+            dead_letter,
+            factory: Arc::new(factory),
+            runtime_lock,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_erased(
+        journal: Arc<J>,
+        instance_store: Arc<S>,
+        checkpoint: Arc<C>,
+        dead_letter: Arc<D>,
         factory: Arc<dyn SagaActionFactory>,
         runtime_lock: SagaRuntimeLock,
     ) -> Self {
@@ -611,11 +869,20 @@ pub struct SagaExecutorConfig {
 }
 
 impl SagaExecutorConfig {
-    /// Build executor config from the generated saga contract binding.
+    /// Build executor config from the same generated saga contract binding used by the typed factory.
     ///
-    /// The contract id and runtime policy are derived from the same generated `SPEC`, so runtime
-    /// composition cannot hand-author a contract id independently from its policy.
-    pub fn from_contract_spec(
+    /// Runtime composition receives one object for action registration and derives contract id and
+    /// policy from it, so the executor config cannot drift to a different saga contract.
+    pub fn from_typed_factory(
+        owner: CheckpointOwner,
+        holder_id: impl Into<String>,
+        lease_ttl: Duration,
+        factory: &TypedSagaActionFactory,
+    ) -> Result<Self, SagaPolicyError> {
+        Self::from_contract_spec(owner, holder_id, lease_ttl, factory.spec())
+    }
+
+    fn from_contract_spec(
         owner: CheckpointOwner,
         holder_id: impl Into<String>,
         lease_ttl: Duration,
@@ -955,7 +1222,10 @@ impl SagaActionPhase {
 }
 
 fn is_saga_action_retryable(err: &SagaActionError) -> bool {
-    !matches!(err, SagaActionError::SerializeFailed)
+    !matches!(
+        err,
+        SagaActionError::SerializeFailed | SagaActionError::NonRetryableActionFailed
+    )
 }
 
 fn duration_millis_u64(duration: Duration) -> u64 {
@@ -1274,9 +1544,13 @@ where
         loop {
             match op().await {
                 Ok(output) => return Ok(output),
-                Err(err) if !is_saga_action_retryable(&err) => return Err(err),
+                Err(err) if !is_saga_action_retryable(&err) => {
+                    self.warn_action_not_retrying(action_name, phase, attempt, err.as_label());
+                    return Err(err);
+                }
                 Err(err) => {
                     let Some(delay) = retry_delay else {
+                        self.warn_action_not_retrying(action_name, phase, attempt, err.as_label());
                         return Err(err);
                     };
                     self.warn_action_retry(action_name, phase, attempt, delay, err.as_label());
@@ -1340,6 +1614,25 @@ where
         );
     }
 
+    fn warn_action_not_retrying(
+        &self,
+        action_name: &str,
+        phase: SagaActionPhase,
+        attempt: u32,
+        error_kind: &'static str,
+    ) {
+        tracing::warn!(
+            tenant_id = %self.instance.tenant(),
+            saga_id = %self.instance.saga_id().as_uuid(),
+            contract_id = self.contract_id,
+            step_name = action_name,
+            phase = phase.as_str(),
+            attempt,
+            error_kind,
+            "saga: action failed, not retrying"
+        );
+    }
+
     /// 前向执行 `actions[start..]`；失败逆序补偿 `cursor.completed`（含 resume 预填前缀）。
     async fn run_forward(
         &self,
@@ -1370,6 +1663,18 @@ where
             let output = match self.run_forward_action(action).await {
                 Ok(o) => o,
                 Err(SagaPhaseError::Action(err)) => {
+                    if action.failed_after_forward_effect(&err) {
+                        return self
+                            .compensate_after_forward_effect(
+                                actions,
+                                &cursor.completed,
+                                (i, step),
+                                cursor.seq,
+                                action.name(),
+                                err,
+                            )
+                            .await;
+                    }
                     return self
                         .compensate(actions, &cursor.completed, cursor.seq, action.name(), err)
                         .await;
@@ -1433,6 +1738,44 @@ where
             .await
     }
 
+    /// Compensate a step whose forward side effect already happened but whose `Completed` record is
+    /// not valid to write, for example typed output serialization failure after `execute`.
+    async fn compensate_after_forward_effect(
+        &self,
+        actions: &[Box<dyn SagaAction>],
+        completed: &[(usize, StepName)],
+        current: (usize, StepName),
+        seq: u64,
+        failed_node: &str,
+        original_error: SagaActionError,
+    ) -> SagaOutcome {
+        let (current_idx, current_step) = current;
+        if !self.refresh_lease().await {
+            return Self::interrupted(SagaInterruption::LeaseLost);
+        }
+        if let Err(failure) = self
+            .append(SagaJournalAppendRecord::compensating(
+                seq,
+                current_step.clone(),
+            ))
+            .await
+        {
+            return self.append_failure_outcome(failure, failed_node);
+        }
+        let action = actions[current_idx].as_ref();
+        let next_seq = match self
+            .compensate_step_after_intent(action, &current_step, seq + 1, failed_node)
+            .await
+        {
+            Ok(next_seq) => next_seq,
+            Err(outcome) => return outcome,
+        };
+        let mut remaining = completed.to_vec();
+        remaining.reverse();
+        self.compensate_pending(actions, &remaining, next_seq, failed_node, original_error)
+            .await
+    }
+
     /// 按传入顺序补偿 pending step；`pending` 必须已是 reverse compensation order。
     async fn compensate_pending(
         &self,
@@ -1473,14 +1816,27 @@ where
         {
             return Err(self.append_failure_outcome(failure, failed_node));
         }
-        let undo_seq = seq + 1;
+        self.compensate_step_after_intent(action, step, seq + 1, failed_node)
+            .await
+    }
+
+    async fn compensate_step_after_intent(
+        &self,
+        action: &dyn SagaAction,
+        step: &StepName,
+        seq: u64,
+        failed_node: &str,
+    ) -> Result<u64, SagaOutcome> {
+        if !self.refresh_lease().await {
+            return Err(Self::interrupted(SagaInterruption::LeaseLost));
+        }
         match self.run_compensation_action(action).await {
             Ok(()) => {
-                self.finish_compensation_success(action, step, undo_seq, failed_node)
+                self.finish_compensation_success(action, step, seq, failed_node)
                     .await
             }
             Err(SagaPhaseError::Action(undo_err)) => Err(self
-                .finish_compensation_failure(action, step, undo_seq, failed_node, undo_err)
+                .finish_compensation_failure(action, step, seq, failed_node, undo_err)
                 .await),
             Err(SagaPhaseError::Interrupted(reason)) => Err(Self::interrupted(reason)),
         }
