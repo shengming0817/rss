@@ -68,6 +68,7 @@ use crate::internal::mem::{
 use crate::internal::ports::FlagStore;
 use crate::ports::{
     ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
+    TenantRepoScope,
 };
 
 /// 配置路由组前缀（Primary listener，业务 API）。
@@ -306,12 +307,12 @@ impl SettingsService {
     /// 当前 key 的下一版本号（无历史 → 1）。
     async fn next_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<u64, SettingsServiceError> {
         // 真实最高版本（含 tombstone）+ 1——delete 软删后 version 单调不重置，防 event_id 复用（#1249 F1）。
         // 用 `latest_version` 而非 `find`：`find` 排除 tombstone，删后返 `None` 会误回 v1 → 复用旧 event_id。
-        let current = self.configs.latest_version(tenant, key).await?;
+        let current = self.configs.latest_version(scope, key).await?;
         Ok(current.map_or(1, |v| v + 1))
     }
 
@@ -367,8 +368,9 @@ impl SettingsService {
         actor: OutboxActor,
         request: SettingsConfigPublishRequest,
     ) -> Result<SettingsConfigPublishResponse, SettingsServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(&request.key)?;
-        let version = self.next_version(tenant, &key).await?;
+        let version = self.next_version(scope, &key).await?;
         let entry = ConfigEntry::new(
             key.clone(),
             ConfigValue::new(request.value),
@@ -386,7 +388,7 @@ impl SettingsService {
         // co-tx：CAS 配置写 + outbox append 同事务（both-or-neither）——冲突冒泡 `VersionConflict`，
         // 存储失败冒泡 `Storage`；二者皆使配置写与 outbox 行共回滚（消除 write-without-event 窗口）。
         self.writer
-            .save_and_append_outbox(tenant, entry.clone(), outbox_entry, envelope)
+            .save_and_append_outbox(scope, entry.clone(), outbox_entry, envelope)
             .await?;
         self.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
@@ -408,14 +410,15 @@ impl SettingsService {
         key: &str,
         to_version: u64,
     ) -> Result<SettingsConfigPublishResponse, SettingsServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
         let source = self
             .configs
-            .find_version(tenant, &key, to_version)
+            .find_version(scope, &key, to_version)
             .await?
             .ok_or(SettingsServiceError::NotFound)?;
         let value = ConfigValue::new(source.value());
-        let version = self.next_version(tenant, &key).await?;
+        let version = self.next_version(scope, &key).await?;
         let entry = ConfigEntry::new(key.clone(), value, tenant, ConfigVersion::new(version));
         let (outbox_entry, envelope) = self.build_version_changed_entry(
             &key,
@@ -429,7 +432,7 @@ impl SettingsService {
         // 不可变无 TOCTOU；新版本号（`next_version`）存在 read-then-write 窗口，由 CAS INSERT 守住——并发
         // 冲突返 `VersionConflict`，调用方读后重写重试。
         self.writer
-            .save_and_append_outbox(tenant, entry.clone(), outbox_entry, envelope)
+            .save_and_append_outbox(scope, entry.clone(), outbox_entry, envelope)
             .await?;
         self.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
@@ -447,11 +450,12 @@ impl SettingsService {
         tenant: TenantId,
         key: &str,
     ) -> Result<Option<String>, SettingsServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
         if let Some(entry) = self.cache.find(tenant, &key) {
             return Ok(Some(entry.value().to_string()));
         }
-        let entry = self.configs.find(tenant, &key).await?;
+        let entry = self.configs.find(scope, &key).await?;
         if let Some(entry) = &entry {
             self.cache.upsert(entry.clone());
         }
@@ -465,8 +469,9 @@ impl SettingsService {
     /// 事件留订阅缓存单元 #1120（同 `ports.rs` 注记）；届时 delete 亦走 co-tx writer 发 tombstone fact。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn delete(&self, tenant: TenantId, key: &str) -> Result<(), SettingsServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
-        self.configs.delete(tenant, &key).await?;
+        self.configs.delete(scope, &key).await?;
         self.cache.remove(tenant, &key);
         Ok(())
     }
@@ -515,16 +520,17 @@ impl SettingsService {
         key: SettingKey,
         version: u64,
     ) -> Result<(), SubscriberHandlerError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let latest = self
             .configs
-            .latest_version(tenant, &key)
+            .latest_version(scope, &key)
             .await
             .map_err(SubscriberHandlerError::transient)?;
         match latest {
             Some(current) if current > version => {
                 let current = self
                     .configs
-                    .find(tenant, &key)
+                    .find(scope, &key)
                     .await
                     .map_err(SubscriberHandlerError::transient)?;
                 match current {
@@ -550,7 +556,7 @@ impl SettingsService {
 
         let entry = self
             .configs
-            .find_version(tenant, &key, version)
+            .find_version(scope, &key, version)
             .await
             .map_err(SubscriberHandlerError::transient)?
             .ok_or_else(|| {
@@ -614,6 +620,12 @@ pub(crate) fn authenticated_tenant(req: &Request<Body>) -> Result<TenantId, Auth
         None => Err(AuthReject::Unauthenticated),
         Some(auth) => Ok(auth.tenant_id()),
     }
+}
+
+pub(crate) fn authenticated_tenant_scope(
+    req: &Request<Body>,
+) -> Result<TenantRepoScope, AuthReject> {
+    authenticated_tenant(req).map(TenantRepoScope::from_authenticated_tenant)
 }
 
 fn authenticated_actor(req: &Request<Body>) -> Result<(TenantId, OutboxActor), AuthReject> {
@@ -687,7 +699,7 @@ async fn config_publish_handler(
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
-    let (tenant, actor) = match authenticated_actor(&req) {
+    let (scope, actor) = match authenticated_actor(&req) {
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
@@ -696,7 +708,7 @@ async fn config_publish_handler(
         Ok(body) => body,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
-    config_publish_handler_bytes(service, tenant, actor, body, &request_id).await
+    config_publish_handler_bytes(service, scope, actor, body, &request_id).await
 }
 
 /// config-publish 核心（tenant 已解析）：parse → service → typed 响应 / 错误映射。供单测直接驱动。
@@ -1036,10 +1048,12 @@ mod tests {
             t,
             ConfigVersion::new(1),
         );
-        repo.save(t, entry_v1).await.expect("v1 ok");
+        repo.save(TenantRepoScope::for_test(t), entry_v1)
+            .await
+            .expect("v1 ok");
         let stale = ConfigEntry::new(key, ConfigValue::new("v1b"), t, ConfigVersion::new(1));
         assert!(matches!(
-            repo.save(t, stale).await,
+            repo.save(TenantRepoScope::for_test(t), stale).await,
             Err(ConfigRepoError::VersionConflict)
         ));
     }
@@ -1697,25 +1711,25 @@ mod tests {
         impl ConfigRepo for BarrierConfigRepo {
             async fn find(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
             ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
-                self.inner.find(tenant, key).await
+                self.inner.find(scope, key).await
             }
             async fn find_version(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
                 version: u64,
             ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
-                self.inner.find_version(tenant, key, version).await
+                self.inner.find_version(scope, key, version).await
             }
             async fn latest_version(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
             ) -> Result<Option<u64>, ConfigRepoError> {
-                let result = self.inner.latest_version(tenant, key).await;
+                let result = self.inner.latest_version(scope, key).await;
                 if self.version_reads.fetch_add(1, Ordering::SeqCst) < 2 {
                     self.barrier.wait().await;
                 }
@@ -1723,17 +1737,17 @@ mod tests {
             }
             async fn save(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 entry: ConfigEntry,
             ) -> Result<(), ConfigRepoError> {
-                self.inner.save(tenant, entry).await
+                self.inner.save(scope, entry).await
             }
             async fn delete(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
             ) -> Result<(), ConfigRepoError> {
-                self.inner.delete(tenant, key).await
+                self.inner.delete(scope, key).await
             }
         }
 

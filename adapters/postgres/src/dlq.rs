@@ -13,7 +13,7 @@ use eventexec::{
 };
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 use crate::outbox::{
     OutboxAppendOutcome, ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox_with_projection,
@@ -131,7 +131,7 @@ impl DlqStore for PgDlqStore {
         let result = self
             .tenant_pool
             .write(
-                request.tenant(),
+                infra_tenant_scope(request.tenant()),
                 move |conn| {
                     let payload_protector = payload_protector.clone();
                     Box::pin(async move {
@@ -253,7 +253,7 @@ impl DlqStore for PgDlqStore {
         let result = self
             .tenant_pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |conn| {
                     let event_id = event_id.clone();
                     Box::pin(async move {
@@ -298,7 +298,7 @@ impl PgDlqStore {
         let id = id.to_string();
         let row: Option<DeadLetterRow> = self
             .tenant_pool
-            .read(tenant, move |conn| {
+            .read(infra_tenant_scope(tenant), move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
                         r#"
@@ -341,7 +341,7 @@ impl PgDlqStore {
         let row: Option<OutboxRow> = self
             .tenant_pool
             .read_map(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query_as(
@@ -409,7 +409,7 @@ impl PgDlqStore {
         let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
         let rows: Vec<DeadLetterRow> = self
             .tenant_pool
-            .read(tenant, move |conn| {
+            .read(infra_tenant_scope(tenant), move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(LIST_DEAD_LETTER_SQL)
                         .bind(tenant.to_string())
@@ -456,7 +456,7 @@ impl PgDlqStore {
         let rows: Vec<OutboxRow> = self
             .tenant_pool
             .read_map(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |conn| {
                     let domain = domain.clone();
                     let contract_id = contract_id.clone();

@@ -27,7 +27,7 @@ use generated::http::identity_v1::roles_list::SPEC as ROLES_LIST_SPEC;
 use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
 use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
 use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleRepo};
-use identity::ports::{Role, RoleRepo as _, TenantId};
+use identity::ports::{Role, RoleRepo as _, TenantId, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::ListenerKind;
@@ -369,6 +369,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     // 2. postgres fixture + credential seed（login 凭据）。
     let (_fixture, pg) = connect_pg().await?;
     let tenant = TenantId::parse(CANON_TENANT)?;
+    let tenant_scope = TenantRepoScope::for_test(tenant);
     let credential = Credential::hydrate(
         LOGIN_USERNAME,
         ids::UserId::parse(CANON_USER)?,
@@ -378,7 +379,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     );
     pg.for_domain::<caps::Identity>()
         .credential_repo()
-        .save(credential)
+        .save(tenant_scope, credential)
         .await?;
 
     // 3. vault bundle（#1498）：pre-GA 空 allowlist，secret resolver 不触 vault；仅构造器结构满足
@@ -585,10 +586,11 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         ],
     )?;
     let admin_role_id = admin_role.id().clone();
-    id.role_repo().save(tenant, admin_role).await?;
+    let tenant_scope = TenantRepoScope::for_test(tenant);
+    id.role_repo().save(tenant_scope, admin_role).await?;
     id.role_repo()
         .save(
-            tenant,
+            tenant_scope,
             Role::hydrate(
                 OPERATOR_ROLE,
                 "Operator",

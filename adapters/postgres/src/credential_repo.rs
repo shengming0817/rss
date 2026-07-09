@@ -35,7 +35,7 @@ use std::time::SystemTime;
 
 use identity::ports::{
     AccountLockout, AuthOutcome, Credential, CredentialRepo, IdentityError, LoginIdentifier,
-    TenantId,
+    TenantId, TenantRepoScope,
 };
 use sqlx::{PgConnection, Row};
 
@@ -179,9 +179,10 @@ async fn write_lockout(
 impl CredentialRepo for PgCredentialRepo {
     async fn find_by_user_id(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         user_id: ids::UserId,
     ) -> Result<Option<Credential>, IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let user_uuid = user_id.as_uuid().to_string();
         let tenant_uuid_q = tenant_uuid.clone();
@@ -191,7 +192,7 @@ impl CredentialRepo for PgCredentialRepo {
         // try_get 返回 owned 原始值，hydrate（PHC 复核 / Credential 重建）在 tx 外（域错误不依赖 sqlx）。
         let raw = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
@@ -239,16 +240,17 @@ impl CredentialRepo for PgCredentialRepo {
 
     async fn authenticate(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         login: LoginIdentifier,
         candidate: String,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         authenticate_in_tx(conn.conn(), &tenant_uuid, &login_str, &candidate, now)
@@ -260,12 +262,21 @@ impl CredentialRepo for PgCredentialRepo {
             .await
     }
 
-    async fn save(&self, credential: Credential) -> Result<(), IdentityError> {
-        let tenant_uuid = tenant_param(credential.tenant());
-        let tenant = credential.tenant();
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        credential: Credential,
+    ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
+        if credential.tenant() != tenant {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "credential save tenant scope mismatch",
+            ))));
+        }
+        let tenant_uuid = tenant_param(tenant);
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(
                         async move { save_in_tx(conn.conn(), &tenant_uuid, &credential).await },
@@ -276,10 +287,20 @@ impl CredentialRepo for PgCredentialRepo {
             .await
     }
 
-    async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError> {
-        let tenant_uuid = tenant_param(next.tenant());
+    async fn bump_version(
+        &self,
+        scope: TenantRepoScope,
+        expected: u32,
+        next: Credential,
+    ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
+        if next.tenant() != tenant {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "credential bump tenant scope mismatch",
+            ))));
+        }
+        let tenant_uuid = tenant_param(tenant);
         let login_str = next.login().as_str().to_owned();
-        let tenant = next.tenant();
         run_pg_tx_retry(
             IDENTITY_CREDENTIAL_BOUNDARY,
             |_attempt| {
@@ -289,7 +310,7 @@ impl CredentialRepo for PgCredentialRepo {
                 async move {
                     self.pool
                         .retry_write(
-                            tenant,
+                            scope,
                             move |conn| {
                                 Box::pin(async move {
                                     bump_version_in_tx(
@@ -314,15 +335,16 @@ impl CredentialRepo for PgCredentialRepo {
 
     async fn lockout_status(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         login: LoginIdentifier,
         now: SystemTime,
     ) -> Result<bool, IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let login_str = login.as_str().to_owned();
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         lockout_status_in_tx(conn.conn(), &tenant_uuid, &login_str, now).await

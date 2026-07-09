@@ -372,6 +372,7 @@ dependencies = [
  "tower",
  "tracing",
  "trait-variant",
+ "trybuild",
  "uuid",
  "vocab",
 ]
@@ -2886,6 +2887,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trait-variant",
+ "trybuild",
  "uuid",
  "vocab",
 ]
@@ -5226,6 +5228,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trait-variant",
+ "trybuild",
  "vocab",
 ]
 

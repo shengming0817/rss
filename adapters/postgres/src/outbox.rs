@@ -35,7 +35,7 @@ use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use sqlx::Row;
 
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability};
+use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 use crate::dead_letter_payload::{
     DLX_ORIGINAL_ENTRY_ENCODING, DlxPayloadContext, DlxPayloadProtector,
 };
@@ -1313,7 +1313,7 @@ async fn settle_dlx(
 
     tenant_pool
         .write(
-            tenant,
+            infra_tenant_scope(tenant),
             move |conn| {
                 let payload_protector = payload_protector.clone();
                 let event_id = event_id.clone();

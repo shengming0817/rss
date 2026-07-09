@@ -18,7 +18,7 @@ use consistency::Entry;
 use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::outbox::{
     OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient, unix_secs,
 };
@@ -87,7 +87,7 @@ impl OutboxEmitter for PgEmitter {
         let projection_registry = self.pool.projection_registry();
         self.pool
             .write(
-                env.tenant(),
+                infra_tenant_scope(env.tenant()),
                 move |tx| {
                     Box::pin(async move {
                         append_outbox_with_projection(tx, &entry, &env, &projection_registry)

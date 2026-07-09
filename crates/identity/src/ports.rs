@@ -39,6 +39,65 @@ pub use crate::domain::{
 };
 pub use vocab::TenantId;
 
+/// Tenant-scoped repo capability for identity storage ports.
+///
+/// It is an opaque handle: external crates can read the tenant for adapter lowering, but cannot
+/// construct it from a bare [`TenantId`] in production builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TenantRepoScope {
+    tenant: TenantId,
+    _seal: (),
+}
+
+impl TenantRepoScope {
+    /// Domain-internal constructor from an already authenticated or authorized tenant claim.
+    pub(crate) fn from_authenticated_tenant(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+
+    /// Read the tenant carried by this repo capability.
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// Test/dev-only constructor for downstream adapter conformance tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+}
+
+/// Non-cross-tenant row-scoped repo capability for identity rows.
+///
+/// It only accepts [`vocab::ScopedTenant`]-derived visibility, which keeps `RowScope::All` out of
+/// ordinary row-scoped repositories at the type boundary.
+pub struct RowRepoScope {
+    visibility: vocab::RowVisibility,
+    _seal: (),
+}
+
+impl RowRepoScope {
+    #[allow(dead_code)]
+    pub(crate) fn from_scoped_visibility(
+        scope: vocab::ScopedTenant,
+        tenant: TenantRepoScope,
+    ) -> Self {
+        Self {
+            visibility: vocab::RowVisibility::new(scope, tenant.tenant()),
+            _seal: (),
+        }
+    }
+
+    pub fn visibility(&self) -> &vocab::RowVisibility {
+        &self.visibility
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(scope: vocab::ScopedTenant, tenant: TenantRepoScope) -> Self {
+        Self::from_scoped_visibility(scope, tenant)
+    }
+}
+
 /// durable ABAC policy read repository DI port（tenant-scoped，domain-shaped）。
 ///
 /// 本 port 只暴露读侧能力。管理写侧必须经 [`PolicyLifecycle`] 的 combined co-tx API，以类型边界避免
@@ -49,17 +108,21 @@ pub use vocab::TenantId;
 #[dynosaur(pub DynPolicyRepo = dyn(box) PolicyRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
 pub trait PolicyRepoLocal: Send + Sync {
-    async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError>;
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        id: PolicyId,
+    ) -> Result<Option<Policy>, IdentityError>;
 
     async fn list_active(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         page: PolicyPage,
     ) -> Result<PolicyListResult, IdentityError>;
 
     async fn list_effective(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         at: SystemTime,
     ) -> Result<Vec<Policy>, IdentityError>;
@@ -90,7 +153,7 @@ pub struct PolicyListResult {
 pub trait ResourceAttributeRepoLocal: Send + Sync {
     async fn resolve_effective(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         required_keys: Vec<ResourceAttributeKey>,
@@ -99,14 +162,14 @@ pub trait ResourceAttributeRepoLocal: Send + Sync {
 
     async fn upsert(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         attribute: ResourceAttribute,
         expected: Option<ResourceAttributeVersion>,
     ) -> Result<ResourceAttribute, IdentityError>;
 
     async fn expire(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
@@ -121,7 +184,7 @@ pub trait ResourceAttributeRepoLocal: Send + Sync {
 pub trait PolicyLifecycleLocal: Send + Sync {
     async fn create_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         policy: Policy,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
@@ -129,7 +192,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 
     async fn update_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
         entry: Entry,
@@ -138,7 +201,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 
     async fn deactivate_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
         entry: Entry,
@@ -156,7 +219,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 /// （签名引用 `Role`/`RoleId`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
 ///
 /// **当前方法集 = PR5b 最小生产接缝（find / save / tenant-scoped list），非完整 repo 设计范式（勿照抄查询集）**。
-/// 安全 scope 由签名承载：`Role` 按租户内角色建模，repo 方法必须接收 typed `TenantId` 位置参做 store scope
+/// 安全 scope 由签名承载：`Role` 按租户内角色建模，repo 方法必须接收 [`TenantRepoScope`] 做 store scope
 /// （pre-GA：显式 `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨
 /// roles/sessions/config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立
 /// `GlobalRoleRepo`，不得复用本租户内 repo 签名。
@@ -172,14 +235,18 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 // （签名冻结，ADR-004 C8）。
 pub trait RoleRepoLocal: Send + Sync {
     /// 按 ID 查角色（不存在返回 `Ok(None)`）。
-    async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError>;
+    async fn find(&self, scope: TenantRepoScope, id: RoleId)
+    -> Result<Option<Role>, IdentityError>;
 
     /// 持久化角色（upsert）。
-    async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError>;
+    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError>;
 
     /// 租户内分页列出角色（按 role id 升序稳定排序）。
-    async fn list(&self, tenant: TenantId, page: RolePage)
-    -> Result<RoleListResult, IdentityError>;
+    async fn list(
+        &self,
+        scope: TenantRepoScope,
+        page: RolePage,
+    ) -> Result<RoleListResult, IdentityError>;
 }
 
 /// 角色列表分页参数（handler 已完成 query/cursor 校验，repo 只接收 typed page）。
@@ -217,7 +284,7 @@ pub struct RoleListResult {
 /// rollback 两行皆无），同 OUTBOX-COTX-SESSION-01。
 ///
 /// **租户隔离由签名承载（fail-closed）**：`assign_and_emit` 的 tenant 来自 `binding.tenant()`；
-/// `revoke_and_emit` 接 typed [`TenantId`] 位参做 store scope——跨租 revoke → 幂等 `Ok(false)`（不撤、不发
+/// `revoke_and_emit` 接 [`TenantRepoScope`] 做 store scope——跨租 revoke → 幂等 `Ok(false)`（不撤、不发
 /// 事件、不泄露存在性，IDENTITY-AUTHZ-TENANT-01）。失败通道经 [`OutboxEmitError`]（infra 错误，source 已
 /// PII-redacted）冒泡。
 ///
@@ -237,6 +304,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
     /// 事务原子写入。tenant scope 来自 `binding.tenant()`（无独立 tenant 入参可错位）。
     async fn assign_and_emit(
         &self,
+        scope: TenantRepoScope,
         binding: RoleBinding,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
@@ -247,7 +315,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
     /// 返回 `Ok(false)`（幂等 + 跨租隐藏存在性）。`entry`/`envelope` 在未命中时被丢弃（其 EventId 独立 opaque）。
     async fn revoke_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
         entry: Entry,
@@ -258,7 +326,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
     /// authorizer 求值；不存在返回空集，跨租经 tenant scope 天然不可见。失败由调用方 fail-closed 映射 403。
     async fn list_for_subject(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         subject: String,
     ) -> Result<Vec<RoleBinding>, IdentityError>;
 }
@@ -271,7 +339,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// 基 trait 带 `Send + Sync` supertrait：登录 handler 需 clone 共享同一 credential store，且
 /// `LoginService::login().await` future 必须为 `Send`（axum handler 要求）。
 ///
-/// **租户隔离由签名承载（fail-closed）**：所有方法接收 typed `TenantId` 位参做 RLS / store scope；跨租赁
+/// **租户隔离由签名承载（fail-closed）**：所有方法接收 [`TenantRepoScope`] 做 RLS / store scope；跨租
 /// 经 tenant-keyed 查找天然失败——`find(t ≠ cred.tenant)` → `None`，`authenticate` → `InvalidUnknown`，
 /// 不创建会话、不推进锁定计数（spec 003 US3 跨租红用例）。
 ///
@@ -284,7 +352,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `bump_version`）**不收**
 /// 独立 `tenant`/`login` 参，store key 直接派生自 `credential.tenant()` / `.login()`——错位组合不可表达
 /// （零信任租户隔离不靠调用方约定 / debug_assert）。只持标识的方法：`authenticate` / `lockout_status` 收
-/// typed `TenantId` + [`LoginIdentifier`]（登录路径，攻击者可控查找键）；`find_by_user_id` 收 `TenantId` +
+/// [`TenantRepoScope`] + [`LoginIdentifier`]（登录路径，攻击者可控查找键）；`find_by_user_id` 收 [`TenantRepoScope`] +
 /// `ids::UserId`（self-scoped 改密路径，认证主体锚点，#1277 F2）——二者皆经 tenant-keyed 查找天然 fail-closed。
 ///
 /// **验签 + 锁定推进原子化（F1+F2，#1277）**：失败计数 = 安全关键状态，**禁**外部「读-改-写」（并发丢更新）。
@@ -312,7 +380,7 @@ pub trait CredentialRepoLocal: Send + Sync {
     /// （#1277 F2：self-scoped 端点身份锚点 = authenticated subject，类型层杜绝越权改他人密码）。
     async fn find_by_user_id(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         user_id: ids::UserId,
     ) -> Result<Option<Credential>, IdentityError>;
 
@@ -332,25 +400,34 @@ pub trait CredentialRepoLocal: Send + Sync {
     /// 或已知主体路径异步推进）。in-mem 替身经 Mutex 内 KDF 主导，天然满足。
     async fn authenticate(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         login: LoginIdentifier,
         candidate: String,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError>;
 
     /// 持久化凭据（upsert）。store key 派生自 `credential`（F2：tenant/login 错位不可表达）。
-    async fn save(&self, credential: Credential) -> Result<(), IdentityError>;
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        credential: Credential,
+    ) -> Result<(), IdentityError>;
 
     /// 密码变更 CAS：仅当存储版本 == `expected` 时以 `next` 替换；版本不匹配 → `Err(VersionConflict)`，
     /// 查无凭据 → `Err(CredentialNotFound)`（并发密码变更安全）。store key 派生自 `next`（F2）；消费方经
     /// `Credential::rotate`（保持 login/user_id/tenant、version + 1）构造 `next`。
-    async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError>;
+    async fn bump_version(
+        &self,
+        scope: TenantRepoScope,
+        expected: u32,
+        next: Credential,
+    ) -> Result<(), IdentityError>;
 
     /// **原子**锁定态查询（F1，验签前门控）：provider 内 RMW 完成「读 → `try_lazy_unlock(now)`（TTL 过则解锁
     /// 并持久化）→ 返回 `is_locked(now)`」。无锁定态（查无）→ `Ok(false)`。`now` 经注入 `Clock`。
     async fn lockout_status(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         login: LoginIdentifier,
         now: SystemTime,
     ) -> Result<bool, IdentityError>;
@@ -384,7 +461,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 /// Hard）。adapter same-tx 接线由 postgres `PgSessionLifecycle` 的 **INVARIANT: OUTBOX-COTX-SESSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }** +
 /// 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无）守。
 ///
-/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `revoke` 接收 typed `TenantId`，跨租
+/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `revoke` 接收 [`TenantRepoScope`]，跨租
 /// find→None（不泄露存在性）/ revoke→幂等 no-op。失败通道：`persist_session_and_emit` 经 [`OutboxEmitError`]
 /// （diport infra 错误，source 已 PII-redacted）冒泡（co-tx 写失败任一步均不暴露原始错误明文，zero-trust；
 /// 复用 infra 错误因签名已桥接 [`Entry`] / [`OutboxEnvelopeParts`]、失败本质是持久化层错误）；`find` / `revoke`
@@ -411,6 +488,7 @@ pub trait SessionLifecycleLocal: Send + Sync {
     /// API**（OUTBOX-COTX-SESSION-01：域无 `save`/`emit` 分调、无半开事务句柄）。
     async fn persist_session_and_emit(
         &self,
+        scope: TenantRepoScope,
         session: Session,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
@@ -419,13 +497,17 @@ pub trait SessionLifecycleLocal: Send + Sync {
     /// **查询（L1）**：按 id 查会话（不存在 / 已撤销 / 跨租 → `Ok(None)`，不泄露存在性）。
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         session_id: SessionId,
     ) -> Result<Option<Session>, IdentityError>;
 
     /// **软撤销（L1，logout）**：域侧软撤销会话（幂等——重复 / 未知 / 跨租均 `Ok` 且 no-op）。已颁 JWT 在 TTL
     /// 内仍有效（硬吊销延 #1003）。
-    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError>;
+    async fn revoke(
+        &self,
+        scope: TenantRepoScope,
+        session_id: SessionId,
+    ) -> Result<(), IdentityError>;
 }
 
 /// refresh token 持久化 store DI port（域形；provider 可换：prod postgres / test in-mem）——#1325。
@@ -443,8 +525,8 @@ pub trait SessionLifecycleLocal: Send + Sync {
 /// refresh token（摘要不可逆）。secret 生成 / 摘要计算在 `secure::refresh`（base 层 crypto），编排在
 /// `application::RefreshService`（域 / store 不做 crypto）。
 ///
-/// **租户隔离由签名承载（fail-closed，同 `CredentialRepo`/`SessionLifecycle`）**：所有方法接 typed
-/// [`TenantId`] 位参做 store scope；跨租 `find_by_hash`→`None`（不泄露存在性）、`rotate`→CAS miss、
+/// **租户隔离由签名承载（fail-closed，同 `CredentialRepo`/`SessionLifecycle`）**：所有方法接
+/// [`TenantRepoScope`] 做 store scope；跨租 `find_by_hash`→`None`（不泄露存在性）、`rotate`→CAS miss、
 /// `revoke`/`revoke_lineage`→幂等 no-op。
 ///
 /// **reuse-detection（旧 refresh 一次性 + 失窃检测）**：rotation 经 [`rotate`](RefreshTokenStoreLocal::rotate)
@@ -461,13 +543,17 @@ pub trait SessionLifecycleLocal: Send + Sync {
 // `Box<DynRefreshTokenStore>` 为 `Sync`、`RefreshService<S>` 可作共享 handler state（同 SessionLifecycle，#1252）。
 pub trait RefreshTokenStoreLocal: Send + Sync {
     /// 持久化新签发记录（`status = Active`；签发链根 `lineage_id == id`）。
-    async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+    async fn insert(
+        &self,
+        scope: TenantRepoScope,
+        record: RefreshTokenRecord,
+    ) -> Result<(), IdentityError>;
 
     /// 按 secret 摘要查找（不存在 / 跨租 → `Ok(None)`，不泄露存在性）。返回的记录含 status——application 据此
     /// 判活跃 / 重放（命中非 Active = 重放）。
     async fn find_by_hash(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         hash: RefreshTokenHash,
     ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
 
@@ -481,7 +567,11 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     /// 返回 `Ok(true)` = CAS 命中（old 当时仍 Active，已消费 + 写入 new）；`Ok(false)` = old 已非 Active
     /// （并发轮换 / 重放胜出者已消费它）——**不写 new**，由 application 据此触发 reuse-detection 级联撤销。
     /// 旧 refresh 一次性失效在类型层 + 事务 CAS 双重保证（杜绝 TOCTOU 双换）。
-    async fn rotate(&self, rotation: RefreshRotation) -> Result<bool, IdentityError>;
+    async fn rotate(
+        &self,
+        scope: TenantRepoScope,
+        rotation: RefreshRotation,
+    ) -> Result<bool, IdentityError>;
 
     /// **级联撤销整条谱系**（reuse-detection + logout）：把 `lineage_id` 家族全部记录置 `Revoked`。幂等
     /// （未知 / 跨租 / 已撤销均 `Ok` 且 no-op）。
@@ -490,7 +580,7 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     /// 子 token 仍可用），故无独立单条 `revoke(id)`（YAGNI：单条撤销无消费方）。
     async fn revoke_lineage(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         lineage_id: RefreshTokenId,
     ) -> Result<(), IdentityError>;
 }
@@ -507,7 +597,7 @@ mod smoke {
     use super::{
         DynRoleRepo, DynSessionLifecycle, Entry, IdentityError, OutboxEmitError,
         OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionLifecycle,
-        TenantId,
+        TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -515,17 +605,17 @@ mod smoke {
     impl RoleRepo for NoopRoleRepo {
         async fn find(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _id: RoleId,
         ) -> Result<Option<Role>, IdentityError> {
             todo!()
         }
-        async fn save(&self, _tenant: TenantId, _role: Role) -> Result<(), IdentityError> {
+        async fn save(&self, _scope: TenantRepoScope, _role: Role) -> Result<(), IdentityError> {
             todo!()
         }
         async fn list(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _page: super::RolePage,
         ) -> Result<super::RoleListResult, IdentityError> {
             todo!()
@@ -571,13 +661,13 @@ mod smoke {
         impl RoleRepo for TestRoleRepo {
             async fn find(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 id: RoleId,
             ) -> Result<Option<Role>, IdentityError>;
-            async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError>;
+            async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError>;
             async fn list(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 page: super::RolePage,
             ) -> Result<super::RoleListResult, IdentityError>;
         }
@@ -592,6 +682,7 @@ mod smoke {
     impl SessionLifecycle for NoopSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
+            _scope: TenantRepoScope,
             _session: Session,
             _entry: Entry,
             _envelope: OutboxEnvelopeParts,
@@ -600,14 +691,14 @@ mod smoke {
         }
         async fn find(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _session_id: SessionId,
         ) -> Result<Option<Session>, IdentityError> {
             todo!()
         }
         async fn revoke(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _session_id: SessionId,
         ) -> Result<(), IdentityError> {
             todo!()
@@ -656,18 +747,19 @@ mod smoke {
         impl SessionLifecycle for TestSessionLifecycle {
             async fn persist_session_and_emit(
                 &self,
+                scope: TenantRepoScope,
                 session: Session,
                 entry: Entry,
                 envelope: OutboxEnvelopeParts,
             ) -> Result<(), OutboxEmitError>;
             async fn find(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 session_id: SessionId,
             ) -> Result<Option<Session>, IdentityError>;
             async fn revoke(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 session_id: SessionId,
             ) -> Result<(), IdentityError>;
         }
@@ -682,7 +774,7 @@ mod smoke_credential {
     //! round-trip 测试覆盖）。
     use super::{
         AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, IdentityError, LoginIdentifier,
-        SystemTime, TenantId,
+        SystemTime, TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -690,25 +782,30 @@ mod smoke_credential {
     impl CredentialRepo for NoopCredentialRepo {
         async fn find_by_user_id(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _user_id: ids::UserId,
         ) -> Result<Option<Credential>, IdentityError> {
             todo!()
         }
         async fn authenticate(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _login: LoginIdentifier,
             _candidate: String,
             _now: SystemTime,
         ) -> Result<AuthOutcome, IdentityError> {
             todo!()
         }
-        async fn save(&self, _credential: Credential) -> Result<(), IdentityError> {
+        async fn save(
+            &self,
+            _scope: TenantRepoScope,
+            _credential: Credential,
+        ) -> Result<(), IdentityError> {
             todo!()
         }
         async fn bump_version(
             &self,
+            _scope: TenantRepoScope,
             _expected: u32,
             _next: Credential,
         ) -> Result<(), IdentityError> {
@@ -716,7 +813,7 @@ mod smoke_credential {
         }
         async fn lockout_status(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _login: LoginIdentifier,
             _now: SystemTime,
         ) -> Result<bool, IdentityError> {
@@ -762,11 +859,11 @@ mod smoke_credential {
     mockall::mock! {
         TestCredentialRepo {}
         impl CredentialRepo for TestCredentialRepo {
-            async fn find_by_user_id(&self, tenant: TenantId, user_id: ids::UserId) -> Result<Option<Credential>, IdentityError>;
-            async fn authenticate(&self, tenant: TenantId, login: LoginIdentifier, candidate: String, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
-            async fn save(&self, credential: Credential) -> Result<(), IdentityError>;
-            async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError>;
-            async fn lockout_status(&self, tenant: TenantId, login: LoginIdentifier, now: SystemTime) -> Result<bool, IdentityError>;
+            async fn find_by_user_id(&self, scope: TenantRepoScope, user_id: ids::UserId) -> Result<Option<Credential>, IdentityError>;
+            async fn authenticate(&self, scope: TenantRepoScope, login: LoginIdentifier, candidate: String, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
+            async fn save(&self, scope: TenantRepoScope, credential: Credential) -> Result<(), IdentityError>;
+            async fn bump_version(&self, scope: TenantRepoScope, expected: u32, next: Credential) -> Result<(), IdentityError>;
+            async fn lockout_status(&self, scope: TenantRepoScope, login: LoginIdentifier, now: SystemTime) -> Result<bool, IdentityError>;
         }
     }
 }
@@ -781,27 +878,35 @@ mod smoke_refresh {
     //! + `application::RefreshService` 集成测试覆盖）。
     use super::{
         DynRefreshTokenStore, IdentityError, RefreshRotation, RefreshTokenHash, RefreshTokenId,
-        RefreshTokenRecord, RefreshTokenStore, TenantId,
+        RefreshTokenRecord, RefreshTokenStore, TenantRepoScope,
     };
 
     struct NoopRefreshTokenStore;
     impl RefreshTokenStore for NoopRefreshTokenStore {
-        async fn insert(&self, _record: RefreshTokenRecord) -> Result<(), IdentityError> {
+        async fn insert(
+            &self,
+            _scope: TenantRepoScope,
+            _record: RefreshTokenRecord,
+        ) -> Result<(), IdentityError> {
             todo!()
         }
         async fn find_by_hash(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _hash: RefreshTokenHash,
         ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
             todo!()
         }
-        async fn rotate(&self, _rotation: RefreshRotation) -> Result<bool, IdentityError> {
+        async fn rotate(
+            &self,
+            _scope: TenantRepoScope,
+            _rotation: RefreshRotation,
+        ) -> Result<bool, IdentityError> {
             todo!()
         }
         async fn revoke_lineage(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _lineage_id: RefreshTokenId,
         ) -> Result<(), IdentityError> {
             todo!()
@@ -845,10 +950,10 @@ mod smoke_refresh {
     mockall::mock! {
         TestRefreshTokenStore {}
         impl RefreshTokenStore for TestRefreshTokenStore {
-            async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
-            async fn find_by_hash(&self, tenant: TenantId, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-            async fn rotate(&self, rotation: RefreshRotation) -> Result<bool, IdentityError>;
-            async fn revoke_lineage(&self, tenant: TenantId, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;
+            async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+            async fn find_by_hash(&self, scope: TenantRepoScope, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
+            async fn rotate(&self, scope: TenantRepoScope, rotation: RefreshRotation) -> Result<bool, IdentityError>;
+            async fn revoke_lineage(&self, scope: TenantRepoScope, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;
         }
     }
 }

@@ -26,11 +26,11 @@ use generated::http::settings_v2::{
 };
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
-use crate::application::{authenticated_tenant, request_id_from, wire_version};
+use crate::application::{authenticated_tenant_scope, request_id_from, wire_version};
 use crate::domain::{
     SecretEntry, SecretKey, SecretRef, SecretRepoError, SecretVersion, SettingsError, StoreId,
 };
-use crate::ports::{DynSecretRepo, SecretRepo};
+use crate::ports::{DynSecretRepo, SecretRepo, TenantRepoScope};
 
 #[cfg(test)]
 use crate::internal::mem::{InMemSecretRepo, new_secret_store};
@@ -185,7 +185,8 @@ impl SecretService {
         key: SecretKey,
         secret_ref: SecretRef,
     ) -> Result<u64, SecretServiceError> {
-        publish_secret_to_repo(&self.secrets, tenant, key, secret_ref).await
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        publish_secret_to_repo(&self.secrets, scope, key, secret_ref).await
     }
 
     /// 读取当前活跃 secret 引用（不存在返回 `Ok(None)`）。
@@ -195,9 +196,10 @@ impl SecretService {
         tenant: TenantId,
         key: &SecretKey,
     ) -> Result<Option<SecretRef>, SecretServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         Ok(self
             .secrets
-            .find(tenant, key)
+            .find(scope, key)
             .await?
             .map(|entry| entry.secret_ref().clone()))
     }
@@ -210,9 +212,10 @@ impl SecretService {
         key: &SecretKey,
         version: u64,
     ) -> Result<Option<SecretRef>, SecretServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         Ok(self
             .secrets
-            .find_version(tenant, key, version)
+            .find_version(scope, key, version)
             .await?
             .map(|entry| entry.secret_ref().clone()))
     }
@@ -227,9 +230,10 @@ impl SecretService {
         key: &SecretKey,
         to_version: u64,
     ) -> Result<u64, SecretServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let source_ref = self
             .secrets
-            .find_version(tenant, key, to_version)
+            .find_version(scope, key, to_version)
             .await?
             .ok_or(SecretServiceError::NotFound)?
             .secret_ref()
@@ -246,7 +250,8 @@ impl SecretService {
         tenant: TenantId,
         key: &SecretKey,
     ) -> Result<(), SecretServiceError> {
-        self.secrets.delete(tenant, key).await.map_err(Into::into)
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        self.secrets.delete(scope, key).await.map_err(Into::into)
     }
 
     /// 按 secret 引用解析材料（每次 fresh 调用 resolver，绝不缓存）。
@@ -283,14 +288,15 @@ const MAX_SECRET_BODY_BYTES: usize = 64 * 1024;
 /// `Arc<DynSecretRepo>`（已 `Send + Sync`），不持整个 `SecretService`（含 `Send`-only resolver、非 `Sync`）。
 pub(crate) async fn publish_secret_to_repo(
     secrets: &DynSecretRepo<'static>,
-    tenant: TenantId,
+    scope: TenantRepoScope,
     key: SecretKey,
     secret_ref: SecretRef,
 ) -> Result<u64, SecretServiceError> {
-    let current = secrets.latest_version(tenant, &key).await?;
+    let tenant = scope.tenant();
+    let current = secrets.latest_version(scope, &key).await?;
     let version = current.map_or(1, |v| v + 1);
     let entry = SecretEntry::new(key, secret_ref, tenant, SecretVersion::new(version));
-    secrets.save(tenant, entry).await?;
+    secrets.save(scope, entry).await?;
     Ok(version)
 }
 
@@ -303,8 +309,8 @@ pub(crate) async fn secret_publish_handler(
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
-    let tenant = match authenticated_tenant(&req) {
-        Ok(tenant) => tenant,
+    let scope = match authenticated_tenant_scope(&req) {
+        Ok(scope) => scope,
         Err(reject) => return reject.into_response(&request_id),
     };
     let (_, body) = req.into_parts();
@@ -312,13 +318,13 @@ pub(crate) async fn secret_publish_handler(
         Ok(body) => body,
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
-    secret_publish_handler_bytes(&secrets, tenant, body, &request_id).await
+    secret_publish_handler_bytes(&secrets, scope, body, &request_id).await
 }
 
 /// secret-publish 核心（tenant 已解析）：parse + domain funnel + 仓储发布。供单测直接驱动。
 pub(crate) async fn secret_publish_handler_bytes(
     secrets: &DynSecretRepo<'static>,
-    tenant: TenantId,
+    scope: TenantRepoScope,
     body: Bytes,
     request_id: &str,
 ) -> Response {
@@ -331,7 +337,7 @@ pub(crate) async fn secret_publish_handler_bytes(
         Ok(parsed) => parsed,
         Err(_) => return httpserve::error::validation_bad_request(request_id),
     };
-    match publish_secret_to_repo(secrets, tenant, key, secret_ref).await {
+    match publish_secret_to_repo(secrets, scope, key, secret_ref).await {
         Ok(version) => {
             let response = SettingsSecretPublishResponse {
                 data: SettingsSecretPublishData {
@@ -341,7 +347,7 @@ pub(crate) async fn secret_publish_handler_bytes(
             };
             (StatusCode::CREATED, Json(response)).into_response()
         }
-        Err(err) => secret_error_response(&err, tenant, request_id),
+        Err(err) => secret_error_response(&err, scope.tenant(), request_id),
     }
 }
 
@@ -414,6 +420,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn tenant_b() -> TenantId {
         TenantId::parse(TENANT_B_STR).expect("canonical uuid")
+    }
+
+    fn tenant_scope() -> TenantRepoScope {
+        TenantRepoScope::for_test(tenant())
     }
 
     #[allow(clippy::expect_used)]
@@ -539,7 +549,7 @@ mod tests {
         let repo = secret_repo_arc();
         let resp = secret_publish_handler_bytes(
             &repo,
-            tenant(),
+            tenant_scope(),
             axum::body::Bytes::from_static(b"not json"),
             "rid",
         )
@@ -558,7 +568,7 @@ mod tests {
             ref_version: None,
         };
         let body = serde_json::to_vec(&req).expect("serialize");
-        let resp = secret_publish_handler_bytes(&repo, tenant(), body.into(), "rid").await;
+        let resp = secret_publish_handler_bytes(&repo, tenant_scope(), body.into(), "rid").await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -572,7 +582,7 @@ mod tests {
         let repo = secret_repo_arc();
         let v1 = publish_secret_to_repo(
             &repo,
-            tenant(),
+            tenant_scope(),
             make_key("vault.db"),
             make_ref("vault", "k"),
         )
@@ -580,7 +590,7 @@ mod tests {
         .expect("v1");
         let v2 = publish_secret_to_repo(
             &repo,
-            tenant(),
+            tenant_scope(),
             make_key("vault.db"),
             make_ref("vault", "k"),
         )

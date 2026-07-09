@@ -29,7 +29,9 @@ use vocab::TenantId;
 
 use super::unix_secs;
 use crate::domain::{IdentityError, RoleBinding, RoleId};
-use crate::ports::{DynRoleBindingLifecycle, DynRoleRepo, RoleBindingLifecycle, RoleRepo};
+use crate::ports::{
+    DynRoleBindingLifecycle, DynRoleRepo, RoleBindingLifecycle, RoleRepo, TenantRepoScope,
+};
 
 /// 发布域（tracing span 标签）。从契约绑定单源派生（= contract.toml `domain`，两 role 事件同域 `identity`）。
 const RBAC_DOMAIN: &str = ROLE_ASSIGNED_CONTRACT.domain();
@@ -101,10 +103,11 @@ impl RbacAdminService {
         subject: String,
         role_id: RoleId,
     ) -> Result<(), RbacAdminError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         // 1. 角色存在校验（跨租 find→None ⇒ 同 RoleNotFound，不区分以免存在性泄露）。
         if self
             .roles
-            .find(tenant, role_id.clone())
+            .find(tenant_scope, role_id.clone())
             .await
             .map_err(RbacAdminError::RoleLookup)?
             .is_none()
@@ -139,7 +142,7 @@ impl RbacAdminService {
         // 3. L2 co-tx（binding 行 + outbox 行同一事务原子写入）。
         let binding = RoleBinding::new(subject, role_id, tenant);
         self.bindings
-            .assign_and_emit(binding, entry, envelope)
+            .assign_and_emit(tenant_scope, binding, entry, envelope)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }
@@ -166,6 +169,7 @@ impl RbacAdminService {
         role_id: RoleId,
         subject: String,
     ) -> Result<bool, RbacAdminError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let now = self.clock.now();
         let payload = IdentityRoleRevokedPayload {
             role_id: role_id.as_str().to_string(),
@@ -190,7 +194,7 @@ impl RbacAdminService {
         let envelope = OutboxEnvelopeParts::new(ROLE_REVOKED_CONTRACT, tenant, subject_id, actor);
 
         self.bindings
-            .revoke_and_emit(tenant, role_id, subject, entry, envelope)
+            .revoke_and_emit(tenant_scope, role_id, subject, entry, envelope)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }

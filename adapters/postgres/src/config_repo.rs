@@ -31,6 +31,7 @@ use diport::{
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
     ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey, TenantId,
+    TenantRepoScope,
 };
 use sqlx::{Executor, Postgres, Row};
 
@@ -637,13 +638,14 @@ async fn hydrate_active(
 
 async fn latest_deleted(
     pool: &PgTenantPool,
-    tenant: TenantId,
+    scope: TenantRepoScope,
     key: &SettingKey,
 ) -> Result<bool, ConfigRepoError> {
+    let tenant = scope.tenant();
     let tenant_uuid = tenant_param(tenant);
     let key_str = key.as_str().to_owned();
     let deleted = pool
-        .read(tenant, move |conn| {
+        .read(scope, move |conn| {
             Box::pin(async move {
                 sqlx::query_scalar(
                     r#"
@@ -1118,9 +1120,10 @@ enum RewrapDisposition {
 impl ConfigRepo for PgConfigRepo {
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 活跃值 = 最高版本行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned，不借连接）；hydrate_active 在 tx 外执行。
@@ -1130,7 +1133,7 @@ impl ConfigRepo for PgConfigRepo {
 
         let row = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query(
                         r#"
@@ -1154,10 +1157,11 @@ impl ConfigRepo for PgConfigRepo {
 
     async fn find_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
         version: u64,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned）；hydrate_active 在 tx 外执行。
         let tenant_uuid = tenant_param(tenant);
@@ -1167,7 +1171,7 @@ impl ConfigRepo for PgConfigRepo {
 
         let row = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query(
                         r#"
@@ -1190,9 +1194,10 @@ impl ConfigRepo for PgConfigRepo {
 
     async fn latest_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<u64>, ConfigRepoError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
         // rss_app 角色下 RLS 过滤后 max() 仅对当前 tenant 行计算（否则无 SET LOCAL 时 rss_app 下所有行不可见
@@ -1203,7 +1208,7 @@ impl ConfigRepo for PgConfigRepo {
 
         let (mv,): (Option<i64>,) = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
                         "SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
@@ -1219,7 +1224,15 @@ impl ConfigRepo for PgConfigRepo {
         Ok(mv.and_then(|v| u64::try_from(v).ok()))
     }
 
-    async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError> {
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        entry: ConfigEntry,
+    ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
+        if entry.tenant() != tenant {
+            return Err(tenant_mismatch_storage_error("config save"));
+        }
         // F3：plain CAS 写经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致。
         let encoded = self.encode_value(tenant, &entry).await?;
         run_pg_tx_retry(
@@ -1230,7 +1243,7 @@ impl ConfigRepo for PgConfigRepo {
                 async move {
                     self.pool
                         .retry_write(
-                            tenant,
+                            scope,
                             move |conn| {
                                 Box::pin(async move {
                                     cas_insert(conn.conn(), tenant, &entry, &encoded).await
@@ -1246,7 +1259,12 @@ impl ConfigRepo for PgConfigRepo {
         .await
     }
 
-    async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError> {
+    async fn delete(
+        &self,
+        scope: TenantRepoScope,
+        key: &SettingKey,
+    ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
         // F1 软删：仅当 latest 非 tombstone 时在 max+1 追加 tombstone（幂等；version 单调不重置，防 event_id
         // 复用）。F3：经 tenant-scoped 事务（SET LOCAL）。
         let tenant_uuid = tenant_param(tenant);
@@ -1255,7 +1273,7 @@ impl ConfigRepo for PgConfigRepo {
         let key_str_q = key_str.clone();
         let latest_deleted_before: Option<bool> = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query_scalar(
                         r#"
@@ -1288,7 +1306,7 @@ impl ConfigRepo for PgConfigRepo {
                 async move {
                     self.pool
                         .retry_write(
-                            tenant,
+                            scope,
                             move |conn| {
                                 Box::pin(async move {
                                     sqlx::query(
@@ -1328,9 +1346,7 @@ impl ConfigRepo for PgConfigRepo {
         .await;
         match result {
             Ok(()) => Ok(()),
-            Err(e)
-                if is_unique_violation(&e) && latest_deleted(&self.pool, tenant, key).await? =>
-            {
+            Err(e) if is_unique_violation(&e) && latest_deleted(&self.pool, scope, key).await? => {
                 Ok(())
             }
             Err(e) => Err(e),
@@ -1341,11 +1357,12 @@ impl ConfigRepo for PgConfigRepo {
 impl ConfigUnitOfWork for PgConfigRepo {
     async fn save_and_append_outbox(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         entry: ConfigEntry,
         outbox_entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgSessionLifecycle）。
         // `contract` 契约派生绑定（#1193），routing 列经 `domain()`/`contract_id()` 取。reserved key occurred_at
         // 由 `OutboxMetadata::new` **构造期必填**从注入 Clock 注入（#1129/#262 F1：settings 生产 outbox 路径补齐
@@ -1354,6 +1371,9 @@ impl ConfigUnitOfWork for PgConfigRepo {
             envelope.into_parts();
         if env_tenant != tenant {
             return Err(tenant_mismatch_storage_error("config co-tx"));
+        }
+        if entry.tenant() != tenant {
+            return Err(tenant_mismatch_storage_error("config co-tx entry"));
         }
         let encoded = self.encode_value(tenant, &entry).await?;
         let env = OutboxEnvelope::new(
@@ -1377,7 +1397,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
                 async move {
                     self.pool
                         .retry_co_tx_with_outbox(
-                            tenant,
+                            scope,
                             &outbox_entry,
                             &env,
                             move |conn| {

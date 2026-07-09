@@ -18,7 +18,7 @@ use eventexec::reconcile::{
 };
 
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability};
+use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 use crate::outbox::{
     OutboxAppendOutcome, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
 };
@@ -264,7 +264,7 @@ impl PgReconcileStore {
         let fields = TargetFields::from_key(tenant, key);
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         let (target_id,): (String,) = sqlx::query_as(
@@ -325,7 +325,7 @@ impl PgReconcileStore {
 
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     let tenant_id = tenant_id.clone();
                     let target_id = target_id.clone();
@@ -429,7 +429,7 @@ impl PgReconcileStore {
 
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         let held = lock_held_lease(tx, &tenant_id, &target_id, &lease_token, epoch)
@@ -486,7 +486,7 @@ impl PgReconcileStore {
 
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         let held = lock_held_lease(tx, &tenant_id, &target_id, &lease_token, epoch)
@@ -547,7 +547,7 @@ impl PgReconcileStore {
         let lease_token = request.lease_token.to_string();
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         let result = match request.operation {
@@ -653,7 +653,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let limit = i64::from(limit.max(1));
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         let rows: Vec<(String, String, i64, String, String, String, String)> =
@@ -835,7 +835,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let action_kind = action.as_label();
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         let held = lock_held_lease(tx, &tenant_id, &target_id, &lease_token, epoch)
@@ -1135,7 +1135,7 @@ async fn update_target_status(
     let tenant_id = tenant.to_string();
     let target_id = target_id.to_string();
     pool.write(
-        tenant,
+        infra_tenant_scope(tenant),
         move |tx| {
             Box::pin(async move {
                 sqlx::query(

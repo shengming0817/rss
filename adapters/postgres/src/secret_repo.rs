@@ -20,7 +20,9 @@
 //!
 //! ref: adapters/postgres/src/config_repo.rs（版本历史 + CAS + tombstone + tenant_scoped 范式）
 
-use settings::ports::{SecretEntry, SecretKey, SecretRepo, SecretRepoError, StoreId, TenantId};
+use settings::ports::{
+    SecretEntry, SecretKey, SecretRepo, SecretRepoError, StoreId, TenantId, TenantRepoScope,
+};
 use sqlx::{Executor, Postgres, Row};
 
 use crate::PgStore;
@@ -162,9 +164,10 @@ where
 impl SecretRepo for PgSecretRepo {
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<SecretEntry>, SecretRepoError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 活跃值 = 最高版本行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned，不借连接）；hydrate_active 在 tx 外执行。
@@ -174,7 +177,7 @@ impl SecretRepo for PgSecretRepo {
 
         let row = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query(
                         r#"
@@ -198,10 +201,11 @@ impl SecretRepo for PgSecretRepo {
 
     async fn find_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
         version: u64,
     ) -> Result<Option<SecretEntry>, SecretRepoError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 读闭包内仅 SQL fetch 返回 Option<PgRow>（owned）；hydrate_active 在 tx 外执行。
         let tenant_uuid = tenant_param(tenant);
@@ -211,7 +215,7 @@ impl SecretRepo for PgSecretRepo {
 
         let row = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query(
                         r#"
@@ -234,9 +238,10 @@ impl SecretRepo for PgSecretRepo {
 
     async fn latest_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
         // rss_app 角色下 RLS 过滤后 max() 仅对当前 tenant 行计算（否则无 SET LOCAL 时 rss_app 下所有行不可见
@@ -247,7 +252,7 @@ impl SecretRepo for PgSecretRepo {
 
         let (mv,): (Option<i64>,) = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
                         "SELECT max(version) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
@@ -263,23 +268,34 @@ impl SecretRepo for PgSecretRepo {
         Ok(mv.and_then(|v| u64::try_from(v).ok()))
     }
 
-    async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError> {
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        entry: SecretEntry,
+    ) -> Result<(), SecretRepoError> {
+        let tenant = scope.tenant();
+        if entry.tenant() != tenant {
+            return Err(SecretRepoError::Storage(Box::new(std::io::Error::other(
+                "secret save tenant scope mismatch",
+            ))));
+        }
         // 写路径经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致（未来 RLS policy 锚点）。
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| Box::pin(async move { cas_insert(conn.conn(), tenant, &entry).await }),
                 storage,
             )
             .await
     }
 
-    async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError> {
+    async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError> {
+        let tenant = scope.tenant();
         // 软删：仅当 latest 非 tombstone 时在 max+1 追加 tombstone（幂等；version 单调不重置）。
         // 占位坐标列 store_id='', ref_key='', ref_version=NULL——不携带有效坐标。
         let tu = tenant_param(tenant);
         let key_str = key.as_str().to_string();
-        self.pool.write(tenant, move |conn| {
+        self.pool.write(scope, move |conn| {
             Box::pin(async move {
                 sqlx::query(
                     r#"

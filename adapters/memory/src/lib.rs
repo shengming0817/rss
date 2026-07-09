@@ -39,7 +39,7 @@ use diport::{
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
-use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantId};
+use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantRepoScope};
 use tokio_util::sync::CancellationToken;
 
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
@@ -359,10 +359,21 @@ impl MemSessionLifecycle {
 impl SessionLifecycle for MemSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        scope: TenantRepoScope,
         session: Session,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
+        if session.tenant() != scope.tenant() {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "session persist tenant scope mismatch",
+            )));
+        }
+        if envelope.tenant() != scope.tenant() {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "session persist envelope tenant scope mismatch",
+            )));
+        }
         // demo：把 session 存入进程内 store（demo logout/查询可见），再复用 MemPublisher 把 entry fan 到总线
         // （`Message.id = entry.idem_key()` = EventId，闭合 demo 侧幂等传播）。
         // reason: 真实 co-tx both-or-neither + durable 持久化由 PgSessionLifecycle 的 OUTBOX-COTX-SESSION-01
@@ -391,9 +402,10 @@ impl SessionLifecycle for MemSessionLifecycle {
 
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         session_id: SessionId,
     ) -> Result<Option<Session>, IdentityError> {
+        let tenant = scope.tenant();
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         Ok(guard
             .get(&session_id)
@@ -401,7 +413,12 @@ impl SessionLifecycle for MemSessionLifecycle {
             .map(|(s, _)| s.clone()))
     }
 
-    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError> {
+    async fn revoke(
+        &self,
+        scope: TenantRepoScope,
+        session_id: SessionId,
+    ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
         let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = guard.get_mut(&session_id)
             && entry.0.tenant() == tenant
@@ -1440,6 +1457,7 @@ mod tests {
     use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000abc";
     const TOPIC: &str = "identity.session-created";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -1714,7 +1732,12 @@ mod tests {
 
         let signer = Arc::new(RecordingTenantSigner::default());
         MemSessionLifecycle::with_tenant_metadata_signer(bus.clone(), signer)
-            .persist_session_and_emit(session, entry, envelope)
+            .persist_session_and_emit(
+                identity::ports::TenantRepoScope::for_test(tenant),
+                session,
+                entry,
+                envelope,
+            )
             .await
             .expect("persist session and emit");
 
@@ -1738,6 +1761,118 @@ mod tests {
             msg.metadata.get(diport::KEY_ACTOR),
             None,
             "MemSessionLifecycle co-tx path must not expose persisted-only actor"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_session_lifecycle_rejects_session_tenant_mismatch_without_write_or_emit() {
+        let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
+        let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
+        let session = Session::hydrate(
+            "sess-mem-mismatch",
+            "subj-opaque-session",
+            tenant_b,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
+            SystemTime::UNIX_EPOCH,
+        );
+        let session_id = session.id().clone();
+        let entry = Entry::new(
+            consistency::Topic::parse(TOPIC).expect("topic"),
+            IdemKey::parse("evt-session-mem-mismatch").expect("idem"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
+        );
+        let envelope = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
+            tenant_b,
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
+                tenant_b,
+                vocab::ScopedTenant::SelfOnly,
+            ),
+        );
+
+        let signer = Arc::new(RecordingTenantSigner::default());
+        let lifecycle =
+            MemSessionLifecycle::with_tenant_metadata_signer(MemBus::new(), signer.clone());
+        let result = lifecycle
+            .persist_session_and_emit(
+                identity::ports::TenantRepoScope::for_test(tenant_a),
+                session,
+                entry,
+                envelope,
+            )
+            .await;
+
+        assert!(result.is_err(), "tenant mismatch must fail closed");
+        assert_eq!(signer.calls(), Vec::<String>::new());
+        assert!(
+            lifecycle
+                .find(
+                    identity::ports::TenantRepoScope::for_test(tenant_b),
+                    session_id
+                )
+                .await
+                .expect("find")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn mem_session_lifecycle_rejects_envelope_tenant_mismatch_without_write_or_emit() {
+        let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
+        let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
+        let session = Session::hydrate(
+            "sess-mem-envelope-mismatch",
+            "subj-opaque-session",
+            tenant_a,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
+            SystemTime::UNIX_EPOCH,
+        );
+        let session_id = session.id().clone();
+        let entry = Entry::new(
+            consistency::Topic::parse(TOPIC).expect("topic"),
+            IdemKey::parse("evt-session-mem-envelope-mismatch").expect("idem"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
+        );
+        let envelope = OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
+            tenant_b,
+            diport::EnvelopeSubjectId::from_opaque("subj-opaque-session").expect("subject"),
+            diport::OutboxActor::scoped(
+                vocab::PrincipalKind::User,
+                diport::OpaqueActorId::from_opaque("actor-opaque-session").expect("actor"),
+                tenant_b,
+                vocab::ScopedTenant::SelfOnly,
+            ),
+        );
+
+        let signer = Arc::new(RecordingTenantSigner::default());
+        let lifecycle =
+            MemSessionLifecycle::with_tenant_metadata_signer(MemBus::new(), signer.clone());
+        let result = lifecycle
+            .persist_session_and_emit(
+                identity::ports::TenantRepoScope::for_test(tenant_a),
+                session,
+                entry,
+                envelope,
+            )
+            .await;
+
+        assert!(result.is_err(), "envelope tenant mismatch must fail closed");
+        assert_eq!(signer.calls(), Vec::<String>::new());
+        assert!(
+            lifecycle
+                .find(
+                    identity::ports::TenantRepoScope::for_test(tenant_a),
+                    session_id
+                )
+                .await
+                .expect("find")
+                .is_none()
         );
     }
 

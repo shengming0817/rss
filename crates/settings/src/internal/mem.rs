@@ -23,7 +23,7 @@ use crate::domain::{ConfigEntry, ConfigRepoError, FlagKey, FlagState, SettingKey
 use crate::domain::{SecretEntry, SecretKey, SecretRepoError};
 #[cfg(any(test, feature = "seed-data"))]
 use crate::ports::SecretRepo;
-use crate::ports::{ConfigRepo, ConfigUnitOfWork};
+use crate::ports::{ConfigRepo, ConfigUnitOfWork, TenantRepoScope};
 
 /// 复合存储键（租户隔离）：(tenant, key 字符串)。
 type StoreKey = (TenantId, String);
@@ -86,9 +86,10 @@ impl InMemConfigRepo {
 impl ConfigRepo for InMemConfigRepo {
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+        let tenant = scope.tenant();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // 活跃值 = latest 行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
         Ok(entries
@@ -100,10 +101,11 @@ impl ConfigRepo for InMemConfigRepo {
 
     async fn find_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
         version: u64,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+        let tenant = scope.tenant();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
@@ -114,9 +116,10 @@ impl ConfigRepo for InMemConfigRepo {
 
     async fn latest_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<u64>, ConfigRepoError> {
+        let tenant = scope.tenant();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // 真实最高版本（含 tombstone）——业务层算下一版本用，delete 后不重置。
         Ok(entries
@@ -125,11 +128,26 @@ impl ConfigRepo for InMemConfigRepo {
             .map(|row| row.entry.version()))
     }
 
-    async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError> {
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        entry: ConfigEntry,
+    ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
+        if entry.tenant() != tenant {
+            return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                "config tenant mismatch",
+            ))));
+        }
         cas_insert(&self.entries, tenant, entry)
     }
 
-    async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError> {
+    async fn delete(
+        &self,
+        scope: TenantRepoScope,
+        key: &SettingKey,
+    ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // 软删：仅当 key 存在且 latest 非 tombstone 时追加 tombstone（幂等；version 单调不重置，F1）。
         if let Some(history) = entries.get_mut(&(tenant, key.as_str().to_string()))
@@ -172,11 +190,17 @@ impl<E> InMemConfigUnitOfWork<E> {
 impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigUnitOfWork<E> {
     async fn save_and_append_outbox(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         entry: ConfigEntry,
         outbox_entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
+        if entry.tenant() != tenant || envelope.tenant() != tenant {
+            return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                "config tenant mismatch",
+            ))));
+        }
         cas_insert(&self.entries, tenant, entry)?;
         self.emitter
             .emit(outbox_entry, envelope)
@@ -262,9 +286,10 @@ impl InMemSecretRepo {
 impl SecretRepo for InMemSecretRepo {
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<SecretEntry>, SecretRepoError> {
+        let tenant = scope.tenant();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
@@ -275,10 +300,11 @@ impl SecretRepo for InMemSecretRepo {
 
     async fn find_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
         version: u64,
     ) -> Result<Option<SecretEntry>, SecretRepoError> {
+        let tenant = scope.tenant();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
@@ -289,9 +315,10 @@ impl SecretRepo for InMemSecretRepo {
 
     async fn latest_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError> {
+        let tenant = scope.tenant();
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
@@ -299,11 +326,22 @@ impl SecretRepo for InMemSecretRepo {
             .map(|row| row.entry.version()))
     }
 
-    async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError> {
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        entry: SecretEntry,
+    ) -> Result<(), SecretRepoError> {
+        let tenant = scope.tenant();
+        if entry.tenant() != tenant {
+            return Err(SecretRepoError::Storage(Box::new(std::io::Error::other(
+                "secret tenant mismatch",
+            ))));
+        }
         secret_cas_insert(&self.entries, tenant, entry)
     }
 
-    async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError> {
+    async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError> {
+        let tenant = scope.tenant();
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // 软删（tombstone）：仅当 latest 非 tombstone 时追加（幂等；version 单调不重置）。
         if let Some(history) = entries.get_mut(&(tenant, key.as_str().to_string()))
@@ -357,5 +395,185 @@ impl FlagStore for InMemFlagStore {
     fn find(&self, tenant: TenantId, key: &FlagKey) -> Option<FlagState> {
         let flags = self.flags.lock().unwrap_or_else(|e| e.into_inner());
         flags.get(&(tenant, key.as_str().to_string())).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{ConfigValue, ConfigVersion, SecretKey, StoreId};
+    use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
+
+    const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
+    const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[derive(Clone, Default)]
+    struct CountingEmitter {
+        emits: Arc<Mutex<usize>>,
+    }
+
+    impl CountingEmitter {
+        fn emitted(&self) -> usize {
+            *self.emits.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    }
+
+    impl OutboxEmitter for CountingEmitter {
+        async fn emit(
+            &self,
+            _entry: Entry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<(), diport::OutboxEmitError> {
+            *self.emits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn tenant(raw: &str) -> TenantId {
+        TenantId::parse(raw).expect("canonical tenant")
+    }
+
+    fn scope(raw: &str) -> TenantRepoScope {
+        TenantRepoScope::for_test(tenant(raw))
+    }
+
+    #[allow(clippy::expect_used)]
+    fn setting_key(raw: &str) -> SettingKey {
+        SettingKey::parse(raw).expect("valid setting key")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn secret_key(raw: &str) -> SecretKey {
+        SecretKey::parse(raw).expect("valid secret key")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn config_entry(raw_key: &str, tenant_raw: &str) -> ConfigEntry {
+        ConfigEntry::new(
+            setting_key(raw_key),
+            ConfigValue::new("v1"),
+            tenant(tenant_raw),
+            ConfigVersion::new(1),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn secret_entry(raw_key: &str, tenant_raw: &str) -> SecretEntry {
+        SecretEntry::hydrate(
+            secret_key(raw_key),
+            StoreId::parse("vault").expect("valid store"),
+            "secret/path",
+            None,
+            tenant(tenant_raw),
+            1,
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn entry(event_id: &str) -> Entry {
+        Entry::new(
+            consistency::Topic::parse("settings.config-version-changed").expect("topic"),
+            consistency::IdemKey::parse(event_id).expect("event id"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn envelope(tenant_raw: &str) -> OutboxEnvelopeParts {
+        let tenant = tenant(tenant_raw);
+        OutboxEnvelopeParts::new(
+            vocab::ContractBinding::from_static(
+                "settings",
+                "settings.config-version-changed",
+                "v1",
+                HASH,
+            ),
+            tenant,
+            EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
+            OutboxActor::scoped(
+                vocab::PrincipalKind::Admin,
+                OpaqueActorId::from_opaque("actor").expect("actor"),
+                tenant,
+                vocab::ScopedTenant::Tenant,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_uow_rejects_entry_tenant_mismatch_without_write_or_emit() {
+        let store = new_config_store();
+        let emitter = CountingEmitter::default();
+        let uow = InMemConfigUnitOfWork::new(store.clone(), emitter.clone());
+        let repo = InMemConfigRepo::from_shared(store);
+        let key = setting_key("app.scope");
+
+        let result = uow
+            .save_and_append_outbox(
+                scope(TENANT_A),
+                config_entry("app.scope", TENANT_B),
+                entry("evt-config-entry-mismatch"),
+                envelope(TENANT_A),
+            )
+            .await;
+
+        assert!(matches!(result, Err(ConfigRepoError::Storage(_))));
+        assert!(
+            repo.find(scope(TENANT_B), &key)
+                .await
+                .expect("find")
+                .is_none()
+        );
+        assert_eq!(emitter.emitted(), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_uow_rejects_envelope_tenant_mismatch_without_write_or_emit() {
+        let store = new_config_store();
+        let emitter = CountingEmitter::default();
+        let uow = InMemConfigUnitOfWork::new(store.clone(), emitter.clone());
+        let repo = InMemConfigRepo::from_shared(store);
+        let key = setting_key("app.envelope");
+
+        let result = uow
+            .save_and_append_outbox(
+                scope(TENANT_A),
+                config_entry("app.envelope", TENANT_A),
+                entry("evt-config-envelope-mismatch"),
+                envelope(TENANT_B),
+            )
+            .await;
+
+        assert!(matches!(result, Err(ConfigRepoError::Storage(_))));
+        assert!(
+            repo.find(scope(TENANT_A), &key)
+                .await
+                .expect("find")
+                .is_none()
+        );
+        assert_eq!(emitter.emitted(), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_save_rejects_entry_tenant_mismatch_without_write() {
+        let store = new_secret_store();
+        let repo = InMemSecretRepo::from_shared(store);
+        let key = secret_key("app.secret");
+
+        let result = repo
+            .save(scope(TENANT_A), secret_entry("app.secret", TENANT_B))
+            .await;
+
+        assert!(matches!(result, Err(SecretRepoError::Storage(_))));
+        assert!(
+            repo.find(scope(TENANT_B), &key)
+                .await
+                .expect("find")
+                .is_none()
+        );
     }
 }

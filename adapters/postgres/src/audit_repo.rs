@@ -27,14 +27,14 @@ use std::time::{Duration, UNIX_EPOCH};
 use audit::ports::{
     AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditLedgerVerifyReport,
     AuditListResult, AuditOutcome, AuditPage, AuditRecord, AuditRepo, EntryHash, ResourceRef,
-    TenantId, actor_kind_from_db, actor_kind_to_db,
+    TenantId, TenantRepoScope, actor_kind_from_db, actor_kind_to_db,
 };
 use base64::Engine as _;
 use primitives::MacVerifier;
 use sqlx::{PgConnection, Row};
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, infra_tenant_scope};
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -514,13 +514,19 @@ async fn verify_full_in_tx<M: MacVerifier>(
 
 impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
     /// **原子封链 append**：advisory-lock 串行化 → 读 tail → 链接 → INSERT（单事务原子）。
-    async fn append(&self, record: AuditRecord) -> Result<(), AuditError> {
+    async fn append(&self, scope: TenantRepoScope, record: AuditRecord) -> Result<(), AuditError> {
+        let tenant = scope.tenant();
+        if record.tenant != tenant {
+            return Err(AuditError::storage(std::io::Error::other(
+                "audit append tenant scope mismatch",
+            )));
+        }
         let tenant_uuid = tenant_str(record.tenant);
         let lock_key = advisory_lock_key(record.tenant);
         let hasher = Arc::clone(&self.hasher);
         self.pool
             .write(
-                record.tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         append_in_tx(conn.conn(), &tenant_uuid, lock_key, &record, &hasher).await
@@ -532,7 +538,12 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
     }
 
     /// 按租户分页列出审计条目（读路径**增量验证**窗口+1前驱，篡改 fail-closed → `Err`）。
-    async fn list(&self, tenant: TenantId, page: AuditPage) -> Result<AuditListResult, AuditError> {
+    async fn list(
+        &self,
+        scope: TenantRepoScope,
+        page: AuditPage,
+    ) -> Result<AuditListResult, AuditError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_str(tenant);
         let start_seq = match page.cursor.as_ref() {
             Some(c) => decode_cursor(c)?,
@@ -542,7 +553,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
         let hasher = Arc::clone(&self.hasher);
         self.pool
             .read_map(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         list_in_tx(conn, &tenant_uuid, tenant, start_seq, limit, &hasher).await
@@ -554,12 +565,13 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
     }
 
     /// **尾部增量验证**（末 `limit` 条 + 前驱，非全扫整链；bootstrap 启动自检用）。
-    async fn verify_tail(&self, tenant: TenantId, limit: u32) -> Result<(), AuditError> {
+    async fn verify_tail(&self, scope: TenantRepoScope, limit: u32) -> Result<(), AuditError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_str(tenant);
         let hasher = Arc::clone(&self.hasher);
         self.pool
             .read_map(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         verify_tail_in_tx(conn, &tenant_uuid, tenant, limit, &hasher).await
@@ -587,7 +599,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
         let hasher = Arc::clone(&self.hasher);
         self.pool
             .read_map(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |conn| {
                     Box::pin(async move {
                         list_in_tx(conn, &tenant_uuid, tenant, start_seq, limit, &hasher).await
@@ -609,7 +621,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
         let hasher = Arc::clone(&self.hasher);
         self.pool
             .read_map(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |conn| {
                     Box::pin(async move {
                         verify_full_in_tx(conn, &tenant_uuid, tenant, batch, &hasher).await

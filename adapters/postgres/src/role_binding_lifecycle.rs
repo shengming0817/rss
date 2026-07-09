@@ -5,7 +5,7 @@
 
 use consistency::Entry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId};
+use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId, TenantRepoScope};
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
@@ -57,11 +57,17 @@ impl PgRoleBindingLifecycle {
 impl RoleBindingLifecycle for PgRoleBindingLifecycle {
     async fn assign_and_emit(
         &self,
+        scope: TenantRepoScope,
         binding: RoleBinding,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         let tenant = binding.tenant();
+        if scope.tenant() != tenant {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "role binding assign co-tx: scope tenant does not match binding tenant",
+            )));
+        }
         let (env_tenant, env) = self.envelope(envelope);
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
@@ -70,7 +76,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
         }
         self.pool
             .co_tx_with_outbox(
-                tenant,
+                scope,
                 &entry,
                 &env,
                 move |conn| {
@@ -99,12 +105,13 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
 
     async fn revoke_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError> {
+        let tenant = scope.tenant();
         let (env_tenant, env) = self.envelope(envelope);
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
@@ -115,7 +122,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
         let projection_registry = self.pool.projection_registry();
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         let deleted = sqlx::query(
@@ -147,12 +154,13 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
 
     async fn list_for_subject(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         subject: String,
     ) -> Result<Vec<RoleBinding>, identity::ports::IdentityError> {
+        let tenant = scope.tenant();
         let rows: Vec<(String, String)> = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
                         "SELECT role_id, subject FROM role_bindings \

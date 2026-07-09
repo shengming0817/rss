@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime};
 
 use identity::ports::{
     IdentityError, RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-    RefreshTokenRecord, RefreshTokenStore, TenantId, kind_from_db, kind_to_db,
+    RefreshTokenRecord, RefreshTokenStore, TenantRepoScope, kind_from_db, kind_to_db,
 };
 use sqlx::Row;
 
@@ -123,11 +123,20 @@ async fn do_rotate_tx(
 
 impl RefreshTokenStore for PgRefreshTokenStore {
     /// 持久化新签发记录（tenant-scoped 事务，SET LOCAL 锚点，`do_insert` 写体）。
-    async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError> {
-        let tenant = record.tenant();
+    async fn insert(
+        &self,
+        scope: TenantRepoScope,
+        record: RefreshTokenRecord,
+    ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
+        if record.tenant() != tenant {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "refresh insert tenant scope mismatch",
+            ))));
+        }
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move { do_insert(conn.conn(), &record).await.map_err(storage) })
                 },
@@ -141,16 +150,17 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     /// 与 `PgRoleRepo::find` 模式一致；hydrate 在事务外进行，不持有 conn）。
     async fn find_by_hash(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         hash: RefreshTokenHash,
     ) -> Result<Option<RefreshTokenRecord>, IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant.as_uuid().to_string();
         let tenant_uuid_q = tenant_uuid.clone();
         let hash_bytes = *hash.as_bytes();
 
         let raw = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
@@ -236,14 +246,23 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     ///
     /// 入参 [`RefreshRotation`] 是 sealed command（`begin_rotation` 从源 record 派生）——tenant 从
     /// `rotation.new_record().tenant()` 取，无独立 `tenant` 入参错位风险（REFRESH-ROTATE-LINEAGE-01）。
-    async fn rotate(&self, rotation: RefreshRotation) -> Result<bool, IdentityError> {
+    async fn rotate(
+        &self,
+        scope: TenantRepoScope,
+        rotation: RefreshRotation,
+    ) -> Result<bool, IdentityError> {
         let old_id = rotation.old_id().clone();
         let new = rotation.new_record().clone();
-        let tenant = new.tenant();
+        let tenant = scope.tenant();
+        if new.tenant() != tenant {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "refresh rotate tenant scope mismatch",
+            ))));
+        }
         let tenant_uuid = tenant.as_uuid().to_string();
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         do_rotate_tx(&tenant_uuid, conn.conn(), &old_id, &new)
@@ -260,13 +279,14 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     /// WHERE lineage_id=$2`（logout / reuse-detection 共用）。
     async fn revoke_lineage(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         lineage_id: RefreshTokenId,
     ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant.as_uuid().to_string();
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query(

@@ -100,6 +100,9 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
+# runtime 单元/e2e 测试需要显式构造 domain-local TenantRepoScope；生产依赖不启用 test-support。
+audit = { path = "../../crates/audit", features = ["test-support"] }
+identity = { path = "../../crates/identity", features = ["test-support"] }
 # dev-only 虚拟时间（JWKS poll 测试）；生产 tokio feature set 不引 `test-util`。
 tokio = { workspace = true, features = ["test-util"] }
 # oneshot 驱动已组装 router（health/auth e2e 单元级断言；真实 socket serve 由 httpd + 冒烟 e2e 覆盖）。

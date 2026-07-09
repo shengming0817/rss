@@ -8,6 +8,9 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
@@ -51,3 +54,4 @@ runctx = { path = "../runctx", features = ["test-support"] }
 # 生产构建无此 feature ⇒ 该入口编译期不存在（ADR-009 §6 Soft→Medium）。
 httpserve = { path = "../httpserve", features = ["test-util"] }
 authn = { path = "../authn", features = ["test-support"] }
+trybuild = { workspace = true }

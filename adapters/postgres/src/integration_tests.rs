@@ -83,6 +83,18 @@ fn actor_for(tenant: vocab::TenantId) -> diport::OutboxActor {
     )
 }
 
+fn identity_scope(tenant: vocab::TenantId) -> identity::ports::TenantRepoScope {
+    identity::ports::TenantRepoScope::for_test(tenant)
+}
+
+fn settings_scope(tenant: vocab::TenantId) -> settings::ports::TenantRepoScope {
+    settings::ports::TenantRepoScope::for_test(tenant)
+}
+
+fn audit_scope(tenant: vocab::TenantId) -> audit::ports::TenantRepoScope {
+    audit::ports::TenantRepoScope::for_test(tenant)
+}
+
 /// 测试用固定事件发生时刻（unix 秒）——t10/t11 断言 envelope `occurred_at`（#1129）。
 const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
 const TEST_SCHEMA_HASH: &str =
@@ -6918,6 +6930,7 @@ async fn t11_cotx_commits_session_and_outbox() -> TestResult {
 
     crate::PgSessionLifecycle::new(&store, fixed_clock())
         .persist_session_and_emit(
+            identity_scope(tenant),
             session,
             session_entry(&event_id),
             session_envelope().with_causation_id(
@@ -7002,7 +7015,12 @@ async fn t11b_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     );
 
     let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
-        .persist_session_and_emit(session, session_entry(&event_id), envelope)
+        .persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            envelope,
+        )
         .await;
     assert!(
         result.is_err(),
@@ -7019,6 +7037,61 @@ async fn t11b_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 0, "mismatch 不得写 outbox 行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// t11c：session tenant 与 repo scope tenant 不一致 → fail-closed，session / outbox 均不落库。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn t11c_cotx_rejects_scope_session_tenant_mismatch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = unique_event_id("t11c-sess");
+    let event_id = unique_event_id("t11c-evt");
+    let scope_tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let session_tenant = TenantId::parse(COTX_TENANT_B).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session = identity::test_support::session(
+        &session_id,
+        "subj-opaque-cotx",
+        session_tenant,
+        expires,
+        created,
+    );
+    let envelope = OutboxEnvelopeParts::new(
+        session_contract(),
+        session_tenant,
+        subject_id("subj-opaque-cotx"),
+        actor_for(session_tenant),
+    );
+
+    let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
+        .persist_session_and_emit(
+            identity_scope(scope_tenant),
+            session,
+            session_entry(&event_id),
+            envelope,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "session/scope tenant mismatch must fail closed"
+    );
+
+    let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(sess_cnt.0, 0, "scope mismatch 不得写 session 行");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 0, "scope mismatch 不得写 outbox 行");
 
     store.shutdown().await?;
     Ok(())
@@ -7117,8 +7190,13 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
             expires,
             created,
         );
-        uow.persist_session_and_emit(session, session_entry(&event_id), session_envelope())
-            .await?;
+        uow.persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
+        .await?;
     }
 
     let sess_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
@@ -8795,7 +8873,12 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
         identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
 
     let result = crate::PgSessionLifecycle::new(&store, fixed_clock())
-        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
         .await;
     assert!(
         result.is_err(),
@@ -8851,6 +8934,7 @@ async fn t14b_session_lifecycle_cotx_conformance() -> TestResult {
                 );
                 lifecycle
                     .persist_session_and_emit(
+                        identity_scope(tenant),
                         session,
                         session_entry(&ok_event_id),
                         session_envelope(),
@@ -8879,6 +8963,7 @@ async fn t14b_session_lifecycle_cotx_conformance() -> TestResult {
                 );
                 lifecycle
                     .persist_session_and_emit(
+                        identity_scope(tenant),
                         session,
                         session_entry(&fail_event_id),
                         session_envelope(),
@@ -8943,12 +9028,17 @@ async fn t20_find_returns_persisted_session() -> TestResult {
 
     let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
     lifecycle
-        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
         .await?;
 
     // find 命中：经 Session::hydrate 重建，字段（含 epoch 时刻 roundtrip）与持久化一致。
     let s = lifecycle
-        .find(tenant, sid)
+        .find(identity_scope(tenant), sid)
         .await?
         .expect("persisted session should be found");
     assert_eq!(s.id().as_str(), session_id, "session_id roundtrip");
@@ -8980,17 +9070,30 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
 
     let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
     lifecycle
-        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
         .await?;
     assert!(
-        lifecycle.find(tenant, sid.clone()).await?.is_some(),
+        lifecycle
+            .find(identity_scope(tenant), sid.clone())
+            .await?
+            .is_some(),
         "revoke 前应能 find 到"
     );
 
     // 软撤销 → find None（行仍在、revoked=true）。
-    lifecycle.revoke(tenant, sid.clone()).await?;
+    lifecycle
+        .revoke(identity_scope(tenant), sid.clone())
+        .await?;
     assert!(
-        lifecycle.find(tenant, sid.clone()).await?.is_none(),
+        lifecycle
+            .find(identity_scope(tenant), sid.clone())
+            .await?
+            .is_none(),
         "revoke 后 find 应 None"
     );
     let row_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM sessions WHERE session_id = $1")
@@ -9000,7 +9103,7 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
     assert_eq!(row_cnt.0, 1, "软撤销不删行（行仍在、revoked=true）");
 
     // 幂等：重复 revoke + 未知 sid revoke 均 Ok。
-    lifecycle.revoke(tenant, sid).await?;
+    lifecycle.revoke(identity_scope(tenant), sid).await?;
     let ghost = identity::test_support::session(
         &unique_event_id("t16-ghost"),
         "x",
@@ -9008,7 +9111,9 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
         expires,
         created,
     );
-    lifecycle.revoke(tenant, ghost.id().clone()).await?;
+    lifecycle
+        .revoke(identity_scope(tenant), ghost.id().clone())
+        .await?;
 
     store.shutdown().await?;
     Ok(())
@@ -9034,24 +9139,42 @@ async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
 
     let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock());
     lifecycle
-        .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+        .persist_session_and_emit(
+            identity_scope(tenant_a),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
         .await?;
 
     // 跨租 find（tenant B 查 tenant A sid）→ None（不泄露存在性）。
     assert!(
-        lifecycle.find(tenant_b, sid.clone()).await?.is_none(),
+        lifecycle
+            .find(identity_scope(tenant_b), sid.clone())
+            .await?
+            .is_none(),
         "跨租 find 应 None"
     );
     // 跨租 revoke（tenant B）→ no-op：tenant A 会话仍 find 到。
-    lifecycle.revoke(tenant_b, sid.clone()).await?;
+    lifecycle
+        .revoke(identity_scope(tenant_b), sid.clone())
+        .await?;
     assert!(
-        lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+        lifecycle
+            .find(identity_scope(tenant_a), sid.clone())
+            .await?
+            .is_some(),
         "跨租 revoke 不应撤销 tenant A 的会话"
     );
     // 同租 revoke → find None（隔离正确、撤销生效）。
-    lifecycle.revoke(tenant_a, sid.clone()).await?;
+    lifecycle
+        .revoke(identity_scope(tenant_a), sid.clone())
+        .await?;
     assert!(
-        lifecycle.find(tenant_a, sid).await?.is_none(),
+        lifecycle
+            .find(identity_scope(tenant_a), sid)
+            .await?
+            .is_none(),
         "同租 revoke 后 find 应 None"
     );
 
@@ -9080,27 +9203,43 @@ async fn t22b_session_lifecycle_tenant_noop_conformance() -> TestResult {
     testkit::repo_conformance::assert_cross_tenant_noop(
         || async {
             lifecycle
-                .persist_session_and_emit(session, session_entry(&event_id), session_envelope())
+                .persist_session_and_emit(
+                    identity_scope(tenant_a),
+                    session,
+                    session_entry(&event_id),
+                    session_envelope(),
+                )
                 .await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+                lifecycle
+                    .find(identity_scope(tenant_a), sid.clone())
+                    .await?
+                    .is_some(),
             )
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                lifecycle.find(tenant_b, sid.clone()).await?.is_some(),
+                lifecycle
+                    .find(identity_scope(tenant_b), sid.clone())
+                    .await?
+                    .is_some(),
             )
         },
         || async {
-            lifecycle.revoke(tenant_b, sid.clone()).await?;
+            lifecycle
+                .revoke(identity_scope(tenant_b), sid.clone())
+                .await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                lifecycle.find(tenant_a, sid.clone()).await?.is_some(),
+                lifecycle
+                    .find(identity_scope(tenant_a), sid.clone())
+                    .await?
+                    .is_some(),
             )
         },
     )
@@ -9131,7 +9270,12 @@ async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
 
     testkit::repo_conformance::assert_storage_error_mapping(
         || async { store.shutdown().await },
-        || async { lifecycle.find(tenant, sid).await.map(|_| ()) },
+        || async {
+            lifecycle
+                .find(identity_scope(tenant), sid)
+                .await
+                .map(|_| ())
+        },
         |e| matches!(e, identity::ports::IdentityError::Storage(_)),
     )
     .await?;
@@ -9177,12 +9321,12 @@ fn config_maintenance_capability() -> ConfigValueMaintenanceCapability {
 /// 构造 ConfigEntry（经 `ConfigEntry::hydrate` 跨 crate pub funnel）。
 #[allow(clippy::unwrap_used)]
 fn config_entry(key: &str, value: &str, version: u64) -> ConfigEntry {
-    ConfigEntry::hydrate(
-        SettingKey::parse(key).unwrap(),
-        value,
-        config_tenant(),
-        version,
-    )
+    config_entry_for(config_tenant(), key, value, version)
+}
+
+#[allow(clippy::unwrap_used)]
+fn config_entry_for(tenant: TenantId, key: &str, value: &str, version: u64) -> ConfigEntry {
+    ConfigEntry::hydrate(SettingKey::parse(key).unwrap(), value, tenant, version)
 }
 
 struct AadBoundKeyProvider;
@@ -9502,11 +9646,17 @@ async fn tc1_config_save_find_roundtrip() -> TestResult {
     let tenant = config_tenant();
     let key = SettingKey::parse("app.timeout").unwrap();
 
-    assert!(repo.find(tenant, &key).await?.is_none(), "未写入 → None");
+    assert!(
+        repo.find(settings_scope(tenant), &key).await?.is_none(),
+        "未写入 → None"
+    );
 
-    repo.save(tenant, config_entry("app.timeout", "30s", 1))
-        .await?;
-    let found = repo.find(tenant, &key).await?.unwrap();
+    repo.save(
+        settings_scope(tenant),
+        config_entry("app.timeout", "30s", 1),
+    )
+    .await?;
+    let found = repo.find(settings_scope(tenant), &key).await?.unwrap();
     assert_eq!(found.value(), "30s", "find 取回值");
     assert_eq!(found.version(), 1, "find 取回版本");
     assert_eq!(found.key().as_str(), "app.timeout", "find 取回 key");
@@ -9553,7 +9703,7 @@ async fn tc1a_config_legacy_plaintext_read_fails_closed() -> TestResult {
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), rejecting_config_protection());
     let tenant = config_tenant();
     let key = SettingKey::parse("legacy.value").unwrap();
-    let result = repo.find(tenant, &key).await;
+    let result = repo.find(settings_scope(tenant), &key).await;
     assert!(
         matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
         "serving read path must reject legacy plaintext rows"
@@ -9601,8 +9751,11 @@ async fn tc1d_config_encrypted_row_cross_tenant_copy_rejected() -> TestResult {
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.aad").unwrap();
 
-    repo.save(tenant_a, config_entry("app.aad", "tenant-a-value", 1))
-        .await?;
+    repo.save(
+        settings_scope(tenant_a),
+        config_entry("app.aad", "tenant-a-value", 1),
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO config_entries (
              tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
@@ -9617,7 +9770,7 @@ async fn tc1d_config_encrypted_row_cross_tenant_copy_rejected() -> TestResult {
     .execute(&store.pool)
     .await?;
 
-    let result = repo.find(tenant_b, &key).await;
+    let result = repo.find(settings_scope(tenant_b), &key).await;
     assert!(
         matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
         "copied ciphertext under another tenant must fail AAD authentication"
@@ -9639,9 +9792,12 @@ async fn tc1e_config_encrypted_read_provider_unavailable() -> TestResult {
     let key = SettingKey::parse("app.kms").unwrap();
 
     writer
-        .save(tenant, config_entry("app.kms", "encrypted-value", 1))
+        .save(
+            settings_scope(tenant),
+            config_entry("app.kms", "encrypted-value", 1),
+        )
         .await?;
-    let result = reader.find(tenant, &key).await;
+    let result = reader.find(settings_scope(tenant), &key).await;
     assert!(
         matches!(result, Err(ConfigRepoError::ProtectionUnavailable(_))),
         "provider unavailable on encrypted read must surface ProtectionUnavailable"
@@ -9673,7 +9829,10 @@ async fn tc1f_config_corrupt_encrypted_metadata_fails_closed() -> TestResult {
 
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let result = repo
-        .find(config_tenant(), &SettingKey::parse("app.corrupt").unwrap())
+        .find(
+            settings_scope(config_tenant()),
+            &SettingKey::parse("app.corrupt").unwrap(),
+        )
         .await;
     assert!(
         matches!(result, Err(ConfigRepoError::ProtectionAuthFailure(_))),
@@ -9786,7 +9945,7 @@ async fn tc1h_config_maintenance_backfills_legacy_plaintext() -> TestResult {
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let found = repo
         .find(
-            config_tenant(),
+            settings_scope(config_tenant()),
             &SettingKey::parse("legacy.backfill").unwrap(),
         )
         .await?
@@ -9807,7 +9966,10 @@ async fn tc1i_config_maintenance_rewrap_updates_key_ref() -> TestResult {
     setup_config(&store).await?;
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(config_tenant(), config_entry("encrypted.rewrap", "v1", 1))
+        .save(
+            settings_scope(config_tenant()),
+            config_entry("encrypted.rewrap", "v1", 1),
+        )
         .await?;
 
     let store = Arc::new(store);
@@ -9956,7 +10118,7 @@ async fn tc1m_config_maintenance_rewrap_failure_preserves_row() -> TestResult {
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
         .save(
-            config_tenant(),
+            settings_scope(config_tenant()),
             config_entry("encrypted.rewrap_failure", "v1", 1),
         )
         .await?;
@@ -10014,7 +10176,7 @@ async fn tc1o_config_maintenance_rewrap_invalid_key_ref_counts_as_failed_selecte
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
         .save(
-            config_tenant(),
+            settings_scope(config_tenant()),
             config_entry("encrypted.valid_after_invalid", "v1", 1),
         )
         .await?;
@@ -10128,7 +10290,7 @@ async fn tc1n_config_maintenance_both_max_rows_is_shared() -> TestResult {
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
         .save(
-            config_tenant(),
+            settings_scope(config_tenant()),
             config_entry("encrypted.both_budget", "v1", 1),
         )
         .await?;
@@ -10173,11 +10335,17 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     let tenant = config_tenant();
     let key = SettingKey::parse("bundle.timeout").unwrap();
 
-    assert!(configs.find(tenant, &key).await?.is_none(), "未写入 → None");
+    assert!(
+        configs.find(settings_scope(tenant), &key).await?.is_none(),
+        "未写入 → None"
+    );
     configs
-        .save(tenant, config_entry("bundle.timeout", "30s", 1))
+        .save(
+            settings_scope(tenant),
+            config_entry("bundle.timeout", "30s", 1),
+        )
         .await?;
-    let found = configs.find(tenant, &key).await?.unwrap();
+    let found = configs.find(settings_scope(tenant), &key).await?.unwrap();
     assert_eq!(found.value(), "30s", "bundle DynConfigRepo find 取回值");
     assert_eq!(found.version(), 1, "bundle DynConfigRepo find 取回版本");
     Ok(())
@@ -10203,7 +10371,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
 
     writer
         .save_and_append_outbox(
-            tenant,
+            settings_scope(tenant),
             config_entry("bundle.cotx", "v1", 1),
             config_outbox_entry(&event_id),
             config_envelope("bundle.cotx"),
@@ -10255,25 +10423,38 @@ async fn tc2_config_find_version_returns_history() -> TestResult {
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
-    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
-    repo.save(tenant, config_entry("app.k", "v2", 2)).await?;
+    repo.save(settings_scope(tenant), config_entry("app.k", "v1", 1))
+        .await?;
+    repo.save(settings_scope(tenant), config_entry("app.k", "v2", 2))
+        .await?;
 
     assert_eq!(
-        repo.find(tenant, &key).await?.unwrap().value(),
+        repo.find(settings_scope(tenant), &key)
+            .await?
+            .unwrap()
+            .value(),
         "v2",
         "find = 最高版本"
     );
     assert_eq!(
-        repo.find_version(tenant, &key, 1).await?.unwrap().value(),
+        repo.find_version(settings_scope(tenant), &key, 1)
+            .await?
+            .unwrap()
+            .value(),
         "v1",
         "find_version(1) = 历史 v1"
     );
     assert_eq!(
-        repo.find_version(tenant, &key, 2).await?.unwrap().value(),
+        repo.find_version(settings_scope(tenant), &key, 2)
+            .await?
+            .unwrap()
+            .value(),
         "v2"
     );
     assert!(
-        repo.find_version(tenant, &key, 9).await?.is_none(),
+        repo.find_version(settings_scope(tenant), &key, 9)
+            .await?
+            .is_none(),
         "缺失版本 → None"
     );
 
@@ -10299,15 +10480,18 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
         |version, marker| {
             let repo = &repo;
             async move {
-                repo.save(tenant, config_entry("app.k", &marker, version))
-                    .await
+                repo.save(
+                    settings_scope(tenant),
+                    config_entry("app.k", &marker, version),
+                )
+                .await
             }
         },
         || {
             let repo = &repo;
             let key = &key;
             async move {
-                repo.find(tenant, key)
+                repo.find(settings_scope(tenant), key)
                     .await
                     .map(|entry| entry.map(|entry| entry.value().to_string()))
             }
@@ -10330,7 +10514,10 @@ async fn tc3b_config_save_provider_unavailable_persists_nothing() -> TestResult 
     let tenant = config_tenant();
 
     let result = repo
-        .save(tenant, config_entry("app.kms-down", "no-write", 1))
+        .save(
+            settings_scope(tenant),
+            config_entry("app.kms-down", "no-write", 1),
+        )
         .await;
     assert!(
         matches!(result, Err(ConfigRepoError::ProtectionUnavailable(_))),
@@ -10363,20 +10550,23 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
         |version, marker| {
             let repo = &repo;
             async move {
-                repo.save(tenant, config_entry("app.k", &marker, version))
-                    .await
+                repo.save(
+                    settings_scope(tenant),
+                    config_entry("app.k", &marker, version),
+                )
+                .await
             }
         },
         || {
             let repo = &repo;
             let key = &key;
-            async move { repo.delete(tenant, key).await }
+            async move { repo.delete(settings_scope(tenant), key).await }
         },
         || {
             let repo = &repo;
             let key = &key;
             async move {
-                repo.find(tenant, key)
+                repo.find(settings_scope(tenant), key)
                     .await
                     .map(|entry| entry.map(|entry| entry.value().to_string()))
             }
@@ -10385,7 +10575,7 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
             let repo = &repo;
             let key = &key;
             async move {
-                repo.find_version(tenant, key, version)
+                repo.find_version(settings_scope(tenant), key, version)
                     .await
                     .map(|entry| entry.map(|entry| entry.value().to_string()))
             }
@@ -10393,7 +10583,7 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
         || {
             let repo = &repo;
             let key = &key;
-            async move { repo.latest_version(tenant, key).await }
+            async move { repo.latest_version(settings_scope(tenant), key).await }
         },
     )
     .await?;
@@ -10414,7 +10604,9 @@ async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestRes
 
     let unavailable_repo =
         PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
-    unavailable_repo.delete(tenant, &missing).await?;
+    unavailable_repo
+        .delete(settings_scope(tenant), &missing)
+        .await?;
     let missing_cnt: (i64,) =
         sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
             .bind("app.missing")
@@ -10424,10 +10616,12 @@ async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestRes
 
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(tenant, config_entry("app.deleted", "v1", 1))
+        .save(settings_scope(tenant), config_entry("app.deleted", "v1", 1))
         .await?;
-    writer.delete(tenant, &key).await?;
-    unavailable_repo.delete(tenant, &key).await?;
+    writer.delete(settings_scope(tenant), &key).await?;
+    unavailable_repo
+        .delete(settings_scope(tenant), &key)
+        .await?;
 
     let latest: (Option<i64>,) =
         sqlx::query_as("SELECT max(version) FROM config_entries WHERE config_key = $1")
@@ -10459,8 +10653,11 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
     let tenant = config_tenant();
     let key = Arc::new(SettingKey::parse("app.concurrent-delete")?);
 
-    repo.save(tenant, config_entry("app.concurrent-delete", "v1", 1))
-        .await?;
+    repo.save(
+        settings_scope(tenant),
+        config_entry("app.concurrent-delete", "v1", 1),
+    )
+    .await?;
 
     let workers = 12;
     let barrier = Arc::new(tokio::sync::Barrier::new(workers));
@@ -10471,7 +10668,7 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            repo.delete(tenant, &key).await
+            repo.delete(settings_scope(tenant), &key).await
         }));
     }
     for handle in handles {
@@ -10479,11 +10676,11 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
     }
 
     assert!(
-        repo.find(tenant, &key).await?.is_none(),
+        repo.find(settings_scope(tenant), &key).await?.is_none(),
         "concurrent delete leaves key deleted"
     );
     assert_eq!(
-        repo.latest_version(tenant, &key).await?,
+        repo.latest_version(settings_scope(tenant), &key).await?,
         Some(2),
         "only one tombstone version is appended"
     );
@@ -10512,7 +10709,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let plain_value = "settings-value-must-not-leak";
 
     repo.save_and_append_outbox(
-        tenant,
+        settings_scope(tenant),
         config_entry("app.k", plain_value, 1),
         config_outbox_entry(&event_id),
         config_envelope("app.k").with_causation_id(
@@ -10586,7 +10783,7 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     assert_metadata_text_has_standard_schema_header(&cfg_meta.0, "config co-tx outbox");
     // 值经 find 取回正确。
     assert_eq!(
-        repo.find(tenant, &SettingKey::parse("app.k").unwrap())
+        repo.find(settings_scope(tenant), &SettingKey::parse("app.k").unwrap())
             .await?
             .unwrap()
             .value(),
@@ -10615,7 +10812,7 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
 
     let result = repo
         .save_and_append_outbox(
-            tenant,
+            settings_scope(tenant),
             config_entry("app.mismatch", "v1", 1),
             config_outbox_entry(&event_id),
             envelope,
@@ -10642,6 +10839,47 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     Ok(())
 }
 
+/// tc5c：config entry tenant 与 repo scope tenant 不一致 → fail-closed，config / outbox 均不落库。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc5c_config_cotx_rejects_scope_entry_tenant_mismatch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let scope_tenant = config_tenant();
+    let entry_tenant = TenantId::parse(CONFIG_TENANT_B).unwrap();
+    let event_id = unique_event_id("cfg-tc5c-evt");
+    let key = "app.scope-entry-mismatch";
+
+    let result = repo
+        .save_and_append_outbox(
+            settings_scope(scope_tenant),
+            config_entry_for(entry_tenant, key, "v1", 1),
+            config_outbox_entry(&event_id),
+            config_envelope(key),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ConfigRepoError::Storage(_))),
+        "config entry/scope tenant mismatch must fail closed as storage boundary error"
+    );
+
+    let cfg_cnt: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind(key)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cfg_cnt.0, 0, "scope mismatch 不得写 config 行");
+    let ob_cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ob_cnt.0, 0, "scope mismatch 不得写 outbox 行");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc6：co-tx 业务写后强制 Err → config 行 + outbox 行**共回滚**（both-or-neither，真实 `co_tx_with_outbox`）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -10661,8 +10899,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
 
     // 业务写：真插一行 config（成功）后强制 Err（模拟「配置写后、后续步骤失败」= emit/commit 失败等价物）。
     let result = tenant_pool
-        .co_tx_with_outbox(
-            tenant,
+        .co_tx_with_outbox(settings_scope(tenant),
             &entry,
             &env,
             move |conn| {
@@ -10722,13 +10959,14 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
 
-    repo.save(tenant, config_entry("app.k", "v1", 1)).await?;
+    repo.save(settings_scope(tenant), config_entry("app.k", "v1", 1))
+        .await?;
 
     // 以陈旧 v1 走 co-tx → CAS 冲突 → 整事务回滚（无 outbox 行）。
     let event_id = unique_event_id("cfg-tc7-evt");
     let result = repo
         .save_and_append_outbox(
-            tenant,
+            settings_scope(tenant),
             config_entry("app.k", "v1-stale", 1),
             config_outbox_entry(&event_id),
             config_envelope("app.k"),
@@ -10746,7 +10984,7 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     );
     // 原 v1 不被覆盖。
     assert_eq!(
-        repo.find(tenant, &SettingKey::parse("app.k").unwrap())
+        repo.find(settings_scope(tenant), &SettingKey::parse("app.k").unwrap())
             .await?
             .unwrap()
             .value(),
@@ -10771,14 +11009,16 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     let conflict_event = unique_event_id("cfg-tc7b-conflict");
     let tenant_pool = PgTenantPool::new(&store);
 
-    repo.save(tenant, config_entry("app.cotx-conflict", "v1", 1))
-        .await?;
+    repo.save(
+        settings_scope(tenant),
+        config_entry("app.cotx-conflict", "v1", 1),
+    )
+    .await?;
 
     testkit::repo_conformance::assert_cotx_both_or_neither(
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.save_and_append_outbox(
-                    tenant,
+                repo.save_and_append_outbox(settings_scope(tenant),
                     config_entry("app.cotx-ok", "v1", 1),
                     config_outbox_entry(&ok_event),
                     config_envelope("app.cotx-ok"),
@@ -10788,7 +11028,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
             business_exists: || async {
                 let key = SettingKey::parse("app.cotx-ok")
                     .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                repo.find(tenant, &key)
+                repo.find(settings_scope(tenant), &key)
                     .await
                     .map(|entry| entry.is_some_and(|entry| entry.value() == "v1"))
             },
@@ -10812,8 +11052,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
                         .with_subject_id(subject_id("app.cotx-rollback")),
                 );
                 tenant_pool
-                    .co_tx_with_outbox(
-                        tenant,
+                    .co_tx_with_outbox(settings_scope(tenant),
                         &entry,
                         &env,
                         move |conn| {
@@ -10859,8 +11098,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
         },
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.save_and_append_outbox(
-                    tenant,
+                repo.save_and_append_outbox(settings_scope(tenant),
                     config_entry("app.cotx-conflict", "stale", 1),
                     config_outbox_entry(&conflict_event),
                     config_envelope("app.cotx-conflict"),
@@ -10870,7 +11108,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
             business_exists: || async {
                 let key = SettingKey::parse("app.cotx-conflict")
                     .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                repo.find(tenant, &key)
+                repo.find(settings_scope(tenant), &key)
                     .await
                     .map(|entry| entry.is_some_and(|entry| entry.value() == "stale"))
             },
@@ -10907,8 +11145,11 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
     let conflict_event = unique_event_id("cfg-tc7c-conflict");
     let permanent_event = unique_event_id("cfg-tc7c-permanent");
 
-    repo.save(tenant, config_entry("app.retry-conflict", "v1", 1))
-        .await?;
+    repo.save(
+        settings_scope(tenant),
+        config_entry("app.retry-conflict", "v1", 1),
+    )
+    .await?;
 
     testkit::repo_conformance::assert_retry_boundary_policy(
         testkit::repo_conformance::RetryBoundaryCase {
@@ -10918,7 +11159,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                 arm_config_retry_failpoint("app.retry-transient", 1);
                 async move {
                     repo.save_and_append_outbox(
-                        tenant,
+                        settings_scope(tenant),
                         config_entry("app.retry-transient", "v1", 1),
                         config_outbox_entry(&transient_event),
                         config_envelope("app.retry-transient"),
@@ -10947,7 +11188,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
             },
             conflict_action: || async {
                 repo.save_and_append_outbox(
-                    tenant,
+                    settings_scope(tenant),
                     config_entry("app.retry-conflict", "stale", 1),
                     config_outbox_entry(&conflict_event),
                     config_envelope("app.retry-conflict"),
@@ -10973,7 +11214,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
             },
             permanent_action: || async {
                 repo.save_and_append_outbox(
-                    tenant,
+                    settings_scope(tenant),
                     config_entry("app.retry-permanent", "v1", 1),
                     config_outbox_entry(&permanent_event),
                     OutboxEnvelopeParts::new(
@@ -11032,7 +11273,7 @@ async fn tc8_config_find_maps_storage_error() -> TestResult {
 
     testkit::repo_conformance::assert_storage_error_mapping(
         || async { store.shutdown().await },
-        || async { repo.find(tenant, &key).await.map(|_| ()) },
+        || async { repo.find(settings_scope(tenant), &key).await.map(|_| ()) },
         |e| matches!(e, ConfigRepoError::Storage(_)),
     )
     .await?;
@@ -11065,7 +11306,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
                 let repo = &repo;
                 async move {
                     repo.save(
-                        tenant,
+                        settings_scope(tenant),
                         ConfigEntry::hydrate(
                             SettingKey::parse("app.k").unwrap(),
                             &marker,
@@ -11079,13 +11320,13 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
             delete: |tenant| {
                 let repo = &repo;
                 let key = &key;
-                async move { repo.delete(tenant, key).await }
+                async move { repo.delete(settings_scope(tenant), key).await }
             },
             current: |tenant| {
                 let repo = &repo;
                 let key = &key;
                 async move {
-                    repo.find(tenant, key)
+                    repo.find(settings_scope(tenant), key)
                         .await
                         .map(|entry| entry.map(|entry| entry.value().to_string()))
                 }
@@ -11094,7 +11335,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
                 let repo = &repo;
                 let key = &key;
                 async move {
-                    repo.find_version(tenant, key, version)
+                    repo.find_version(settings_scope(tenant), key, version)
                         .await
                         .map(|entry| entry.map(|entry| entry.value().to_string()))
                 }
@@ -11102,7 +11343,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
             latest_version: |tenant| {
                 let repo = &repo;
                 let key = &key;
-                async move { repo.latest_version(tenant, key).await }
+                async move { repo.latest_version(settings_scope(tenant), key).await }
             },
         },
     )
@@ -11133,13 +11374,13 @@ async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
             async move {
                 let entry =
                     ConfigEntry::hydrate(SettingKey::parse("app.conformance").unwrap(), "v1", t, 1);
-                repo.save(t, entry).await
+                repo.save(settings_scope(t), entry).await
             }
         },
         |t| {
             let repo = &repo;
             let key = &key;
-            async move { repo.find(t, key).await.map(|o| o.is_some()) }
+            async move { repo.find(settings_scope(t), key).await.map(|o| o.is_some()) }
         },
     )
     .await?;
@@ -11171,7 +11412,7 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     // publish v1 经 co-tx（content-派生 event_id ...:v1）。
     let ev1 = config_event_id(tenant, "app.k", 1);
     repo.save_and_append_outbox(
-        tenant,
+        settings_scope(tenant),
         config_entry("app.k", "v1", 1),
         config_outbox_entry(&ev1),
         config_envelope("app.k"),
@@ -11179,18 +11420,18 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     .await?;
 
     // delete → tombstone v2（version 不重置）。
-    repo.delete(tenant, &key).await?;
+    repo.delete(settings_scope(tenant), &key).await?;
 
     // republish：下一版本 = latest_version(含 tombstone) + 1 = 3（**非**重置回 1，旧 bug 的根因）。
     let next = repo
-        .latest_version(tenant, &key)
+        .latest_version(settings_scope(tenant), &key)
         .await?
         .map_or(1, |v| v + 1);
     assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
     let ev3 = config_event_id(tenant, "app.k", next);
     assert_ne!(ev1, ev3, "republish event_id 不复用（v1 ≠ v3）");
     repo.save_and_append_outbox(
-        tenant,
+        settings_scope(tenant),
         config_entry("app.k", "v1-again", next),
         config_outbox_entry(&ev3),
         config_envelope("app.k"),
@@ -11213,7 +11454,10 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
     );
     // 活跃值恢复。
     assert_eq!(
-        repo.find(tenant, &key).await?.unwrap().value(),
+        repo.find(settings_scope(tenant), &key)
+            .await?
+            .unwrap()
+            .value(),
         "v1-again",
         "republish 后活跃值恢复"
     );
@@ -11289,10 +11533,13 @@ async fn ts1_secret_save_find_roundtrip() -> TestResult {
     let key = SecretKey::parse("myapp.db-password").unwrap();
 
     // 未写入 → None。
-    assert!(repo.find(tenant, &key).await?.is_none(), "未写入 → None");
+    assert!(
+        repo.find(settings_scope(tenant), &key).await?.is_none(),
+        "未写入 → None"
+    );
 
     repo.save(
-        tenant,
+        settings_scope(tenant),
         make_secret_entry(
             "myapp.db-password",
             "vault",
@@ -11304,7 +11551,7 @@ async fn ts1_secret_save_find_roundtrip() -> TestResult {
     )
     .await?;
 
-    let found = repo.find(tenant, &key).await?.unwrap();
+    let found = repo.find(settings_scope(tenant), &key).await?.unwrap();
     assert_eq!(found.key().as_str(), "myapp.db-password", "key 回环");
     assert_eq!(
         found.secret_ref().store_id().as_str(),
@@ -11338,7 +11585,7 @@ async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
     let tenant = secret_tenant_a();
 
     repo.save(
-        tenant,
+        settings_scope(tenant),
         make_secret_entry(
             "myapp.api-key",
             "k8s-secrets",
@@ -11351,7 +11598,10 @@ async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
     .await?;
 
     let found = repo
-        .find(tenant, &SecretKey::parse("myapp.api-key").unwrap())
+        .find(
+            settings_scope(tenant),
+            &SecretKey::parse("myapp.api-key").unwrap(),
+        )
         .await?
         .unwrap();
     assert_eq!(
@@ -11375,12 +11625,12 @@ async fn ts2_secret_find_version_history() -> TestResult {
     let key = SecretKey::parse("myapp.db-pass").unwrap();
 
     repo.save(
-        tenant,
+        settings_scope(tenant),
         make_secret_entry("myapp.db-pass", "vault", "secret/v1", None, 1, tenant),
     )
     .await?;
     repo.save(
-        tenant,
+        settings_scope(tenant),
         make_secret_entry(
             "myapp.db-pass",
             "vault",
@@ -11393,14 +11643,20 @@ async fn ts2_secret_find_version_history() -> TestResult {
     .await?;
 
     // find 取最高版本。
-    let latest = repo.find(tenant, &key).await?.unwrap();
+    let latest = repo.find(settings_scope(tenant), &key).await?.unwrap();
     assert_eq!(latest.version(), 2, "find = max version");
     assert_eq!(latest.secret_ref().ref_key(), "secret/v2");
 
     // find_version 精确历史。
-    let v1 = repo.find_version(tenant, &key, 1).await?.unwrap();
+    let v1 = repo
+        .find_version(settings_scope(tenant), &key, 1)
+        .await?
+        .unwrap();
     assert_eq!(v1.secret_ref().ref_key(), "secret/v1", "find_version(1)");
-    let v2 = repo.find_version(tenant, &key, 2).await?.unwrap();
+    let v2 = repo
+        .find_version(settings_scope(tenant), &key, 2)
+        .await?
+        .unwrap();
     assert_eq!(
         v2.secret_ref().ref_version(),
         Some("rev-2"),
@@ -11409,7 +11665,9 @@ async fn ts2_secret_find_version_history() -> TestResult {
 
     // 缺失版本 → None。
     assert!(
-        repo.find_version(tenant, &key, 9).await?.is_none(),
+        repo.find_version(settings_scope(tenant), &key, 9)
+            .await?
+            .is_none(),
         "缺失版本 → None"
     );
 
@@ -11436,7 +11694,7 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
             let repo = &repo;
             async move {
                 repo.save(
-                    tenant,
+                    settings_scope(tenant),
                     make_secret_entry("myapp.token", "vault", &marker, None, version, tenant),
                 )
                 .await
@@ -11446,7 +11704,7 @@ async fn ts3_secret_save_cas_conflict() -> TestResult {
             let repo = &repo;
             let key = &key;
             async move {
-                repo.find(tenant, key)
+                repo.find(settings_scope(tenant), key)
                     .await
                     .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
             }
@@ -11477,7 +11735,7 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
             let repo = &repo;
             async move {
                 repo.save(
-                    tenant,
+                    settings_scope(tenant),
                     make_secret_entry("myapp.cred", "vault", &marker, None, version, tenant),
                 )
                 .await
@@ -11486,13 +11744,13 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
         || {
             let repo = &repo;
             let key = &key;
-            async move { repo.delete(tenant, key).await }
+            async move { repo.delete(settings_scope(tenant), key).await }
         },
         || {
             let repo = &repo;
             let key = &key;
             async move {
-                repo.find(tenant, key)
+                repo.find(settings_scope(tenant), key)
                     .await
                     .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
             }
@@ -11501,7 +11759,7 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
             let repo = &repo;
             let key = &key;
             async move {
-                repo.find_version(tenant, key, version)
+                repo.find_version(settings_scope(tenant), key, version)
                     .await
                     .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
             }
@@ -11509,14 +11767,14 @@ async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
         || {
             let repo = &repo;
             let key = &key;
-            async move { repo.latest_version(tenant, key).await }
+            async move { repo.latest_version(settings_scope(tenant), key).await }
         },
     )
     .await?;
 
     // 不存在 key → no-op（无 panic / 无错误）。
     let phantom = SecretKey::parse("myapp.nonexistent").unwrap();
-    repo.delete(tenant, &phantom).await?;
+    repo.delete(settings_scope(tenant), &phantom).await?;
 
     store.shutdown().await?;
     Ok(())
@@ -11534,7 +11792,7 @@ async fn ts5_secret_find_maps_storage_error() -> TestResult {
 
     testkit::repo_conformance::assert_storage_error_mapping(
         || async { store.shutdown().await },
-        || async { repo.find(tenant, &key).await.map(|_| ()) },
+        || async { repo.find(settings_scope(tenant), &key).await.map(|_| ()) },
         |e| matches!(e, SecretRepoError::Storage(_)),
     )
     .await?;
@@ -11563,7 +11821,7 @@ async fn ts6_secret_cross_tenant_isolation() -> TestResult {
                 let repo = &repo;
                 async move {
                     repo.save(
-                        tenant,
+                        settings_scope(tenant),
                         make_secret_entry(
                             "shared.key",
                             &marker,
@@ -11579,13 +11837,13 @@ async fn ts6_secret_cross_tenant_isolation() -> TestResult {
             delete: |tenant| {
                 let repo = &repo;
                 let key = &key;
-                async move { repo.delete(tenant, key).await }
+                async move { repo.delete(settings_scope(tenant), key).await }
             },
             current: |tenant| {
                 let repo = &repo;
                 let key = &key;
                 async move {
-                    repo.find(tenant, key).await.map(|entry| {
+                    repo.find(settings_scope(tenant), key).await.map(|entry| {
                         entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
                     })
                 }
@@ -11594,15 +11852,17 @@ async fn ts6_secret_cross_tenant_isolation() -> TestResult {
                 let repo = &repo;
                 let key = &key;
                 async move {
-                    repo.find_version(tenant, key, version).await.map(|entry| {
-                        entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
-                    })
+                    repo.find_version(settings_scope(tenant), key, version)
+                        .await
+                        .map(|entry| {
+                            entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
+                        })
                 }
             },
             latest_version: |tenant| {
                 let repo = &repo;
                 let key = &key;
-                async move { repo.latest_version(tenant, key).await }
+                async move { repo.latest_version(settings_scope(tenant), key).await }
             },
         },
     )
@@ -11626,7 +11886,7 @@ async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
 
     // 写 v1。
     repo.save(
-        tenant,
+        settings_scope(tenant),
         make_secret_entry(
             "myapp.rotate-key",
             "vault",
@@ -11639,22 +11899,22 @@ async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
     .await?;
 
     // delete → tombstone v2。
-    repo.delete(tenant, &key).await?;
+    repo.delete(settings_scope(tenant), &key).await?;
     assert_eq!(
-        repo.latest_version(tenant, &key).await?,
+        repo.latest_version(settings_scope(tenant), &key).await?,
         Some(2),
         "tombstone v2"
     );
 
     // republish：下一版本 = latest+1 = 3（不是重置回 1）。
     let next = repo
-        .latest_version(tenant, &key)
+        .latest_version(settings_scope(tenant), &key)
         .await?
         .map_or(1, |v| v + 1);
     assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
 
     repo.save(
-        tenant,
+        settings_scope(tenant),
         make_secret_entry(
             "myapp.rotate-key",
             "vault",
@@ -11667,7 +11927,7 @@ async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
     .await?;
 
     // 活跃值恢复，版本 = 3。
-    let active = repo.find(tenant, &key).await?.unwrap();
+    let active = repo.find(settings_scope(tenant), &key).await?.unwrap();
     assert_eq!(active.version(), 3, "republish 后版本 = 3");
     assert_eq!(active.secret_ref().ref_key(), "secret/rotate-new");
 
@@ -11925,7 +12185,7 @@ async fn policy_create_and_emit(
     let (entry, envelope) =
         policy_lifecycle_event(tenant, policy.id().as_str(), "created", policy.version())?;
     lifecycle
-        .create_and_emit(tenant, policy, entry, envelope)
+        .create_and_emit(identity_scope(tenant), policy, entry, envelope)
         .await
 }
 
@@ -11942,7 +12202,7 @@ async fn policy_update_and_emit(
         expected.next_checked()?,
     )?;
     lifecycle
-        .update_and_emit(tenant, policy, expected, entry, envelope)
+        .update_and_emit(identity_scope(tenant), policy, expected, entry, envelope)
         .await
 }
 
@@ -11955,7 +12215,7 @@ async fn policy_deactivate_and_emit(
     let (entry, envelope) =
         policy_lifecycle_event(tenant, id.as_str(), "deactivated", expected.next_checked()?)?;
     lifecycle
-        .deactivate_and_emit(tenant, id, expected, entry, envelope)
+        .deactivate_and_emit(identity_scope(tenant), id, expected, entry, envelope)
         .await
 }
 
@@ -11974,7 +12234,7 @@ async fn policy_update_and_emit_event(
         event_id,
     )?;
     lifecycle
-        .update_and_emit(tenant, policy, expected, entry, envelope)
+        .update_and_emit(identity_scope(tenant), policy, expected, entry, envelope)
         .await
 }
 
@@ -11993,7 +12253,7 @@ async fn policy_deactivate_and_emit_event(
         event_id,
     )?;
     lifecycle
-        .deactivate_and_emit(tenant, id, expected, entry, envelope)
+        .deactivate_and_emit(identity_scope(tenant), id, expected, entry, envelope)
         .await
 }
 
@@ -12020,14 +12280,16 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
     let admin = Role::hydrate("role-admin", "Admin", &["identity:policy:read".to_string()])?;
     let admin_id = admin.id().clone();
     assert!(
-        repo.find(tenant, admin_id.clone()).await?.is_none(),
+        repo.find(identity_scope(tenant), admin_id.clone())
+            .await?
+            .is_none(),
         "未保存 → None"
     );
 
     // save → find 往返一致（id / name / permissions）。
-    repo.save(tenant, admin).await?;
+    repo.save(identity_scope(tenant), admin).await?;
     let got = repo
-        .find(tenant, admin_id.clone())
+        .find(identity_scope(tenant), admin_id.clone())
         .await?
         .expect("saved role visible");
     assert_eq!(got.id().as_str(), "role-admin");
@@ -12046,9 +12308,9 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
             "identity:policy:update".to_string(),
         ],
     )?;
-    repo.save(tenant, admin_v2).await?;
+    repo.save(identity_scope(tenant), admin_v2).await?;
     let got2 = repo
-        .find(tenant, admin_id)
+        .find(identity_scope(tenant), admin_id)
         .await?
         .expect("upserted role visible");
     assert_eq!(got2.name(), "Administrator", "upsert 覆盖 name");
@@ -12087,16 +12349,18 @@ async fn role_repo_tenant_row_isolation() -> TestResult {
         &["identity:policy:read".to_string()],
     )?;
     let id = role.id().clone();
-    repo.save(tenant_a, role).await?;
+    repo.save(identity_scope(tenant_a), role).await?;
 
     // 跨租不可见（负例）：tenant B 查同 id → None（行级隔离，不泄露存在性）。
     assert!(
-        repo.find(tenant_b, id.clone()).await?.is_none(),
+        repo.find(identity_scope(tenant_b), id.clone())
+            .await?
+            .is_none(),
         "跨租 find → None（tenant 行级隔离）"
     );
     // 同租可见（正例，证明上面 None 非因数据未写入 = anti-vacuity）。
     assert_eq!(
-        repo.find(tenant_a, id)
+        repo.find(identity_scope(tenant_a), id)
             .await?
             .expect("visible in own tenant")
             .name(),
@@ -12124,7 +12388,7 @@ async fn role_repo_tenant_conformance() -> TestResult {
             let repo = &repo;
             async move {
                 repo.save(
-                    tenant,
+                    identity_scope(tenant),
                     Role::hydrate(
                         "tenant-conf-role",
                         "TenantConf",
@@ -12137,7 +12401,11 @@ async fn role_repo_tenant_conformance() -> TestResult {
         |tenant| {
             let repo = &repo;
             let role_id = role_id.clone();
-            async move { repo.find(tenant, role_id).await.map(|role| role.is_some()) }
+            async move {
+                repo.find(identity_scope(tenant), role_id)
+                    .await
+                    .map(|role| role.is_some())
+            }
         },
     )
     .await?;
@@ -12189,12 +12457,12 @@ async fn policy_repo_lifecycle_conformance() -> TestResult {
             },
             find: |tenant, key| {
                 let repo = &repo;
-                async move { repo.find(tenant, policy_id(key)?).await }
+                async move { repo.find(identity_scope(tenant), policy_id(key)?).await }
             },
             list: |tenant| {
                 let repo = &repo;
                 async move {
-                    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+                    repo.list_effective(identity_scope(tenant), policy_scope()?, policy_time(20))
                         .await
                 }
             },
@@ -12270,12 +12538,12 @@ async fn policy_repo_delete_leaves_tombstone_conformance() -> TestResult {
             },
             find: |tenant, key| {
                 let repo = &repo;
-                async move { repo.find(tenant, policy_id(key)?).await }
+                async move { repo.find(identity_scope(tenant), policy_id(key)?).await }
             },
             list: |tenant| {
                 let repo = &repo;
                 async move {
-                    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+                    repo.list_effective(identity_scope(tenant), policy_scope()?, policy_time(20))
                         .await
                 }
             },
@@ -12358,12 +12626,12 @@ async fn policy_repo_tenant_isolation_conformance() -> TestResult {
             },
             find: |tenant, key| {
                 let repo = &repo;
-                async move { repo.find(tenant, policy_id(key)?).await }
+                async move { repo.find(identity_scope(tenant), policy_id(key)?).await }
             },
             list: |tenant| {
                 let repo = &repo;
                 async move {
-                    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+                    repo.list_effective(identity_scope(tenant), policy_scope()?, policy_time(20))
                         .await
                 }
             },
@@ -12563,8 +12831,7 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
     );
 
     let result = tenant_pool
-        .co_tx_with_outbox(
-            tenant,
+        .co_tx_with_outbox(identity_scope(tenant),
             &entry,
             &env,
             move |conn| {
@@ -12635,7 +12902,7 @@ async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult
 
     let first = repo
         .list_active(
-            tenant,
+            identity_scope(tenant),
             PolicyPage {
                 limit: vocab::Limit::new(2)?,
                 after: None,
@@ -12655,7 +12922,7 @@ async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult
 
     let second = repo
         .list_active(
-            tenant,
+            identity_scope(tenant),
             PolicyPage {
                 limit: vocab::Limit::new(2)?,
                 after: Some(policy_id("policy-list-b")?),
@@ -12684,7 +12951,7 @@ async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult
         "deactivate existing policy"
     );
     assert!(
-        repo.find(tenant, policy_id("policy-list-b")?)
+        repo.find(identity_scope(tenant), policy_id("policy-list-b")?)
             .await?
             .is_none(),
         "deactivated policy must be hidden from get"
@@ -12692,7 +12959,7 @@ async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult
 
     let after_deactivate = repo
         .list_active(
-            tenant,
+            identity_scope(tenant),
             PolicyPage {
                 limit: vocab::Limit::new(10)?,
                 after: None,
@@ -12775,8 +13042,12 @@ async fn policy_repo_active_window_conformance() -> TestResult {
             active_at: |tenant, at| {
                 let repo = &repo;
                 async move {
-                    repo.list_effective(tenant, policy_scope()?, policy_time(at as u64))
-                        .await
+                    repo.list_effective(
+                        identity_scope(tenant),
+                        policy_scope()?,
+                        policy_time(at as u64),
+                    )
+                    .await
                 }
             },
         },
@@ -12797,7 +13068,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     let created = repo
         .upsert(
-            tenant,
+            identity_scope(tenant),
             resource_attribute_fixture(tenant, "resource.owner", "owner-a", 10, None)?,
             None,
         )
@@ -12810,7 +13081,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     let known = repo
         .resolve_effective(
-            tenant,
+            identity_scope(tenant),
             policy_scope()?,
             resource_attribute_id()?,
             vec![resource_attribute_key("resource.owner")?],
@@ -12827,7 +13098,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     let missing = repo
         .resolve_effective(
-            tenant,
+            identity_scope(tenant),
             policy_scope()?,
             resource_attribute_id()?,
             vec![resource_attribute_key("resource.missing")?],
@@ -12839,14 +13110,14 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
     );
 
     repo.upsert(
-        tenant,
+        identity_scope(tenant),
         resource_attribute_fixture(tenant, "resource.stale_owner", "owner-a", 1, Some(5))?,
         None,
     )
     .await?;
     let stale = repo
         .resolve_effective(
-            tenant,
+            identity_scope(tenant),
             policy_scope()?,
             resource_attribute_id()?,
             vec![resource_attribute_key("resource.stale_owner")?],
@@ -12859,7 +13130,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     let conflict = repo
         .upsert(
-            tenant,
+            identity_scope(tenant),
             resource_attribute_fixture(tenant, "resource.owner", "owner-b", 10, None)?,
             Some(ResourceAttributeVersion::new(99)?),
         )
@@ -12868,7 +13139,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     let updated = repo
         .upsert(
-            tenant,
+            identity_scope(tenant),
             resource_attribute_fixture(tenant, "resource.owner", "owner-b", 10, None)?,
             Some(created.version()),
         )
@@ -12877,7 +13148,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     let stale_expire = repo
         .expire(
-            tenant,
+            identity_scope(tenant),
             policy_scope()?,
             resource_attribute_id()?,
             resource_attribute_key("resource.owner")?,
@@ -12888,7 +13159,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
 
     assert!(
         repo.expire(
-            tenant,
+            identity_scope(tenant),
             policy_scope()?,
             resource_attribute_id()?,
             resource_attribute_key("resource.owner")?,
@@ -12899,7 +13170,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
     );
     let after_expire = repo
         .resolve_effective(
-            tenant,
+            identity_scope(tenant),
             policy_scope()?,
             resource_attribute_id()?,
             vec![resource_attribute_key("resource.owner")?],
@@ -13104,7 +13375,7 @@ async fn insert_raw_policy_and_load(
     .await
     .map_err(|e| IdentityError::Storage(Box::new(e)))?;
 
-    repo.list_effective(tenant, policy_scope()?, policy_time(20))
+    repo.list_effective(identity_scope(tenant), policy_scope()?, policy_time(20))
         .await
         .map(|_| ())
 }
@@ -13178,7 +13449,7 @@ async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
             },
             find: |tenant, key| {
                 let repo = &repo;
-                async move { repo.find(tenant, policy_id(key)?).await }
+                async move { repo.find(identity_scope(tenant), policy_id(key)?).await }
             },
             obligations: first_policy_obligations,
         },
@@ -13372,7 +13643,7 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
                 "identity:policy:update"
             };
             let role = Role::hydrate("contended", "C", &[permission.to_string()])?;
-            repo.save(tenant, role).await
+            repo.save(identity_scope(tenant), role).await
         }));
     }
     for h in handles {
@@ -13382,7 +13653,7 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
     // throwaway role 取 contended 的 RoleId（不 save，仅为 mint id 查终态）。
     let contended_id = Role::hydrate("contended", "x", &[])?.id().clone();
     let got = repo
-        .find(tenant, contended_id)
+        .find(identity_scope(tenant), contended_id)
         .await?
         .expect("contended role converged");
     assert_eq!(got.id().as_str(), "contended");
@@ -13402,7 +13673,7 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
         let repo = Arc::clone(&repo);
         handles2.push(tokio::spawn(async move {
             let role = Role::hydrate(&format!("role-{i}"), "N", &[])?;
-            repo.save(tenant, role).await
+            repo.save(identity_scope(tenant), role).await
         }));
     }
     for h in handles2 {
@@ -13432,20 +13703,20 @@ async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
 
     for (id, name) in [("role-a", "A"), ("role-b", "B"), ("role-c", "C")] {
         repo.save(
-            tenant_a,
+            identity_scope(tenant_a),
             Role::hydrate(id, name, &["identity:policy:read".to_string()])?,
         )
         .await?;
     }
     repo.save(
-        tenant_b,
+        identity_scope(tenant_b),
         Role::hydrate("role-aa", "TenantB", &["identity:policy:read".to_string()])?,
     )
     .await?;
 
     let page1 = repo
         .list(
-            tenant_a,
+            identity_scope(tenant_a),
             RolePage {
                 limit: vocab::Limit::new(2)?,
                 after: None,
@@ -13465,7 +13736,7 @@ async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
     let after = page1.roles[1].id().clone();
     let page2 = repo
         .list(
-            tenant_a,
+            identity_scope(tenant_a),
             RolePage {
                 limit: vocab::Limit::new(2)?,
                 after: Some(after),
@@ -13484,7 +13755,7 @@ async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
 
     let tenant_b_page = repo
         .list(
-            tenant_b,
+            identity_scope(tenant_b),
             RolePage {
                 limit: vocab::Limit::new(10)?,
                 after: None,
@@ -13516,8 +13787,8 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     let role = Role::hydrate("role-admin", "Admin", &["identity:role:assign".to_string()])?;
     let role_id = role.id().clone();
     let repo = PgRoleRepo::new(&store);
-    repo.save(tenant, role.clone()).await?;
-    repo.save(tenant_b, role).await?;
+    repo.save(identity_scope(tenant), role.clone()).await?;
+    repo.save(identity_scope(tenant_b), role).await?;
 
     let svc = identity::RbacAdminService::new(
         Arc::from(DynRoleRepo::new_box(PgRoleRepo::new(&store))),
@@ -13639,7 +13910,9 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
         "Causation",
         &["identity:role:assign".to_string()],
     )?;
-    PgRoleRepo::new(&store).save(tenant, role).await?;
+    PgRoleRepo::new(&store)
+        .save(identity_scope(tenant), role)
+        .await?;
 
     let event_id = unique_event_id("role-causation");
     let role_assigned_contract = vocab::ContractBinding::from_static(
@@ -13663,7 +13936,7 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
     let binding = RoleBinding::hydrate("target-user", "role-causation", tenant)?;
 
     PgRoleBindingLifecycle::new(&store, fixed_clock())
-        .assign_and_emit(binding, entry, envelope)
+        .assign_and_emit(identity_scope(tenant), binding, entry, envelope)
         .await?;
 
     let outbox: (Option<String>, String) =
@@ -14461,9 +14734,11 @@ async fn rt1_insert_then_find_by_hash_roundtrip() -> TestResult {
     let hash_to_find = record.token_hash().clone();
 
     let rt_store = PgRefreshTokenStore::new(&store);
-    rt_store.insert(record).await?;
+    rt_store.insert(identity_scope(tenant), record).await?;
 
-    let found = rt_store.find_by_hash(tenant, hash_to_find).await?;
+    let found = rt_store
+        .find_by_hash(identity_scope(tenant), hash_to_find)
+        .await?;
     let found = found.expect("rt1: 应能按 hash 找到刚写入的 record");
 
     assert_eq!(found.id().as_str(), id, "rt1: id 往返");
@@ -14538,7 +14813,7 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
     // sealed command: clone 源 record 供 begin_rotation（移动前保留引用，rotate 不再接受裸 id/record）。
     let old_for_rotate = old_record.clone();
     let rt_store = PgRefreshTokenStore::new(&store);
-    rt_store.insert(old_record).await?;
+    rt_store.insert(identity_scope(tenant), old_record).await?;
 
     // 构造 new record（rotation 子节点），clone hash 供后续 find 使用。
     let new_id_str = uuid::Uuid::new_v4().to_string();
@@ -14565,12 +14840,12 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
     );
-    let result = rt_store.rotate(rotation1).await?;
+    let result = rt_store.rotate(identity_scope(tenant), rotation1).await?;
     assert!(result, "rt2: 首次 rotate 应返回 true（CAS 命中）");
 
     // 验证 old 变 consumed。
     let old_found = rt_store
-        .find_by_hash(tenant, hash_old_typed)
+        .find_by_hash(identity_scope(tenant), hash_old_typed)
         .await?
         .expect("rt2: old 仍可查到");
     assert_eq!(
@@ -14581,7 +14856,7 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
 
     // 验证 new 可查到且为 Active。
     let new_found = rt_store
-        .find_by_hash(tenant, hash_new_typed)
+        .find_by_hash(identity_scope(tenant), hash_new_typed)
         .await?
         .expect("rt2: new 应可查到");
     assert_eq!(
@@ -14610,14 +14885,16 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
         issued + Duration::from_secs(2),
         expires + Duration::from_secs(2),
     );
-    let result2 = rt_store.rotate(rotation2).await?;
+    let result2 = rt_store.rotate(identity_scope(tenant), rotation2).await?;
     assert!(
         !result2,
         "rt2: 再次 rotate consumed old 应返回 false（CAS miss）"
     );
 
     // new2 不应被写入。
-    let new2_found = rt_store.find_by_hash(tenant, hash_new2_typed).await?;
+    let new2_found = rt_store
+        .find_by_hash(identity_scope(tenant), hash_new2_typed)
+        .await?;
     assert!(new2_found.is_none(), "rt2: CAS miss 时 new2 不应写入");
 
     store.shutdown().await?;
@@ -14659,7 +14936,7 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
     );
     let lineage_id = root_record.lineage_id().clone();
     let hash_root_typed = root_record.token_hash().clone();
-    rt_store.insert(root_record).await?;
+    rt_store.insert(identity_scope(tenant), root_record).await?;
 
     let child_record = RefreshTokenRecord::hydrate(
         uuid::Uuid::new_v4().to_string(),
@@ -14674,14 +14951,18 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
         expires + Duration::from_secs(1),
     );
     let hash_child_typed = child_record.token_hash().clone();
-    rt_store.insert(child_record).await?;
+    rt_store
+        .insert(identity_scope(tenant), child_record)
+        .await?;
 
     // revoke_lineage → 整条谱系置 Revoked。
-    rt_store.revoke_lineage(tenant, lineage_id.clone()).await?;
+    rt_store
+        .revoke_lineage(identity_scope(tenant), lineage_id.clone())
+        .await?;
 
     // root 变 revoked。
     let root_found = rt_store
-        .find_by_hash(tenant, hash_root_typed)
+        .find_by_hash(identity_scope(tenant), hash_root_typed)
         .await?
         .expect("rt3: root 仍可查到");
     assert_eq!(
@@ -14692,7 +14973,7 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
 
     // child 变 revoked。
     let child_found = rt_store
-        .find_by_hash(tenant, hash_child_typed)
+        .find_by_hash(identity_scope(tenant), hash_child_typed)
         .await?
         .expect("rt3: child 仍可查到");
     assert_eq!(
@@ -14702,7 +14983,9 @@ async fn rt3_revoke_lineage_revokes_all_and_is_idempotent() -> TestResult {
     );
 
     // 幂等：再次 revoke_lineage 也 Ok（0 行 UPDATE）。
-    rt_store.revoke_lineage(tenant, lineage_id).await?;
+    rt_store
+        .revoke_lineage(identity_scope(tenant), lineage_id)
+        .await?;
 
     store.shutdown().await?;
     Ok(())
@@ -14744,16 +15027,18 @@ async fn rt4_cross_tenant_isolation() -> TestResult {
     let hash_a_typed = record_a.token_hash().clone();
 
     let rt_store = PgRefreshTokenStore::new(&store);
-    rt_store.insert(record_a).await?;
+    rt_store.insert(identity_scope(tenant_a), record_a).await?;
 
     // tenant A 查自己 hash → 可以找到（anti-vacuity：record 确实存在）。
     let found_a = rt_store
-        .find_by_hash(tenant_a, hash_a_typed.clone())
+        .find_by_hash(identity_scope(tenant_a), hash_a_typed.clone())
         .await?;
     assert!(found_a.is_some(), "rt4: tenant A 应能查到自己的 record");
 
     // tenant B 查 tenant A 的 hash → None（跨租 WHERE tenant_id 隔离，fail-closed）。
-    let found_b = rt_store.find_by_hash(tenant_b, hash_a_typed).await?;
+    let found_b = rt_store
+        .find_by_hash(identity_scope(tenant_b), hash_a_typed)
+        .await?;
     assert!(
         found_b.is_none(),
         "rt4: tenant B 不应查到 tenant A 的 record（跨租隔离）"
@@ -14819,14 +15104,16 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
         expires + Duration::from_secs(1),
     );
     let rt_store = PgRefreshTokenStore::new(&store);
-    let result = rt_store.rotate(rotation).await?;
+    let result = rt_store.rotate(identity_scope(tenant), rotation).await?;
     assert!(
         !result,
         "rt5: 未入库 old_id → CAS miss → rotate 应返回 false"
     );
 
     // new_seed 也未被写入（CAS miss 不写 new）。
-    let new_found = rt_store.find_by_hash(tenant, new_hash_typed).await?;
+    let new_found = rt_store
+        .find_by_hash(identity_scope(tenant), new_hash_typed)
+        .await?;
     assert!(new_found.is_none(), "rt5: CAS miss 时 new 不应写入");
 
     store.shutdown().await?;
@@ -14872,14 +15159,16 @@ async fn rt6_revoke_lineage_cross_tenant_noop() -> TestResult {
     let lineage_id_typed = record_a.lineage_id().clone();
 
     let rt_store = PgRefreshTokenStore::new(&store);
-    rt_store.insert(record_a).await?;
+    rt_store.insert(identity_scope(tenant_a), record_a).await?;
 
     // tenant B 用 tenant A 的 lineage_id 调 revoke_lineage → WHERE tenant_id = B 不匹配 → no-op（0 行）
-    rt_store.revoke_lineage(tenant_b, lineage_id_typed).await?;
+    rt_store
+        .revoke_lineage(identity_scope(tenant_b), lineage_id_typed)
+        .await?;
 
     // tenant A 的记录仍 Active（未被跨租撤销）
     let found_a = rt_store
-        .find_by_hash(tenant_a, hash_a_typed)
+        .find_by_hash(identity_scope(tenant_a), hash_a_typed)
         .await?
         .expect("rt6: tenant A record 仍可查到");
     assert_eq!(
@@ -14925,13 +15214,13 @@ async fn rt6b_refresh_token_store_tenant_noop_conformance() -> TestResult {
 
     testkit::repo_conformance::assert_cross_tenant_noop(
         || async {
-            rt_store.insert(record_a).await?;
+            rt_store.insert(identity_scope(tenant_a), record_a).await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
                 rt_store
-                    .find_by_hash(tenant_a, hash_a.clone())
+                    .find_by_hash(identity_scope(tenant_a), hash_a.clone())
                     .await?
                     .is_some_and(|record| record.status() == RefreshStatus::Active),
             )
@@ -14939,19 +15228,21 @@ async fn rt6b_refresh_token_store_tenant_noop_conformance() -> TestResult {
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
                 rt_store
-                    .find_by_hash(tenant_b, hash_a.clone())
+                    .find_by_hash(identity_scope(tenant_b), hash_a.clone())
                     .await?
                     .is_some(),
             )
         },
         || async {
-            rt_store.revoke_lineage(tenant_b, lineage_a.clone()).await?;
+            rt_store
+                .revoke_lineage(identity_scope(tenant_b), lineage_a.clone())
+                .await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
                 rt_store
-                    .find_by_hash(tenant_a, hash_a.clone())
+                    .find_by_hash(identity_scope(tenant_a), hash_a.clone())
                     .await?
                     .is_some_and(|record| record.status() == RefreshStatus::Active),
             )
@@ -15004,7 +15295,7 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     let old_for_rotate = old_record.clone();
 
     let rt_store1 = PgRefreshTokenStore::new(&store);
-    rt_store1.insert(old_record).await?;
+    rt_store1.insert(identity_scope(tenant), old_record).await?;
 
     // 两个不同 new record（不同 id + hash 避免 PK / unique 冲突；只有 CAS 命中的会被写入）
     let new_record_1 = RefreshTokenRecord::hydrate(
@@ -15051,7 +15342,10 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
 
     // 共享 pool 的两个独立 store 实例：并发 rotate 同一 old_id
     let rt_store2 = PgRefreshTokenStore::new(&store);
-    let (r1, r2) = tokio::join!(rt_store1.rotate(rotation1), rt_store2.rotate(rotation2),);
+    let (r1, r2) = tokio::join!(
+        rt_store1.rotate(identity_scope(tenant), rotation1),
+        rt_store2.rotate(identity_scope(tenant), rotation2),
+    );
 
     let r1 = r1?;
     let r2 = r2?;
@@ -15065,7 +15359,7 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
 
     // old 应已变 Consumed
     let old_found = rt_store1
-        .find_by_hash(tenant, old_hash_typed)
+        .find_by_hash(identity_scope(tenant), old_hash_typed)
         .await?
         .expect("rt7: old 仍可查到（status = consumed）");
     assert_eq!(
@@ -15075,8 +15369,12 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     );
 
     // new 恰一条（CAS miss 的 rotate 不写 new）
-    let new1_found = rt_store1.find_by_hash(tenant, hash_new1).await?;
-    let new2_found = rt_store1.find_by_hash(tenant, hash_new2).await?;
+    let new1_found = rt_store1
+        .find_by_hash(identity_scope(tenant), hash_new1)
+        .await?;
+    let new2_found = rt_store1
+        .find_by_hash(identity_scope(tenant), hash_new2)
+        .await?;
     let new_count = u32::from(new1_found.is_some()) + u32::from(new2_found.is_some());
     assert_eq!(
         new_count, 1,
@@ -15144,16 +15442,16 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
     );
 
     let rt_store = PgRefreshTokenStore::new(&store);
-    rt_store.insert(old_record).await?;
+    rt_store.insert(identity_scope(tenant), old_record).await?;
 
-    let result = rt_store.rotate(rotation).await;
+    let result = rt_store.rotate(identity_scope(tenant), rotation).await;
     assert!(
         matches!(result, Err(identity::ports::IdentityError::Storage(_))),
         "rt8: new insert 失败应映射为 IdentityError::Storage"
     );
 
     let old_found = rt_store
-        .find_by_hash(tenant, old_hash)
+        .find_by_hash(identity_scope(tenant), old_hash)
         .await?
         .expect("rt8: rollback 后 old 仍应可查");
     assert_eq!(
@@ -15161,7 +15459,9 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
         RefreshStatus::Active,
         "rt8: rotate 回滚后 old 必须保持 Active"
     );
-    let new_found = rt_store.find_by_hash(tenant, new_hash).await?;
+    let new_found = rt_store
+        .find_by_hash(identity_scope(tenant), new_hash)
+        .await?;
     assert!(new_found.is_none(), "rt8: rotate 回滚后失败 new 不应写入");
 
     store.shutdown().await?;
@@ -15196,7 +15496,12 @@ async fn rt9_refresh_token_store_storage_error_conformance() -> TestResult {
 
     testkit::repo_conformance::assert_storage_error_mapping(
         || async { store.shutdown().await },
-        || async { rt_store.find_by_hash(tenant, hash).await.map(|_| ()) },
+        || async {
+            rt_store
+                .find_by_hash(identity_scope(tenant), hash)
+                .await
+                .map(|_| ())
+        },
         |e| matches!(e, identity::ports::IdentityError::Storage(_)),
     )
     .await?;
@@ -15376,17 +15681,20 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
 
     // 未保存 → None（fail-closed 基线，anti-vacuity 负例）。
     assert!(
-        repo.find_by_user_id(tenant, cred_uid(CRED_USER_ALICE)?)
+        repo.find_by_user_id(identity_scope(tenant), cred_uid(CRED_USER_ALICE)?)
             .await?
             .is_none(),
         "未保存 → None"
     );
 
     // save → find_by_user_id 往返一致。
-    repo.save(make_cred("alice", CRED_USER_ALICE, "pw1", 1, tenant)?)
-        .await?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred("alice", CRED_USER_ALICE, "pw1", 1, tenant)?,
+    )
+    .await?;
     let Some(got) = repo
-        .find_by_user_id(tenant, cred_uid(CRED_USER_ALICE)?)
+        .find_by_user_id(identity_scope(tenant), cred_uid(CRED_USER_ALICE)?)
         .await?
     else {
         return Err("saved credential visible".into());
@@ -15404,10 +15712,13 @@ async fn credential_repo_save_find_roundtrip_and_upsert() -> TestResult {
     );
 
     // 同 login 二次 save → upsert 覆盖 version（DO UPDATE，非新增行）。
-    repo.save(make_cred("alice", CRED_USER_ALICE, "pw2", 2, tenant)?)
-        .await?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred("alice", CRED_USER_ALICE, "pw2", 2, tenant)?,
+    )
+    .await?;
     let Some(got2) = repo
-        .find_by_user_id(tenant, cred_uid(CRED_USER_ALICE)?)
+        .find_by_user_id(identity_scope(tenant), cred_uid(CRED_USER_ALICE)?)
         .await?
     else {
         return Err("upserted credential visible".into());
@@ -15434,25 +15745,43 @@ async fn credential_repo_authenticate_known_wrong_and_unknown() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?)
-        .await?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+    )
+    .await?;
     let now = cred_epoch(CRED_BASE_SECS);
 
     assert_eq!(
-        repo.authenticate(tenant, login_id("alice"), "correct".to_string(), now)
-            .await?,
+        repo.authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            "correct".to_string(),
+            now
+        )
+        .await?,
         AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
         "已知+正确 → Authenticated(canonical user_id)"
     );
     assert_eq!(
-        repo.authenticate(tenant, login_id("alice"), "wrong".to_string(), now)
-            .await?,
+        repo.authenticate(
+            identity_scope(tenant),
+            login_id("alice"),
+            "wrong".to_string(),
+            now
+        )
+        .await?,
         AuthOutcome::InvalidKnownUser,
         "已知+错 → InvalidKnownUser"
     );
     assert_eq!(
-        repo.authenticate(tenant, login_id("ghost"), "correct".to_string(), now)
-            .await?,
+        repo.authenticate(
+            identity_scope(tenant),
+            login_id("ghost"),
+            "correct".to_string(),
+            now
+        )
+        .await?,
         AuthOutcome::InvalidUnknown,
         "查无凭据 → InvalidUnknown"
     );
@@ -15468,14 +15797,17 @@ async fn credential_repo_unknown_subject_creates_no_row() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?)
-        .await?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, tenant)?,
+    )
+    .await?;
     let now = cred_epoch(CRED_BASE_SECS);
 
     for i in 0..20 {
         assert_eq!(
             repo.authenticate(
-                tenant,
+                identity_scope(tenant),
                 login_id(&format!("ghost-{i}")),
                 "x".to_string(),
                 now
@@ -15504,28 +15836,36 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
     let repo = PgCredentialRepo::new(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     let b = cred_tenant(CRED_TENANT_B)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
+    )
+    .await?;
     let now = cred_epoch(CRED_BASE_SECS);
 
     // 跨租 find → None（不泄露存在性）。
     assert!(
-        repo.find_by_user_id(b, cred_uid(CRED_USER_ALICE)?)
+        repo.find_by_user_id(identity_scope(b), cred_uid(CRED_USER_ALICE)?)
             .await?
             .is_none(),
         "跨租 find → None"
     );
     // 跨租 authenticate → InvalidUnknown（跨租即未知）。
     assert_eq!(
-        repo.authenticate(b, login_id("alice"), "correct".to_string(), now)
-            .await?,
+        repo.authenticate(
+            identity_scope(b),
+            login_id("alice"),
+            "correct".to_string(),
+            now
+        )
+        .await?,
         AuthOutcome::InvalidUnknown,
         "跨租 authenticate → InvalidUnknown"
     );
     // 在 A 锁定 alice（5 次错），B 视角 lockout_status 仍 false（隔离）。
     for i in 1..=5 {
         repo.authenticate(
-            a,
+            identity_scope(a),
             login_id("alice"),
             "wrong".to_string(),
             cred_epoch(CRED_BASE_SECS + i),
@@ -15533,13 +15873,21 @@ async fn credential_repo_cross_tenant_fail_closed() -> TestResult {
         .await?;
     }
     assert!(
-        repo.lockout_status(a, login_id("alice"), cred_epoch(CRED_BASE_SECS + 5))
-            .await?,
+        repo.lockout_status(
+            identity_scope(a),
+            login_id("alice"),
+            cred_epoch(CRED_BASE_SECS + 5)
+        )
+        .await?,
         "A 视角 alice 已锁"
     );
     assert!(
         !repo
-            .lockout_status(b, login_id("alice"), cred_epoch(CRED_BASE_SECS + 5))
+            .lockout_status(
+                identity_scope(b),
+                login_id("alice"),
+                cred_epoch(CRED_BASE_SECS + 5)
+            )
             .await?,
         "B 视角不受 A 锁定影响（跨租隔离）"
     );
@@ -15561,22 +15909,31 @@ async fn credential_repo_tenant_noop_conformance() -> TestResult {
 
     testkit::repo_conformance::assert_cross_tenant_noop(
         || async {
-            repo.save(credential).await?;
+            repo.save(identity_scope(a), credential).await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                repo.find_by_user_id(a, alice_uid).await?.is_some(),
+                repo.find_by_user_id(identity_scope(a), alice_uid)
+                    .await?
+                    .is_some(),
             )
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                repo.find_by_user_id(b, alice_uid).await?.is_some(),
+                repo.find_by_user_id(identity_scope(b), alice_uid)
+                    .await?
+                    .is_some(),
             )
         },
         || async {
             let outcome = repo
-                .authenticate(b, login_id("alice"), "correct".to_string(), now)
+                .authenticate(
+                    identity_scope(b),
+                    login_id("alice"),
+                    "correct".to_string(),
+                    now,
+                )
                 .await?;
             if outcome == AuthOutcome::InvalidUnknown {
                 Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -15586,7 +15943,9 @@ async fn credential_repo_tenant_noop_conformance() -> TestResult {
         },
         || async {
             Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(
-                repo.find_by_user_id(a, alice_uid).await?.is_some(),
+                repo.find_by_user_id(identity_scope(a), alice_uid)
+                    .await?
+                    .is_some(),
             )
         },
     )
@@ -15603,13 +15962,16 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
+    )
+    .await?;
 
     for i in 1..5 {
         assert_eq!(
             repo.authenticate(
-                a,
+                identity_scope(a),
                 login_id("alice"),
                 "wrong".to_string(),
                 cred_epoch(CRED_BASE_SECS + i)
@@ -15620,22 +15982,30 @@ async fn credential_repo_accumulate_failures_then_locks() -> TestResult {
         );
         assert!(
             !repo
-                .lockout_status(a, login_id("alice"), cred_epoch(CRED_BASE_SECS + i))
+                .lockout_status(
+                    identity_scope(a),
+                    login_id("alice"),
+                    cred_epoch(CRED_BASE_SECS + i)
+                )
                 .await?,
             "未达阈值仍未锁"
         );
     }
     // 第 5 次（窗口内）→ 达阈值锁定（DB 持久化失败计数 = 5）。
     repo.authenticate(
-        a,
+        identity_scope(a),
         login_id("alice"),
         "wrong".to_string(),
         cred_epoch(CRED_BASE_SECS + 5),
     )
     .await?;
     assert!(
-        repo.lockout_status(a, login_id("alice"), cred_epoch(CRED_BASE_SECS + 5))
-            .await?,
+        repo.lockout_status(
+            identity_scope(a),
+            login_id("alice"),
+            cred_epoch(CRED_BASE_SECS + 5)
+        )
+        .await?,
         "第 5 次达阈值锁定"
     );
     assert_eq!(
@@ -15655,11 +16025,14 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
+    )
+    .await?;
     for i in 1..=5 {
         repo.authenticate(
-            a,
+            identity_scope(a),
             login_id("alice"),
             "wrong".to_string(),
             cred_epoch(CRED_BASE_SECS + i),
@@ -15671,7 +16044,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     // TTL 内仍锁。
     assert!(
         repo.lockout_status(
-            a,
+            identity_scope(a),
             login_id("alice"),
             cred_epoch(lock_at + LOCK_TTL_SECS - 1)
         )
@@ -15682,7 +16055,7 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     assert!(
         !repo
             .lockout_status(
-                a,
+                identity_scope(a),
                 login_id("alice"),
                 cred_epoch(lock_at + LOCK_TTL_SECS + 1)
             )
@@ -15698,13 +16071,18 @@ async fn credential_repo_lockout_lazy_unlocks_after_ttl() -> TestResult {
     // 解锁后再失败从 1 重计（不沿用旧计数）→ InvalidKnownUser、未锁。
     let after = lock_at + LOCK_TTL_SECS + 2;
     assert_eq!(
-        repo.authenticate(a, login_id("alice"), "wrong".to_string(), cred_epoch(after))
-            .await?,
+        repo.authenticate(
+            identity_scope(a),
+            login_id("alice"),
+            "wrong".to_string(),
+            cred_epoch(after)
+        )
+        .await?,
         AuthOutcome::InvalidKnownUser
     );
     assert!(
         !repo
-            .lockout_status(a, login_id("alice"), cred_epoch(after))
+            .lockout_status(identity_scope(a), login_id("alice"), cred_epoch(after))
             .await?,
         "重计未达阈值未锁"
     );
@@ -15720,13 +16098,16 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
+    )
+    .await?;
 
     // 4 次错（未达阈值 5，未锁）→ 失败计数持久化 = 4。
     for i in 1..=4 {
         repo.authenticate(
-            a,
+            identity_scope(a),
             login_id("alice"),
             "wrong".to_string(),
             cred_epoch(CRED_BASE_SECS + i),
@@ -15741,7 +16122,7 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     // 正确密码 → Authenticated + 原子清零失败计数。
     assert_eq!(
         repo.authenticate(
-            a,
+            identity_scope(a),
             login_id("alice"),
             "correct".to_string(),
             cred_epoch(CRED_BASE_SECS + 5)
@@ -15768,28 +16149,42 @@ async fn credential_repo_bump_version_cas() -> TestResult {
     let repo = PgCredentialRepo::new(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
     let b = cred_tenant(CRED_TENANT_B)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "pw1", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "pw1", 1, a)?,
+    )
+    .await?;
     let now = cred_epoch(CRED_BASE_SECS);
 
     // 期望版本不匹配 → VersionConflict。
     assert!(
         matches!(
-            repo.bump_version(99, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?)
-                .await,
+            repo.bump_version(
+                identity_scope(a),
+                99,
+                make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?
+            )
+            .await,
             Err(IdentityError::VersionConflict)
         ),
         "期望不匹配 → VersionConflict"
     );
     // 命中 → 替换 hash + version。
-    repo.bump_version(1, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?)
-        .await?;
-    let Some(got) = repo.find_by_user_id(a, cred_uid(CRED_USER_ALICE)?).await? else {
+    repo.bump_version(
+        identity_scope(a),
+        1,
+        make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?,
+    )
+    .await?;
+    let Some(got) = repo
+        .find_by_user_id(identity_scope(a), cred_uid(CRED_USER_ALICE)?)
+        .await?
+    else {
         return Err("credential visible after CAS hit".into());
     };
     assert_eq!(got.version(), 2, "CAS 命中后 version = 2");
     assert_eq!(
-        repo.authenticate(a, login_id("alice"), "pw2".to_string(), now)
+        repo.authenticate(identity_scope(a), login_id("alice"), "pw2".to_string(), now)
             .await?,
         AuthOutcome::Authenticated(cred_uid(CRED_USER_ALICE)?),
         "新密码验签真"
@@ -15797,8 +16192,12 @@ async fn credential_repo_bump_version_cas() -> TestResult {
     // 查无凭据 → CredentialNotFound。
     assert!(
         matches!(
-            repo.bump_version(1, make_cred("ghost", CRED_USER_BOB, "x", 1, a)?)
-                .await,
+            repo.bump_version(
+                identity_scope(a),
+                1,
+                make_cred("ghost", CRED_USER_BOB, "x", 1, a)?
+            )
+            .await,
             Err(IdentityError::CredentialNotFound)
         ),
         "查无 → CredentialNotFound"
@@ -15806,13 +16205,20 @@ async fn credential_repo_bump_version_cas() -> TestResult {
     // 跨租 bump（next 在 B）→ CredentialNotFound（key 派生自 next，B 无行），不动 A。
     assert!(
         matches!(
-            repo.bump_version(2, make_cred("alice", CRED_USER_ALICE, "pw3", 3, b)?)
-                .await,
+            repo.bump_version(
+                identity_scope(b),
+                2,
+                make_cred("alice", CRED_USER_ALICE, "pw3", 3, b)?
+            )
+            .await,
             Err(IdentityError::CredentialNotFound)
         ),
         "跨租 bump → CredentialNotFound"
     );
-    let Some(still_a) = repo.find_by_user_id(a, cred_uid(CRED_USER_ALICE)?).await? else {
+    let Some(still_a) = repo
+        .find_by_user_id(identity_scope(a), cred_uid(CRED_USER_ALICE)?)
+        .await?
+    else {
         return Err("tenant A credential still present after cross-tenant bump".into());
     };
     assert_eq!(still_a.version(), 2, "跨租 bump 不动 A（仍 v2）");
@@ -15837,8 +16243,11 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
     let conflict_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-conflict", 3, tenant)?;
     let ghost_next = make_cred("ghost", CRED_USER_BOB, "pw-ghost", 1, tenant)?;
 
-    repo.save(make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?)
-        .await?;
+    repo.save(
+        identity_scope(tenant),
+        make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?,
+    )
+    .await?;
 
     testkit::repo_conformance::assert_retry_boundary_policy(
         testkit::repo_conformance::RetryBoundaryCase {
@@ -15846,28 +16255,47 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
                 let repo = &repo;
                 let transient_next = transient_next.clone();
                 arm_credential_retry_failpoint("retry-alice", 1);
-                async move { repo.bump_version(1, transient_next).await }
+                async move {
+                    repo.bump_version(identity_scope(tenant), 1, transient_next)
+                        .await
+                }
             },
             transient_attempts: credential_retry_failpoint_hits,
             expected_transient_attempts: 2,
             transient_visible: || async {
-                let Some(got) = repo.find_by_user_id(tenant, retry_uid).await? else {
+                let Some(got) = repo
+                    .find_by_user_id(identity_scope(tenant), retry_uid)
+                    .await?
+                else {
                     return Ok::<bool, IdentityError>(false);
                 };
                 Ok::<bool, IdentityError>(
                     got.version() == 2 && credential_retry_failpoint_hits() == 2,
                 )
             },
-            conflict_action: || async { repo.bump_version(99, conflict_next.clone()).await },
+            conflict_action: || async {
+                repo.bump_version(identity_scope(tenant), 99, conflict_next.clone())
+                    .await
+            },
             conflict_visible: || async {
-                let Some(got) = repo.find_by_user_id(tenant, retry_uid).await? else {
+                let Some(got) = repo
+                    .find_by_user_id(identity_scope(tenant), retry_uid)
+                    .await?
+                else {
                     return Ok::<bool, IdentityError>(false);
                 };
                 Ok::<bool, IdentityError>(got.version() == 3)
             },
-            permanent_action: || async { repo.bump_version(1, ghost_next.clone()).await },
+            permanent_action: || async {
+                repo.bump_version(identity_scope(tenant), 1, ghost_next.clone())
+                    .await
+            },
             permanent_visible: || async {
-                Ok::<bool, IdentityError>(repo.find_by_user_id(tenant, bob_uid).await?.is_some())
+                Ok::<bool, IdentityError>(
+                    repo.find_by_user_id(identity_scope(tenant), bob_uid)
+                        .await?
+                        .is_some(),
+                )
             },
         },
         |e| {
@@ -15939,13 +16367,16 @@ async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
+    )
+    .await?;
 
     // 5 次错 → 达阈值锁定（locked_until 持久化非 NULL）。
     for i in 1..=5 {
         repo.authenticate(
-            a,
+            identity_scope(a),
             login_id("alice"),
             "wrong".to_string(),
             cred_epoch(CRED_BASE_SECS + i),
@@ -15962,7 +16393,7 @@ async fn credential_repo_authenticate_correct_clears_active_lock() -> TestResult
     // 正确密码 → Authenticated + 原子清锁（locked_until + failure_count 持久化清零）。
     assert_eq!(
         repo.authenticate(
-            a,
+            identity_scope(a),
             login_id("alice"),
             "correct".to_string(),
             cred_epoch(CRED_BASE_SECS + 6)
@@ -16181,8 +16612,11 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
     store.run_migrations().await?;
     let repo = Arc::new(PgCredentialRepo::new(&store));
     let a = cred_tenant(CRED_TENANT_A)?;
-    repo.save(make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?)
-        .await?;
+    repo.save(
+        identity_scope(a),
+        make_cred("alice", CRED_USER_ALICE, "correct", 1, a)?,
+    )
+    .await?;
 
     // 5 路并发错密码（同一行）——同一 now，行锁强制串行 RMW（非各自读 stale 副本各 +1 丢更新）。
     let now = cred_epoch(CRED_BASE_SECS);
@@ -16190,8 +16624,13 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
     for _ in 0..5 {
         let repo = Arc::clone(&repo);
         handles.push(tokio::spawn(async move {
-            repo.authenticate(a, login_id("alice"), "wrong".to_string(), now)
-                .await
+            repo.authenticate(
+                identity_scope(a),
+                login_id("alice"),
+                "wrong".to_string(),
+                now,
+            )
+            .await
         }));
     }
     for h in handles {
@@ -16211,7 +16650,8 @@ async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
         "5 路并发错密码 → 失败计数恰 5（FOR UPDATE 无丢更新）"
     );
     assert!(
-        repo.lockout_status(a, login_id("alice"), now).await?,
+        repo.lockout_status(identity_scope(a), login_id("alice"), now)
+            .await?,
         "达阈值后锁定"
     );
 
@@ -16448,11 +16888,16 @@ async fn ta1_audit_append_genesis_and_monotonic_seq() -> TestResult {
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
-    repo.append(make_audit_record(tenant, 0)).await?;
-    repo.append(make_audit_record(tenant, 0)).await?;
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
-    let result = repo.list(tenant, audit_page(500, None)).await?;
+    let result = repo
+        .list(audit_scope(tenant), audit_page(500, None))
+        .await?;
     assert_eq!(result.entries.len(), 3, "TA1: 应恰有 3 条");
     assert_eq!(result.entries[0].seq(), 0, "TA1: genesis seq=0");
     assert_eq!(result.entries[1].seq(), 1, "TA1: seq 单调+1");
@@ -16475,10 +16920,13 @@ async fn ta2_audit_prev_links_to_predecessor_entry_hash() -> TestResult {
     let repo = make_audit_repo(&store);
 
     for _ in 0..3 {
-        repo.append(make_audit_record(tenant, 0)).await?;
+        repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+            .await?;
     }
 
-    let result = repo.list(tenant, audit_page(500, None)).await?;
+    let result = repo
+        .list(audit_scope(tenant), audit_page(500, None))
+        .await?;
     let e = &result.entries;
 
     assert_eq!(
@@ -16516,14 +16964,19 @@ async fn ta3_audit_concurrent_appends_no_seq_gap() -> TestResult {
     let handles: Vec<_> = (0..N)
         .map(|_| {
             let r = Arc::clone(&repo);
-            tokio::spawn(async move { r.append(make_audit_record(tenant, 0)).await })
+            tokio::spawn(async move {
+                r.append(audit_scope(tenant), make_audit_record(tenant, 0))
+                    .await
+            })
         })
         .collect();
     for h in handles {
         h.await.map_err(|e| format!("join error: {e}"))??;
     }
 
-    let result = repo.list(tenant, audit_page(500, None)).await?;
+    let result = repo
+        .list(audit_scope(tenant), audit_page(500, None))
+        .await?;
     assert_eq!(result.entries.len(), N, "TA3: 应恰有 {N} 条");
     let mut seqs: Vec<u64> = result.entries.iter().map(|e| e.seq()).collect();
     seqs.sort_unstable();
@@ -16546,12 +16999,19 @@ async fn ta4_audit_tenant_isolation_independent_genesis() -> TestResult {
     let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
-    repo.append(make_audit_record(tenant_a, 0)).await?;
-    repo.append(make_audit_record(tenant_a, 0)).await?;
-    repo.append(make_audit_record(tenant_b, 0)).await?;
+    repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
+        .await?;
+    repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
+        .await?;
+    repo.append(audit_scope(tenant_b), make_audit_record(tenant_b, 0))
+        .await?;
 
-    let a = repo.list(tenant_a, audit_page(500, None)).await?;
-    let b = repo.list(tenant_b, audit_page(500, None)).await?;
+    let a = repo
+        .list(audit_scope(tenant_a), audit_page(500, None))
+        .await?;
+    let b = repo
+        .list(audit_scope(tenant_b), audit_page(500, None))
+        .await?;
     assert_eq!(a.entries.len(), 2, "TA4: tenant_a 应有 2 条");
     assert_eq!(b.entries.len(), 1, "TA4: tenant_b 应有 1 条");
     assert_eq!(a.entries[0].seq(), 0, "TA4: tenant_a genesis seq=0");
@@ -16577,18 +17037,54 @@ async fn ta4b_audit_tenant_conformance() -> TestResult {
         tenant_b,
         |tenant| {
             let repo = &repo;
-            async move { repo.append(make_audit_record(tenant, 0)).await }
+            async move {
+                repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+                    .await
+            }
         },
         |tenant| {
             let repo = &repo;
             async move {
-                repo.list(tenant, audit_page(500, None))
+                repo.list(audit_scope(tenant), audit_page(500, None))
                     .await
                     .map(|page| !page.entries.is_empty())
             }
         },
     )
     .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// TA4c：audit record tenant 与 repo scope tenant 不一致 → fail-closed，audit row 不落库。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ta4c_audit_rejects_scope_record_tenant_mismatch() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let scope_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let record_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = make_audit_repo(&store);
+
+    let result = repo
+        .append(
+            audit_scope(scope_tenant),
+            make_audit_record(record_tenant, 0),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "audit scope/record mismatch must fail closed"
+    );
+
+    let cnt: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM audit_entries WHERE tenant_id = $1::uuid")
+            .bind(record_tenant.to_string())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(cnt.0, 0, "scope mismatch 不得写 audit_entries 行");
 
     store.shutdown().await?;
     Ok(())
@@ -16611,7 +17107,8 @@ async fn ta5_audit_rls_cross_tenant_read_denied() -> TestResult {
         .await?;
 
     let repo = make_audit_repo(&store);
-    repo.append(make_audit_record(tenant_a, 0)).await?;
+    repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
+        .await?;
 
     {
         let mut tx = store.pool.begin().await?;
@@ -16649,23 +17146,28 @@ async fn ta6_audit_list_pagination_cursor_and_has_more() -> TestResult {
     let repo = make_audit_repo(&store);
 
     for _ in 0..5 {
-        repo.append(make_audit_record(tenant, 0)).await?;
+        repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+            .await?;
     }
 
-    let p1 = repo.list(tenant, audit_page(2, None)).await?;
+    let p1 = repo.list(audit_scope(tenant), audit_page(2, None)).await?;
     assert_eq!(p1.entries.len(), 2, "TA6: p1 应有 2 条");
     assert!(p1.has_more, "TA6: p1 has_more=true");
     assert!(p1.next_cursor.is_some(), "TA6: p1 应有 next_cursor");
     assert_eq!(p1.entries[0].seq(), 0);
     assert_eq!(p1.entries[1].seq(), 1);
 
-    let p2 = repo.list(tenant, audit_page(2, p1.next_cursor)).await?;
+    let p2 = repo
+        .list(audit_scope(tenant), audit_page(2, p1.next_cursor))
+        .await?;
     assert_eq!(p2.entries.len(), 2, "TA6: p2 应有 2 条");
     assert!(p2.has_more, "TA6: p2 has_more=true");
     assert_eq!(p2.entries[0].seq(), 2);
     assert_eq!(p2.entries[1].seq(), 3);
 
-    let p3 = repo.list(tenant, audit_page(2, p2.next_cursor)).await?;
+    let p3 = repo
+        .list(audit_scope(tenant), audit_page(2, p2.next_cursor))
+        .await?;
     assert_eq!(p3.entries.len(), 1, "TA6: p3 应有 1 条");
     assert!(!p3.has_more, "TA6: p3 has_more=false");
     assert!(p3.next_cursor.is_none(), "TA6: p3 无 next_cursor");
@@ -16684,11 +17186,14 @@ async fn ta7_audit_list_invalid_cursor_fail_closed() -> TestResult {
     store.run_migrations().await?;
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-a-number");
     let cursor = vocab::Cursor::parse(&raw).unwrap();
-    let result = repo.list(tenant, audit_page(10, Some(cursor))).await;
+    let result = repo
+        .list(audit_scope(tenant), audit_page(10, Some(cursor)))
+        .await;
     assert!(
         matches!(result, Err(audit::ports::AuditError::InvalidCursor)),
         "TA7: 语义无效游标须返回 InvalidCursor"
@@ -16710,12 +17215,13 @@ async fn ta8_audit_verify_tail_incremental_and_tamper_detection() -> TestResult 
     let repo = make_audit_repo(&store);
 
     for _ in 0..5 {
-        repo.append(make_audit_record(tenant, 0)).await?;
+        repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+            .await?;
     }
 
     // 干净链：verify_tail 均通过。
-    repo.verify_tail(tenant, 2).await?;
-    repo.verify_tail(tenant, 10).await?;
+    repo.verify_tail(audit_scope(tenant), 2).await?;
+    repo.verify_tail(audit_scope(tenant), 10).await?;
 
     // 超级用户篡改 seq=0 的 entry_hash（rss_app 无 UPDATE 权）。
     sqlx::query("UPDATE audit_entries SET entry_hash = $1 WHERE tenant_id = $2::uuid AND seq = 0")
@@ -16725,14 +17231,14 @@ async fn ta8_audit_verify_tail_incremental_and_tamper_detection() -> TestResult 
         .await?;
 
     // 小窗口（末 2 条 = seq 3,4 + 前驱 seq 2）：不覆盖被篡改 seq 0 → 增量验证仍 Ok。
-    let tail2 = repo.verify_tail(tenant, 2).await;
+    let tail2 = repo.verify_tail(audit_scope(tenant), 2).await;
     assert!(
         tail2.is_ok(),
         "TA8: 小窗口不覆盖被篡改 genesis → verify_tail(2) 须 Ok，got: {tail2:?}"
     );
 
     // 大窗口（全 5 条 seq 0-4）：覆盖被篡改 seq 0 → HashMismatch。
-    let tail10 = repo.verify_tail(tenant, 10).await;
+    let tail10 = repo.verify_tail(audit_scope(tenant), 10).await;
     assert!(
         matches!(tail10, Err(audit::ports::AuditError::HashMismatch)),
         "TA8: 大窗口覆盖被篡改 genesis → HashMismatch，got: {tail10:?}"
@@ -16756,9 +17262,10 @@ async fn ta9_audit_recorded_at_nanos_roundtrip_and_chain_verifies() -> TestResul
     let repo = make_audit_repo(&store);
 
     let nanos_input: u32 = 123_456_789;
-    repo.append(make_audit_record(tenant, nanos_input)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, nanos_input))
+        .await?;
 
-    let result = repo.list(tenant, audit_page(10, None)).await?;
+    let result = repo.list(audit_scope(tenant), audit_page(10, None)).await?;
     assert_eq!(result.entries.len(), 1, "TA9: 应恰有 1 条");
 
     let e = &result.entries[0];
@@ -16773,7 +17280,7 @@ async fn ta9_audit_recorded_at_nanos_roundtrip_and_chain_verifies() -> TestResul
     );
 
     // list 内置增量验证；额外 verify_tail 确认链完整。
-    repo.verify_tail(tenant, 10).await?;
+    repo.verify_tail(audit_scope(tenant), 10).await?;
 
     store.shutdown().await?;
     Ok(())
@@ -16794,7 +17301,8 @@ async fn ta10_audit_append_only_delete_update_rejected_for_rss_app() -> TestResu
     let tenant_str = uuid::Uuid::new_v4().to_string();
     let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
     // rss_app DELETE → permission denied。
     {
@@ -16859,7 +17367,8 @@ async fn ta11_audit_rls_null_tenant_fail_closed() -> TestResult {
     let tenant_str = uuid::Uuid::new_v4().to_string();
     let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
     {
         let mut tx = store.pool.begin().await?;
@@ -16891,11 +17400,11 @@ async fn ta12_audit_empty_tenant_list_and_verify_tail_ok() -> TestResult {
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
-    let result = repo.list(tenant, audit_page(10, None)).await?;
+    let result = repo.list(audit_scope(tenant), audit_page(10, None)).await?;
     assert!(result.entries.is_empty(), "TA12: 空租户 list 须空");
     assert!(!result.has_more);
 
-    repo.verify_tail(tenant, 10).await?;
+    repo.verify_tail(audit_scope(tenant), 10).await?;
 
     store.shutdown().await?;
     Ok(())
@@ -16911,7 +17420,8 @@ async fn ta15_audit_admin_verify_tenant_clean_chain_success() -> TestResult {
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
     for _ in 0..5 {
-        repo.append(make_audit_record(tenant, 0)).await?;
+        repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+            .await?;
     }
 
     let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
@@ -16937,9 +17447,12 @@ async fn ta16_audit_admin_verify_tenant_ab_isolation() -> TestResult {
     let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
-    repo.append(make_audit_record(tenant_a, 0)).await?;
-    repo.append(make_audit_record(tenant_a, 0)).await?;
-    repo.append(make_audit_record(tenant_b, 0)).await?;
+    repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
+        .await?;
+    repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
+        .await?;
+    repo.append(audit_scope(tenant_b), make_audit_record(tenant_b, 0))
+        .await?;
 
     let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
     let admin_repo = make_audit_admin_repo(&audit_admin);
@@ -16970,8 +17483,13 @@ async fn ta17_audit_admin_verify_tenant_tamper_and_seq_gap_fail() -> TestResult 
     let gap_tenant = vocab::TenantId::parse(&gap_tenant_str).unwrap();
     let repo = make_audit_repo(&store);
     for _ in 0..5 {
-        repo.append(make_audit_record(tampered_tenant, 0)).await?;
-        repo.append(make_audit_record(gap_tenant, 0)).await?;
+        repo.append(
+            audit_scope(tampered_tenant),
+            make_audit_record(tampered_tenant, 0),
+        )
+        .await?;
+        repo.append(audit_scope(gap_tenant), make_audit_record(gap_tenant, 0))
+            .await?;
     }
     sqlx::query("UPDATE audit_entries SET entry_hash = $1 WHERE tenant_id = $2::uuid AND seq = 0")
         .bind(vec![0xAAu8; 32])
@@ -17015,7 +17533,8 @@ async fn ta18_audit_admin_role_dml_is_rejected() -> TestResult {
     let tenant_str = uuid::Uuid::new_v4().to_string();
     let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
     let audit_admin = connect_pg_audit_admin_role(&pg, &store).await?;
     {
@@ -17103,7 +17622,8 @@ async fn ta13_audit_hydrate_row_wrong_length_entry_hash_returns_storage() -> Tes
     let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
 
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
     // 超级用户临时删 entry_hash 长度 CHECK 约束（PostgreSQL 自动命名 audit_entries_entry_hash_check），
     // 注入错误长度 bytea（10B ≠ 32B）以覆盖 hydrate_row wrong-length arm。
@@ -17118,7 +17638,7 @@ async fn ta13_audit_hydrate_row_wrong_length_entry_hash_returns_storage() -> Tes
         .execute(&store.pool)
         .await?;
 
-    let result = repo.list(tenant, audit_page(10, None)).await;
+    let result = repo.list(audit_scope(tenant), audit_page(10, None)).await;
     assert!(
         matches!(result, Err(audit::ports::AuditError::Storage(_))),
         "TA13: 错误长度 entry_hash 须返回 AuditError::Storage（实际为 Ok 或其它 Err 变体）"
@@ -17141,7 +17661,8 @@ async fn ta14_audit_hydrate_row_unknown_actor_kind_returns_storage() -> TestResu
     let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
 
-    repo.append(make_audit_record(tenant, 0)).await?;
+    repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+        .await?;
 
     // 超级用户临时删 actor_kind IN 值集 CHECK 约束（PostgreSQL 自动命名 audit_entries_actor_kind_check），
     // 注入闭值集外的 actor_kind 文本以覆盖 hydrate_row actor_kind_from_db → None 的错误臂。
@@ -17157,7 +17678,7 @@ async fn ta14_audit_hydrate_row_unknown_actor_kind_returns_storage() -> TestResu
     .execute(&store.pool)
     .await?;
 
-    let result = repo.list(tenant, audit_page(10, None)).await;
+    let result = repo.list(audit_scope(tenant), audit_page(10, None)).await;
     assert!(
         matches!(result, Err(audit::ports::AuditError::Storage(_))),
         "TA14: 未知 actor_kind 须返回 AuditError::Storage（实际为 Ok 或其它 Err 变体）"

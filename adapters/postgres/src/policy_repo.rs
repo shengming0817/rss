@@ -7,7 +7,7 @@ use diport::{Clock, OutboxEnvelopeParts};
 use identity::ports::{
     AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, Policy, PolicyCondition,
     PolicyEffect, PolicyId, PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage,
-    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, TenantId,
+    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion, TenantId, TenantRepoScope,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -327,12 +327,17 @@ fn hydrate_policy(tenant: TenantId, raw: RawPolicy) -> Result<Policy, IdentityEr
 }
 
 impl PolicyRepo for PgPolicyRepo {
-    async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError> {
+    async fn find(
+        &self,
+        tenant_scope: TenantRepoScope,
+        id: PolicyId,
+    ) -> Result<Option<Policy>, IdentityError> {
+        let tenant = tenant_scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let id_str = id.as_str().to_string();
         let raw: Option<RawPolicy> = self
             .pool
-            .read(tenant, move |conn| {
+            .read(tenant_scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
@@ -360,16 +365,17 @@ impl PolicyRepo for PgPolicyRepo {
 
     async fn list_active(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         page: PolicyPage,
     ) -> Result<PolicyListResult, IdentityError> {
+        let tenant = tenant_scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let limit = usize::from(page.limit.get());
         let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(storage_boxed)?;
         let after = page.after.map(|id| id.as_str().to_string());
         let raw: Vec<RawPolicy> = self
             .pool
-            .read(tenant, move |conn| {
+            .read(tenant_scope, move |conn| {
                 Box::pin(async move {
                     let rows = sqlx::query(
                         r#"
@@ -408,15 +414,16 @@ impl PolicyRepo for PgPolicyRepo {
 
     async fn list_effective(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         at: SystemTime,
     ) -> Result<Vec<Policy>, IdentityError> {
+        let tenant = tenant_scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let at_secs = unix_secs(at);
         let raw: Vec<RawPolicy> = self
             .pool
-            .read(tenant, move |conn| {
+            .read(tenant_scope, move |conn| {
                 Box::pin(async move {
                     let rows = sqlx::query(
                         r#"
@@ -456,11 +463,12 @@ impl PolicyRepo for PgPolicyRepo {
 impl PolicyLifecycle for PgPolicyLifecycle {
     async fn create_and_emit(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         policy: Policy,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
+        let tenant = tenant_scope.tenant();
         if policy.tenant() != tenant || policy.version().get() != 1 {
             return Err(IdentityError::InvalidPolicy);
         }
@@ -480,7 +488,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let inserted = self
             .pool
             .write(
-                tenant,
+                tenant_scope,
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query(
@@ -528,12 +536,13 @@ impl PolicyLifecycle for PgPolicyLifecycle {
 
     async fn update_and_emit(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
+        let tenant = tenant_scope.tenant();
         if policy.tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
@@ -549,7 +558,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let raw: Option<RawPolicy> = self
             .pool
             .write(
-                tenant,
+                tenant_scope,
                 move |conn| {
                     Box::pin(async move {
                         let row = sqlx::query(
@@ -606,7 +615,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                 if (PgPolicyRepo {
                     pool: self.pool.clone(),
                 })
-                .find(tenant, id)
+                .find(tenant_scope, id)
                 .await?
                 .is_some()
                 {
@@ -620,12 +629,13 @@ impl PolicyLifecycle for PgPolicyLifecycle {
 
     async fn deactivate_and_emit(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, IdentityError> {
+        let tenant = tenant_scope.tenant();
         let (env_tenant, env) = self.envelope(envelope)?;
         if env_tenant != tenant {
             return Err(IdentityError::InvalidPolicy);
@@ -637,7 +647,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         let deleted = self
             .pool
             .write(
-                tenant,
+                tenant_scope,
                 move |conn| {
                     Box::pin(async move {
                         let rows = sqlx::query(
@@ -676,7 +686,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         if (PgPolicyRepo {
             pool: self.pool.clone(),
         })
-        .find(tenant, id)
+        .find(tenant_scope, id)
         .await?
         .is_some()
         {

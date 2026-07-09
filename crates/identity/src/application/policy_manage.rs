@@ -33,7 +33,9 @@ use crate::domain::{
     PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
     ResourcePolicyAttributeKey,
 };
-use crate::ports::{DynPolicyLifecycle, DynPolicyRepo, PolicyLifecycle, PolicyPage, PolicyRepo};
+use crate::ports::{
+    DynPolicyLifecycle, DynPolicyRepo, PolicyLifecycle, PolicyPage, PolicyRepo, TenantRepoScope,
+};
 
 const POLICY_DOMAIN: &str = POLICY_UPDATED_CONTRACT.domain();
 
@@ -200,6 +202,7 @@ impl PolicyManageService {
         actor_kind: vocab::PrincipalKind,
         draft: PolicyCreateDraft,
     ) -> Result<Policy, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let policy = Policy::build(
             draft.id.as_str(),
             tenant,
@@ -220,7 +223,7 @@ impl PolicyManageService {
             version: policy.version(),
         })?;
         self.lifecycle
-            .create_and_emit(tenant, policy, entry, envelope)
+            .create_and_emit(tenant_scope, policy, entry, envelope)
             .await
             .map_err(map_identity_error)
     }
@@ -237,6 +240,7 @@ impl PolicyManageService {
         actor_kind: vocab::PrincipalKind,
         draft: PolicyUpdateDraft,
     ) -> Result<Policy, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let next = draft
             .expected
             .next_checked()
@@ -262,7 +266,7 @@ impl PolicyManageService {
             version: next,
         })?;
         self.lifecycle
-            .update_and_emit(tenant, policy, draft.expected, entry, envelope)
+            .update_and_emit(tenant_scope, policy, draft.expected, entry, envelope)
             .await
             .map_err(map_identity_error)
     }
@@ -279,9 +283,10 @@ impl PolicyManageService {
         actor_kind: vocab::PrincipalKind,
         draft: PolicyDeactivateDraft,
     ) -> Result<PolicyVersion, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let current = self
             .policies
-            .find(tenant, draft.id.clone())
+            .find(tenant_scope, draft.id.clone())
             .await
             .map_err(map_identity_error)?
             .ok_or(PolicyManageError::PolicyNotFound)?;
@@ -303,7 +308,7 @@ impl PolicyManageService {
         })?;
         match self
             .lifecycle
-            .deactivate_and_emit(tenant, draft.id, draft.expected, entry, envelope)
+            .deactivate_and_emit(tenant_scope, draft.id, draft.expected, entry, envelope)
             .await
             .map_err(map_identity_error)?
         {
@@ -317,8 +322,9 @@ impl PolicyManageService {
         tenant: TenantId,
         id: PolicyId,
     ) -> Result<Policy, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         self.policies
-            .find(tenant, id)
+            .find(tenant_scope, id)
             .await
             .map_err(map_identity_error)?
             .ok_or(PolicyManageError::PolicyNotFound)
@@ -329,8 +335,9 @@ impl PolicyManageService {
         tenant: TenantId,
         page: PolicyPage,
     ) -> Result<crate::ports::PolicyListResult, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
         self.policies
-            .list_active(tenant, page)
+            .list_active(tenant_scope, page)
             .await
             .map_err(map_identity_error)
     }

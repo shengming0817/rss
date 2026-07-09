@@ -14,7 +14,9 @@
 //! ref: casbin/casbin-rs（RBAC 角色多租 domain-scoped 持久化模型）
 //! ref: adapters/postgres/src/config_repo.rs（#1249，pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
 
-use identity::ports::{IdentityError, Role, RoleId, RoleListResult, RolePage, RoleRepo, TenantId};
+use identity::ports::{
+    IdentityError, Role, RoleId, RoleListResult, RolePage, RoleRepo, TenantId, TenantRepoScope,
+};
 use sqlx::Row;
 
 use crate::PgStore;
@@ -50,7 +52,12 @@ fn tenant_param(tenant: TenantId) -> String {
 }
 
 impl RoleRepo for PgRoleRepo {
-    async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError> {
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        id: RoleId,
+    ) -> Result<Option<Role>, IdentityError> {
+        let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 读闭包内仅 SQL fetch + try_get 返回原始值；Role::hydrate（复核 id / permission 白名单）在 tx 外，
         // 保持 IdentityError 语义不变（域错误不依赖 sqlx）。损坏持久化值 → Storage（fail-closed）。
@@ -61,7 +68,7 @@ impl RoleRepo for PgRoleRepo {
 
         let raw = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
@@ -97,14 +104,15 @@ impl RoleRepo for PgRoleRepo {
         }
     }
 
-    async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError> {
+    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let permissions: Vec<String> = role.permission_ids().collect();
         // tenant-scoped 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert。
         // save 是本 adapter **唯一**写路径（find 为 plain read）⇒ 不抽 `tenant_scoped` helper，直接 inline。
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query(
@@ -132,15 +140,16 @@ impl RoleRepo for PgRoleRepo {
 
     async fn list(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         page: RolePage,
     ) -> Result<RoleListResult, IdentityError> {
+        let tenant = scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let after = page.after.as_ref().map(|id| id.as_str().to_owned());
         let limit = i64::from(page.limit.get()) + 1;
         let raw = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     let rows = sqlx::query(
                         r#"

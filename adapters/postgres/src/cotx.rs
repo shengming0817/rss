@@ -28,6 +28,56 @@ use crate::projection_events::ProjectionWriteRegistry;
 
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
 
+pub(crate) trait TenantScopeHandle: Copy + Send {
+    fn tenant(self) -> TenantId;
+}
+
+/// Crate-private tenant capability for postgres-owned infrastructure paths
+/// such as outbox, inbox, DLQ, saga, and reconcile workers.
+#[derive(Clone, Copy)]
+pub(crate) struct InfraTenantScope {
+    tenant: TenantId,
+    _seal: (),
+}
+
+impl InfraTenantScope {
+    fn from_infra_capability(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+
+    pub(crate) fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+}
+
+impl TenantScopeHandle for InfraTenantScope {
+    fn tenant(self) -> TenantId {
+        InfraTenantScope::tenant(&self)
+    }
+}
+
+pub(crate) fn infra_tenant_scope(tenant: TenantId) -> InfraTenantScope {
+    InfraTenantScope::from_infra_capability(tenant)
+}
+
+impl TenantScopeHandle for settings::ports::TenantRepoScope {
+    fn tenant(self) -> TenantId {
+        settings::ports::TenantRepoScope::tenant(&self)
+    }
+}
+
+impl TenantScopeHandle for identity::ports::TenantRepoScope {
+    fn tenant(self) -> TenantId {
+        identity::ports::TenantRepoScope::tenant(&self)
+    }
+}
+
+impl TenantScopeHandle for audit::ports::TenantRepoScope {
+    fn tenant(self) -> TenantId {
+        audit::ports::TenantRepoScope::tenant(&self)
+    }
+}
+
 /// Commit returned an error after the server may already have accepted the transaction.
 ///
 /// Callers must not treat this like a pre-commit transient error: retrying the same UoW can turn
@@ -131,72 +181,82 @@ impl PgTenantPool {
     }
 
     /// Run a tenant-scoped read transaction.
-    pub(crate) async fn read<T, F>(&self, tenant: TenantId, read: F) -> Result<T, sqlx::Error>
+    pub(crate) async fn read<S, T, F>(&self, scope: S, read: F) -> Result<T, sqlx::Error>
     where
+        S: TenantScopeHandle,
         F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, sqlx::Error>> + Send,
         T: Send,
     {
+        let tenant = scope.tenant();
         tenant_scoped_read(&self.pool, tenant, read).await
     }
 
     /// Run a tenant-scoped read transaction whose closure can return domain errors.
-    pub(crate) async fn read_map<T, F, E>(
+    pub(crate) async fn read_map<S, T, F, E>(
         &self,
-        tenant: TenantId,
+        scope: S,
         read: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<T, E>
     where
+        S: TenantScopeHandle,
         F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
+        let tenant = scope.tenant();
         tenant_scoped_read_map(&self.pool, tenant, read, map_storage).await
     }
 
     /// Run a tenant-scoped write transaction.
-    pub(crate) async fn write<T, F, E>(
+    pub(crate) async fn write<S, T, F, E>(
         &self,
-        tenant: TenantId,
+        scope: S,
         write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<T, E>
     where
+        S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
+        let tenant = scope.tenant();
         tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, false).await
     }
 
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
-    pub(crate) async fn retry_write<T, F, E>(
+    pub(crate) async fn retry_write<S, T, F, E>(
         &self,
-        tenant: TenantId,
+        scope: S,
         write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<T, E>
     where
+        S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
         E: Send,
         T: Send,
     {
+        let tenant = scope.tenant();
         tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, true).await
     }
 
     /// Run a tenant-scoped business write followed by outbox append in the same transaction.
-    pub(crate) async fn co_tx_with_outbox<F, E>(
+    pub(crate) async fn co_tx_with_outbox<S, F, E>(
         &self,
-        tenant: TenantId,
+        scope: S,
         entry: &Entry,
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<(), E>
     where
+        S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
         E: Send,
     {
+        let tenant = scope.tenant();
         co_tx_with_outbox(
             &self.pool,
             self.projection_registry,
@@ -210,18 +270,20 @@ impl PgTenantPool {
     }
 
     /// Run a tenant-scoped co-transaction with a per-attempt lock wait bound.
-    pub(crate) async fn retry_co_tx_with_outbox<F, E>(
+    pub(crate) async fn retry_co_tx_with_outbox<S, F, E>(
         &self,
-        tenant: TenantId,
+        scope: S,
         entry: &Entry,
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
     ) -> Result<(), E>
     where
+        S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
         E: Send,
     {
+        let tenant = scope.tenant();
         co_tx_with_outbox_inner(
             &self.pool,
             self.projection_registry,

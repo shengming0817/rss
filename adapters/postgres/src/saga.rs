@@ -19,7 +19,7 @@ use diport::{
 };
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, infra_tenant_scope};
 
 const HOLDER_ID_MAX_BYTES: usize = 256;
 
@@ -57,7 +57,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         let fields = RegistrationFields::from(registration);
         self.pool
             .write(
-                fields.instance.tenant(),
+                infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
                     Box::pin(async move {
                         sqlx::query(
@@ -106,7 +106,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         let fields = InstanceFields::from(*instance);
         self.pool
             .read_map(
-                fields.instance.tenant(),
+                infra_tenant_scope(fields.instance.tenant()),
                 move |conn| {
                     Box::pin(async move {
                         let row: Option<(String,)> = sqlx::query_as(
@@ -146,7 +146,7 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         let ttl_secs = duration_secs(ttl).map_err(SagaInstanceStoreError::new)?;
         self.pool
             .write(
-                fields.instance.tenant(),
+                infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
                     Box::pin(async move {
                         let row: Option<(String, i64)> = sqlx::query_as(
@@ -227,7 +227,7 @@ impl PgSagaInstanceStore {
         let fields = LeaseFields::from(lease).map_err(SagaInstanceStoreError::new)?;
         self.pool
             .write(
-                fields.instance.tenant(),
+                infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
                     Box::pin(async move {
                         let result = if let Some(ttl_secs) = extend_ttl_secs {
@@ -319,7 +319,7 @@ impl SagaJournal for PgSagaJournal {
         let entry_fields = JournalEntryFields::from(entry)?;
         self.pool
             .write(
-                fields.instance.tenant(),
+                infra_tenant_scope(fields.instance.tenant()),
                 move |tx| {
                     Box::pin(async move {
                         let inserted: Option<(i32,)> = sqlx::query_as(
@@ -417,7 +417,7 @@ impl SagaJournal for PgSagaJournal {
         let fields = InstanceFields::from(*instance);
         self.pool
             .read_map(
-                fields.instance.tenant(),
+                infra_tenant_scope(fields.instance.tenant()),
                 move |conn| {
                     Box::pin(async move {
                         let rows: Vec<(i64, String, String)> = sqlx::query_as(

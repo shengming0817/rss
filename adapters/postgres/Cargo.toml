@@ -78,6 +78,8 @@ metrics-exporter-prometheus = { workspace = true }
 # （funnel `Session::new` 为 pub(crate)；test-support feature 仅 dev/test 生效，生产 seal 不变）。同范式见
 # identity 自身 dev-dep `authn = { features = ["test-support"] }`。
 identity = { path = "../../crates/identity", features = ["test-support"] }
+settings = { path = "../../crates/settings", features = ["test-support"] }
+audit = { path = "../../crates/audit", features = ["test-support"] }
 # 集成测试容器 fixture（#1137）：testcontainers self-provision postgres（经 testkit/containers，
 # 仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement，dev-dep 边不入 shipped 分层图）。
 testkit = { path = "../../crates/testkit" }

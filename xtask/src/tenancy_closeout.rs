@@ -22,6 +22,7 @@ const VERIFY_CI_REQUIRED_GATES: &[&str] = &[
     "schema-rls",
     "setlocal-funnel",
     "pg-tenant-tx-guard",
+    "repo-scope-guard",
     "pdp-allow-guard",
     "tenancy-closeout",
     "dylint",
@@ -1470,6 +1471,10 @@ ABAC is not the tenant boundary
     #[test]
     fn green_fixture_has_no_findings() {
         assert!(scan_plan_membership("ci", VERIFY_CI_REQUIRED_GATES).is_empty());
+        assert!(
+            VERIFY_CI_REQUIRED_GATES.contains(&"repo-scope-guard"),
+            "tenancy closeout required gate set must include repo-scope-guard"
+        );
 
         let root_lint_fixture = format!(
             "[workspace.metadata.dylint]\nlibraries = [{}]\n",

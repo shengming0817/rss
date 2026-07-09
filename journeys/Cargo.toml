@@ -16,11 +16,13 @@ workspace = true
 # journey 集成测试组装根：组合根可依赖所有库 crate（deny.toml wrappers 已含 journeys）。
 [dev-dependencies]
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
-identity = { path = "../crates/identity", features = ["seed-login"] }
+# test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
+identity = { path = "../crates/identity", features = ["seed-login", "test-support"] }
 audit = { path = "../crates/audit" }
 httpserve = { path = "../crates/httpserve" }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
-settings = { path = "../crates/settings", features = ["seed-data"] }
+# test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
+settings = { path = "../crates/settings", features = ["seed-data", "test-support"] }
 bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
 deviceloop = { path = "../crates/deviceloop" }

@@ -19,7 +19,7 @@ use primitives::MacVerifier;
 
 use crate::PgStore;
 use crate::audit_repo::{advisory_lock_key, append_in_tx, tenant_str};
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::inbox::commit_in_tx;
 
 /// Postgres-backed ConsumerTx audit handler.
@@ -96,7 +96,7 @@ where
         let hasher = Arc::clone(&self.hasher);
         self.pool
             .write(
-                tenant,
+                infra_tenant_scope(tenant),
                 move |tx| {
                     Box::pin(async move {
                         append_in_tx(tx.conn(), &tenant_uuid, lock_key, &record, &hasher)
@@ -198,7 +198,7 @@ impl PgSettingsConsumerTx {
     ) -> Result<(), PgConsumerTxError> {
         self.pool
             .write(
-                ctx.tenant_id(),
+                infra_tenant_scope(ctx.tenant_id()),
                 move |tx| {
                     Box::pin(async move {
                         match commit_in_tx(tx, &ctx, &key, &lease)

@@ -33,7 +33,7 @@
 
 use consistency::Entry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantId};
+use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantRepoScope};
 use sqlx::Row;
 
 use crate::PgStore;
@@ -77,6 +77,7 @@ impl PgSessionLifecycle {
 impl SessionLifecycle for PgSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        scope: TenantRepoScope,
         session: Session,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
@@ -88,6 +89,11 @@ impl SessionLifecycle for PgSessionLifecycle {
         let (contract, env_tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
         let tenant = session.tenant();
+        if scope.tenant() != tenant {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "session co-tx: scope tenant does not match session tenant",
+            )));
+        }
         if env_tenant != tenant {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "session co-tx: outbox envelope tenant does not match session tenant",
@@ -104,7 +110,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         .with_causation_id_opt(causation_id);
         self.pool
             .co_tx_with_outbox(
-                tenant,
+                scope,
                 &entry,
                 &env,
                 move |conn| {
@@ -121,9 +127,10 @@ impl SessionLifecycle for PgSessionLifecycle {
 
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         session_id: SessionId,
     ) -> Result<Option<Session>, IdentityError> {
+        let tenant = scope.tenant();
         // 读经 cotx [`tenant_scoped_read`] 注入 SET LOCAL（与 `PgRoleRepo` / `PgConfigRepo` / `PgSecretRepo` /
         // `PgCredentialRepo` / `PgRefreshTokenStore` 读路径**统一收口**，对齐 0009 RLS policy current_setting
         // 锚点）+ 显式 `WHERE tenant_id` 双保险；跨租 → 0 行 → None（fail-closed）。`revoked = false` 过滤软撤销。
@@ -135,7 +142,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         let session_id_q = session_id.as_str().to_owned();
         let raw = self
             .pool
-            .read(tenant, move |conn| {
+            .read(scope, move |conn| {
                 Box::pin(async move {
                     let row = sqlx::query(
                         r#"
@@ -176,14 +183,19 @@ impl SessionLifecycle for PgSessionLifecycle {
         }
     }
 
-    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError> {
+    async fn revoke(
+        &self,
+        scope: TenantRepoScope,
+        session_id: SessionId,
+    ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
         // 软撤销 = tenant-scoped 事务（SET LOCAL 锚点，与 co-tx 写 / `PgRoleRepo::save` 统一收口）内
         // `UPDATE ... SET revoked = true`。幂等：未知 / 跨租（`WHERE tenant_id` 不匹配）/ 已撤销均 0 行影响、仍
         // `Ok(())`（与 in-mem / demo provider 的幂等 no-op 语义对齐）。软撤销不删行（保留审计 + 幂等）。
         let tenant_uuid = tenant.as_uuid().to_string();
         self.pool
             .write(
-                tenant,
+                scope,
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query(

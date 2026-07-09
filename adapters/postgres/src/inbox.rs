@@ -32,7 +32,7 @@ use consistency::{
 use sqlx::{PgPool, Row};
 
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability};
+use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 
 /// inbox 租约过期阈值（秒）；claimed 行超此阈值未续租即可被 TTL 重捞（镜 outbox `LEASE_TTL_SECONDS`，#1213）。
 ///
@@ -125,7 +125,7 @@ async fn sample_inbox_backlog(
     let tenant = scope.tenant_id();
     let group = scope.consumer_group().as_str().to_string();
     let (depth, oldest_age_seconds): (i64, i64) = pool
-        .read(tenant, move |conn| {
+        .read(infra_tenant_scope(tenant), move |conn| {
             Box::pin(async move {
                 sqlx::query_as(
                     r#"
@@ -332,7 +332,7 @@ impl InboxStore for PgInboxStore {
         let lease = lease.as_str().to_string();
         self.pool
             .write(
-                fields.tenant,
+                infra_tenant_scope(fields.tenant),
                 move |tx| {
                     let fields = fields.clone();
                     let key = key.clone();
@@ -432,7 +432,7 @@ impl InboxStore for PgInboxStore {
         let lease = lease.as_str().to_string();
         self.pool
             .write(
-                fields.tenant,
+                infra_tenant_scope(fields.tenant),
                 move |tx| {
                     let fields = fields.clone();
                     let key = key.clone();
@@ -486,7 +486,7 @@ impl InboxStore for PgInboxStore {
         let lease = lease.as_str().to_string();
         self.pool
             .write(
-                fields.tenant,
+                infra_tenant_scope(fields.tenant),
                 move |tx| {
                     let fields = fields.clone();
                     let key = key.clone();
@@ -517,7 +517,7 @@ impl InboxStore for PgInboxStore {
         let lease = lease.as_str().to_string();
         self.pool
             .write(
-                fields.tenant,
+                infra_tenant_scope(fields.tenant),
                 move |tx| {
                     let fields = fields.clone();
                     let key = key.clone();

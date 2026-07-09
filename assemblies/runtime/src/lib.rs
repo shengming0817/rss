@@ -4056,12 +4056,14 @@ mod tests {
     use super::*;
     use crate::routes::{AssembledListener, assemble_authed_routers};
 
+    use audit::ports::TenantRepoScope as AuditTenantRepoScope;
     use axum::http::Method;
     use diport::ServiceTokenReplayGuard;
     use eventexec::{
         DlqError, EVENT_CONSUMER_PROBE, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE,
         OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
     };
+    use identity::ports::TenantRepoScope as IdentityTenantRepoScope;
     use oidc::OidcProvider;
     use primitives::ListenerKind;
     use std::future::Future;
@@ -4348,7 +4350,7 @@ mod tests {
     impl identity::ports::RoleRepo for StaticRoleRepo {
         async fn find(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             id: identity::ports::RoleId,
         ) -> Result<Option<identity::ports::Role>, identity::ports::IdentityError> {
             Ok(self.roles.get(id.as_str()).cloned())
@@ -4356,7 +4358,7 @@ mod tests {
 
         async fn save(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _role: identity::ports::Role,
         ) -> Result<(), identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4366,7 +4368,7 @@ mod tests {
 
         async fn list(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _page: identity::ports::RolePage,
         ) -> Result<identity::ports::RoleListResult, identity::ports::IdentityError> {
             Ok(identity::ports::RoleListResult {
@@ -4392,6 +4394,7 @@ mod tests {
     impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
         async fn assign_and_emit(
             &self,
+            _scope: IdentityTenantRepoScope,
             _binding: identity::ports::RoleBinding,
             _entry: consistency::Entry,
             _envelope: diport::OutboxEnvelopeParts,
@@ -4403,7 +4406,7 @@ mod tests {
 
         async fn revoke_and_emit(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _role_id: identity::ports::RoleId,
             _subject: String,
             _entry: consistency::Entry,
@@ -4416,9 +4419,10 @@ mod tests {
 
         async fn list_for_subject(
             &self,
-            tenant: vocab::TenantId,
+            scope: IdentityTenantRepoScope,
             subject: String,
         ) -> Result<Vec<identity::ports::RoleBinding>, identity::ports::IdentityError> {
+            let tenant = scope.tenant();
             self.bindings
                 .iter()
                 .filter(|(binding_tenant, binding_subject, _)| {
@@ -4436,7 +4440,7 @@ mod tests {
     impl identity::ports::PolicyRepo for EmptyPolicyRepo {
         async fn find(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _id: identity::ports::PolicyId,
         ) -> Result<Option<identity::ports::Policy>, identity::ports::IdentityError> {
             Ok(None)
@@ -4444,7 +4448,7 @@ mod tests {
 
         async fn list_active(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _page: identity::ports::PolicyPage,
         ) -> Result<identity::ports::PolicyListResult, identity::ports::IdentityError> {
             Ok(identity::ports::PolicyListResult {
@@ -4455,7 +4459,7 @@ mod tests {
 
         async fn list_effective(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant_scope: IdentityTenantRepoScope,
             _scope: identity::ports::PolicyRouteScope,
             _at: SystemTime,
         ) -> Result<Vec<identity::ports::Policy>, identity::ports::IdentityError> {
@@ -4468,7 +4472,7 @@ mod tests {
     impl identity::ports::ResourceAttributeRepo for EmptyResourceAttributeRepo {
         async fn resolve_effective(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant_scope: IdentityTenantRepoScope,
             _scope: identity::ports::PolicyRouteScope,
             _resource_id: identity::ports::ResourceAttributeResourceId,
             _required_keys: Vec<identity::ports::ResourceAttributeKey>,
@@ -4482,7 +4486,7 @@ mod tests {
 
         async fn upsert(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _attribute: identity::ports::ResourceAttribute,
             _expected: Option<identity::ports::ResourceAttributeVersion>,
         ) -> Result<identity::ports::ResourceAttribute, identity::ports::IdentityError> {
@@ -4493,7 +4497,7 @@ mod tests {
 
         async fn expire(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant_scope: IdentityTenantRepoScope,
             _scope: identity::ports::PolicyRouteScope,
             _resource_id: identity::ports::ResourceAttributeResourceId,
             _key: identity::ports::ResourceAttributeKey,
@@ -4510,7 +4514,7 @@ mod tests {
     impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         async fn create_and_emit(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _policy: identity::ports::Policy,
             _entry: consistency::Entry,
             _envelope: diport::OutboxEnvelopeParts,
@@ -4522,7 +4526,7 @@ mod tests {
 
         async fn update_and_emit(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _policy: identity::ports::Policy,
             _expected: identity::ports::PolicyVersion,
             _entry: consistency::Entry,
@@ -4535,7 +4539,7 @@ mod tests {
 
         async fn deactivate_and_emit(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _id: identity::ports::PolicyId,
             _expected: identity::ports::PolicyVersion,
             _entry: consistency::Entry,
@@ -4552,7 +4556,7 @@ mod tests {
     impl identity::ports::CredentialRepo for UnusedCredentialRepo {
         async fn find_by_user_id(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _user_id: ids::UserId,
         ) -> Result<Option<identity::ports::Credential>, identity::ports::IdentityError> {
             Ok(None)
@@ -4560,7 +4564,7 @@ mod tests {
 
         async fn authenticate(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _login: identity::ports::LoginIdentifier,
             _candidate: String,
             _now: SystemTime,
@@ -4572,6 +4576,7 @@ mod tests {
 
         async fn save(
             &self,
+            _scope: IdentityTenantRepoScope,
             _credential: identity::ports::Credential,
         ) -> Result<(), identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4581,6 +4586,7 @@ mod tests {
 
         async fn bump_version(
             &self,
+            _scope: IdentityTenantRepoScope,
             _expected: u32,
             _next: identity::ports::Credential,
         ) -> Result<(), identity::ports::IdentityError> {
@@ -4591,7 +4597,7 @@ mod tests {
 
         async fn lockout_status(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _login: identity::ports::LoginIdentifier,
             _now: SystemTime,
         ) -> Result<bool, identity::ports::IdentityError> {
@@ -4604,6 +4610,7 @@ mod tests {
     impl identity::ports::SessionLifecycle for UnusedSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
+            _scope: IdentityTenantRepoScope,
             _session: identity::ports::Session,
             _entry: consistency::Entry,
             _envelope: diport::OutboxEnvelopeParts,
@@ -4615,7 +4622,7 @@ mod tests {
 
         async fn find(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _session_id: identity::ports::SessionId,
         ) -> Result<Option<identity::ports::Session>, identity::ports::IdentityError> {
             Ok(None)
@@ -4623,7 +4630,7 @@ mod tests {
 
         async fn revoke(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _session_id: identity::ports::SessionId,
         ) -> Result<(), identity::ports::IdentityError> {
             Ok(())
@@ -4635,6 +4642,7 @@ mod tests {
     impl identity::ports::RefreshTokenStore for UnusedRefreshStore {
         async fn insert(
             &self,
+            _scope: IdentityTenantRepoScope,
             _record: identity::ports::RefreshTokenRecord,
         ) -> Result<(), identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4644,7 +4652,7 @@ mod tests {
 
         async fn find_by_hash(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _hash: identity::ports::RefreshTokenHash,
         ) -> Result<Option<identity::ports::RefreshTokenRecord>, identity::ports::IdentityError>
         {
@@ -4653,6 +4661,7 @@ mod tests {
 
         async fn rotate(
             &self,
+            _scope: IdentityTenantRepoScope,
             _rotation: identity::ports::RefreshRotation,
         ) -> Result<bool, identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4662,7 +4671,7 @@ mod tests {
 
         async fn revoke_lineage(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: IdentityTenantRepoScope,
             _lineage_id: identity::ports::RefreshTokenId,
         ) -> Result<(), identity::ports::IdentityError> {
             Ok(())
@@ -4697,7 +4706,9 @@ mod tests {
         ) -> Result<audit::ports::AuditListResult, audit::ports::AuditError> {
             use audit::ports::AuditRepo as _;
 
-            self.repo.list(tenant, page).await
+            self.repo
+                .list(AuditTenantRepoScope::for_test(tenant), page)
+                .await
         }
 
         async fn verify_tenant(
@@ -4713,7 +4724,7 @@ mod tests {
                 let result = self
                     .repo
                     .list(
-                        tenant,
+                        AuditTenantRepoScope::for_test(tenant),
                         audit::ports::AuditPage {
                             limit: batch,
                             cursor,
@@ -4850,18 +4861,21 @@ mod tests {
     ) {
         use audit::ports::AuditRepo as _;
 
-        repo.append(audit::ports::AuditRecord {
-            tenant,
-            actor: ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("actor"),
-            actor_kind: vocab::PrincipalKind::Admin,
-            action: vocab::Action::parse("audit:read").expect("action"),
-            resource: audit::ports::ResourceRef::new(
-                "session",
-                "99999999-8888-4777-8666-555555555555",
-            ),
-            outcome: audit::ports::AuditOutcome::Success,
-            recorded_at: SystemTime::UNIX_EPOCH,
-        })
+        repo.append(
+            AuditTenantRepoScope::for_test(tenant),
+            audit::ports::AuditRecord {
+                tenant,
+                actor: ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("actor"),
+                actor_kind: vocab::PrincipalKind::Admin,
+                action: vocab::Action::parse("audit:read").expect("action"),
+                resource: audit::ports::ResourceRef::new(
+                    "session",
+                    "99999999-8888-4777-8666-555555555555",
+                ),
+                outcome: audit::ports::AuditOutcome::Success,
+                recorded_at: SystemTime::UNIX_EPOCH,
+            },
+        )
         .await
         .expect("append audit record");
     }

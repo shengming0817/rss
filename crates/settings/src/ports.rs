@@ -27,11 +27,71 @@ pub use crate::domain::{ConfigEntry, ConfigRepoError, SettingKey, SettingsError}
 pub use crate::domain::{SecretEntry, SecretKey, SecretRef, SecretRepoError, StoreId};
 pub use vocab::TenantId;
 
+/// Tenant-scoped repo capability for settings storage ports.
+///
+/// The raw tenant id is readable for SQL/RLS lowering, but construction is kept inside this crate
+/// except for test-support builds. External callers cannot pass a bare [`TenantId`] or fabricate a
+/// scope with a struct literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TenantRepoScope {
+    tenant: TenantId,
+    _seal: (),
+}
+
+impl TenantRepoScope {
+    /// Domain-internal constructor from an already authenticated tenant claim.
+    pub(crate) fn from_authenticated_tenant(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+
+    /// Read the tenant carried by this repo capability.
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// Test/dev-only constructor for downstream adapter conformance tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+}
+
+/// Non-cross-tenant row-scoped repo capability for settings rows.
+///
+/// It only wraps [`vocab::ScopedTenant`]-derived visibility, so `RowScope::All` cannot enter normal
+/// row-scoped repo signatures.
+pub struct RowRepoScope {
+    visibility: vocab::RowVisibility,
+    _seal: (),
+}
+
+impl RowRepoScope {
+    #[allow(dead_code)]
+    pub(crate) fn from_scoped_visibility(
+        scope: vocab::ScopedTenant,
+        tenant: TenantRepoScope,
+    ) -> Self {
+        Self {
+            visibility: vocab::RowVisibility::new(scope, tenant.tenant()),
+            _seal: (),
+        }
+    }
+
+    pub fn visibility(&self) -> &vocab::RowVisibility {
+        &self.visibility
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(scope: vocab::ScopedTenant, tenant: TenantRepoScope) -> Self {
+        Self::from_scoped_visibility(scope, tenant)
+    }
+}
+
 /// 版本化配置仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
 /// 公开 [`ConfigRepo`] 是 **Send 变体**（adapter `impl ConfigRepo for ...`），[`DynConfigRepo`] 是其
 /// dyn-compatible wrapper（组合根经 `Box<DynConfigRepo>` 注入）。版本以 `u64` 表达（不裸传内部
-/// `ConfigVersion`），租户必经 typed [`TenantId`] 位置参做 RLS / store scope（多租隔离签名承载）。
+/// `ConfigVersion`），租户必经 [`TenantRepoScope`] opaque handle 做 RLS / store scope（多租隔离签名承载）。
 ///
 /// CAS 语义（etcd 版本模型）：[`ConfigRepo::save`] 要求 `entry.version()` 恰等于当前最高版本 + 1
 /// （首版要求 `1`），否则返回 [`ConfigRepoError::VersionConflict`]——乐观并发写冲突由业务层读后重写重试。
@@ -47,14 +107,14 @@ pub trait ConfigRepoLocal: Send + Sync {
     /// 取 key 当前活跃配置（最高版本且**非 tombstone**）；不存在 / 已删（latest 为 tombstone）返回 `Ok(None)`。
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
 
     /// 取指定版本号的历史配置条目；不存在 / 该版本是 tombstone 返回 `Ok(None)`（回滚读取旧值用）。
     async fn find_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
         version: u64,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
@@ -66,17 +126,19 @@ pub trait ConfigRepoLocal: Send + Sync {
     /// （删后 `find=None` 会误判 v1、复用 event_id），须用本方法的真实最高版本。
     async fn latest_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SettingKey,
     ) -> Result<Option<u64>, ConfigRepoError>;
 
     /// CAS 追加新版本（`entry.version()` 须等于当前最高版本 + 1，否则 `VersionConflict`）。
-    async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError>;
+    async fn save(&self, scope: TenantRepoScope, entry: ConfigEntry)
+    -> Result<(), ConfigRepoError>;
 
     /// 软删除 key（tombstone）：在 `max+1` 追加一条 tombstone 版本 → version 单调不重置（防 event_id 复用，
     /// #1249 F1）；幂等（latest 已 tombstone / key 不存在 ⇒ no-op）。`find` 此后返回 `None`，历史值行保留可经
     /// `find_version` 读。删除事件（`config-version-deleted`）留订阅缓存单元（#1120），tombstone 自身不发事件。
-    async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError>;
+    async fn delete(&self, scope: TenantRepoScope, key: &SettingKey)
+    -> Result<(), ConfigRepoError>;
 }
 
 /// 配置写入 **co-tx** Unit-of-Work DI port（L2 OutboxFact 同事务接缝）。
@@ -99,7 +161,7 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
     /// 回滚（配置写与 outbox 行皆不落库）。
     async fn save_and_append_outbox(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         entry: ConfigEntry,
         outbox_entry: Entry,
         envelope: OutboxEnvelopeParts,
@@ -109,7 +171,7 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
 /// secret 引用仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
 /// 公开 [`SecretRepo`] 是 **Send 变体**，[`DynSecretRepo`] 是其 dyn-compatible wrapper
-/// （组合根经 `Box<DynSecretRepo>` 注入）。租户必经 typed [`TenantId`] 位置参做 RLS 分隔。
+/// （组合根经 `Box<DynSecretRepo>` 注入）。租户必经 [`TenantRepoScope`] opaque handle 做 RLS 分隔。
 ///
 /// **无 resolve**：secret 材料解析是 diport seam（`diport::SecretResolver`），不在此 port。
 /// **无 UoW**：secret 写入是 L1 本地事务，不需与 outbox 同事务（与 config 的 L2 OutboxFact 分叉）。
@@ -125,14 +187,14 @@ pub trait SecretRepoLocal: Send + Sync {
     /// 取 key 当前活跃 secret 引用（最高版本且非 tombstone）；不存在 / 已删返回 `Ok(None)`。
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<SecretEntry>, SecretRepoError>;
 
     /// 取指定版本号的历史条目；不存在 / 该版本是 tombstone 返回 `Ok(None)`。
     async fn find_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
         version: u64,
     ) -> Result<Option<SecretEntry>, SecretRepoError>;
@@ -140,15 +202,16 @@ pub trait SecretRepoLocal: Send + Sync {
     /// 取 key 当前**最高版本号**（含 tombstone，不存在返回 `Ok(None)`）。
     async fn latest_version(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError>;
 
     /// CAS 追加新版本（`entry.version()` 须等于当前最高版本 + 1，否则 `VersionConflict`）。
-    async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError>;
+    async fn save(&self, scope: TenantRepoScope, entry: SecretEntry)
+    -> Result<(), SecretRepoError>;
 
     /// 软删除 key（tombstone）：version 单调不重置；幂等（latest 已 tombstone / key 不存在 ⇒ no-op）。
-    async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError>;
+    async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError>;
 }
 
 #[cfg(test)]
@@ -160,21 +223,21 @@ mod smoke {
 
     use super::{
         ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, DynConfigRepo,
-        DynConfigUnitOfWork, SettingKey, TenantId,
+        DynConfigUnitOfWork, SettingKey, TenantRepoScope,
     };
 
     struct NoopConfigRepo;
     impl ConfigRepo for NoopConfigRepo {
         async fn find(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SettingKey,
         ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
             Ok(None)
         }
         async fn find_version(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SettingKey,
             _version: u64,
         ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
@@ -182,21 +245,21 @@ mod smoke {
         }
         async fn latest_version(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SettingKey,
         ) -> Result<Option<u64>, ConfigRepoError> {
             Ok(None)
         }
         async fn save(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _entry: ConfigEntry,
         ) -> Result<(), ConfigRepoError> {
             Ok(())
         }
         async fn delete(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SettingKey,
         ) -> Result<(), ConfigRepoError> {
             Ok(())
@@ -207,7 +270,7 @@ mod smoke {
     impl ConfigUnitOfWork for NoopConfigUow {
         async fn save_and_append_outbox(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _entry: ConfigEntry,
             _outbox_entry: Entry,
             _envelope: OutboxEnvelopeParts,
@@ -276,22 +339,22 @@ mod smoke {
         impl ConfigRepo for TestConfigRepo {
             async fn find(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
             ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
             async fn find_version(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
                 version: u64,
             ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
             async fn latest_version(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SettingKey,
             ) -> Result<Option<u64>, ConfigRepoError>;
-            async fn save(&self, tenant: TenantId, entry: ConfigEntry) -> Result<(), ConfigRepoError>;
-            async fn delete(&self, tenant: TenantId, key: &SettingKey) -> Result<(), ConfigRepoError>;
+            async fn save(&self, scope: TenantRepoScope, entry: ConfigEntry) -> Result<(), ConfigRepoError>;
+            async fn delete(&self, scope: TenantRepoScope, key: &SettingKey) -> Result<(), ConfigRepoError>;
         }
     }
 
@@ -300,7 +363,7 @@ mod smoke {
         impl ConfigUnitOfWork for TestConfigUow {
             async fn save_and_append_outbox(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 entry: ConfigEntry,
                 outbox_entry: Entry,
                 envelope: OutboxEnvelopeParts,
@@ -318,14 +381,14 @@ mod smoke {
     impl SecretRepo for NoopSecretRepo {
         async fn find(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SecretKey,
         ) -> Result<Option<SecretEntry>, SecretRepoError> {
             Ok(None)
         }
         async fn find_version(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SecretKey,
             _version: u64,
         ) -> Result<Option<SecretEntry>, SecretRepoError> {
@@ -333,19 +396,23 @@ mod smoke {
         }
         async fn latest_version(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _key: &SecretKey,
         ) -> Result<Option<u64>, SecretRepoError> {
             Ok(None)
         }
         async fn save(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _entry: SecretEntry,
         ) -> Result<(), SecretRepoError> {
             Ok(())
         }
-        async fn delete(&self, _tenant: TenantId, _key: &SecretKey) -> Result<(), SecretRepoError> {
+        async fn delete(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SecretKey,
+        ) -> Result<(), SecretRepoError> {
             Ok(())
         }
     }
@@ -382,22 +449,22 @@ mod smoke {
         impl SecretRepo for TestSecretRepo {
             async fn find(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SecretKey,
             ) -> Result<Option<SecretEntry>, SecretRepoError>;
             async fn find_version(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SecretKey,
                 version: u64,
             ) -> Result<Option<SecretEntry>, SecretRepoError>;
             async fn latest_version(
                 &self,
-                tenant: TenantId,
+                scope: TenantRepoScope,
                 key: &SecretKey,
             ) -> Result<Option<u64>, SecretRepoError>;
-            async fn save(&self, tenant: TenantId, entry: SecretEntry) -> Result<(), SecretRepoError>;
-            async fn delete(&self, tenant: TenantId, key: &SecretKey) -> Result<(), SecretRepoError>;
+            async fn save(&self, scope: TenantRepoScope, entry: SecretEntry) -> Result<(), SecretRepoError>;
+            async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError>;
         }
     }
 }

@@ -102,7 +102,7 @@ use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeRepo,
     DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, Operator, PolicyPage, PolicyRepo,
     RefreshTokenStore, ResourceAttributeRepo, RoleBindingLifecycle, RolePage, RoleRepo,
-    SessionLifecycle,
+    SessionLifecycle, TenantRepoScope,
 };
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
@@ -114,6 +114,10 @@ pub use policy_manage::{PolicyManageError, PolicyManageService};
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
 /// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
 const SESSION_DOMAIN: &str = CONTRACT.domain();
+
+fn tenant_repo_scope(tenant: TenantId) -> TenantRepoScope {
+    TenantRepoScope::from_authenticated_tenant(tenant)
+}
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
 /// JWT 署名用途字面量（seed-login / test 路径；≥ 3 处使用，rust-standards §工程护栏抽 const）。
@@ -269,13 +273,14 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         tenant: TenantId,
         request: IdentityLoginRequest,
     ) -> Result<IdentityLoginResponse, LoginError> {
+        let tenant_scope = tenant_repo_scope(tenant);
         let login = LoginIdentifier::new(request.username);
         let now = self.clock.now();
 
         // 1. lockout 门控（验签前；已锁 → fail-closed InvalidCredentials，不验密码/零 UoW 写）
         if self
             .credentials
-            .lockout_status(tenant, login.clone(), now)
+            .lockout_status(tenant_scope, login.clone(), now)
             .await
             .map_err(LoginError::Credential)?
         {
@@ -286,7 +291,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         //    未知不建锁、成功清零并返回 canonical actor subject；对外一律 InvalidCredentials（防枚举）。
         let user_id = match self
             .credentials
-            .authenticate(tenant, login, request.password, now)
+            .authenticate(tenant_scope, login, request.password, now)
             .await
             .map_err(LoginError::Credential)?
         {
@@ -356,7 +361,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         // 6. L2 co-tx（session 行 + outbox 行同一事务原子写入，FR-003）
         let session = Session::new(session_id.clone(), subject.clone(), tenant, expires_at, now);
         self.lifecycle
-            .persist_session_and_emit(session, entry, envelope)
+            .persist_session_and_emit(tenant_scope, session, entry, envelope)
             .await
             .map_err(LoginError::SessionWrite)?;
 
@@ -391,9 +396,10 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         current_password: String,
         new_password: String,
     ) -> Result<(), ChangePasswordError> {
+        let tenant_scope = tenant_repo_scope(tenant);
         let Some(credential) = self
             .credentials
-            .find_by_user_id(tenant, user_id)
+            .find_by_user_id(tenant_scope, user_id)
             .await
             .map_err(ChangePasswordError::Store)?
         else {
@@ -409,7 +415,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             secure::hash_password(&new_password).map_err(|_| ChangePasswordError::Hash)?;
         let next = credential.rotate(new_hash);
         self.credentials
-            .bump_version(credential.version(), next)
+            .bump_version(tenant_scope, credential.version(), next)
             .await
             .map_err(|e| match e {
                 IdentityError::VersionConflict => ChangePasswordError::VersionConflict,
@@ -436,14 +442,19 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         actor: ids::UserId,
         session_id: SessionId,
     ) -> Result<(), IdentityError> {
-        let Some(session) = self.lifecycle.find(tenant, session_id.clone()).await? else {
+        let tenant_scope = tenant_repo_scope(tenant);
+        let Some(session) = self
+            .lifecycle
+            .find(tenant_scope, session_id.clone())
+            .await?
+        else {
             return Ok(());
         };
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         if session.subject() != actor_subject {
             return Err(IdentityError::PermissionDenied);
         }
-        self.lifecycle.revoke(tenant, session_id).await
+        self.lifecycle.revoke(tenant_scope, session_id).await
     }
 }
 
@@ -663,7 +674,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
             now + self.refresh_ttl,
         );
         self.store
-            .insert(record)
+            .insert(tenant_repo_scope(tenant), record)
             .await
             .map_err(RefreshError::Store)?;
         Ok(authn::RefreshToken::new(secret.expose()))
@@ -718,11 +729,12 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         tenant: vocab::TenantId,
         presented: &authn::RefreshToken,
     ) -> Result<RefreshBundle, RefreshError> {
+        let tenant_scope = tenant_repo_scope(tenant);
         // 1. 查找
         let hash = RefreshTokenHash::new(secure::digest(presented.as_str()));
         let rec = self
             .store
-            .find_by_hash(tenant, hash)
+            .find_by_hash(tenant_scope, hash)
             .await
             .map_err(RefreshError::Store)?
             .ok_or(RefreshError::Invalid)?;
@@ -730,7 +742,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         // 2. 重放检测：status != Active ⇒ 级联撤销 + Replayed
         if rec.status() != RefreshStatus::Active {
             self.store
-                .revoke_lineage(tenant, rec.lineage_id().clone())
+                .revoke_lineage(tenant_scope, rec.lineage_id().clone())
                 .await
                 .map_err(RefreshError::Store)?;
             tracing::warn!(
@@ -776,13 +788,13 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         // 6. 原子 CAS：旧 token 一次性失效（mint 成功后才提交不可回滚的消费）
         let applied = self
             .store
-            .rotate(rotation)
+            .rotate(tenant_scope, rotation)
             .await
             .map_err(RefreshError::Store)?;
         if !applied {
             // 并发双换 / CAS miss ⇒ 重放处理：级联撤销 + Replayed（已 mint 的 access 丢弃，无害——未交付客户端）
             self.store
-                .revoke_lineage(tenant, rec.lineage_id().clone())
+                .revoke_lineage(tenant_scope, rec.lineage_id().clone())
                 .await
                 .map_err(RefreshError::Store)?;
             tracing::warn!(
@@ -813,15 +825,16 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         tenant: vocab::TenantId,
         presented: &authn::RefreshToken,
     ) -> Result<(), RefreshError> {
+        let tenant_scope = tenant_repo_scope(tenant);
         let hash = RefreshTokenHash::new(secure::digest(presented.as_str()));
         if let Some(rec) = self
             .store
-            .find_by_hash(tenant, hash)
+            .find_by_hash(tenant_scope, hash)
             .await
             .map_err(RefreshError::Store)?
         {
             self.store
-                .revoke_lineage(tenant, rec.lineage_id().clone())
+                .revoke_lineage(tenant_scope, rec.lineage_id().clone())
                 .await
                 .map_err(RefreshError::Store)?;
         }
@@ -1286,9 +1299,10 @@ impl ContractAuthorizer {
         ctx: &AuthSubjectContext,
         contract_id: &'static str,
     ) -> Result<Vec<GrantPermission>, AuthReject> {
+        let tenant_scope = tenant_repo_scope(ctx.tenant);
         let bindings = self
             .bindings
-            .list_for_subject(ctx.tenant, ctx.subject.clone())
+            .list_for_subject(tenant_scope, ctx.subject.clone())
             .await
             .map_err(|err| {
                 tracing::warn!(
@@ -1309,16 +1323,20 @@ impl ContractAuthorizer {
 
         let mut permissions = Vec::new();
         for role_id in role_ids {
-            let role = self.roles.find(ctx.tenant, role_id).await.map_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    error_chain = %secure::redact_error(&err),
-                    tenant_id = %ctx.tenant,
-                    contract_id,
-                    "identity contract authorizer role lookup failed"
-                );
-                AuthReject::Forbidden
-            })?;
+            let role = self
+                .roles
+                .find(tenant_scope, role_id)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        error_chain = %secure::redact_error(&err),
+                        tenant_id = %ctx.tenant,
+                        contract_id,
+                        "identity contract authorizer role lookup failed"
+                    );
+                    AuthReject::Forbidden
+                })?;
             if let Some(role) = role {
                 permissions.extend(role.grant_permissions().iter().copied());
             }
@@ -1349,10 +1367,11 @@ impl ContractAuthorizer {
     ) -> Result<PolicyEvaluation, AuthReject> {
         let scope = PolicyRouteScope::parse(request.contract_id, request.permission.as_str())
             .map_err(|_| AuthReject::Forbidden)?;
+        let tenant_scope = tenant_repo_scope(ctx.tenant);
         let now = self.clock.now();
         let policies = self
             .policies
-            .list_effective(ctx.tenant, scope.clone(), now)
+            .list_effective(tenant_scope, scope.clone(), now)
             .await
             .map_err(|err| {
                 tracing::warn!(
@@ -1388,10 +1407,11 @@ impl ContractAuthorizer {
         now: SystemTime,
     ) -> Result<Vec<AbacAttribute>, AuthReject> {
         let resource_id = request_resource_attribute_id(ctx, request)?;
+        let tenant_scope = tenant_repo_scope(ctx.tenant);
         let resolved = self
             .resource_attrs
             .resolve_effective(
-                ctx.tenant,
+                tenant_scope,
                 scope.clone(),
                 resource_id.clone(),
                 required_keys.clone(),
@@ -1471,9 +1491,10 @@ impl ContractAuthorizer {
         }
         let required = policy_management_permission(scope);
         let subject = auth.user_id.as_uuid().hyphenated().to_string();
+        let tenant_scope = tenant_repo_scope(auth.tenant);
         let bindings = self
             .bindings
-            .list_for_subject(auth.tenant, subject.clone())
+            .list_for_subject(tenant_scope, subject.clone())
             .await
             .map_err(|err| {
                 tracing::warn!(
@@ -1494,17 +1515,21 @@ impl ContractAuthorizer {
             .collect::<Vec<_>>();
 
         for role_id in role_ids {
-            let role = self.roles.find(auth.tenant, role_id).await.map_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    error_chain = %secure::redact_error(&err),
-                    tenant_id = %auth.tenant,
-                    target_contract_id = scope.contract_id(),
-                    target_permission = %scope.permission(),
-                    "identity policy management role lookup failed"
-                );
-                AuthReject::Forbidden
-            })?;
+            let role = self
+                .roles
+                .find(tenant_scope, role_id)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        error_chain = %secure::redact_error(&err),
+                        tenant_id = %auth.tenant,
+                        target_contract_id = scope.contract_id(),
+                        target_permission = %scope.permission(),
+                        "identity policy management role lookup failed"
+                    );
+                    AuthReject::Forbidden
+                })?;
             if role.is_some_and(|role| role.grant_permissions().contains(&required)) {
                 return Ok(());
             }
@@ -2038,9 +2063,10 @@ async fn roles_list_handler(
         Ok(after) => after,
         Err(()) => return httpserve::error::validation_bad_request(&request_id),
     };
+    let tenant_scope = tenant_repo_scope(auth.tenant);
     let result = match state
         .roles
-        .list(auth.tenant, RolePage { limit, after })
+        .list(tenant_scope, RolePage { limit, after })
         .await
     {
         Ok(result) => result,
@@ -2733,13 +2759,14 @@ mod tests {
     impl SessionLifecycle for CapturingSessionLifecycle {
         async fn persist_session_and_emit(
             &self,
+            scope: TenantRepoScope,
             session: Session,
             entry: Entry,
             envelope: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
             // 委托 inner 承载 store（创建即写 → 同源 find/revoke）；同时捕获写入供 outbox 断言。
             self.inner
-                .persist_session_and_emit(session.clone(), entry.clone(), envelope.clone())
+                .persist_session_and_emit(scope, session.clone(), entry.clone(), envelope.clone())
                 .await?;
             self.writes
                 .lock()
@@ -2749,17 +2776,17 @@ mod tests {
         }
         async fn find(
             &self,
-            tenant: TenantId,
+            scope: TenantRepoScope,
             session_id: SessionId,
         ) -> Result<Option<Session>, IdentityError> {
-            self.inner.find(tenant, session_id).await
+            self.inner.find(scope, session_id).await
         }
         async fn revoke(
             &self,
-            tenant: TenantId,
+            scope: TenantRepoScope,
             session_id: SessionId,
         ) -> Result<(), IdentityError> {
-            self.inner.revoke(tenant, session_id).await
+            self.inner.revoke(scope, session_id).await
         }
     }
 
@@ -2950,7 +2977,7 @@ mod tests {
     impl ResourceAttributeRepo for IncompleteKnownResourceAttributeRepo {
         async fn resolve_effective(
             &self,
-            _tenant: TenantId,
+            _tenant_scope: TenantRepoScope,
             _scope: PolicyRouteScope,
             _resource_id: ResourceAttributeResourceId,
             _required_keys: Vec<ResourceAttributeKey>,
@@ -2961,7 +2988,7 @@ mod tests {
 
         async fn upsert(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _attribute: crate::domain::ResourceAttribute,
             _expected: Option<crate::domain::ResourceAttributeVersion>,
         ) -> Result<crate::domain::ResourceAttribute, IdentityError> {
@@ -2972,7 +2999,7 @@ mod tests {
 
         async fn expire(
             &self,
-            _tenant: TenantId,
+            _tenant_scope: TenantRepoScope,
             _scope: PolicyRouteScope,
             _resource_id: ResourceAttributeResourceId,
             _key: ResourceAttributeKey,
@@ -3264,7 +3291,7 @@ mod tests {
         crate::internal::mem::InMemRoleBindingLifecycle,
     ) {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(tid(CANON_TENANT), role.clone())
+        repo.save(tenant_repo_scope(tid(CANON_TENANT)), role.clone())
             .await
             .expect("save role");
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
@@ -3760,28 +3787,30 @@ mod tests {
             impl CredentialRepo for CasCreds {
                 async fn find_by_user_id(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     user_id: ids::UserId,
                 ) -> Result<Option<crate::domain::Credential>, IdentityError>;
                 async fn authenticate(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     login: LoginIdentifier,
                     candidate: String,
                     now: SystemTime,
                 ) -> Result<AuthOutcome, IdentityError>;
                 async fn save(
                     &self,
+                    scope: TenantRepoScope,
                     credential: crate::domain::Credential,
                 ) -> Result<(), IdentityError>;
                 async fn bump_version(
                     &self,
+                    scope: TenantRepoScope,
                     expected: u32,
                     next: crate::domain::Credential,
                 ) -> Result<(), IdentityError>;
                 async fn lockout_status(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     login: LoginIdentifier,
                     now: SystemTime,
                 ) -> Result<bool, IdentityError>;
@@ -3799,7 +3828,7 @@ mod tests {
         )
         .expect("seed");
         let alice_cred = cred_repo
-            .find_by_user_id(tid(CANON_TENANT), uid(CANON_USER))
+            .find_by_user_id(tenant_repo_scope(tid(CANON_TENANT)), uid(CANON_USER))
             .await
             .expect("find")
             .expect("some");
@@ -3811,7 +3840,7 @@ mod tests {
             Ok(Some(c))
         });
         mock.expect_bump_version()
-            .returning(|_expected, _next| Err(IdentityError::VersionConflict));
+            .returning(|_scope, _expected, _next| Err(IdentityError::VersionConflict));
 
         let svc = LoginService::new(
             Arc::from(DynCredentialRepo::new_box(mock)),
@@ -3866,7 +3895,7 @@ mod tests {
         // login 写入的会话经同一 lifecycle 可查回（anti-vacuity：非空 store、非两独立面）。
         assert!(
             capture
-                .find(ta, sid.clone())
+                .find(tenant_repo_scope(ta), sid.clone())
                 .await
                 .expect("find before")
                 .is_some(),
@@ -3878,7 +3907,11 @@ mod tests {
             .await
             .expect("logout ok");
         assert!(
-            capture.find(ta, sid).await.expect("find after").is_none(),
+            capture
+                .find(tenant_repo_scope(ta), sid)
+                .await
+                .expect("find after")
+                .is_none(),
             "经 service logout 后 find 应返回 None（软撤销，同源 store）"
         );
     }
@@ -3911,7 +3944,11 @@ mod tests {
             .await
             .expect("cross-tenant logout ok");
         assert!(
-            capture.find(ta, sid.clone()).await.expect("find").is_some(),
+            capture
+                .find(tenant_repo_scope(ta), sid.clone())
+                .await
+                .expect("find")
+                .is_some(),
             "跨租 logout 不应撤销 TENANT_A 的会话"
         );
 
@@ -3920,7 +3957,11 @@ mod tests {
             .await
             .expect("logout 1 ok");
         assert!(
-            capture.find(ta, sid.clone()).await.expect("find").is_none(),
+            capture
+                .find(tenant_repo_scope(ta), sid.clone())
+                .await
+                .expect("find")
+                .is_none(),
             "TENANT_A logout 后会话应被撤销"
         );
         svc.logout(ta, uid(CANON_USER), sid)
@@ -3953,7 +3994,11 @@ mod tests {
 
         assert!(matches!(err, IdentityError::PermissionDenied));
         assert!(
-            capture.find(ta, sid).await.expect("find").is_some(),
+            capture
+                .find(tenant_repo_scope(ta), sid)
+                .await
+                .expect("find")
+                .is_some(),
             "他人 logout 失败后原 session 必须仍 active"
         );
     }
@@ -4142,7 +4187,7 @@ mod tests {
     async fn contract_authorizer_denies_user_role_assign_permission() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role("role-admin", "Admin", &["identity:role:assign"]),
         )
         .await
@@ -4637,7 +4682,7 @@ mod tests {
     -> Result<(), String> {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role(
                 "role-audit",
                 "Audit",
@@ -4693,7 +4738,7 @@ mod tests {
     async fn contract_authorizer_audit_projection_read_without_field_permission_stays_masked() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role(
                 "role-audit",
                 "Audit",
@@ -5045,7 +5090,7 @@ mod tests {
         let external_permission = vocab::RoutePermissionId::SettingsConfigPublish;
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role("role-admin", "Admin", &[external_permission.as_str()]),
         )
         .await
@@ -5147,7 +5192,7 @@ mod tests {
     async fn roles_revoke_handler_returns_typed_revoked_flag() {
         let seeded_role = role("role-admin", "Admin", &["identity:role:revoke"]);
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(tid(CANON_TENANT), seeded_role.clone())
+        repo.save(tenant_repo_scope(tid(CANON_TENANT)), seeded_role.clone())
             .await
             .expect("save role");
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new()
@@ -5198,7 +5243,7 @@ mod tests {
     async fn roles_revoke_handler_rejects_auth_json_subject_and_role_id_errors() {
         let seeded_role = role("role-admin", "Admin", &["identity:role:revoke"]);
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(tid(CANON_TENANT), seeded_role.clone())
+        repo.save(tenant_repo_scope(tid(CANON_TENANT)), seeded_role.clone())
             .await
             .expect("save role");
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new()
@@ -5256,13 +5301,13 @@ mod tests {
     async fn roles_list_handler_pages_and_rejects_bad_cursor() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role("role-a", "A", &["identity:role:read"]),
         )
         .await
         .expect("save a");
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role("role-b", "B", &["identity:policy:update"]),
         )
         .await
@@ -5299,7 +5344,7 @@ mod tests {
     async fn roles_list_handler_rejects_invalid_limit() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
-            tid(CANON_TENANT),
+            tenant_repo_scope(tid(CANON_TENANT)),
             role("role-a", "A", &["identity:role:read"]),
         )
         .await
@@ -5819,7 +5864,7 @@ mod tests {
         assert!(
             capture
                 .find(
-                    tid(CANON_TENANT),
+                    tenant_repo_scope(tid(CANON_TENANT)),
                     SessionId::new(login_resp.data.session_id)
                 )
                 .await
@@ -5864,7 +5909,7 @@ mod tests {
         assert!(
             capture
                 .find(
-                    tid(CANON_TENANT),
+                    tenant_repo_scope(tid(CANON_TENANT)),
                     SessionId::new(login_resp.data.session_id)
                 )
                 .await
@@ -6110,19 +6155,20 @@ mod tests {
         mockall::mock! {
             NonIssuableStore {}
             impl RefreshTokenStore for NonIssuableStore {
-                async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
                 async fn find_by_hash(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
                 async fn rotate(
                     &self,
+                    scope: TenantRepoScope,
                     rotation: crate::ports::RefreshRotation,
                 ) -> Result<bool, IdentityError>;
                 async fn revoke_lineage(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     lineage_id: RefreshTokenId,
                 ) -> Result<(), IdentityError>;
             }
@@ -6409,19 +6455,20 @@ mod tests {
         mockall::mock! {
             CasMissStore {}
             impl RefreshTokenStore for CasMissStore {
-                async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
                 async fn find_by_hash(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
                 async fn rotate(
                     &self,
+                    scope: TenantRepoScope,
                     rotation: crate::ports::RefreshRotation,
                 ) -> Result<bool, IdentityError>;
                 async fn revoke_lineage(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     lineage_id: RefreshTokenId,
                 ) -> Result<(), IdentityError>;
             }
@@ -6452,7 +6499,8 @@ mod tests {
             .returning(move |_t, _h| Ok(Some(active_rec.clone())));
 
         // rotate → Ok(false)（CAS miss，步骤 6）
-        mock.expect_rotate().returning(|_rotation| Ok(false));
+        mock.expect_rotate()
+            .returning(|_scope, _rotation| Ok(false));
 
         // revoke_lineage 须以正确 lineage_id 被调用恰一次（步骤 5 if !applied 分支）
         mock.expect_revoke_lineage()
@@ -6483,19 +6531,20 @@ mod tests {
         mockall::mock! {
             TenantMismatchStore {}
             impl RefreshTokenStore for TenantMismatchStore {
-                async fn insert(&self, record: RefreshTokenRecord) -> Result<(), IdentityError>;
+                async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
                 async fn find_by_hash(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     hash: RefreshTokenHash,
                 ) -> Result<Option<RefreshTokenRecord>, IdentityError>;
                 async fn rotate(
                     &self,
+                    scope: TenantRepoScope,
                     rotation: crate::ports::RefreshRotation,
                 ) -> Result<bool, IdentityError>;
                 async fn revoke_lineage(
                     &self,
-                    tenant: TenantId,
+                    scope: TenantRepoScope,
                     lineage_id: RefreshTokenId,
                 ) -> Result<(), IdentityError>;
             }
@@ -6520,7 +6569,7 @@ mod tests {
 
         let mut mock = MockTenantMismatchStore::new();
         mock.expect_find_by_hash()
-            .withf(move |tenant, _hash| *tenant == request_tenant)
+            .withf(move |scope, _hash| scope.tenant() == request_tenant)
             .returning(move |_tenant, _hash| Ok(Some(active_rec.clone())));
 
         let svc = RefreshService::new(
@@ -6611,7 +6660,7 @@ mod tests {
         // 关键断言：旧 refresh 未被消费、仍 Active（CAS 先于 mint 会让此处 Consumed → 锁死）
         let old_hash = crate::domain::RefreshTokenHash::new(secure::digest(old_rf.as_str()));
         let found = probe
-            .find_by_hash(ta, old_hash)
+            .find_by_hash(tenant_repo_scope(ta), old_hash)
             .await
             .expect("find ok")
             .expect("旧 refresh 仍在 store");

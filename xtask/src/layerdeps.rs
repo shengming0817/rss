@@ -31,10 +31,11 @@
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "verify", source = "code" }—— `runctx` 的 `test-support` **feature** 只准经 `[dev-dependencies]` 启用，
-//!   禁在任一 shipped 依赖表（`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。该 feature 暴露
-//!   `pub fn runctx::test_support::app_ctx`——生产构建启用即可不经 `impl runctx::PrincipalFacet` 直接造
-//!   `AppCtx`、绕过伪造门 dylint `rss_principal_facet_impl_allowlist`（#1105 review C-3：Soft→Medium 机器门）。
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "verify", source = "code" }—— scoped construction 的
+//!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped 依赖表
+//!   （`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。覆盖 `runctx/test-support`
+//!   （构造 `AppCtx`）以及 `identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`；生产构建启用即可伪造
+//!   tenant scope，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -65,11 +66,9 @@ pub(crate) enum Rule {
     UnresolvedPath,
     /// LAYER-DEPS-08：test-support 库被 shipped 依赖（应只经 `[dev-dependencies]` 消费）。
     TestSupportShipped,
-    /// LAYER-DEPS-09：`runctx` 的 `test-support` **feature** 被 shipped 依赖表启用（应只经
-    /// `[dev-dependencies]` 启用）。该 feature 暴露 `pub fn runctx::test_support::app_ctx`——生产构建启用即可
-    /// 不经 `impl runctx::PrincipalFacet` 直接造 `AppCtx`，绕过伪造门 `rss_principal_facet_impl_allowlist`
-    /// （#1105 review C-3：把该旁路从 Cargo.toml 注释约定 Soft 升为机器门 Medium）。
-    RunctxTestSupportFeatureShipped,
+    /// LAYER-DEPS-09：scoped construction 的 `test-support` **feature** 被 shipped 依赖表启用（应只经
+    /// `[dev-dependencies]` 启用）。
+    TestSupportFeatureShipped,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -137,10 +136,10 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_test_support_confinement(&scan.edges));
         let shipped_deps = collect_shipped_deps(&root, &members)?;
-        findings.extend(scan_runctx_testsupport(&shipped_deps));
+        findings.extend(scan_shipped_testsupport_features(&shipped_deps));
 
         let summary = format!(
-            "{} 成员 / {} 内部边 / {} wrappers / {} shipped 依赖（runctx/test-support 扫描）全部通过",
+            "{} 成员 / {} 内部边 / {} wrappers / {} shipped 依赖（test-support feature 扫描）全部通过",
             members.len(),
             scan.edges.len(),
             bans.len(),
@@ -428,11 +427,28 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
         .collect()
 }
 
-/// 被消费 crate（`runctx`）+ 其 `test-support` feature 名（LAYER-DEPS-09 守卫常量）。
+/// shipped 依赖表禁止启用的 scoped-construction test feature（LAYER-DEPS-09 守卫常量）。
 const TEST_SUPPORT_FEATURE: &str = "test-support";
-const RUNCTX_CRATE: &str = "runctx";
+const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
+    (
+        "runctx",
+        "constructing AppCtx via runctx::test_support bypasses PrincipalFacet minting",
+    ),
+    (
+        "identity",
+        "identity::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
+    ),
+    (
+        "settings",
+        "settings::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
+    ),
+    (
+        "audit",
+        "audit::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
+    ),
+];
 
-/// 一条 **shipped**（非 dev）依赖表条目的 feature 视图——供 [`scan_runctx_testsupport`] 纯函数扫描。
+/// 一条 **shipped**（非 dev）依赖表条目的 feature 视图——供 [`scan_shipped_testsupport_features`] 纯函数扫描。
 /// `[dev-dependencies]` 不入（[`MemberManifest`] 刻意不解析 dev 表），故收集到的均为 shipped。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShippedDep {
@@ -448,24 +464,27 @@ pub(crate) struct ShippedDep {
     pub(crate) features: Vec<String>,
 }
 
-/// LAYER-DEPS-09 纯扫描：flag 任一 shipped 依赖表里 `runctx` 启用 `test-support` feature 的条目。
+/// LAYER-DEPS-09 纯扫描：flag 任一 shipped 依赖表里 scoped-construction crate 启用 `test-support` feature 的条目。
 ///
-/// `runctx/test-support` 暴露 `pub fn runctx::test_support::app_ctx[_with_kind]`——生产构建启用即可不经
-/// `impl runctx::PrincipalFacet`（dylint `rss_principal_facet_impl_allowlist` 守的伪造门）直接造 `AppCtx`、
-/// 伪造任意 tenant/principal。该 feature 只准 `[dev-dependencies]` 启用（dev 边不进生产 artifact，resolver 2
-/// 下 dev-dep feature 不 unify 进 normal build）。纯函数（输入 `&[ShippedDep]`）便于 synthetic 红/绿单测。
-pub(crate) fn scan_runctx_testsupport(deps: &[ShippedDep]) -> Vec<Finding> {
+/// 这些 feature 只准 `[dev-dependencies]` 启用（dev 边不进生产 artifact，resolver 2 下 dev-dep feature 不
+/// unify 进 normal build）。纯函数（输入 `&[ShippedDep]`）便于 synthetic 红/绿单测。
+pub(crate) fn scan_shipped_testsupport_features(deps: &[ShippedDep]) -> Vec<Finding> {
     deps.iter()
-        .filter(|d| {
-            d.key == RUNCTX_CRATE && d.features.iter().any(|f| f == TEST_SUPPORT_FEATURE)
+        .filter_map(|d| {
+            SHIPPED_TEST_SUPPORT_FEATURE_BANS
+                .iter()
+                .find(|(crate_name, _)| {
+                    d.key == *crate_name && d.features.iter().any(|f| f == TEST_SUPPORT_FEATURE)
+                })
+                .map(|(crate_name, reason)| (d, *crate_name, *reason))
         })
-        .map(|d| {
+        .map(|(d, crate_name, reason)| {
             finding(
-                Rule::RunctxTestSupportFeatureShipped,
+                Rule::TestSupportFeatureShipped,
                 d.from.clone(),
                 format!(
-                    "{} {}.{} 启用 `runctx/{TEST_SUPPORT_FEATURE}` ⇒ 生产构建可经 `runctx::test_support::app_ctx` 伪造 AppCtx、绕过 `PrincipalFacet` 伪造门；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
-                    d.manifest_file, d.section, d.key
+                    "{} {}.{} 启用 `{crate_name}/{TEST_SUPPORT_FEATURE}` ⇒ {reason}；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
+                    d.manifest_file, d.section, d.key,
                 ),
             )
         })
@@ -668,7 +687,7 @@ struct DetailedDep {
     path: Option<String>,
     #[serde(default)]
     workspace: bool,
-    /// 该依赖启用的 feature 列表（LAYER-DEPS-09：守 `runctx/test-support` 不进 shipped 依赖表）。
+    /// 该依赖启用的 feature 列表（LAYER-DEPS-09：守 scoped construction `test-support` 不进 shipped 依赖表）。
     #[serde(default)]
     features: Vec<String>,
 }
@@ -932,7 +951,7 @@ mod tests {
         assert_eq!(findings[0].rule, Rule::TestSupportShipped);
     }
 
-    // ---- LAYER-DEPS-09：runctx 的 test-support feature 进 shipped 依赖表 ----
+    // ---- LAYER-DEPS-09：scoped construction 的 test-support feature 进 shipped 依赖表 ----
 
     fn sdep(from: &str, section: &str, key: &str, features: &[&str]) -> ShippedDep {
         ShippedDep {
@@ -944,24 +963,51 @@ mod tests {
         }
     }
 
-    /// 红：`[dependencies]` 启用 `runctx/test-support` ⇒ RunctxTestSupportFeatureShipped。
+    /// 红：`[dependencies]` 启用 `runctx/test-support` ⇒ TestSupportFeatureShipped。
     #[test]
     fn red_runctx_testsupport_in_dependencies() {
-        let findings = scan_runctx_testsupport(&[sdep(
+        let findings = scan_shipped_testsupport_features(&[sdep(
             "badcrate",
             "[dependencies]",
             "runctx",
             &["test-support"],
         )]);
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].rule, Rule::RunctxTestSupportFeatureShipped);
+        assert_eq!(findings[0].rule, Rule::TestSupportFeatureShipped);
         assert_eq!(findings[0].subject, "badcrate");
+    }
+
+    /// 红：domain scope constructors 的 `test-support` 也不得经 shipped 依赖启用。
+    #[test]
+    fn red_domain_scope_testsupport_in_dependencies() {
+        let findings = scan_shipped_testsupport_features(&[
+            sdep(
+                "bad-identity",
+                "[dependencies]",
+                "identity",
+                &["test-support"],
+            ),
+            sdep(
+                "bad-settings",
+                "[dependencies]",
+                "settings",
+                &["test-support"],
+            ),
+            sdep("bad-audit", "[dependencies]", "audit", &["test-support"]),
+        ]);
+        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::TestSupportFeatureShipped),
+            "{findings:?}"
+        );
     }
 
     /// 红：build-dependencies / target 依赖同为 shipped ⇒ 均 flagged（feature 仍泄进生产构建）。
     #[test]
     fn red_runctx_testsupport_in_build_and_target_deps() {
-        let findings = scan_runctx_testsupport(&[
+        let findings = scan_shipped_testsupport_features(&[
             sdep("b1", "[build-dependencies]", "runctx", &["test-support"]),
             sdep(
                 "b2",
@@ -976,7 +1022,7 @@ mod tests {
     /// 绿：runctx 不启用 test-support（无 feature / 仅其它 feature）⇒ 无 finding。
     #[test]
     fn green_runctx_without_testsupport() {
-        let findings = scan_runctx_testsupport(&[
+        let findings = scan_shipped_testsupport_features(&[
             sdep("authn", "[dependencies]", "runctx", &[]),
             sdep("other", "[dependencies]", "runctx", &["some-other-feature"]),
         ]);
@@ -986,15 +1032,19 @@ mod tests {
     /// 绿（specificity）：别的 crate 有名为 `test-support` 的 feature（非 runctx）⇒ 不误报（只守 runctx）。
     #[test]
     fn green_testsupport_feature_on_non_runctx_dep() {
-        let findings =
-            scan_runctx_testsupport(&[sdep("x", "[dependencies]", "someother", &["test-support"])]);
+        let findings = scan_shipped_testsupport_features(&[sdep(
+            "x",
+            "[dependencies]",
+            "someother",
+            &["test-support"],
+        )]);
         assert!(findings.is_empty(), "{findings:?}");
     }
 
     /// anti-vacuity：空输入 ⇒ 无 finding（守卫非恒报；非恒绿由上方红例证）。
     #[test]
     fn antivacuity_runctx_testsupport_empty_is_clean() {
-        assert!(scan_runctx_testsupport(&[]).is_empty());
+        assert!(scan_shipped_testsupport_features(&[]).is_empty());
     }
 
     #[test]

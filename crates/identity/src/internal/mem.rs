@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::domain::{AccountLockout, AuthOutcome, Credential, IdentityError, LoginIdentifier};
-use crate::ports::CredentialRepo;
+use crate::ports::{CredentialRepo, TenantRepoScope};
 use vocab::TenantId;
 
 // 会话生命周期 in-mem 替身（[`InMemSessionLifecycle`]）仅 test 构建编译：with_seed_credential 改注入 lifecycle
@@ -111,9 +111,10 @@ impl InMemCredentialRepo {
 impl CredentialRepo for InMemCredentialRepo {
     async fn find_by_user_id(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         user_id: ids::UserId,
     ) -> Result<Option<Credential>, IdentityError> {
+        let tenant = scope.tenant();
         // creds 按 (tenant, login) 索引——按 canonical user_id 查须线性扫本 tenant 凭据匹配 user_id。
         // reason: in-mem 替身（test/seed-login 门控）规模小，O(n) 扫可接受；生产 postgres adapter（W #1258）
         // 须为 user_id 建二级索引（O(1) 查），不沿用扫描。
@@ -125,11 +126,12 @@ impl CredentialRepo for InMemCredentialRepo {
 
     async fn authenticate(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         login: LoginIdentifier,
         candidate: String,
         now: SystemTime,
     ) -> Result<AuthOutcome, IdentityError> {
+        let tenant = scope.tenant();
         // 恒定成本验签（F3）：先克隆出 (hash, user_id) 释放 creds 锁，经 secure::verify_password_constant_time——
         // 查无凭据也跑等价 argon2 KDF，消登录枚举时序差。再据「已知/未知」+「验签成败」原子分流（F1+F2）。
         // INVARIANT: MEM-LOCK-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— creds 锁与 lockouts 锁**不交叉持有**：creds guard 在下方 `.map()`
@@ -158,12 +160,31 @@ impl CredentialRepo for InMemCredentialRepo {
         })
     }
 
-    async fn save(&self, credential: Credential) -> Result<(), IdentityError> {
+    async fn save(
+        &self,
+        scope: TenantRepoScope,
+        credential: Credential,
+    ) -> Result<(), IdentityError> {
+        if scope.tenant() != credential.tenant() {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "credential save tenant scope mismatch",
+            ))));
+        }
         recover(&self.creds).insert(Self::cred_key(&credential), credential);
         Ok(())
     }
 
-    async fn bump_version(&self, expected: u32, next: Credential) -> Result<(), IdentityError> {
+    async fn bump_version(
+        &self,
+        scope: TenantRepoScope,
+        expected: u32,
+        next: Credential,
+    ) -> Result<(), IdentityError> {
+        if scope.tenant() != next.tenant() {
+            return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                "credential bump tenant scope mismatch",
+            ))));
+        }
         // key 派生自 next（F2：错位不可表达，无需 debug_assert）。
         let key = Self::cred_key(&next);
         let mut guard = recover(&self.creds);
@@ -179,10 +200,11 @@ impl CredentialRepo for InMemCredentialRepo {
 
     async fn lockout_status(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         login: LoginIdentifier,
         now: SystemTime,
     ) -> Result<bool, IdentityError> {
+        let tenant = scope.tenant();
         // 原子 RMW（锁内，F1）：lazy-unlock（TTL 过则原地清）后返回 is_locked。查无锁定态 → 未锁定。
         let mut guard = recover(&self.lockouts);
         match guard.get_mut(&(tenant, login)) {
@@ -234,10 +256,16 @@ impl InMemSessionLifecycle {
 impl SessionLifecycle for InMemSessionLifecycle {
     async fn persist_session_and_emit(
         &self,
+        scope: TenantRepoScope,
         session: Session,
         _entry: Entry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
+        if scope.tenant() != session.tenant() {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "session persist tenant scope mismatch",
+            )));
+        }
         // reason: in-mem 替身无 durable 事务 / outbox 载体——创建即把 session 直插共享 store（revoked=false）；
         // entry/envelope 不落库（同 MemSessionLifecycle；真实 co-tx 原子性由 PgSessionLifecycle 守）。
         recover(&self.sessions).insert(session.id().clone(), (session, false));
@@ -246,16 +274,22 @@ impl SessionLifecycle for InMemSessionLifecycle {
 
     async fn find(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         session_id: SessionId,
     ) -> Result<Option<Session>, IdentityError> {
+        let tenant = scope.tenant();
         Ok(recover(&self.sessions)
             .get(&session_id)
             .filter(|(s, revoked)| !*revoked && s.tenant() == tenant) // 跨租/已撤销 → None
             .map(|(s, _)| s.clone()))
     }
 
-    async fn revoke(&self, tenant: TenantId, session_id: SessionId) -> Result<(), IdentityError> {
+    async fn revoke(
+        &self,
+        scope: TenantRepoScope,
+        session_id: SessionId,
+    ) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
         if let Some(entry) = recover(&self.sessions).get_mut(&session_id)
             && entry.0.tenant() == tenant
         {
@@ -353,7 +387,12 @@ impl InMemPolicyRepo {
 
 #[cfg(test)]
 impl PolicyRepo for InMemPolicyRepo {
-    async fn find(&self, tenant: TenantId, id: PolicyId) -> Result<Option<Policy>, IdentityError> {
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        id: PolicyId,
+    ) -> Result<Option<Policy>, IdentityError> {
+        let tenant = scope.tenant();
         Ok(self
             .read_guard()?
             .get(&Self::key(tenant, &id))
@@ -362,9 +401,10 @@ impl PolicyRepo for InMemPolicyRepo {
 
     async fn list_active(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         page: PolicyPage,
     ) -> Result<PolicyListResult, IdentityError> {
+        let tenant = scope.tenant();
         let limit = usize::from(page.limit.get());
         let after = page.after.as_ref().map(PolicyId::as_str);
         let mut policies = self
@@ -384,10 +424,11 @@ impl PolicyRepo for InMemPolicyRepo {
 
     async fn list_effective(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         at: SystemTime,
     ) -> Result<Vec<Policy>, IdentityError> {
+        let tenant = tenant_scope.tenant();
         let mut policies = self
             .read_guard()?
             .values()
@@ -408,17 +449,21 @@ impl PolicyRepo for InMemPolicyRepo {
 impl PolicyLifecycle for InMemPolicyRepo {
     async fn create_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         policy: Policy,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
+        let tenant = scope.tenant();
         if self.fail_writes {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "inmem-policy-cotx-fail",
             ))));
         }
-        if policy.tenant() != tenant || policy.version() != PolicyVersion::first() {
+        if policy.tenant() != tenant
+            || envelope.tenant() != tenant
+            || policy.version() != PolicyVersion::first()
+        {
             return Err(IdentityError::InvalidPolicy);
         }
         let key = Self::key(tenant, policy.id());
@@ -433,18 +478,19 @@ impl PolicyLifecycle for InMemPolicyRepo {
 
     async fn update_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
+        let tenant = scope.tenant();
         if self.fail_writes {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "inmem-policy-cotx-fail",
             ))));
         }
-        if policy.tenant() != tenant {
+        if policy.tenant() != tenant || envelope.tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
         let key = Self::key(tenant, policy.id());
@@ -467,16 +513,20 @@ impl PolicyLifecycle for InMemPolicyRepo {
 
     async fn deactivate_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, IdentityError> {
+        let tenant = scope.tenant();
         if self.fail_writes {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "inmem-policy-cotx-fail",
             ))));
+        }
+        if envelope.tenant() != tenant {
+            return Err(IdentityError::InvalidPolicy);
         }
         let key = Self::key(tenant, &id);
         let mut guard = recover(&self.policies);
@@ -603,12 +653,13 @@ impl InMemResourceAttributeRepo {
 impl ResourceAttributeRepo for InMemResourceAttributeRepo {
     async fn resolve_effective(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         required_keys: Vec<ResourceAttributeKey>,
         at: SystemTime,
     ) -> Result<ResourceAttributeResolution, IdentityError> {
+        let tenant = tenant_scope.tenant();
         if self.fail_reads {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "inmem-resource-attribute-read-fail",
@@ -634,10 +685,11 @@ impl ResourceAttributeRepo for InMemResourceAttributeRepo {
 
     async fn upsert(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         attribute: ResourceAttribute,
         expected: Option<ResourceAttributeVersion>,
     ) -> Result<ResourceAttribute, IdentityError> {
+        let tenant = scope.tenant();
         if self.fail_writes {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "inmem-resource-attribute-write-fail",
@@ -678,12 +730,13 @@ impl ResourceAttributeRepo for InMemResourceAttributeRepo {
 
     async fn expire(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
         expected: ResourceAttributeVersion,
     ) -> Result<bool, IdentityError> {
+        let tenant = tenant_scope.tenant();
         if self.fail_writes {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "inmem-resource-attribute-write-fail",
@@ -741,22 +794,29 @@ impl InMemRoleRepo {
 
 #[cfg(test)]
 impl RoleRepo for InMemRoleRepo {
-    async fn find(&self, tenant: TenantId, id: RoleId) -> Result<Option<Role>, IdentityError> {
+    async fn find(
+        &self,
+        scope: TenantRepoScope,
+        id: RoleId,
+    ) -> Result<Option<Role>, IdentityError> {
+        let tenant = scope.tenant();
         Ok(recover(&self.roles)
             .get(&(tenant.to_string(), id.as_str().to_string()))
             .cloned())
     }
 
-    async fn save(&self, tenant: TenantId, role: Role) -> Result<(), IdentityError> {
+    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
         recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
         Ok(())
     }
 
     async fn list(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         page: crate::ports::RolePage,
     ) -> Result<crate::ports::RoleListResult, IdentityError> {
+        let tenant = scope.tenant();
         let limit = usize::from(page.limit.get());
         let after = page.after.as_ref().map(RoleId::as_str);
         let mut roles = recover(&self.roles)
@@ -855,10 +915,21 @@ impl InMemRoleBindingLifecycle {
 impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
     async fn assign_and_emit(
         &self,
+        scope: TenantRepoScope,
         binding: RoleBinding,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
+        if scope.tenant() != binding.tenant() {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "role binding assign tenant scope mismatch",
+            )));
+        }
+        if envelope.tenant() != scope.tenant() {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "role binding assign envelope tenant scope mismatch",
+            )));
+        }
         if self.fail {
             // reason: 模拟 co-tx 写失败 ⇒ both-or-neither：binding 不落、事件不记（提前返回）。
             return Err(OutboxEmitError::new(std::io::Error::other(
@@ -876,12 +947,18 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
 
     async fn revoke_and_emit(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
         entry: Entry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError> {
+        let tenant = scope.tenant();
+        if envelope.tenant() != tenant {
+            return Err(OutboxEmitError::new(std::io::Error::other(
+                "role binding revoke envelope tenant scope mismatch",
+            )));
+        }
         if self.fail {
             return Err(OutboxEmitError::new(std::io::Error::other(
                 "inmem-rbac-cotx-fail",
@@ -902,9 +979,10 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
 
     async fn list_for_subject(
         &self,
-        tenant: TenantId,
+        scope: TenantRepoScope,
         subject: String,
     ) -> Result<Vec<RoleBinding>, IdentityError> {
+        let tenant = scope.tenant();
         recover(&self.bindings)
             .iter()
             .filter(|(t, _, s)| t == &tenant.to_string() && s == &subject)
@@ -945,16 +1023,26 @@ impl InMemRefreshTokenStore {
 
 #[cfg(any(test, feature = "seed-login"))]
 impl RefreshTokenStore for InMemRefreshTokenStore {
-    async fn insert(&self, record: RefreshTokenRecord) -> Result<(), crate::domain::IdentityError> {
+    async fn insert(
+        &self,
+        scope: TenantRepoScope,
+        record: RefreshTokenRecord,
+    ) -> Result<(), crate::domain::IdentityError> {
+        if scope.tenant() != record.tenant() {
+            return Err(crate::domain::IdentityError::Storage(Box::new(
+                std::io::Error::other("refresh insert tenant scope mismatch"),
+            )));
+        }
         recover(&self.records).insert(record.id().clone(), record);
         Ok(())
     }
 
     async fn find_by_hash(
         &self,
-        tenant: vocab::TenantId,
+        scope: TenantRepoScope,
         hash: RefreshTokenHash,
     ) -> Result<Option<RefreshTokenRecord>, crate::domain::IdentityError> {
+        let tenant = scope.tenant();
         // reason: in-mem 替身（test 门控）规模小，O(n) 扫可接受；生产 postgres adapter 须 btree 索引。
         Ok(recover(&self.records)
             .values()
@@ -964,12 +1052,18 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
 
     async fn rotate(
         &self,
+        scope: TenantRepoScope,
         rotation: crate::ports::RefreshRotation,
     ) -> Result<bool, crate::domain::IdentityError> {
         // sealed 命令：tenant 从 new record 派生（= 源 record tenant），无独立 tenant 入参可错位（#284 F2）。
         let old_id = rotation.old_id().clone();
         let new = rotation.new_record().clone();
         let tenant = new.tenant();
+        if scope.tenant() != tenant {
+            return Err(crate::domain::IdentityError::Storage(Box::new(
+                std::io::Error::other("refresh rotate tenant scope mismatch"),
+            )));
+        }
         let mut guard = recover(&self.records);
         // CAS：找 old_id，若 Active + tenant 匹配 ⇒ 消费 + 写 new；否则 false（不写 new）。
         match guard.get(&old_id) {
@@ -985,9 +1079,10 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
 
     async fn revoke_lineage(
         &self,
-        tenant: vocab::TenantId,
+        scope: TenantRepoScope,
         lineage_id: RefreshTokenId,
     ) -> Result<(), crate::domain::IdentityError> {
+        let tenant = scope.tenant();
         // 幂等：锁内把所有同 lineage_id + tenant 的记录置 Revoked。
         let mut guard = recover(&self.records);
         let to_revoke: Vec<RefreshTokenId> = guard
@@ -1010,16 +1105,17 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
 mod tests {
     use super::{
         Credential, InMemCredentialRepo, InMemPolicyRepo, InMemResourceAttributeRepo,
-        InMemSessionLifecycle, TenantId,
+        InMemRoleBindingLifecycle, InMemSessionLifecycle, TenantId,
     };
     use crate::domain::{
         AttributeValue, AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId,
         PolicyRouteScope, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
         ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
-        Session, SessionId,
+        RoleBinding, RoleId, Session, SessionId,
     };
     use crate::ports::{
-        CredentialRepo, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo, SessionLifecycle,
+        CredentialRepo, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo, RoleBindingLifecycle,
+        SessionLifecycle, TenantRepoScope,
     };
     use consistency::{Entry, IdemKey, OutboxPayload, Topic};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
@@ -1035,6 +1131,10 @@ mod tests {
 
     fn tid(raw: &str) -> TenantId {
         TenantId::parse(raw).expect("canonical tenant parses")
+    }
+
+    fn scope(tenant: TenantId) -> TenantRepoScope {
+        TenantRepoScope::for_test(tenant)
     }
 
     fn uid(raw: &str) -> ids::UserId {
@@ -1119,14 +1219,18 @@ mod tests {
     }
 
     fn dummy_envelope() -> OutboxEnvelopeParts {
+        dummy_envelope_for(tid(TENANT_A))
+    }
+
+    fn dummy_envelope_for(tenant: TenantId) -> OutboxEnvelopeParts {
         OutboxEnvelopeParts::new(
             generated::event::identity_v1::session_created::CONTRACT,
-            tid(TENANT_A),
+            tenant,
             EnvelopeSubjectId::from_opaque("subject-1").expect("subject"),
             OutboxActor::scoped(
                 vocab::PrincipalKind::User,
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
-                tid(TENANT_A),
+                tenant,
                 vocab::ScopedTenant::SelfOnly,
             ),
         )
@@ -1141,11 +1245,11 @@ mod tests {
         let repo = InMemCredentialRepo::new();
         let t = tid(TENANT_A);
         // save key 派生自 credential（F2，无独立 tenant 参）。
-        repo.save(cred("alice", USER_ALICE, "pw", 1, t))
+        repo.save(scope(t), cred("alice", USER_ALICE, "pw", 1, t))
             .await
             .expect("save");
         let found = repo
-            .find_by_user_id(t, uid(USER_ALICE))
+            .find_by_user_id(scope(t), uid(USER_ALICE))
             .await
             .expect("find")
             .expect("some");
@@ -1156,7 +1260,7 @@ mod tests {
             "canonical subject 随凭据存取"
         );
         assert!(
-            repo.find_by_user_id(t, uid(USER_GHOST))
+            repo.find_by_user_id(scope(t), uid(USER_GHOST))
                 .await
                 .expect("find")
                 .is_none()
@@ -1176,21 +1280,21 @@ mod tests {
         let now = epoch(1_000);
         // 已知 + 正确 → Authenticated(canonical user id)。
         assert_eq!(
-            repo.authenticate(t, lid("alice"), "correct".to_string(), now)
+            repo.authenticate(scope(t), lid("alice"), "correct".to_string(), now)
                 .await
                 .expect("auth"),
             AuthOutcome::Authenticated(uid(USER_ALICE))
         );
         // 已知 + 错 → InvalidKnownUser。
         assert_eq!(
-            repo.authenticate(t, lid("alice"), "wrong".to_string(), now)
+            repo.authenticate(scope(t), lid("alice"), "wrong".to_string(), now)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidKnownUser
         );
         // 查无主体 → InvalidUnknown（恒定成本 KDF 仍跑，F3；不 panic）。
         assert_eq!(
-            repo.authenticate(t, lid("ghost"), "correct".to_string(), now)
+            repo.authenticate(scope(t), lid("ghost"), "correct".to_string(), now)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidUnknown
@@ -1211,7 +1315,7 @@ mod tests {
         let now = epoch(1_000);
         for i in 0..50 {
             assert_eq!(
-                repo.authenticate(t, lid(&format!("ghost-{i}")), "x".to_string(), now)
+                repo.authenticate(scope(t), lid(&format!("ghost-{i}")), "x".to_string(), now)
                     .await
                     .expect("auth"),
                 AuthOutcome::InvalidUnknown
@@ -1223,7 +1327,7 @@ mod tests {
             "未知主体失败不建锁定态（lockout 表不随枚举增长，F2）"
         );
         // 对比：已知主体失败才建恰一条。
-        repo.authenticate(t, lid("alice"), "wrong".to_string(), now)
+        repo.authenticate(scope(t), lid("alice"), "wrong".to_string(), now)
             .await
             .expect("auth");
         assert_eq!(repo.lockout_len(), 1, "已知主体失败建恰一条 lockout 态");
@@ -1243,13 +1347,13 @@ mod tests {
         let t0 = epoch(1_000);
         // 跨租赁查找 → None（不泄露存在性），authenticate → InvalidUnknown（跨租即未知，不建锁）。
         assert!(
-            repo.find_by_user_id(other, uid(USER_ALICE))
+            repo.find_by_user_id(scope(other), uid(USER_ALICE))
                 .await
                 .expect("find")
                 .is_none()
         );
         assert_eq!(
-            repo.authenticate(other, lid("alice"), "correct".to_string(), t0)
+            repo.authenticate(scope(other), lid("alice"), "correct".to_string(), t0)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidUnknown
@@ -1258,7 +1362,7 @@ mod tests {
         // 在 TENANT_A 把 alice 锁定（5 次错密码），TENANT_B 视角 lockout_status 仍 false（隔离）。
         for i in 1..=5 {
             repo.authenticate(
-                a,
+                scope(a),
                 lid("alice"),
                 "wrong".to_string(),
                 t0 + Duration::from_secs(i),
@@ -1267,13 +1371,13 @@ mod tests {
             .expect("auth");
         }
         assert!(
-            repo.lockout_status(a, lid("alice"), t0 + Duration::from_secs(5))
+            repo.lockout_status(scope(a), lid("alice"), t0 + Duration::from_secs(5))
                 .await
                 .expect("ls")
         );
         assert!(
             !repo
-                .lockout_status(other, lid("alice"), t0 + Duration::from_secs(5))
+                .lockout_status(scope(other), lid("alice"), t0 + Duration::from_secs(5))
                 .await
                 .expect("ls"),
             "TENANT_B 视角不应受 TENANT_A 锁定影响"
@@ -1285,16 +1389,16 @@ mod tests {
         let a = tid(TENANT_A);
         let other = tid(TENANT_B);
         let repo = InMemCredentialRepo::new();
-        repo.save(cred("alice", USER_ALICE, "pw", 1, a))
+        repo.save(scope(a), cred("alice", USER_ALICE, "pw", 1, a))
             .await
             .expect("save");
         // 跨租 bump：next 在 TENANT_B（key 派生自 next）→ 查无 → CredentialNotFound，不动 TENANT_A。
         let res = repo
-            .bump_version(1, cred("alice", USER_ALICE, "pw2", 2, other))
+            .bump_version(scope(other), 1, cred("alice", USER_ALICE, "pw2", 2, other))
             .await;
         assert!(matches!(res, Err(IdentityError::CredentialNotFound)));
         let still = repo
-            .find_by_user_id(a, uid(USER_ALICE))
+            .find_by_user_id(scope(a), uid(USER_ALICE))
             .await
             .expect("find")
             .expect("some");
@@ -1306,20 +1410,20 @@ mod tests {
     async fn bump_version_cas_hit_miss_and_unknown() {
         let repo = InMemCredentialRepo::new();
         let t = tid(TENANT_A);
-        repo.save(cred("alice", USER_ALICE, "pw", 1, t))
+        repo.save(scope(t), cred("alice", USER_ALICE, "pw", 1, t))
             .await
             .expect("save");
         // 期望版本不匹配 → VersionConflict（key 派生自 next）。
         let conflict = repo
-            .bump_version(99, cred("alice", USER_ALICE, "pw2", 2, t))
+            .bump_version(scope(t), 99, cred("alice", USER_ALICE, "pw2", 2, t))
             .await;
         assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
         // 期望版本命中 → 替换。
-        repo.bump_version(1, cred("alice", USER_ALICE, "pw2", 2, t))
+        repo.bump_version(scope(t), 1, cred("alice", USER_ALICE, "pw2", 2, t))
             .await
             .expect("cas hit");
         let found = repo
-            .find_by_user_id(t, uid(USER_ALICE))
+            .find_by_user_id(scope(t), uid(USER_ALICE))
             .await
             .expect("find")
             .expect("some");
@@ -1327,7 +1431,7 @@ mod tests {
         assert!(found.verify_password("pw2"));
         // 查无凭据 → CredentialNotFound。
         let missing = repo
-            .bump_version(1, cred("ghost", USER_ALICE, "x", 1, t))
+            .bump_version(scope(t), 1, cred("ghost", USER_ALICE, "x", 1, t))
             .await;
         assert!(matches!(missing, Err(IdentityError::CredentialNotFound)));
     }
@@ -1339,7 +1443,7 @@ mod tests {
         let id = policy_id("policy-tombstone");
 
         repo.create_and_emit(
-            tenant,
+            scope(tenant),
             policy("policy-tombstone", tenant),
             dummy_entry(),
             dummy_envelope(),
@@ -1348,7 +1452,7 @@ mod tests {
         .expect("create policy");
         assert!(
             repo.deactivate_and_emit(
-                tenant,
+                scope(tenant),
                 id.clone(),
                 PolicyVersion::first(),
                 dummy_entry(),
@@ -1359,7 +1463,7 @@ mod tests {
             "first delete succeeds"
         );
         assert!(
-            repo.find(tenant, id.clone())
+            repo.find(scope(tenant), id.clone())
                 .await
                 .expect("find after delete")
                 .is_none(),
@@ -1368,7 +1472,7 @@ mod tests {
 
         let recreate = repo
             .create_and_emit(
-                tenant,
+                scope(tenant),
                 policy("policy-tombstone", tenant),
                 dummy_entry(),
                 dummy_envelope(),
@@ -1379,7 +1483,7 @@ mod tests {
             "deleted policy id keeps tombstone and rejects recreate, got: {recreate:?}"
         );
         assert!(
-            repo.find(tenant, id)
+            repo.find(scope(tenant), id)
                 .await
                 .expect("find after rejected recreate")
                 .is_none(),
@@ -1400,7 +1504,7 @@ mod tests {
 
         let missing = repo
             .resolve_effective(
-                tenant,
+                scope(tenant),
                 resource_scope(),
                 resource_id(),
                 vec![resource_key("resource.owner")],
@@ -1414,7 +1518,7 @@ mod tests {
 
         let stale = repo
             .resolve_effective(
-                tenant,
+                scope(tenant),
                 resource_scope(),
                 resource_id(),
                 vec![stale_key],
@@ -1435,7 +1539,7 @@ mod tests {
 
         let created = repo
             .upsert(
-                tenant,
+                scope(tenant),
                 resource_attribute(tenant, key.clone(), 0, None),
                 None,
             )
@@ -1445,7 +1549,7 @@ mod tests {
 
         let conflict = repo
             .upsert(
-                tenant,
+                scope(tenant),
                 resource_attribute(tenant, key.clone(), 0, None),
                 Some(ResourceAttributeVersion::new(99).expect("version")),
             )
@@ -1454,7 +1558,7 @@ mod tests {
 
         let updated = repo
             .upsert(
-                tenant,
+                scope(tenant),
                 resource_attribute(tenant, key.clone(), 0, None),
                 Some(created.version()),
             )
@@ -1464,7 +1568,7 @@ mod tests {
 
         let expired = repo
             .expire(
-                tenant,
+                scope(tenant),
                 resource_scope(),
                 resource_id(),
                 key.clone(),
@@ -1475,7 +1579,13 @@ mod tests {
         assert!(expired);
 
         let after_expire = repo
-            .resolve_effective(tenant, resource_scope(), resource_id(), vec![key], epoch(1))
+            .resolve_effective(
+                scope(tenant),
+                resource_scope(),
+                resource_id(),
+                vec![key],
+                epoch(1),
+            )
             .await
             .expect("resolve after expire");
         assert!(matches!(
@@ -1485,7 +1595,7 @@ mod tests {
 
         let failed_write = InMemResourceAttributeRepo::failing_writes()
             .upsert(
-                tenant,
+                scope(tenant),
                 resource_attribute(tenant, resource_key("resource.fail"), 0, None),
                 None,
             )
@@ -1508,7 +1618,7 @@ mod tests {
         for i in 1..5 {
             assert_eq!(
                 repo.authenticate(
-                    t,
+                    scope(t),
                     lid("alice"),
                     "wrong".to_string(),
                     t0 + Duration::from_secs(i)
@@ -1520,7 +1630,7 @@ mod tests {
             );
             assert!(
                 !repo
-                    .lockout_status(t, lid("alice"), t0 + Duration::from_secs(i))
+                    .lockout_status(scope(t), lid("alice"), t0 + Duration::from_secs(i))
                     .await
                     .expect("ls"),
                 "未达阈值仍未锁"
@@ -1528,7 +1638,7 @@ mod tests {
         }
         // 第 5 次（窗口内）→ 达阈值锁定。
         repo.authenticate(
-            t,
+            scope(t),
             lid("alice"),
             "wrong".to_string(),
             t0 + Duration::from_secs(5),
@@ -1536,7 +1646,7 @@ mod tests {
         .await
         .expect("auth");
         assert!(
-            repo.lockout_status(t, lid("alice"), t0 + Duration::from_secs(5))
+            repo.lockout_status(scope(t), lid("alice"), t0 + Duration::from_secs(5))
                 .await
                 .expect("ls")
         );
@@ -1555,7 +1665,7 @@ mod tests {
         let t0 = epoch(1_000);
         for i in 1..=5 {
             repo.authenticate(
-                t,
+                scope(t),
                 lid("alice"),
                 "wrong".to_string(),
                 t0 + Duration::from_secs(i),
@@ -1567,28 +1677,36 @@ mod tests {
         let lock_ttl = Duration::from_secs(15 * 60);
         // TTL 内仍锁定。
         assert!(
-            repo.lockout_status(t, lid("alice"), lock_at + lock_ttl - Duration::from_secs(1))
-                .await
-                .expect("ls")
+            repo.lockout_status(
+                scope(t),
+                lid("alice"),
+                lock_at + lock_ttl - Duration::from_secs(1)
+            )
+            .await
+            .expect("ls")
         );
         // lockout_status 在 TTL 后原子 lazy-unlock → false（且持久化解锁）。
         assert!(
             !repo
-                .lockout_status(t, lid("alice"), lock_at + lock_ttl + Duration::from_secs(1))
+                .lockout_status(
+                    scope(t),
+                    lid("alice"),
+                    lock_at + lock_ttl + Duration::from_secs(1)
+                )
                 .await
                 .expect("ls")
         );
         // 解锁后再失败从 1 重计（不沿用旧计数）→ InvalidKnownUser、未锁。
         let after = lock_at + lock_ttl + Duration::from_secs(2);
         assert_eq!(
-            repo.authenticate(t, lid("alice"), "wrong".to_string(), after)
+            repo.authenticate(scope(t), lid("alice"), "wrong".to_string(), after)
                 .await
                 .expect("auth"),
             AuthOutcome::InvalidKnownUser
         );
         assert!(
             !repo
-                .lockout_status(t, lid("alice"), after)
+                .lockout_status(scope(t), lid("alice"), after)
                 .await
                 .expect("ls")
         );
@@ -1610,7 +1728,7 @@ mod tests {
         for i in 1..=4 {
             assert_eq!(
                 repo.authenticate(
-                    t,
+                    scope(t),
                     lid("alice"),
                     "wrong".to_string(),
                     t0 + Duration::from_secs(i)
@@ -1624,7 +1742,7 @@ mod tests {
         // 正确密码 → Authenticated + 原子清除 lockout 态。
         assert_eq!(
             repo.authenticate(
-                t,
+                scope(t),
                 lid("alice"),
                 "correct".to_string(),
                 t0 + Duration::from_secs(5)
@@ -1648,11 +1766,16 @@ mod tests {
     async fn lifecycle_persist_then_find_roundtrip() {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
-        repo.persist_session_and_emit(make_session("sid-001", ta), dummy_entry(), dummy_envelope())
-            .await
-            .expect("persist ok");
+        repo.persist_session_and_emit(
+            scope(ta),
+            make_session("sid-001", ta),
+            dummy_entry(),
+            dummy_envelope(),
+        )
+        .await
+        .expect("persist ok");
         let found = repo
-            .find(ta, SessionId::new("sid-001"))
+            .find(scope(ta), SessionId::new("sid-001"))
             .await
             .expect("find ok");
         assert!(found.is_some(), "persist 后应能找到会话");
@@ -1663,14 +1786,19 @@ mod tests {
     async fn lifecycle_revoke_then_find_returns_none() {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
-        repo.persist_session_and_emit(make_session("sid-002", ta), dummy_entry(), dummy_envelope())
-            .await
-            .expect("persist ok");
-        repo.revoke(ta, SessionId::new("sid-002"))
+        repo.persist_session_and_emit(
+            scope(ta),
+            make_session("sid-002", ta),
+            dummy_entry(),
+            dummy_envelope(),
+        )
+        .await
+        .expect("persist ok");
+        repo.revoke(scope(ta), SessionId::new("sid-002"))
             .await
             .expect("revoke ok");
         let found = repo
-            .find(ta, SessionId::new("sid-002"))
+            .find(scope(ta), SessionId::new("sid-002"))
             .await
             .expect("find ok");
         assert!(found.is_none(), "已撤销会话 find 应返回 None");
@@ -1680,19 +1808,24 @@ mod tests {
     async fn lifecycle_revoke_idempotent() {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
-        repo.persist_session_and_emit(make_session("sid-003", ta), dummy_entry(), dummy_envelope())
-            .await
-            .expect("persist ok");
+        repo.persist_session_and_emit(
+            scope(ta),
+            make_session("sid-003", ta),
+            dummy_entry(),
+            dummy_envelope(),
+        )
+        .await
+        .expect("persist ok");
         // 第一次 revoke
-        repo.revoke(ta, SessionId::new("sid-003"))
+        repo.revoke(scope(ta), SessionId::new("sid-003"))
             .await
             .expect("revoke 1");
         // 第二次 revoke（幂等，应仍 Ok）
-        repo.revoke(ta, SessionId::new("sid-003"))
+        repo.revoke(scope(ta), SessionId::new("sid-003"))
             .await
             .expect("revoke 2 idempotent");
         // 未知 session id（幂等，no-op）
-        repo.revoke(ta, SessionId::new("no-such-sid"))
+        repo.revoke(scope(ta), SessionId::new("no-such-sid"))
             .await
             .expect("revoke unknown idempotent");
     }
@@ -1702,12 +1835,17 @@ mod tests {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
         let tb = tid(TENANT_B);
-        repo.persist_session_and_emit(make_session("sid-004", ta), dummy_entry(), dummy_envelope())
-            .await
-            .expect("persist ok");
+        repo.persist_session_and_emit(
+            scope(ta),
+            make_session("sid-004", ta),
+            dummy_entry(),
+            dummy_envelope(),
+        )
+        .await
+        .expect("persist ok");
         // 用 TENANT_B 查 TENANT_A 的 session → None（不泄露存在性）。
         let found = repo
-            .find(tb, SessionId::new("sid-004"))
+            .find(scope(tb), SessionId::new("sid-004"))
             .await
             .expect("find ok");
         assert!(found.is_none(), "跨租查找应返回 None");
@@ -1719,18 +1857,69 @@ mod tests {
         let repo = InMemSessionLifecycle::new();
         let ta = tid(TENANT_A);
         let tb = tid(TENANT_B);
-        repo.persist_session_and_emit(make_session("sid-005", ta), dummy_entry(), dummy_envelope())
-            .await
-            .expect("persist ok");
+        repo.persist_session_and_emit(
+            scope(ta),
+            make_session("sid-005", ta),
+            dummy_entry(),
+            dummy_envelope(),
+        )
+        .await
+        .expect("persist ok");
         // 跨租 revoke：no-op，不影响 TENANT_A 的记录。
-        repo.revoke(tb, SessionId::new("sid-005"))
+        repo.revoke(scope(tb), SessionId::new("sid-005"))
             .await
             .expect("cross-tenant revoke");
         let found = repo
-            .find(ta, SessionId::new("sid-005"))
+            .find(scope(ta), SessionId::new("sid-005"))
             .await
             .expect("find ok");
         assert!(found.is_some(), "TENANT_A 的会话不应被 TENANT_B 撤销");
+    }
+
+    #[tokio::test]
+    async fn role_binding_lifecycle_rejects_assign_envelope_tenant_mismatch() {
+        let lifecycle = InMemRoleBindingLifecycle::default();
+        let tenant = tid(TENANT_A);
+        let role_id = RoleId::parse("role-admin").expect("role id");
+        let result = lifecycle
+            .assign_and_emit(
+                scope(tenant),
+                RoleBinding::new("user-1", role_id.clone(), tenant),
+                dummy_entry(),
+                dummy_envelope_for(tid(TENANT_B)),
+            )
+            .await;
+
+        assert!(result.is_err(), "assign envelope mismatch must fail closed");
+        assert!(
+            !lifecycle.has_binding(tenant, &role_id, "user-1"),
+            "mismatch must not mutate bindings"
+        );
+        assert!(lifecycle.emitted().is_empty(), "mismatch must not emit");
+    }
+
+    #[tokio::test]
+    async fn role_binding_lifecycle_rejects_revoke_envelope_tenant_mismatch() {
+        let tenant = tid(TENANT_A);
+        let role_id = RoleId::parse("role-admin").expect("role id");
+        let lifecycle =
+            InMemRoleBindingLifecycle::default().with_binding(tenant, &role_id, "user-1");
+        let result = lifecycle
+            .revoke_and_emit(
+                scope(tenant),
+                role_id.clone(),
+                "user-1".to_string(),
+                dummy_entry(),
+                dummy_envelope_for(tid(TENANT_B)),
+            )
+            .await;
+
+        assert!(result.is_err(), "revoke envelope mismatch must fail closed");
+        assert!(
+            lifecycle.has_binding(tenant, &role_id, "user-1"),
+            "mismatch must leave existing binding intact"
+        );
+        assert!(lifecycle.emitted().is_empty(), "mismatch must not emit");
     }
 
     // ---------------------------------------------------------------------------
@@ -1777,7 +1966,7 @@ mod tests {
 
         // 插入 Consumed 记录（非 Active）
         let old_rec = make_rt_record(old_id, ta, old_hash, lineage, RefreshStatus::Consumed);
-        store.insert(old_rec).await.expect("insert ok");
+        store.insert(scope(ta), old_rec).await.expect("insert ok");
 
         // CAS：old status = Consumed → miss → false，new 不写入。
         // sealed 命令由源 record 派生（#284 F2）：源（Consumed）的 begin_rotation 生成新 hash 的子 record。
@@ -1789,19 +1978,19 @@ mod tests {
                 issued,
                 issued + Duration::from_secs(3_600),
             );
-        let result = store.rotate(rotation).await.expect("rotate ok");
+        let result = store.rotate(scope(ta), rotation).await.expect("rotate ok");
         assert!(!result, "Consumed 状态 CAS miss 应返回 false");
 
         // new 不应写入
         let new_found = store
-            .find_by_hash(ta, RefreshTokenHash::new(new_hash))
+            .find_by_hash(scope(ta), RefreshTokenHash::new(new_hash))
             .await
             .expect("find ok");
         assert!(new_found.is_none(), "CAS miss 时 new 不应写入");
 
         // old 仍 Consumed（不变）
         let old_found = store
-            .find_by_hash(ta, RefreshTokenHash::new(old_hash))
+            .find_by_hash(scope(ta), RefreshTokenHash::new(old_hash))
             .await
             .expect("find ok");
         assert_eq!(
@@ -1828,7 +2017,10 @@ mod tests {
         let issued = epoch(1_700_000_000);
 
         let old_rec = make_rt_record(old_id, ta, old_hash, lineage, RefreshStatus::Active);
-        store.insert(old_rec.clone()).await.expect("insert ok");
+        store
+            .insert(scope(ta), old_rec.clone())
+            .await
+            .expect("insert ok");
 
         // 首次 rotate：源 Active → CAS 命中 → true（old→Consumed，new 写入）
         let rotation1 = old_rec.begin_rotation(
@@ -1838,7 +2030,7 @@ mod tests {
             issued + Duration::from_secs(3_600),
         );
         assert!(
-            store.rotate(rotation1).await.expect("rotate ok"),
+            store.rotate(scope(ta), rotation1).await.expect("rotate ok"),
             "首次 rotate 应命中 CAS"
         );
 
@@ -1850,13 +2042,13 @@ mod tests {
             issued + Duration::from_secs(3_600),
         );
         assert!(
-            !store.rotate(rotation2).await.expect("rotate ok"),
+            !store.rotate(scope(ta), rotation2).await.expect("rotate ok"),
             "二次 rotate 同一 old 应 miss（一次性）"
         );
 
         // old 现为 Consumed；二次的 new（0x15）未写入
         let old_found = store
-            .find_by_hash(ta, RefreshTokenHash::new(old_hash))
+            .find_by_hash(scope(ta), RefreshTokenHash::new(old_hash))
             .await
             .expect("find ok");
         assert_eq!(
@@ -1865,7 +2057,7 @@ mod tests {
             "首次 rotate 后 old 应 Consumed"
         );
         let third_found = store
-            .find_by_hash(ta, RefreshTokenHash::new([0x15u8; 32]))
+            .find_by_hash(scope(ta), RefreshTokenHash::new([0x15u8; 32]))
             .await
             .expect("find ok");
         assert!(third_found.is_none(), "二次 CAS miss 时 new 不应写入");
@@ -1888,17 +2080,17 @@ mod tests {
             lineage_str,
             RefreshStatus::Active,
         );
-        store.insert(rec_a).await.expect("insert ok");
+        store.insert(scope(ta), rec_a).await.expect("insert ok");
 
         // tenant B 用相同 lineage_id 调 revoke_lineage → WHERE tenant 不匹配 → no-op
         store
-            .revoke_lineage(tb, RefreshTokenId::new(lineage_str))
+            .revoke_lineage(scope(tb), RefreshTokenId::new(lineage_str))
             .await
             .expect("revoke_lineage ok");
 
         // tenant A 的记录仍 Active（未受影响）
         let found = store
-            .find_by_hash(ta, RefreshTokenHash::new(hash_a))
+            .find_by_hash(scope(ta), RefreshTokenHash::new(hash_a))
             .await
             .expect("find ok");
         assert_eq!(
@@ -1924,11 +2116,11 @@ mod tests {
             "aaaaaaaa-0016-4000-8000-000000000016",
             RefreshStatus::Active,
         );
-        store.insert(rec_a).await.expect("insert ok");
+        store.insert(scope(ta), rec_a).await.expect("insert ok");
 
         // anti-vacuity：tenant A 自查 → Some
         let found_a = store
-            .find_by_hash(ta, RefreshTokenHash::new(hash_a))
+            .find_by_hash(scope(ta), RefreshTokenHash::new(hash_a))
             .await
             .expect("find ok");
         assert!(
@@ -1938,7 +2130,7 @@ mod tests {
 
         // 跨租：tenant B 查 → None
         let found_b = store
-            .find_by_hash(tb, RefreshTokenHash::new(hash_a))
+            .find_by_hash(scope(tb), RefreshTokenHash::new(hash_a))
             .await
             .expect("find ok");
         assert!(found_b.is_none(), "跨租 find_by_hash 应返回 None");

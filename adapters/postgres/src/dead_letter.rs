@@ -26,7 +26,7 @@ use diport::{
 use sqlx::PgPool;
 
 use crate::PgStore;
-use crate::cotx::PgTenantPool;
+use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::dead_letter_payload::{
     DLX_ORIGINAL_ENTRY_ENCODING, DlxPayloadContext, DlxPayloadProtector,
 };
@@ -91,7 +91,7 @@ impl DeadLetterStore for PgDeadLetterStore {
 
         self.tenant_pool
             .write(
-                record.tenant(),
+                infra_tenant_scope(record.tenant()),
                 move |conn| {
                     Box::pin(async move {
                         sqlx::query(

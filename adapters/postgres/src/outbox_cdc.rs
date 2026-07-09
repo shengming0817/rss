@@ -9,7 +9,7 @@ use diport::{Clock, EnvelopeSubjectId, OutboxEmitError, OutboxEmitter, OutboxEnv
 use futures::future::BoxFuture;
 
 use crate::PgStore;
-use crate::cotx::{PgTenantPool, TxCapability};
+use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 
 /// PostgreSQL CDC outbox emitter.
@@ -55,7 +55,7 @@ impl OutboxEmitter for PgOutboxCdcEmitter {
         .with_causation_id_opt(causation_id);
         self.pool
             .write(
-                env.tenant(),
+                infra_tenant_scope(env.tenant()),
                 move |tx| {
                     Box::pin(async move {
                         append_outbox_log(tx, &entry, &env, &aggregate_id)

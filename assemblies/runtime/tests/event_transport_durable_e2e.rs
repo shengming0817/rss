@@ -39,7 +39,7 @@ use identity::ports::{
     AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo,
     DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, Operator,
     POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
-    PolicyObligations, PolicyRouteScope, PolicyRule, TenantId,
+    PolicyObligations, PolicyRouteScope, PolicyRule, TenantId, TenantRepoScope,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
@@ -833,7 +833,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
         policy_event_id,
     )?;
     policy_lifecycle
-        .create_and_emit(tenant, policy, policy_entry, policy_envelope)
+        .create_and_emit(
+            TenantRepoScope::for_test(tenant),
+            policy,
+            policy_entry,
+            policy_envelope,
+        )
         .await?;
     let policy_outbox_event_id =
         latest_outbox_event_id(&assertion_pool, "identity", policy_updated::TOPIC).await?;

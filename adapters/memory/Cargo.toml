@@ -32,3 +32,4 @@ identity = { path = "../../crates/identity" }
 # 异步单测 runtime + StreamExt::next。
 tokio = { workspace = true }
 futures = { workspace = true }
+identity = { path = "../../crates/identity", features = ["test-support"] }

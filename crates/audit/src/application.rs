@@ -58,7 +58,7 @@ use primitives::ListenerKind;
 use crate::domain::{AuditEntry, AuditError, AuditOutcome, ResourceRef};
 use crate::ports::{
     AuditAdminRepo, AuditListResult, AuditPage, AuditRecord, AuditRepo, DynAuditAdminRepo,
-    DynAuditRepo,
+    DynAuditRepo, TenantRepoScope,
 };
 
 /// 本域 DomainId（在 generated `SUBSCRIPTIONS` 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
@@ -484,7 +484,8 @@ async fn list_entries_scoped(
         Ok(page) => page,
         Err(kind) => return validation_or_internal(kind, &request_id),
     };
-    match repo.list(tenant, page).await {
+    let scope = TenantRepoScope::from_authenticated_tenant(tenant);
+    match repo.list(scope, page).await {
         Ok(result) => Json(to_response(result, projection)).into_response(),
         // 语义无效游标（合法 base64url 但非有效页索引）是客户端错误 → 400（F4）。
         Err(AuditError::InvalidCursor) => httpserve::error::validation_bad_request(&request_id),
@@ -634,7 +635,8 @@ impl SubscriberHandler for SessionCreatedAuditHandler {
                 .map_err(|e| {
                     reject_audit_event_record_error(&msg_id, "identity.session-created", e)
                 })?;
-            repo.append(record).await.map_err(|e| {
+            let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
+            repo.append(scope, record).await.map_err(|e| {
                 tracing::error!(
                     message_id = msg_id.as_str(),
                     error = %e,
@@ -722,7 +724,8 @@ async fn append_audit_record(
     event_name: &'static str,
     record: AuditRecord,
 ) -> Result<(), SubscriberHandlerError> {
-    repo.append(record).await.map_err(|e| {
+    let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
+    repo.append(scope, record).await.map_err(|e| {
         tracing::error!(
             message_id,
             event_name,
@@ -1020,7 +1023,9 @@ mod tests {
             tenant: vocab::TenantId,
             page: AuditPage,
         ) -> Result<AuditListResult, AuditError> {
-            self.repo.list(tenant, page).await
+            self.repo
+                .list(TenantRepoScope::for_test(tenant), page)
+                .await
         }
 
         async fn verify_tenant(
@@ -1034,7 +1039,7 @@ mod tests {
                 let result = self
                     .repo
                     .list(
-                        tenant,
+                        TenantRepoScope::for_test(tenant),
                         AuditPage {
                             limit: batch,
                             cursor,
@@ -1316,7 +1321,10 @@ mod tests {
             limit: vocab::Limit::new(10).expect("limit"),
             cursor: None,
         };
-        let listed = repo.list(tenant, page).await.expect("list");
+        let listed = repo
+            .list(TenantRepoScope::for_test(tenant), page)
+            .await
+            .expect("list");
         assert_eq!(listed.entries.len(), 1);
         let entry = &listed.entries[0];
         assert_eq!(entry.seq(), 0);
@@ -1344,7 +1352,7 @@ mod tests {
 
         let listed = repo
             .list(
-                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1376,7 +1384,7 @@ mod tests {
 
         let listed = repo
             .list(
-                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1411,7 +1419,7 @@ mod tests {
 
         let listed = repo
             .list(
-                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1451,7 +1459,7 @@ mod tests {
 
         let listed = repo
             .list(
-                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1488,7 +1496,7 @@ mod tests {
 
         let listed = repo
             .list(
-                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1516,7 +1524,7 @@ mod tests {
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let listed = repo
             .list(
-                tenant,
+                TenantRepoScope::for_test(tenant),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1576,7 +1584,7 @@ mod tests {
         // anti-vacuity：未 append（链空）。
         let listed = repo
             .list(
-                vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -1886,13 +1894,17 @@ mod tests {
         }
 
         impl AuditRepo for ReadFailsRepo {
-            async fn append(&self, _record: AuditRecord) -> Result<(), AuditError> {
+            async fn append(
+                &self,
+                _scope: TenantRepoScope,
+                _record: AuditRecord,
+            ) -> Result<(), AuditError> {
                 Ok(())
             }
 
             async fn list(
                 &self,
-                _tenant: vocab::TenantId,
+                _scope: TenantRepoScope,
                 _page: AuditPage,
             ) -> Result<AuditListResult, AuditError> {
                 self.list_calls
@@ -1902,7 +1914,7 @@ mod tests {
 
             async fn verify_tail(
                 &self,
-                _tenant: vocab::TenantId,
+                _scope: TenantRepoScope,
                 _limit: u32,
             ) -> Result<(), AuditError> {
                 Ok(())
@@ -2374,19 +2386,23 @@ mod tests {
     async fn admin_read_fails_closed_when_list_errors() {
         struct FailingAuditRepo;
         impl AuditRepo for FailingAuditRepo {
-            async fn append(&self, _record: AuditRecord) -> Result<(), AuditError> {
+            async fn append(
+                &self,
+                _scope: TenantRepoScope,
+                _record: AuditRecord,
+            ) -> Result<(), AuditError> {
                 Ok(())
             }
             async fn list(
                 &self,
-                _tenant: vocab::TenantId,
+                _scope: TenantRepoScope,
                 _page: AuditPage,
             ) -> Result<AuditListResult, AuditError> {
                 Err(AuditError::HashMismatch)
             }
             async fn verify_tail(
                 &self,
-                _tenant: vocab::TenantId,
+                _scope: TenantRepoScope,
                 _limit: u32,
             ) -> Result<(), AuditError> {
                 Err(AuditError::HashMismatch)

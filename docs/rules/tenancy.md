@@ -6,7 +6,8 @@ GitHub Issues。
 ## TenantID
 
 `tenant::TenantId` 是隔离域边界类型。空值和 nil UUID 非法；非空必须是 canonical
-UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
+UUID。service / auth 边界使用 typed tenant 参数，不传裸 `String`；tenant-scoped repo API
+使用各域本地 opaque `TenantRepoScope`，不接收裸 `TenantId`。
 
 ## RowScope / RowVisibility
 
@@ -17,7 +18,7 @@ UUID。repo 和 service API 使用 typed tenant 参数，不传裸 `String`。
 - tenant / all 不带 subject。
 - `sql_predicate` / `allows` 是纯翻译器，不决定 all 是否可用。
 
-`tenant::RowVisibility::new` 拒绝 `RowScope::All`。跨租户可见性只能由
+`tenant::RowVisibility::new` 接收 `ScopedTenant`，类型层排除 `RowScope::All`。跨租户可见性只能由
 `tenant::RowVisibility::new_cross_tenant()` 生产；跨租户读取 API 必须接收 sealed
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
 `RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。「同址」由 `authn` audited 派生 funnel 类型层强制——先写审计成功才签发 All-scope，audit 写失败 fail-closed（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01，封闭符号见 `crates/authn/src/lib.rs`）；裸同步 `Principal::row_visibility` 的 super-admin 分支不再签发 All-scope（无 `AuditSink` 无法同址，返回 deny）。runtime JWT verify bridge 在认证成功后把具体 `Arc<authn::Principal>` 写入 request extension；跨租户 audit read handler 使用该 principal 做 SuperAdmin 判定和 durable audit。
@@ -80,10 +81,13 @@ JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 
 ## RLS 与 PG scope
 
 PG tenant scope 使用 `SET LOCAL` 注入当前事务。tenant-scoped repository 不持有 raw
-`sqlx::PgPool`，只持有 opaque `PgTenantPool`；读写入口只能是
-`PgTenantPool::{read, write, co_tx_with_outbox}`。`PgTenantPool` 不暴露 `begin`、`acquire`、
-raw `PgPool` 或 `Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。
-绕过该类型入口直接借连接或走 global transaction 必须 fail-fast。
+`sqlx::PgPool`，只持有 opaque `PgTenantPool`；普通 repo 入口只能接收各域本地
+`TenantRepoScope` / `RowRepoScope`，不能接收裸 `TenantId`、`RowVisibility`、`RowScope` 或
+`ScopedTenant`。`PgTenantPool::{read, read_map, write, retry_write, co_tx_with_outbox,
+retry_co_tx_with_outbox}` 同样只接收 sealed scope handle，并且只在 `cotx.rs` 内 lower 成
+`TenantId` 后执行 `SET LOCAL`。`PgTenantPool` 不暴露 `begin`、`acquire`、raw `PgPool` 或
+`Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。绕过该类型入口直接借连接或
+走 global transaction 必须 fail-fast。
 
 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
 Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` +
@@ -136,9 +140,9 @@ partition liveness 语义。
 
 **作用域来源**：`TenantId`（`vocab`，fail-closed 解析，空值 / nil / 非 canonical UUID 非法）
 从声明过的认证/预认证通道（JWT tenant claim 或 `X-Tenant-ID` populate-only header，见 §Tenant source）
-流入，经 `adapters/postgres/src/cotx.rs` 的类型化 funnel
-（`set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox`）注入当前 PG 事务；
-永不从 HTTP request body 读取。
+流入；域内从已认证/授权证据派生本地 `TenantRepoScope`，repo / `PgTenantPool` 只接收该 sealed handle。
+`adapters/postgres/src/cotx.rs` 是唯一 lower 点：从 scope handle 取 `TenantId`，经
+`set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox` 注入当前 PG 事务；永不从 HTTP request body 读取。
 
 **缺失 SET LOCAL 的行为（预期 default-deny）**：若 `SET LOCAL rss.tenant_id` 未注入，
 `current_setting('rss.tenant_id', true)` 返回 NULL，`tenant_id = NULL` 永不匹配任何行——
@@ -149,8 +153,9 @@ partition liveness 语义。
 helper 进行；`INVARIANT TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`，Medium
 内容扫描）机器强制：字面量 `set_config('rss.tenant_id'` 仅允许出现在
 `adapters/postgres/src/cotx.rs`（测试代码豁免）。tenant repository 的 Hard 载体是
-`PgTenantPool` + `tenant: TenantId`：非 `TenantId` 类型无法通过编译进入 funnel，tenant repo
-也无法直接调用 raw pool transaction / connection API。
+各域 `TenantRepoScope` / `RowRepoScope` + `PgTenantPool`：外部代码不能从裸 `TenantId` 构造 scope，
+普通 repo / `PgTenantPool` 也不能用裸 tenant 或 row visibility 调用；tenant repo 无法直接调用 raw pool
+transaction / connection API。
 
 **raw-pool / TxManager bypass 守卫**：`INVARIANT TENANCY-PG-TX-FUNNEL-01` 由两层承载。
 Hard 层是 `PgTenantPool`，tenant 表 adapter（sessions / config / roles / secret_refs /
@@ -160,6 +165,11 @@ tenant 表集合，扫描生产 Rust SQL site，禁止 tenant 表 SQL 通过 raw
 `pool.acquire` / `&self.pool` executor / `run_global_transaction` 访问，并带 anti-vacuity 与 stale
 allowlist 测试。raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
 global infra adapter 和命名维护例外中出现。
+
+**repo scope 签名守卫**：`INVARIANT TENANCY-REPO-SCOPE-SIGNATURE-01`（`cargo xtask
+repo-scope-guard`，Medium，接入 `verify` / `ci`）扫描 `settings` / `identity` / `audit` 的
+repo/lifecycle/UoW/store port，禁止普通 tenant/row-scoped repo 方法重新引入裸 `TenantId`、
+`RowVisibility`、`RowScope` 或 `ScopedTenant` 参数；admin / maintenance 专用 port 保持独立入口。
 
 **命名维护例外**：tenant 表 raw-pool 维护例外只允许在 `pg-tenant-tx-guard` 中按窄形状显式登记，并带
 stale-allowlist 测试。当前 Rust raw-pool 例外只有两类：`config_entries` startup legacy plaintext probe
@@ -327,7 +337,7 @@ coarse route allow / deny，但不能扩大 tenant rows、跨租户可见性或�
 
 ABAC policy store 是 tenant-scoped durable PG store：每条 policy 必须带 `tenant_id`，
 并受 `ENABLE/FORCE ROW LEVEL SECURITY` + tenant-isolation policy 约束。生产读写入口必须经
-typed tenant 参数和 PG tenant scope funnel 注入当前租户；不得提供全局 current policy 读取路径。
+repo scope handle 和 PG tenant scope funnel 注入当前租户；不得提供全局 current policy 读取路径。
 
 policy 以 version + effective window 表达生效集。查询 active policy 时只加载当前租户中
 `effective_from <= now < effective_until`（无上界按 open-ended 处理）的版本；未生效、已过期或已删除
@@ -405,11 +415,11 @@ generated spec 与 route 装配不一致或出现未知 permission 时必须 fai
 `cargo xtask verify` / `cargo xtask ci`。它不重做业务测试，而是锁以下 governance 锚点：
 
 - verify/ci plan 必须包含 tenant/RLS/AuthZ 相关门：`contract-validate`、`codegen-check`、
-  `schema-rls`、`setlocal-funnel`、`pg-tenant-tx-guard`、`pdp-allow-guard`、
+  `schema-rls`、`setlocal-funnel`、`pg-tenant-tx-guard`、`repo-scope-guard`、`pdp-allow-guard`、
   `tenancy-closeout`，以及实际可用时的 `dylint`。
 - RLS 静态与运行期纵深必须同时可见：迁移 DDL 由 `schema-rls` 守，SET LOCAL 注入由
   `setlocal-funnel` 守，tenant 表 raw-pool / `TxManager` bypass 由 `pg-tenant-tx-guard` 守，
-  durable startup 由 `verify_rls_capability()` 守。
+  repo port 签名由 `repo-scope-guard` 守，durable startup 由 `verify_rls_capability()` 守。
 - AuthZ 路由 gate 必须经 `RouteAuthorizer`，handler 只消费 `AuthorizedSubject`，不回退到
   handler-local role/self 分支。
 - 字段级数据权限必须从 contract projection fields + `responsePath` 派生到 generated spec，经

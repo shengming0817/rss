@@ -11,7 +11,7 @@ use base64::Engine as _;
 use primitives::MacVerifier;
 
 use crate::domain::{AuditChainHasher, AuditEntry, AuditError, EntryHash};
-use crate::ports::{AuditListResult, AuditPage, AuditRecord, AuditRepo};
+use crate::ports::{AuditListResult, AuditPage, AuditRecord, AuditRepo, TenantRepoScope};
 
 /// in-mem 状态：每租户 append-only 子链。
 #[derive(Default)]
@@ -97,7 +97,7 @@ impl<M> AuditRepo for InMemAuditRepo<M>
 where
     M: MacVerifier + Send + Sync,
 {
-    async fn append(&self, record: AuditRecord) -> Result<(), AuditError> {
+    async fn append(&self, scope: TenantRepoScope, record: AuditRecord) -> Result<(), AuditError> {
         let AuditRecord {
             tenant,
             actor,
@@ -107,6 +107,11 @@ where
             outcome,
             recorded_at,
         } = record;
+        if scope.tenant() != tenant {
+            return Err(AuditError::storage(std::io::Error::other(
+                "audit append tenant scope mismatch",
+            )));
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let chain = state.chains.entry(tenant).or_default();
         let (seq, prev) = match chain.last() {
@@ -152,9 +157,10 @@ where
     /// postgres provider 实现时应做增量尾部验证而非全扫（不应复制本实现的全扫逻辑，见 [`Self::verify_tail`]）。
     async fn list(
         &self,
-        tenant: vocab::TenantId,
+        scope: TenantRepoScope,
         page: AuditPage,
     ) -> Result<AuditListResult, AuditError> {
+        let tenant = scope.tenant();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let chain = state.chains.get(&tenant).map(Vec::as_slice).unwrap_or(&[]);
         // 读时校验整链完整（tamper-evident，docs/rules/audit-ledger.md）：篡改即 fail-closed，不返回脏数据。
@@ -183,7 +189,8 @@ where
 
     /// 尾部增量验证：验末 `limit` 条 + 其前驱链接（[`AuditChainHasher::verify_window`]，非全扫整链）。
     /// bootstrap 启动自检 / 运维巡检用——postgres provider 同语义（取末窗口 + 1 前驱行）。
-    async fn verify_tail(&self, tenant: vocab::TenantId, limit: u32) -> Result<(), AuditError> {
+    async fn verify_tail(&self, scope: TenantRepoScope, limit: u32) -> Result<(), AuditError> {
+        let tenant = scope.tenant();
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let chain = state.chains.get(&tenant).map(Vec::as_slice).unwrap_or(&[]);
         let n = chain.len();
@@ -216,6 +223,10 @@ mod tests {
         vocab::TenantId::parse(raw).expect("canonical tenant")
     }
 
+    fn scope(raw: &str) -> TenantRepoScope {
+        TenantRepoScope::for_test(tenant(raw))
+    }
+
     #[allow(clippy::expect_used)]
     fn record(tenant_raw: &str) -> AuditRecord {
         AuditRecord {
@@ -246,10 +257,12 @@ mod tests {
     async fn append_assigns_monotonic_seq_and_links_prev() {
         let repo = repo();
         for _ in 0..3 {
-            repo.append(record(TENANT_A)).await.expect("append");
+            repo.append(scope(TENANT_A), record(TENANT_A))
+                .await
+                .expect("append");
         }
         let listed = repo
-            .list(tenant(TENANT_A), page(500, None))
+            .list(scope(TENANT_A), page(500, None))
             .await
             .expect("list");
         let e = &listed.entries;
@@ -266,11 +279,13 @@ mod tests {
     async fn appended_chain_verifies_on_read() {
         let repo = repo();
         for _ in 0..3 {
-            repo.append(record(TENANT_A)).await.expect("append");
+            repo.append(scope(TENANT_A), record(TENANT_A))
+                .await
+                .expect("append");
         }
         // list 内部读时校验整链：返回 Ok ⇒ 链完整。再以同 key hasher 显式复验页内条目。
         let listed = repo
-            .list(tenant(TENANT_A), page(500, None))
+            .list(scope(TENANT_A), page(500, None))
             .await
             .expect("list ok ⇒ 链完整");
         assert!(keyed_hasher(0x5a).verify(&listed.entries).is_ok());
@@ -282,16 +297,22 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn tenants_are_isolated() {
         let repo = repo();
-        repo.append(record(TENANT_A)).await.expect("a0");
-        repo.append(record(TENANT_A)).await.expect("a1");
-        repo.append(record(TENANT_B)).await.expect("b0");
+        repo.append(scope(TENANT_A), record(TENANT_A))
+            .await
+            .expect("a0");
+        repo.append(scope(TENANT_A), record(TENANT_A))
+            .await
+            .expect("a1");
+        repo.append(scope(TENANT_B), record(TENANT_B))
+            .await
+            .expect("b0");
         // list 仅见本租户；各租户独立 genesis（seq 从 0 起）。
         let a = repo
-            .list(tenant(TENANT_A), page(500, None))
+            .list(scope(TENANT_A), page(500, None))
             .await
             .expect("list a");
         let b = repo
-            .list(tenant(TENANT_B), page(500, None))
+            .list(scope(TENANT_B), page(500, None))
             .await
             .expect("list b");
         assert_eq!(a.entries.len(), 2);
@@ -302,25 +323,47 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn append_rejects_record_tenant_mismatch_without_write() {
+        let repo = repo();
+        let result = repo.append(scope(TENANT_A), record(TENANT_B)).await;
+
+        assert!(matches!(result, Err(AuditError::Storage(_))));
+        assert!(
+            repo.list(scope(TENANT_A), page(500, None))
+                .await
+                .expect("list a")
+                .entries
+                .is_empty()
+        );
+        assert!(
+            repo.list(scope(TENANT_B), page(500, None))
+                .await
+                .expect("list b")
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn pagination_walks_cursor() {
         let repo = repo();
         for _ in 0..5 {
-            repo.append(record(TENANT_A)).await.expect("append");
+            repo.append(scope(TENANT_A), record(TENANT_A))
+                .await
+                .expect("append");
         }
-        let p1 = repo
-            .list(tenant(TENANT_A), page(2, None))
-            .await
-            .expect("p1");
+        let p1 = repo.list(scope(TENANT_A), page(2, None)).await.expect("p1");
         assert_eq!(p1.entries.len(), 2);
         assert!(p1.has_more);
         let p2 = repo
-            .list(tenant(TENANT_A), page(2, p1.next_cursor))
+            .list(scope(TENANT_A), page(2, p1.next_cursor))
             .await
             .expect("p2");
         assert_eq!(p2.entries.len(), 2);
         assert!(p2.has_more);
         let p3 = repo
-            .list(tenant(TENANT_A), page(2, p2.next_cursor))
+            .list(scope(TENANT_A), page(2, p2.next_cursor))
             .await
             .expect("p3");
         assert_eq!(p3.entries.len(), 1);
@@ -333,7 +376,7 @@ mod tests {
     async fn list_empty_for_unknown_tenant() {
         let repo = repo();
         let empty = repo
-            .list(tenant(TENANT_A), page(10, None))
+            .list(scope(TENANT_A), page(10, None))
             .await
             .expect("list");
         assert!(empty.entries.is_empty());
@@ -347,12 +390,16 @@ mod tests {
     async fn list_returns_error_when_chain_tampered() {
         let repo = repo();
         // append 2 条正常记录。
-        repo.append(record(TENANT_A)).await.expect("append 0");
-        repo.append(record(TENANT_A)).await.expect("append 1");
+        repo.append(scope(TENANT_A), record(TENANT_A))
+            .await
+            .expect("append 0");
+        repo.append(scope(TENANT_A), record(TENANT_A))
+            .await
+            .expect("append 1");
         // 篡改首条 entry_hash。
         repo.corrupt_first_entry_hash(tenant(TENANT_A));
         // list 读时链验证应失败。
-        let result = repo.list(tenant(TENANT_A), page(10, None)).await;
+        let result = repo.list(scope(TENANT_A), page(10, None)).await;
         assert!(
             matches!(result, Err(crate::domain::AuditError::HashMismatch)),
             "篡改后 list 须返回 HashMismatch"
@@ -365,12 +412,14 @@ mod tests {
     async fn list_rejects_semantically_invalid_cursor() {
         let repo = repo();
         for _ in 0..3 {
-            repo.append(record(TENANT_A)).await.expect("append");
+            repo.append(scope(TENANT_A), record(TENANT_A))
+                .await
+                .expect("append");
         }
         // 构造 base64url 编码了 "not-a-number" 的游标（Cursor::parse 接受，但语义无效）。
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-a-number");
         let cursor = vocab::Cursor::parse(&raw).expect("cursor parse");
-        let result = repo.list(tenant(TENANT_A), page(10, Some(cursor))).await;
+        let result = repo.list(scope(TENANT_A), page(10, Some(cursor))).await;
         assert!(
             matches!(result, Err(AuditError::InvalidCursor)),
             "语义无效游标须 fail-closed 返回 InvalidCursor（不回退首页，防重复页）"
@@ -383,22 +432,37 @@ mod tests {
     async fn verify_tail_is_incremental_window() {
         let repo = repo();
         for _ in 0..5 {
-            repo.append(record(TENANT_A)).await.expect("append");
+            repo.append(scope(TENANT_A), record(TENANT_A))
+                .await
+                .expect("append");
         }
         let t = tenant(TENANT_A);
         // 干净链：尾窗口 + 全窗口都通过。
-        assert!(repo.verify_tail(t, 2).await.is_ok());
-        assert!(repo.verify_tail(t, 10).await.is_ok());
+        assert!(
+            repo.verify_tail(TenantRepoScope::for_test(t), 2)
+                .await
+                .is_ok()
+        );
+        assert!(
+            repo.verify_tail(TenantRepoScope::for_test(t), 10)
+                .await
+                .is_ok()
+        );
         // 篡改首条（seq 0）。
         repo.corrupt_first_entry_hash(t);
         // 尾 2 条（seq 3,4）+ 前驱 seq 2，不触 seq 0 ⇒ 仍 Ok（增量，不全扫）。
         assert!(
-            repo.verify_tail(t, 2).await.is_ok(),
+            repo.verify_tail(TenantRepoScope::for_test(t), 2)
+                .await
+                .is_ok(),
             "尾窗口不含被篡改的 genesis ⇒ 增量验证须 Ok"
         );
         // 窗口覆盖全链（含被篡改 seq 0）⇒ HashMismatch。
         assert!(
-            matches!(repo.verify_tail(t, 10).await, Err(AuditError::HashMismatch)),
+            matches!(
+                repo.verify_tail(TenantRepoScope::for_test(t), 10).await,
+                Err(AuditError::HashMismatch)
+            ),
             "覆盖被篡改 genesis 的窗口须 fail-closed HashMismatch"
         );
     }

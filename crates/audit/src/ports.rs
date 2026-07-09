@@ -34,6 +34,62 @@ pub use crate::domain::{
 };
 pub use vocab::TenantId;
 
+/// Tenant-scoped repo capability for ordinary audit storage ports.
+///
+/// Audit admin operations intentionally keep their own target-tenant entry points; this handle is
+/// for non-admin tenant-scoped repository calls only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TenantRepoScope {
+    tenant: TenantId,
+    _seal: (),
+}
+
+impl TenantRepoScope {
+    /// Domain-internal constructor from an already authenticated or authorized tenant claim.
+    pub(crate) fn from_authenticated_tenant(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+
+    /// Read the tenant carried by this repo capability.
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    /// Test/dev-only constructor for downstream adapter conformance tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(tenant: TenantId) -> Self {
+        Self { tenant, _seal: () }
+    }
+}
+
+/// Non-cross-tenant row-scoped repo capability for audit rows.
+pub struct RowRepoScope {
+    visibility: vocab::RowVisibility,
+    _seal: (),
+}
+
+impl RowRepoScope {
+    #[allow(dead_code)]
+    pub(crate) fn from_scoped_visibility(
+        scope: vocab::ScopedTenant,
+        tenant: TenantRepoScope,
+    ) -> Self {
+        Self {
+            visibility: vocab::RowVisibility::new(scope, tenant.tenant()),
+            _seal: (),
+        }
+    }
+
+    pub fn visibility(&self) -> &vocab::RowVisibility {
+        &self.visibility
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(scope: vocab::ScopedTenant, tenant: TenantRepoScope) -> Self {
+        Self::from_scoped_visibility(scope, tenant)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 仓储 I/O 类型（跨 in-mem / postgres provider 共用；字段已 typed 自校验 ⇒ pub 字段无需二次 funnel）
 // ---------------------------------------------------------------------------
@@ -98,7 +154,7 @@ pub struct AuditLedgerVerifyReport {
 /// `Arc<DynAuditRepo>` 可被 spawn 的订阅 future / axum handler 闭包持有（[`crate::AuditDomain`] 注入即此形）。
 ///
 /// **租户隔离由签名承载（fail-closed）**：[`list`](AuditRepoLocal::list) / [`verify_tail`](AuditRepoLocal::verify_tail)
-/// 接 typed [`TenantId`] 作 store scope（postgres 经 `SET LOCAL` + FORCE RLS）。**读路径完整性 fail-closed**：
+/// 接 [`TenantRepoScope`] 作 store scope（postgres 经 `SET LOCAL` + FORCE RLS）。**读路径完整性 fail-closed**：
 /// `list` 内增量 [`verify_window`](AuditChainHasher::verify_window)（窗口 + 1 前驱，非全扫），篡改 → `Err`
 /// （handler 映 500，不下发脏数据）。
 ///
@@ -117,13 +173,17 @@ pub struct AuditLedgerVerifyReport {
 pub trait AuditRepoLocal: Send + Sync {
     /// **原子封链 append**：分配 seq、链接 prev、算 entry_hash、持久化（provider 内串行——in-mem `Mutex` /
     /// postgres advisory-lock + `(tenant, seq)` 唯一兜底）。
-    async fn append(&self, record: AuditRecord) -> Result<(), AuditError>;
+    async fn append(&self, scope: TenantRepoScope, record: AuditRecord) -> Result<(), AuditError>;
 
     /// 按租户分页列出审计条目（读路径**增量验证**返回窗口 + 1 前驱，篡改 fail-closed → `Err`）。
-    async fn list(&self, tenant: TenantId, page: AuditPage) -> Result<AuditListResult, AuditError>;
+    async fn list(
+        &self,
+        scope: TenantRepoScope,
+        page: AuditPage,
+    ) -> Result<AuditListResult, AuditError>;
 
     /// **尾部增量验证**（bootstrap 启动自检 + 运维巡检）：验末 `limit` 条 + 其前驱链接，非全扫整链。
-    async fn verify_tail(&self, tenant: TenantId, limit: u32) -> Result<(), AuditError>;
+    async fn verify_tail(&self, scope: TenantRepoScope, limit: u32) -> Result<(), AuditError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,22 +223,30 @@ mod smoke {
 
     use super::{
         AuditAdminRepo, AuditError, AuditLedgerVerifyReport, AuditListResult, AuditPage,
-        AuditRecord, AuditRepo, DynAuditAdminRepo, DynAuditRepo, TenantId,
+        AuditRecord, AuditRepo, DynAuditAdminRepo, DynAuditRepo, TenantId, TenantRepoScope,
     };
 
     struct NoopAuditRepo;
     impl AuditRepo for NoopAuditRepo {
-        async fn append(&self, _record: AuditRecord) -> Result<(), AuditError> {
+        async fn append(
+            &self,
+            _scope: TenantRepoScope,
+            _record: AuditRecord,
+        ) -> Result<(), AuditError> {
             todo!()
         }
         async fn list(
             &self,
-            _tenant: TenantId,
+            _scope: TenantRepoScope,
             _page: AuditPage,
         ) -> Result<AuditListResult, AuditError> {
             todo!()
         }
-        async fn verify_tail(&self, _tenant: TenantId, _limit: u32) -> Result<(), AuditError> {
+        async fn verify_tail(
+            &self,
+            _scope: TenantRepoScope,
+            _limit: u32,
+        ) -> Result<(), AuditError> {
             todo!()
         }
     }

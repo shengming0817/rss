@@ -7,6 +7,7 @@ use identity::ports::PolicyRouteScope;
 use identity::ports::{
     AttributeValue, IdentityError, ResourceAttribute, ResourceAttributeKey, ResourceAttributeRepo,
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, TenantId,
+    TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -87,12 +88,13 @@ fn row_is_effective(raw: &RawResourceAttribute, at_secs: i64) -> bool {
 impl ResourceAttributeRepo for PgResourceAttributeRepo {
     async fn resolve_effective(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         required_keys: Vec<ResourceAttributeKey>,
         at: SystemTime,
     ) -> Result<ResourceAttributeResolution, IdentityError> {
+        let tenant = tenant_scope.tenant();
         if required_keys.is_empty() {
             return Ok(ResourceAttributeResolution::Known(Vec::new()));
         }
@@ -106,7 +108,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
             .collect::<Vec<_>>();
         let rows: Vec<RawResourceAttribute> = self
             .pool
-            .read(tenant, move |conn| {
+            .read(tenant_scope, move |conn| {
                 Box::pin(async move {
                     let rows = sqlx::query(
                         r#"
@@ -162,10 +164,11 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
 
     async fn upsert(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         attribute: ResourceAttribute,
         expected: Option<ResourceAttributeVersion>,
     ) -> Result<ResourceAttribute, IdentityError> {
+        let tenant = tenant_scope.tenant();
         if attribute.tenant() != tenant {
             return Err(IdentityError::InvalidPolicy);
         }
@@ -185,7 +188,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
                 let version = version_param(ResourceAttributeVersion::first())?;
                 self.pool
                     .write(
-                        tenant,
+                        tenant_scope,
                         move |conn| {
                             Box::pin(async move {
                                 let row = sqlx::query(
@@ -229,7 +232,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
                 let expected_version = version_param(expected)?;
                 self.pool
                     .write(
-                        tenant,
+                        tenant_scope,
                         move |conn| {
                             Box::pin(async move {
                                 let row = sqlx::query(
@@ -285,12 +288,13 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
 
     async fn expire(
         &self,
-        tenant: TenantId,
+        tenant_scope: TenantRepoScope,
         scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
         expected: ResourceAttributeVersion,
     ) -> Result<bool, IdentityError> {
+        let tenant = tenant_scope.tenant();
         let tenant_uuid = tenant_param(tenant);
         let contract_id = scope.contract_id().to_string();
         let permission = scope.permission().as_str().to_string();
@@ -300,7 +304,7 @@ impl ResourceAttributeRepo for PgResourceAttributeRepo {
         let outcome = self
             .pool
             .write(
-                tenant,
+                tenant_scope,
                 move |conn| {
                     Box::pin(async move {
                         let updated = sqlx::query(

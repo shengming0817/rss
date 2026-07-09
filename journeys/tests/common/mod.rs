@@ -23,7 +23,7 @@ use identity::ports::{
     PolicyRepo, PolicyRouteScope, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
     ResourceAttributeRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
     ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId, RoleListResult,
-    RolePage, RoleRepo,
+    RolePage, RoleRepo, TenantRepoScope,
 };
 use identity::{
     IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
@@ -270,17 +270,21 @@ pub fn audit_domain() -> (AuditDomain<NoopAuditSink>, CapturingVerifier) {
 struct NoopRoleRepo;
 
 impl RoleRepo for NoopRoleRepo {
-    async fn find(&self, _tenant: TenantId, _id: RoleId) -> Result<Option<Role>, IdentityError> {
+    async fn find(
+        &self,
+        _scope: TenantRepoScope,
+        _id: RoleId,
+    ) -> Result<Option<Role>, IdentityError> {
         Ok(None)
     }
 
-    async fn save(&self, _tenant: TenantId, _role: Role) -> Result<(), IdentityError> {
+    async fn save(&self, _scope: TenantRepoScope, _role: Role) -> Result<(), IdentityError> {
         Ok(())
     }
 
     async fn list(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _page: RolePage,
     ) -> Result<RoleListResult, IdentityError> {
         Ok(RoleListResult {
@@ -295,6 +299,7 @@ struct NoopRoleBindingLifecycle;
 impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
     async fn assign_and_emit(
         &self,
+        _scope: TenantRepoScope,
         _binding: RoleBinding,
         _entry: Entry,
         _envelope: OutboxEnvelopeParts,
@@ -304,7 +309,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
 
     async fn revoke_and_emit(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _role_id: RoleId,
         _subject: String,
         _entry: Entry,
@@ -315,7 +320,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
 
     async fn list_for_subject(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _subject: String,
     ) -> Result<Vec<RoleBinding>, IdentityError> {
         Ok(Vec::new())
@@ -327,7 +332,7 @@ struct NoopPolicyRepo;
 impl PolicyRepo for NoopPolicyRepo {
     async fn find(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _id: PolicyId,
     ) -> Result<Option<Policy>, IdentityError> {
         Ok(None)
@@ -335,7 +340,7 @@ impl PolicyRepo for NoopPolicyRepo {
 
     async fn list_active(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _page: PolicyPage,
     ) -> Result<PolicyListResult, IdentityError> {
         Ok(PolicyListResult {
@@ -346,7 +351,7 @@ impl PolicyRepo for NoopPolicyRepo {
 
     async fn list_effective(
         &self,
-        _tenant: TenantId,
+        _tenant_scope: TenantRepoScope,
         _scope: PolicyRouteScope,
         _at: std::time::SystemTime,
     ) -> Result<Vec<Policy>, IdentityError> {
@@ -359,7 +364,7 @@ struct NoopResourceAttributeRepo;
 impl ResourceAttributeRepo for NoopResourceAttributeRepo {
     async fn resolve_effective(
         &self,
-        _tenant: TenantId,
+        _tenant_scope: TenantRepoScope,
         _scope: PolicyRouteScope,
         _resource_id: ResourceAttributeResourceId,
         mut required_keys: Vec<ResourceAttributeKey>,
@@ -373,7 +378,7 @@ impl ResourceAttributeRepo for NoopResourceAttributeRepo {
 
     async fn upsert(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _attribute: ResourceAttribute,
         _expected: Option<ResourceAttributeVersion>,
     ) -> Result<ResourceAttribute, IdentityError> {
@@ -384,7 +389,7 @@ impl ResourceAttributeRepo for NoopResourceAttributeRepo {
 
     async fn expire(
         &self,
-        _tenant: TenantId,
+        _tenant_scope: TenantRepoScope,
         _scope: PolicyRouteScope,
         _resource_id: ResourceAttributeResourceId,
         _key: ResourceAttributeKey,
@@ -399,7 +404,7 @@ struct NoopPolicyLifecycle;
 impl PolicyLifecycle for NoopPolicyLifecycle {
     async fn create_and_emit(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         policy: Policy,
         _entry: Entry,
         _envelope: OutboxEnvelopeParts,
@@ -409,7 +414,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
 
     async fn update_and_emit(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         policy: Policy,
         _expected: PolicyVersion,
         _entry: Entry,
@@ -420,7 +425,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
 
     async fn deactivate_and_emit(
         &self,
-        _tenant: TenantId,
+        _scope: TenantRepoScope,
         _id: PolicyId,
         _expected: PolicyVersion,
         _entry: Entry,
