@@ -323,11 +323,25 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
     },
 ];
 
+/// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const EFFECTS: &[super::EffectKind] = &[
+    super::EffectKind::Auth,
+    super::EffectKind::Read,
+    super::EffectKind::Projection,
+    super::EffectKind::Write,
+    super::EffectKind::CrossTenantAudit,
+];
+
+/// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const EFFECT_PROFILE: super::EffectProfile = super::EffectProfile { effects: EFFECTS };
+
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: super::HttpSpec = super::HttpSpec {
     contract_id: CONTRACT_ID,
     contract: CONTRACT,
     consistency_level: super::HttpConsistencyLevel::LocalOnly,
+    effect_profile: EFFECT_PROFILE,
+    local_tx: None,
     path: PATH,
     method: "GET",
     auth: super::HttpAuthSpec {

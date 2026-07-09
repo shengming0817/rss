@@ -4,7 +4,10 @@
 //! use every consistency enum variant, but `generated::http::SPECS` stays
 //! active-only.
 
-use generated::http::{self, HttpConsistencyLevel};
+use generated::http::{
+    self, EffectKind, HttpConsistencyLevel, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
+    LocalTxRetry, LocalTxSpec,
+};
 
 const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("audit.list-entries", HttpConsistencyLevel::LocalOnly),
@@ -27,6 +30,19 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("settings.config-publish", HttpConsistencyLevel::OutboxFact),
     ("settings.secret-publish", HttpConsistencyLevel::LocalTx),
 ];
+
+const EXPECTED_LOCAL_TX_SPECS: &[&str] = &[
+    "identity.logout",
+    "identity.password-change",
+    "identity.refresh",
+    "settings.secret-publish",
+];
+
+fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
+    http::SPECS
+        .iter()
+        .find(|spec| spec.contract_id == contract_id)
+}
 
 fn count_in_registry(level: HttpConsistencyLevel) -> usize {
     http::SPECS
@@ -58,6 +74,79 @@ fn registry_distribution() -> [(HttpConsistencyLevel, usize); 5] {
             count_in_registry(HttpConsistencyLevel::DeviceLatent),
         ),
     ]
+}
+
+#[test]
+fn active_http_specs_expose_non_empty_effect_profiles() {
+    let missing: Vec<_> = http::SPECS
+        .iter()
+        .filter(|spec| spec.effect_profile.effects.is_empty())
+        .map(|spec| spec.contract_id)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "every active HTTP spec must expose non-empty effect metadata: {missing:?}"
+    );
+}
+
+#[test]
+fn audit_list_entries_exposes_mixed_effect_profile() {
+    let effects: &[EffectKind] =
+        active_spec("audit.list-entries").map_or(&[], |spec| spec.effect_profile.effects);
+    for expected in [
+        EffectKind::Auth,
+        EffectKind::Read,
+        EffectKind::Projection,
+        EffectKind::Write,
+        EffectKind::CrossTenantAudit,
+    ] {
+        assert!(
+            effects.contains(&expected),
+            "audit.list-entries effect profile missing {expected:?}: {:?}",
+            effects
+        );
+    }
+}
+
+#[test]
+fn local_tx_registry_contains_exact_active_l1_contracts() {
+    let actual: Vec<_> = http::LOCAL_TX_SPECS
+        .iter()
+        .map(|spec| spec.contract_id)
+        .collect();
+    let from_specs: Vec<_> = http::SPECS
+        .iter()
+        .filter(|spec| spec.consistency_level == HttpConsistencyLevel::LocalTx)
+        .map(|spec| spec.contract_id)
+        .collect();
+    let expected_evidence = LocalTxSpec {
+        boundary: LocalTxBoundary::SingleDomain,
+        tx_model: LocalTxModel::TenantScopedUow,
+        retry: LocalTxRetry::BoundedTransient,
+        commit_unknown: LocalTxCommitUnknown::NotRetryable,
+    };
+
+    assert_eq!(
+        actual.as_slice(),
+        EXPECTED_LOCAL_TX_SPECS,
+        "LOCAL_TX_SPECS should expose the current active L1 contract set"
+    );
+    assert_eq!(
+        actual, from_specs,
+        "LOCAL_TX_SPECS should be derived from active LocalTx HTTP specs"
+    );
+    for spec in http::LOCAL_TX_SPECS {
+        assert_eq!(spec.consistency_level, HttpConsistencyLevel::LocalTx);
+        assert_eq!(spec.local_tx, Some(expected_evidence));
+    }
+    for spec in http::SPECS {
+        assert_eq!(
+            spec.local_tx.is_some(),
+            spec.consistency_level == HttpConsistencyLevel::LocalTx,
+            "local_tx evidence should only be present on LocalTx specs: {}",
+            spec.contract_id
+        );
+    }
 }
 
 #[test]

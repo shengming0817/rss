@@ -1,7 +1,8 @@
 # L0 一致性规则
 
-本文件记录 L0/LocalOnly 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest 与 R22 校验；后续可执行证明见
-`docs/spec/006-l0-l1-consistency-hardening/` 的 #1688+ 分解。
+本文件记录 L0/LocalOnly 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest、R22 校验与
+`generated::http::HttpSpec::effect_profile`；后续可执行证明见
+`docs/spec/006-l0-l1-consistency-hardening/` 的 #1689+ 分解。
 
 ## Contract carrier
 
@@ -49,8 +50,9 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
 - `worker`
 - `cross-tenant-audit`
 
-当前 #1687 只提供统一声明面，不把上面的 strict-L0 行为证明落到 runner、lint、route binding 或 metrics。
-这些可执行门由 #1688 生成 registry 后分支实现。
+当前 #1688 已把统一声明面生成进 active HTTP `HttpSpec::effect_profile`，并由 generated tests 锁住非空
+effect 与 `audit.list-entries` 的混合 profile。上面的 strict-L0 行为证明仍未落到 runner、lint、route
+binding 或 metrics；这些可执行门由 #1689/#1690/#1691/#1693 等后续分支实现。
 
 ## Known mixed route
 
@@ -65,9 +67,11 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
 - 新增 `[effectProfile]` carrier。
 - 迁移真实 HTTP `contract.toml`。
 - R22 守住 HTTP 必填、非 HTTP 禁止、空/重复 effect、未知字段/枚举。
-- 不改 `generated/src/**` 输出形状。
-- 不生成 `EffectProfile` registry。
+
+#1688 的边界是 generated metadata：
+
+- `generated::http` 暴露 `EffectProfile` / `EffectKind` 闭 API。
+- 每个 active HTTP `SPEC` 必填 `effect_profile`，缺 carrier 时 codegen fail-closed。
 - 不做 route binding、lint、runner、metrics 或 journey。
 
-#1688 消费本 carrier 生成共享 registry；#1689/#1690/#1691/#1693 等在 registry 基础上补实际 L0
-可执行证明。
+#1689/#1690/#1691/#1693 等在 generated metadata 基础上补实际 L0 可执行证明。

@@ -2393,7 +2393,7 @@ async fn disabled_policy_renews_lease_during_forward_action_and_interrupts_on_lo
 async fn disabled_policy_renews_lease_during_compensation_action_and_interrupts_on_loss() {
     let journal = Arc::new(FakeJournal::default());
     let store = ready_instance_store();
-    store.lose_after_extensions(3);
+    store.lose_after_extensions(4);
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::behaviors(&[
@@ -2425,8 +2425,8 @@ async fn disabled_policy_renews_lease_during_compensation_action_and_interrupts_
     );
     assert_eq!(counts[0].undos(), 1, "compensation should start once");
     assert!(
-        store.extension_count() >= 4,
-        "forward refreshes, compensation refresh, and in-phase renewal should be attempted"
+        store.extension_count() >= 5,
+        "forward refreshes, compensation pre-action refreshes, and in-phase renewal should be attempted"
     );
     assert!(
         !journal

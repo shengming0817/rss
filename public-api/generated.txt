@@ -1427,6 +1427,8 @@ impl<T> typenum::type_operators::Same for generated::http::audit_v1::AuditListEn
 pub type generated::http::audit_v1::AuditListEntriesResponse::Output = T
 pub const generated::http::audit_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::CONTRACT_ID: &str
+pub const generated::http::audit_v1::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::audit_v1::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::audit_v1::PATH: &str
 pub const generated::http::audit_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::audit_v1::SPEC: generated::http::HttpSpec
@@ -1740,6 +1742,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::login::I
 pub type generated::http::identity_v1::login::IdentityLoginResponse::Output = T
 pub const generated::http::identity_v1::login::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::login::CONTRACT_ID: &str
+pub const generated::http::identity_v1::login::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::login::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::login::PATH: &str
 pub const generated::http::identity_v1::login::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::login::SPEC: generated::http::HttpSpec
@@ -1916,6 +1920,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::logout::
 pub type generated::http::identity_v1::logout::IdentityLogoutResponse::Output = T
 pub const generated::http::identity_v1::logout::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::logout::CONTRACT_ID: &str
+pub const generated::http::identity_v1::logout::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::logout::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::logout::PATH: &str
 pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::logout::SPEC: generated::http::HttpSpec
@@ -2093,6 +2099,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::password
 pub type generated::http::identity_v1::password_change::IdentityPasswordChangeResponse::Output = T
 pub const generated::http::identity_v1::password_change::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::password_change::CONTRACT_ID: &str
+pub const generated::http::identity_v1::password_change::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::password_change::PATH: &str
 pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::password_change::SPEC: generated::http::HttpSpec
@@ -3012,6 +3020,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::policies
 pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateView::Output = T
 pub const generated::http::identity_v1::policies_create::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_create::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_create::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::policies_create::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::policies_create::PATH: &str
 pub const generated::http::identity_v1::policies_create::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_create::SPEC: generated::http::HttpSpec
@@ -3189,6 +3199,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::policies
 pub type generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateResponse::Output = T
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_deactivate::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::policies_deactivate::PATH: &str
 pub const generated::http::identity_v1::policies_deactivate::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_deactivate::SPEC: generated::http::HttpSpec
@@ -3772,6 +3784,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::policies
 pub type generated::http::identity_v1::policies_get::IdentityPolicyGetView::Output = T
 pub const generated::http::identity_v1::policies_get::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_get::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_get::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::policies_get::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::policies_get::PATH: &str
 pub const generated::http::identity_v1::policies_get::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_get::SPEC: generated::http::HttpSpec
@@ -4360,6 +4374,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::policies
 pub type generated::http::identity_v1::policies_list::IdentityPolicyListView::Output = T
 pub const generated::http::identity_v1::policies_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_list::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_list::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::policies_list::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::policies_list::PATH: &str
 pub const generated::http::identity_v1::policies_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_list::SPEC: generated::http::HttpSpec
@@ -5279,6 +5295,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::policies
 pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateView::Output = T
 pub const generated::http::identity_v1::policies_update::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_update::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_update::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::policies_update::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::policies_update::PATH: &str
 pub const generated::http::identity_v1::policies_update::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::policies_update::SPEC: generated::http::HttpSpec
@@ -5532,6 +5550,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::profile:
 pub type generated::http::identity_v1::profile::IdentityProfileResponse::Output = T
 pub const generated::http::identity_v1::profile::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::profile::CONTRACT_ID: &str
+pub const generated::http::identity_v1::profile::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::profile::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::profile::PATH: &str
 pub const generated::http::identity_v1::profile::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::profile::SPEC: generated::http::HttpSpec
@@ -5710,6 +5730,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::refresh:
 pub type generated::http::identity_v1::refresh::IdentityRefreshResponse::Output = T
 pub const generated::http::identity_v1::refresh::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::refresh::CONTRACT_ID: &str
+pub const generated::http::identity_v1::refresh::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::refresh::PATH: &str
 pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::refresh::SPEC: generated::http::HttpSpec
@@ -5886,6 +5908,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_as
 pub type generated::http::identity_v1::roles_assign::IdentityRolesAssignResponse::Output = T
 pub const generated::http::identity_v1::roles_assign::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_assign::CONTRACT_ID: &str
+pub const generated::http::identity_v1::roles_assign::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::roles_assign::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::roles_assign::PATH: &str
 pub const generated::http::identity_v1::roles_assign::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_assign::SPEC: generated::http::HttpSpec
@@ -6070,6 +6094,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_li
 pub type generated::http::identity_v1::roles_list::IdentityRolesListResponse::Output = T
 pub const generated::http::identity_v1::roles_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_list::CONTRACT_ID: &str
+pub const generated::http::identity_v1::roles_list::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::roles_list::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::roles_list::PATH: &str
 pub const generated::http::identity_v1::roles_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_list::SPEC: generated::http::HttpSpec
@@ -6247,6 +6273,8 @@ impl<T> typenum::type_operators::Same for generated::http::identity_v1::roles_re
 pub type generated::http::identity_v1::roles_revoke::IdentityRolesRevokeResponse::Output = T
 pub const generated::http::identity_v1::roles_revoke::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_revoke::CONTRACT_ID: &str
+pub const generated::http::identity_v1::roles_revoke::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::identity_v1::roles_revoke::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
 pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
@@ -6558,6 +6586,8 @@ impl<T> typenum::type_operators::Same for generated::http::settings_v1::Settings
 pub type generated::http::settings_v1::SettingsConfigPublishResponse::Output = T
 pub const generated::http::settings_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v1::CONTRACT_ID: &str
+pub const generated::http::settings_v1::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::settings_v1::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::settings_v1::PATH: &str
 pub const generated::http::settings_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v1::SPEC: generated::http::HttpSpec
@@ -6738,6 +6768,8 @@ impl<T> typenum::type_operators::Same for generated::http::settings_v2::Settings
 pub type generated::http::settings_v2::SettingsSecretPublishResponse::Output = T
 pub const generated::http::settings_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v2::CONTRACT_ID: &str
+pub const generated::http::settings_v2::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::settings_v2::EFFECT_PROFILE: generated::http::EffectProfile
 pub const generated::http::settings_v2::PATH: &str
 pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v2::SPEC: generated::http::HttpSpec
@@ -6872,6 +6904,59 @@ impl<T> typenum::type_operators::Same for generated::http::settings_v3::Settings
 pub type generated::http::settings_v3::SettingsConfigProjectionResponse::Output = T
 pub const generated::http::settings_v3::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v3::CONTRACT_ID: &str
+pub enum generated::http::EffectKind
+pub generated::http::EffectKind::Auth
+pub generated::http::EffectKind::CrossTenantAudit
+pub generated::http::EffectKind::Outbox
+pub generated::http::EffectKind::Projection
+pub generated::http::EffectKind::Publish
+pub generated::http::EffectKind::Read
+pub generated::http::EffectKind::Reconcile
+pub generated::http::EffectKind::Saga
+pub generated::http::EffectKind::Transaction
+pub generated::http::EffectKind::Worker
+pub generated::http::EffectKind::Workflow
+pub generated::http::EffectKind::Write
+impl core::clone::Clone for generated::http::EffectKind
+pub fn generated::http::EffectKind::clone(&self) -> generated::http::EffectKind
+impl core::cmp::Eq for generated::http::EffectKind
+impl core::cmp::PartialEq for generated::http::EffectKind
+pub fn generated::http::EffectKind::eq(&self, &generated::http::EffectKind) -> bool
+impl core::fmt::Debug for generated::http::EffectKind
+pub fn generated::http::EffectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::EffectKind
+impl core::marker::StructuralPartialEq for generated::http::EffectKind
+impl core::marker::Freeze for generated::http::EffectKind
+impl core::marker::Send for generated::http::EffectKind
+impl core::marker::Sync for generated::http::EffectKind
+impl core::marker::Unpin for generated::http::EffectKind
+impl core::marker::UnsafeUnpin for generated::http::EffectKind
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::EffectKind
+impl core::panic::unwind_safe::UnwindSafe for generated::http::EffectKind
+impl<T, U> core::convert::Into<U> for generated::http::EffectKind where U: core::convert::From<T>
+pub fn generated::http::EffectKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::EffectKind where U: core::convert::Into<T>
+pub type generated::http::EffectKind::Error = core::convert::Infallible
+pub fn generated::http::EffectKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::EffectKind where U: core::convert::TryFrom<T>
+pub type generated::http::EffectKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::EffectKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::EffectKind where T: core::clone::Clone
+pub type generated::http::EffectKind::Owned = T
+pub fn generated::http::EffectKind::clone_into(&self, &mut T)
+pub fn generated::http::EffectKind::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::EffectKind where T: 'static + ?core::marker::Sized
+pub fn generated::http::EffectKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::EffectKind where T: ?core::marker::Sized
+pub fn generated::http::EffectKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::EffectKind where T: ?core::marker::Sized
+pub fn generated::http::EffectKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::EffectKind where T: core::clone::Clone
+pub unsafe fn generated::http::EffectKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::EffectKind
+pub fn generated::http::EffectKind::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::EffectKind
+pub type generated::http::EffectKind::Output = T
 pub enum generated::http::HttpAuthMode
 pub generated::http::HttpAuthMode::Bootstrap
 pub generated::http::HttpAuthMode::ClientsOnly
@@ -7050,6 +7135,216 @@ impl<T> core::convert::From<T> for generated::http::HttpResourceSharingMode
 pub fn generated::http::HttpResourceSharingMode::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::http::HttpResourceSharingMode
 pub type generated::http::HttpResourceSharingMode::Output = T
+pub enum generated::http::LocalTxBoundary
+pub generated::http::LocalTxBoundary::SingleDomain
+impl core::clone::Clone for generated::http::LocalTxBoundary
+pub fn generated::http::LocalTxBoundary::clone(&self) -> generated::http::LocalTxBoundary
+impl core::cmp::Eq for generated::http::LocalTxBoundary
+impl core::cmp::PartialEq for generated::http::LocalTxBoundary
+pub fn generated::http::LocalTxBoundary::eq(&self, &generated::http::LocalTxBoundary) -> bool
+impl core::fmt::Debug for generated::http::LocalTxBoundary
+pub fn generated::http::LocalTxBoundary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::LocalTxBoundary
+impl core::marker::StructuralPartialEq for generated::http::LocalTxBoundary
+impl core::marker::Freeze for generated::http::LocalTxBoundary
+impl core::marker::Send for generated::http::LocalTxBoundary
+impl core::marker::Sync for generated::http::LocalTxBoundary
+impl core::marker::Unpin for generated::http::LocalTxBoundary
+impl core::marker::UnsafeUnpin for generated::http::LocalTxBoundary
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxBoundary
+impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxBoundary
+impl<T, U> core::convert::Into<U> for generated::http::LocalTxBoundary where U: core::convert::From<T>
+pub fn generated::http::LocalTxBoundary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::LocalTxBoundary where U: core::convert::Into<T>
+pub type generated::http::LocalTxBoundary::Error = core::convert::Infallible
+pub fn generated::http::LocalTxBoundary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::LocalTxBoundary where U: core::convert::TryFrom<T>
+pub type generated::http::LocalTxBoundary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::LocalTxBoundary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::LocalTxBoundary where T: core::clone::Clone
+pub type generated::http::LocalTxBoundary::Owned = T
+pub fn generated::http::LocalTxBoundary::clone_into(&self, &mut T)
+pub fn generated::http::LocalTxBoundary::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::LocalTxBoundary where T: 'static + ?core::marker::Sized
+pub fn generated::http::LocalTxBoundary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::LocalTxBoundary where T: ?core::marker::Sized
+pub fn generated::http::LocalTxBoundary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::LocalTxBoundary where T: ?core::marker::Sized
+pub fn generated::http::LocalTxBoundary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::LocalTxBoundary where T: core::clone::Clone
+pub unsafe fn generated::http::LocalTxBoundary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::LocalTxBoundary
+pub fn generated::http::LocalTxBoundary::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::LocalTxBoundary
+pub type generated::http::LocalTxBoundary::Output = T
+pub enum generated::http::LocalTxCommitUnknown
+pub generated::http::LocalTxCommitUnknown::NotRetryable
+impl core::clone::Clone for generated::http::LocalTxCommitUnknown
+pub fn generated::http::LocalTxCommitUnknown::clone(&self) -> generated::http::LocalTxCommitUnknown
+impl core::cmp::Eq for generated::http::LocalTxCommitUnknown
+impl core::cmp::PartialEq for generated::http::LocalTxCommitUnknown
+pub fn generated::http::LocalTxCommitUnknown::eq(&self, &generated::http::LocalTxCommitUnknown) -> bool
+impl core::fmt::Debug for generated::http::LocalTxCommitUnknown
+pub fn generated::http::LocalTxCommitUnknown::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::LocalTxCommitUnknown
+impl core::marker::StructuralPartialEq for generated::http::LocalTxCommitUnknown
+impl core::marker::Freeze for generated::http::LocalTxCommitUnknown
+impl core::marker::Send for generated::http::LocalTxCommitUnknown
+impl core::marker::Sync for generated::http::LocalTxCommitUnknown
+impl core::marker::Unpin for generated::http::LocalTxCommitUnknown
+impl core::marker::UnsafeUnpin for generated::http::LocalTxCommitUnknown
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxCommitUnknown
+impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxCommitUnknown
+impl<T, U> core::convert::Into<U> for generated::http::LocalTxCommitUnknown where U: core::convert::From<T>
+pub fn generated::http::LocalTxCommitUnknown::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::LocalTxCommitUnknown where U: core::convert::Into<T>
+pub type generated::http::LocalTxCommitUnknown::Error = core::convert::Infallible
+pub fn generated::http::LocalTxCommitUnknown::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::LocalTxCommitUnknown where U: core::convert::TryFrom<T>
+pub type generated::http::LocalTxCommitUnknown::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::LocalTxCommitUnknown::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::LocalTxCommitUnknown where T: core::clone::Clone
+pub type generated::http::LocalTxCommitUnknown::Owned = T
+pub fn generated::http::LocalTxCommitUnknown::clone_into(&self, &mut T)
+pub fn generated::http::LocalTxCommitUnknown::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::LocalTxCommitUnknown where T: 'static + ?core::marker::Sized
+pub fn generated::http::LocalTxCommitUnknown::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::LocalTxCommitUnknown where T: ?core::marker::Sized
+pub fn generated::http::LocalTxCommitUnknown::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::LocalTxCommitUnknown where T: ?core::marker::Sized
+pub fn generated::http::LocalTxCommitUnknown::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::LocalTxCommitUnknown where T: core::clone::Clone
+pub unsafe fn generated::http::LocalTxCommitUnknown::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::LocalTxCommitUnknown
+pub fn generated::http::LocalTxCommitUnknown::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::LocalTxCommitUnknown
+pub type generated::http::LocalTxCommitUnknown::Output = T
+pub enum generated::http::LocalTxModel
+pub generated::http::LocalTxModel::TenantScopedUow
+impl core::clone::Clone for generated::http::LocalTxModel
+pub fn generated::http::LocalTxModel::clone(&self) -> generated::http::LocalTxModel
+impl core::cmp::Eq for generated::http::LocalTxModel
+impl core::cmp::PartialEq for generated::http::LocalTxModel
+pub fn generated::http::LocalTxModel::eq(&self, &generated::http::LocalTxModel) -> bool
+impl core::fmt::Debug for generated::http::LocalTxModel
+pub fn generated::http::LocalTxModel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::LocalTxModel
+impl core::marker::StructuralPartialEq for generated::http::LocalTxModel
+impl core::marker::Freeze for generated::http::LocalTxModel
+impl core::marker::Send for generated::http::LocalTxModel
+impl core::marker::Sync for generated::http::LocalTxModel
+impl core::marker::Unpin for generated::http::LocalTxModel
+impl core::marker::UnsafeUnpin for generated::http::LocalTxModel
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxModel
+impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxModel
+impl<T, U> core::convert::Into<U> for generated::http::LocalTxModel where U: core::convert::From<T>
+pub fn generated::http::LocalTxModel::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::LocalTxModel where U: core::convert::Into<T>
+pub type generated::http::LocalTxModel::Error = core::convert::Infallible
+pub fn generated::http::LocalTxModel::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::LocalTxModel where U: core::convert::TryFrom<T>
+pub type generated::http::LocalTxModel::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::LocalTxModel::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::LocalTxModel where T: core::clone::Clone
+pub type generated::http::LocalTxModel::Owned = T
+pub fn generated::http::LocalTxModel::clone_into(&self, &mut T)
+pub fn generated::http::LocalTxModel::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::LocalTxModel where T: 'static + ?core::marker::Sized
+pub fn generated::http::LocalTxModel::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::LocalTxModel where T: ?core::marker::Sized
+pub fn generated::http::LocalTxModel::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::LocalTxModel where T: ?core::marker::Sized
+pub fn generated::http::LocalTxModel::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::LocalTxModel where T: core::clone::Clone
+pub unsafe fn generated::http::LocalTxModel::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::LocalTxModel
+pub fn generated::http::LocalTxModel::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::LocalTxModel
+pub type generated::http::LocalTxModel::Output = T
+pub enum generated::http::LocalTxRetry
+pub generated::http::LocalTxRetry::BoundedTransient
+impl core::clone::Clone for generated::http::LocalTxRetry
+pub fn generated::http::LocalTxRetry::clone(&self) -> generated::http::LocalTxRetry
+impl core::cmp::Eq for generated::http::LocalTxRetry
+impl core::cmp::PartialEq for generated::http::LocalTxRetry
+pub fn generated::http::LocalTxRetry::eq(&self, &generated::http::LocalTxRetry) -> bool
+impl core::fmt::Debug for generated::http::LocalTxRetry
+pub fn generated::http::LocalTxRetry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::LocalTxRetry
+impl core::marker::StructuralPartialEq for generated::http::LocalTxRetry
+impl core::marker::Freeze for generated::http::LocalTxRetry
+impl core::marker::Send for generated::http::LocalTxRetry
+impl core::marker::Sync for generated::http::LocalTxRetry
+impl core::marker::Unpin for generated::http::LocalTxRetry
+impl core::marker::UnsafeUnpin for generated::http::LocalTxRetry
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxRetry
+impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxRetry
+impl<T, U> core::convert::Into<U> for generated::http::LocalTxRetry where U: core::convert::From<T>
+pub fn generated::http::LocalTxRetry::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::LocalTxRetry where U: core::convert::Into<T>
+pub type generated::http::LocalTxRetry::Error = core::convert::Infallible
+pub fn generated::http::LocalTxRetry::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::LocalTxRetry where U: core::convert::TryFrom<T>
+pub type generated::http::LocalTxRetry::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::LocalTxRetry::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::LocalTxRetry where T: core::clone::Clone
+pub type generated::http::LocalTxRetry::Owned = T
+pub fn generated::http::LocalTxRetry::clone_into(&self, &mut T)
+pub fn generated::http::LocalTxRetry::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::LocalTxRetry where T: 'static + ?core::marker::Sized
+pub fn generated::http::LocalTxRetry::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::LocalTxRetry where T: ?core::marker::Sized
+pub fn generated::http::LocalTxRetry::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::LocalTxRetry where T: ?core::marker::Sized
+pub fn generated::http::LocalTxRetry::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::LocalTxRetry where T: core::clone::Clone
+pub unsafe fn generated::http::LocalTxRetry::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::LocalTxRetry
+pub fn generated::http::LocalTxRetry::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::LocalTxRetry
+pub type generated::http::LocalTxRetry::Output = T
+pub struct generated::http::EffectProfile
+pub generated::http::EffectProfile::effects: &'static [generated::http::EffectKind]
+impl core::clone::Clone for generated::http::EffectProfile
+pub fn generated::http::EffectProfile::clone(&self) -> generated::http::EffectProfile
+impl core::cmp::Eq for generated::http::EffectProfile
+impl core::cmp::PartialEq for generated::http::EffectProfile
+pub fn generated::http::EffectProfile::eq(&self, &generated::http::EffectProfile) -> bool
+impl core::fmt::Debug for generated::http::EffectProfile
+pub fn generated::http::EffectProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::EffectProfile
+impl core::marker::StructuralPartialEq for generated::http::EffectProfile
+impl core::marker::Freeze for generated::http::EffectProfile
+impl core::marker::Send for generated::http::EffectProfile
+impl core::marker::Sync for generated::http::EffectProfile
+impl core::marker::Unpin for generated::http::EffectProfile
+impl core::marker::UnsafeUnpin for generated::http::EffectProfile
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::EffectProfile
+impl core::panic::unwind_safe::UnwindSafe for generated::http::EffectProfile
+impl<T, U> core::convert::Into<U> for generated::http::EffectProfile where U: core::convert::From<T>
+pub fn generated::http::EffectProfile::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::EffectProfile where U: core::convert::Into<T>
+pub type generated::http::EffectProfile::Error = core::convert::Infallible
+pub fn generated::http::EffectProfile::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::EffectProfile where U: core::convert::TryFrom<T>
+pub type generated::http::EffectProfile::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::EffectProfile::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::EffectProfile where T: core::clone::Clone
+pub type generated::http::EffectProfile::Owned = T
+pub fn generated::http::EffectProfile::clone_into(&self, &mut T)
+pub fn generated::http::EffectProfile::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::EffectProfile where T: 'static + ?core::marker::Sized
+pub fn generated::http::EffectProfile::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::EffectProfile where T: ?core::marker::Sized
+pub fn generated::http::EffectProfile::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::EffectProfile where T: ?core::marker::Sized
+pub fn generated::http::EffectProfile::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::EffectProfile where T: core::clone::Clone
+pub unsafe fn generated::http::EffectProfile::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::EffectProfile
+pub fn generated::http::EffectProfile::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::EffectProfile
+pub type generated::http::EffectProfile::Output = T
 pub struct generated::http::HttpAuthSpec
 pub generated::http::HttpAuthSpec::mode: generated::http::HttpAuthMode
 pub generated::http::HttpAuthSpec::permission: core::option::Option<vocab::authz::RoutePermissionId>
@@ -7230,7 +7525,9 @@ pub generated::http::HttpSpec::auth: generated::http::HttpAuthSpec
 pub generated::http::HttpSpec::consistency_level: generated::http::HttpConsistencyLevel
 pub generated::http::HttpSpec::contract: vocab::contract::binding::ContractBinding
 pub generated::http::HttpSpec::contract_id: &'static str
+pub generated::http::HttpSpec::effect_profile: generated::http::EffectProfile
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]
+pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>
 pub generated::http::HttpSpec::method: &'static str
 pub generated::http::HttpSpec::path: &'static str
 pub generated::http::HttpSpec::projection_fields: &'static [generated::http::HttpProjectionFieldSpec]
@@ -7277,6 +7574,52 @@ impl<T> core::convert::From<T> for generated::http::HttpSpec
 pub fn generated::http::HttpSpec::from(T) -> T
 impl<T> typenum::type_operators::Same for generated::http::HttpSpec
 pub type generated::http::HttpSpec::Output = T
+pub struct generated::http::LocalTxSpec
+pub generated::http::LocalTxSpec::boundary: generated::http::LocalTxBoundary
+pub generated::http::LocalTxSpec::commit_unknown: generated::http::LocalTxCommitUnknown
+pub generated::http::LocalTxSpec::retry: generated::http::LocalTxRetry
+pub generated::http::LocalTxSpec::tx_model: generated::http::LocalTxModel
+impl core::clone::Clone for generated::http::LocalTxSpec
+pub fn generated::http::LocalTxSpec::clone(&self) -> generated::http::LocalTxSpec
+impl core::cmp::Eq for generated::http::LocalTxSpec
+impl core::cmp::PartialEq for generated::http::LocalTxSpec
+pub fn generated::http::LocalTxSpec::eq(&self, &generated::http::LocalTxSpec) -> bool
+impl core::fmt::Debug for generated::http::LocalTxSpec
+pub fn generated::http::LocalTxSpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::LocalTxSpec
+impl core::marker::StructuralPartialEq for generated::http::LocalTxSpec
+impl core::marker::Freeze for generated::http::LocalTxSpec
+impl core::marker::Send for generated::http::LocalTxSpec
+impl core::marker::Sync for generated::http::LocalTxSpec
+impl core::marker::Unpin for generated::http::LocalTxSpec
+impl core::marker::UnsafeUnpin for generated::http::LocalTxSpec
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxSpec
+impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxSpec
+impl<T, U> core::convert::Into<U> for generated::http::LocalTxSpec where U: core::convert::From<T>
+pub fn generated::http::LocalTxSpec::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::LocalTxSpec where U: core::convert::Into<T>
+pub type generated::http::LocalTxSpec::Error = core::convert::Infallible
+pub fn generated::http::LocalTxSpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::LocalTxSpec where U: core::convert::TryFrom<T>
+pub type generated::http::LocalTxSpec::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::LocalTxSpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::LocalTxSpec where T: core::clone::Clone
+pub type generated::http::LocalTxSpec::Owned = T
+pub fn generated::http::LocalTxSpec::clone_into(&self, &mut T)
+pub fn generated::http::LocalTxSpec::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::LocalTxSpec where T: 'static + ?core::marker::Sized
+pub fn generated::http::LocalTxSpec::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::LocalTxSpec where T: ?core::marker::Sized
+pub fn generated::http::LocalTxSpec::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::LocalTxSpec where T: ?core::marker::Sized
+pub fn generated::http::LocalTxSpec::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::LocalTxSpec where T: core::clone::Clone
+pub unsafe fn generated::http::LocalTxSpec::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::LocalTxSpec
+pub fn generated::http::LocalTxSpec::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::LocalTxSpec
+pub type generated::http::LocalTxSpec::Output = T
+pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]
 pub const generated::http::SPECS: &[generated::http::HttpSpec]
 pub mod generated::saga
 pub mod generated::saga::billing_v1

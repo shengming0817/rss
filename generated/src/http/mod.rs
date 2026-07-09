@@ -6,6 +6,8 @@ pub struct HttpSpec {
     pub contract_id: &'static str,
     pub contract: ::vocab::ContractBinding,
     pub consistency_level: HttpConsistencyLevel,
+    pub effect_profile: EffectProfile,
+    pub local_tx: Option<LocalTxSpec>,
     pub path: &'static str,
     pub method: &'static str,
     pub auth: HttpAuthSpec,
@@ -23,6 +25,55 @@ pub enum HttpConsistencyLevel {
     OutboxFact,
     WorkflowEventual,
     DeviceLatent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectProfile {
+    pub effects: &'static [EffectKind],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectKind {
+    Read,
+    Auth,
+    Projection,
+    Write,
+    Transaction,
+    Outbox,
+    Publish,
+    Workflow,
+    Saga,
+    Reconcile,
+    Worker,
+    CrossTenantAudit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalTxSpec {
+    pub boundary: LocalTxBoundary,
+    pub tx_model: LocalTxModel,
+    pub retry: LocalTxRetry,
+    pub commit_unknown: LocalTxCommitUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxBoundary {
+    SingleDomain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxModel {
+    TenantScopedUow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxRetry {
+    BoundedTransient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxCommitUnknown {
+    NotRetryable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,5 +149,13 @@ pub const SPECS: &[HttpSpec] = &[
     identity_v1::roles_list::SPEC,
     identity_v1::roles_revoke::SPEC,
     settings_v1::SPEC,
+    settings_v2::SPEC,
+];
+
+/// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
+pub const LOCAL_TX_SPECS: &[HttpSpec] = &[
+    identity_v1::logout::SPEC,
+    identity_v1::password_change::SPEC,
+    identity_v1::refresh::SPEC,
     settings_v2::SPEC,
 ];

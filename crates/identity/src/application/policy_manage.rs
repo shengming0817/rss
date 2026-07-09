@@ -1003,6 +1003,13 @@ mod tests {
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             ),
             consistency_level: generated::http::HttpConsistencyLevel::LocalOnly,
+            effect_profile: generated::http::EffectProfile {
+                effects: &[
+                    generated::http::EffectKind::Auth,
+                    generated::http::EffectKind::Read,
+                ],
+            },
+            local_tx: None,
             path: "/api/v1/identity/global/{resourceId}",
             method: "GET",
             auth: generated::http::HttpAuthSpec {

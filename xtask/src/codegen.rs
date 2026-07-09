@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
-    ConsistencyLevel, ContractKind, HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode,
-    Lifecycle, WorkflowMode,
+    ConsistencyLevel, ContractKind, EffectKind, HttpAuthMode, HttpHeaderMode,
+    HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
+    LocalTxRetry, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -538,6 +539,8 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ServiceOwned => "ServiceOwned",
     };
     let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
+    let effect_profile = render_http_effect_profile_consts(c, sup)?;
+    let local_tx = render_http_local_tx(c, sup)?;
     let reason = render_option_str(auth.reason.as_deref(), "reason")?;
     let permission = render_option_route_permission_expr(auth.permission.as_deref(), "permission")?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
@@ -650,12 +653,15 @@ pub const PATH: &str = "{path}";
 
 /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fields_body}];
+{effect_profile}
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     contract_id: CONTRACT_ID,
     contract: CONTRACT,
     consistency_level: {sup}HttpConsistencyLevel::{consistency_level},
+    effect_profile: EFFECT_PROFILE,
+    local_tx: {local_tx},
     path: PATH,
     method: "{method}",
     auth: {sup}HttpAuthSpec {{
@@ -685,6 +691,104 @@ fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
         ConsistencyLevel::OutboxFact => "OutboxFact",
         ConsistencyLevel::WorkflowEventual => "WorkflowEventual",
         ConsistencyLevel::DeviceLatent => "DeviceLatent",
+    }
+}
+
+fn render_http_effect_profile_consts(c: &DiscoveredContract, sup: &str) -> Result<String> {
+    let profile = c
+        .manifest
+        .effect_profile
+        .as_ref()
+        .context("active http 契约缺 [effectProfile]（codegen fail-closed）")?;
+    if profile.effects.is_empty() {
+        bail!("active http 契约 [effectProfile].effects 为空（codegen fail-closed）");
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut effects = Vec::with_capacity(profile.effects.len());
+    for effect in &profile.effects {
+        if !seen.insert(*effect) {
+            bail!("active http 契约 [effectProfile].effects 含重复值（codegen fail-closed）");
+        }
+        effects.push(format!(
+            "    {sup}EffectKind::{}",
+            render_http_effect_kind(*effect)
+        ));
+    }
+    let effects_body = format!("\n{},\n", effects.join(",\n"));
+    Ok(format!(
+        r#"
+/// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const EFFECTS: &[{sup}EffectKind] = &[{effects_body}];
+
+/// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const EFFECT_PROFILE: {sup}EffectProfile = {sup}EffectProfile {{ effects: EFFECTS }};
+"#
+    ))
+}
+
+fn render_http_effect_kind(effect: EffectKind) -> &'static str {
+    match effect {
+        EffectKind::Read => "Read",
+        EffectKind::Auth => "Auth",
+        EffectKind::Projection => "Projection",
+        EffectKind::Write => "Write",
+        EffectKind::Transaction => "Transaction",
+        EffectKind::Outbox => "Outbox",
+        EffectKind::Publish => "Publish",
+        EffectKind::Workflow => "Workflow",
+        EffectKind::Saga => "Saga",
+        EffectKind::Reconcile => "Reconcile",
+        EffectKind::Worker => "Worker",
+        EffectKind::CrossTenantAudit => "CrossTenantAudit",
+    }
+}
+
+fn render_http_local_tx(c: &DiscoveredContract, sup: &str) -> Result<String> {
+    if c.manifest.consistency_level != ConsistencyLevel::LocalTx {
+        if c.manifest.capabilities.local_tx.is_some() {
+            bail!("非 LocalTx http 契约不得声明 [capabilities.localTx]（codegen fail-closed）");
+        }
+        return Ok("None".to_string());
+    }
+
+    let local_tx = c
+        .manifest
+        .capabilities
+        .local_tx
+        .as_ref()
+        .context("LocalTx http 契约缺 [capabilities.localTx]（codegen fail-closed）")?;
+    let spec = format!(
+        "{sup}LocalTxSpec {{ boundary: {sup}LocalTxBoundary::{}, tx_model: {sup}LocalTxModel::{}, retry: {sup}LocalTxRetry::{}, commit_unknown: {sup}LocalTxCommitUnknown::{} }}",
+        render_local_tx_boundary(local_tx.boundary),
+        render_local_tx_model(local_tx.tx_model),
+        render_local_tx_retry(local_tx.retry),
+        render_local_tx_commit_unknown(local_tx.commit_unknown),
+    );
+    Ok(format!("Some({spec})"))
+}
+
+fn render_local_tx_boundary(boundary: LocalTxBoundary) -> &'static str {
+    match boundary {
+        LocalTxBoundary::SingleDomain => "SingleDomain",
+    }
+}
+
+fn render_local_tx_model(model: LocalTxModel) -> &'static str {
+    match model {
+        LocalTxModel::TenantScopedUow => "TenantScopedUow",
+    }
+}
+
+fn render_local_tx_retry(retry: LocalTxRetry) -> &'static str {
+    match retry {
+        LocalTxRetry::BoundedTransient => "BoundedTransient",
+    }
+}
+
+fn render_local_tx_commit_unknown(commit_unknown: LocalTxCommitUnknown) -> &'static str {
+    match commit_unknown {
+        LocalTxCommitUnknown::NotRetryable => "NotRetryable",
     }
 }
 
@@ -1250,6 +1354,8 @@ pub struct HttpSpec {
     pub contract_id: &'static str,
     pub contract: ::vocab::ContractBinding,
     pub consistency_level: HttpConsistencyLevel,
+    pub effect_profile: EffectProfile,
+    pub local_tx: Option<LocalTxSpec>,
     pub path: &'static str,
     pub method: &'static str,
     pub auth: HttpAuthSpec,
@@ -1267,6 +1373,55 @@ pub enum HttpConsistencyLevel {
     OutboxFact,
     WorkflowEventual,
     DeviceLatent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectProfile {
+    pub effects: &'static [EffectKind],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectKind {
+    Read,
+    Auth,
+    Projection,
+    Write,
+    Transaction,
+    Outbox,
+    Publish,
+    Workflow,
+    Saga,
+    Reconcile,
+    Worker,
+    CrossTenantAudit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalTxSpec {
+    pub boundary: LocalTxBoundary,
+    pub tx_model: LocalTxModel,
+    pub retry: LocalTxRetry,
+    pub commit_unknown: LocalTxCommitUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxBoundary {
+    SingleDomain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxModel {
+    TenantScopedUow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxRetry {
+    BoundedTransient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTxCommitUnknown {
+    NotRetryable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1472,18 +1627,26 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
     s
 }
 
+fn render_http_spec_path(c: &DiscoveredContract) -> Result<String> {
+    let module = module_name(&c.manifest.domain, &c.manifest.version);
+    match c.slug.as_deref() {
+        Some(slug) => Ok(format!("{module}::{}::SPEC", slug_module_ident(slug)?)),
+        None => Ok(format!("{module}::SPEC")),
+    }
+}
+
 fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
     let mut entries = Vec::new();
+    let mut local_tx_entries = Vec::new();
     for c in contracts
         .iter()
         .filter(|c| c.manifest.kind == ContractKind::Http)
         .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
     {
-        let module = module_name(&c.manifest.domain, &c.manifest.version);
-        let path = match c.slug.as_deref() {
-            Some(slug) => format!("{module}::{}::SPEC", slug_module_ident(slug)?),
-            None => format!("{module}::SPEC"),
-        };
+        let path = render_http_spec_path(c)?;
+        if c.manifest.consistency_level == ConsistencyLevel::LocalTx {
+            local_tx_entries.push(format!("    {path}"));
+        }
         entries.push(format!("    {path}"));
     }
     let body = if entries.is_empty() {
@@ -1491,10 +1654,18 @@ fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
     } else {
         format!("\n{},\n", entries.join(",\n"))
     };
+    let local_tx_body = if local_tx_entries.is_empty() {
+        String::new()
+    } else {
+        format!("\n{},\n", local_tx_entries.join(",\n"))
+    };
     Ok(format!(
         r#"
 /// Root registry for active HTTP specs generated from every HTTP contract.
 pub const SPECS: &[HttpSpec] = &[{body}];
+
+/// Root registry for active LocalTx HTTP specs generated from `consistencyLevel = "LocalTx"`.
+pub const LOCAL_TX_SPECS: &[HttpSpec] = &[{local_tx_body}];
 "#
     ))
 }
@@ -1747,6 +1918,18 @@ mod tests {
         assert!(source.contains(needle), "{message}:\n{source}");
     }
 
+    fn generated_http_spec_slice<'a>(source: &'a str, const_name: &str) -> Result<&'a str> {
+        let marker = format!("pub const {const_name}: &[HttpSpec] = &[");
+        let Some(start) = source.find(&marker) else {
+            bail!("generated HTTP root module should contain {const_name}");
+        };
+        let rest = &source[start..];
+        let Some(end) = rest.find("];").map(|idx| idx + "];".len()) else {
+            bail!("generated HTTP root module should close {const_name}");
+        };
+        Ok(&rest[..end])
+    }
+
     /// 在 `root/contracts/http/_seed/v1` 落一个最小 http 契约。
     fn seed_http(root: &Path) -> Result<()> {
         let dir = root.join("contracts/http/_seed/v1");
@@ -1768,26 +1951,58 @@ mod tests {
     }
 
     fn write_seed_active_http(root: &Path, endpoints_http: &str) -> Result<()> {
+        write_seed_active_http_contract(
+            root,
+            "LocalOnly",
+            endpoints_http,
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"auth\", \"read\"]\n",
+            )),
+            "",
+        )
+    }
+
+    fn write_seed_active_http_without_effect_profile(
+        root: &Path,
+        endpoints_http: &str,
+    ) -> Result<()> {
+        write_seed_active_http_contract(root, "LocalOnly", endpoints_http, None, "")
+    }
+
+    fn write_seed_active_http_contract(
+        root: &Path,
+        consistency_level: &str,
+        endpoints_http: &str,
+        effect_profile: Option<&str>,
+        capabilities: &str,
+    ) -> Result<()> {
         let dir = root.join("contracts/http/_seed/v1");
+        let manifest = format!(
+            concat!(
+                "id = \"seed.echo\"\n",
+                "kind = \"http\"\n",
+                "domain = \"_seed\"\n",
+                "version = \"v1\"\n",
+                "owner = \"_framework\"\n",
+                "consistencyLevel = \"{consistency_level}\"\n",
+                "lifecycle = \"active\"\n",
+                "path = \"/api/v1/_seed/echo/{{resourceId}}\"\n",
+                "method = \"POST\"\n",
+                "[schemas]\n",
+                "request = \"request.schema.json\"\n",
+                "response = \"response.schema.json\"\n",
+            ),
+            consistency_level = consistency_level,
+        );
         std::fs::write(
             dir.join("contract.toml"),
             format!(
-                "{}{}",
-                concat!(
-                    "id = \"seed.echo\"\n",
-                    "kind = \"http\"\n",
-                    "domain = \"_seed\"\n",
-                    "version = \"v1\"\n",
-                    "owner = \"_framework\"\n",
-                    "consistencyLevel = \"LocalOnly\"\n",
-                    "lifecycle = \"active\"\n",
-                    "path = \"/api/v1/_seed/echo/{resourceId}\"\n",
-                    "method = \"POST\"\n",
-                    "[schemas]\n",
-                    "request = \"request.schema.json\"\n",
-                    "response = \"response.schema.json\"\n",
-                ),
+                "{}{}{}{}",
+                manifest,
                 endpoints_http,
+                effect_profile.unwrap_or(""),
+                capabilities,
             ),
         )?;
         Ok(())
@@ -2439,6 +2654,241 @@ mod tests {
             &rendered,
             "consistency_level: super::HttpConsistencyLevel::LocalOnly",
             "endpoint SPEC should carry manifest consistencyLevel",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_http_effect_profile_into_spec() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &root_mod,
+            "pub struct EffectProfile",
+            "HTTP root module should expose generated effect profile metadata",
+        );
+        assert_generated_contains(
+            &root_mod,
+            "pub enum EffectKind",
+            "HTTP root module should expose closed effect kind enum",
+        );
+        assert_generated_contains(
+            &rendered,
+            "pub const EFFECTS: &[super::EffectKind]",
+            "endpoint module should emit effect kind slice",
+        );
+        assert_generated_contains(
+            &rendered,
+            "super::EffectKind::Auth",
+            "endpoint effects should include auth",
+        );
+        assert_generated_contains(
+            &rendered,
+            "super::EffectKind::Read",
+            "endpoint effects should include read",
+        );
+        assert_generated_contains(
+            &rendered,
+            "effect_profile: EFFECT_PROFILE",
+            "endpoint SPEC should carry generated effect profile",
+        );
+        assert_generated_contains(
+            &rendered,
+            "local_tx: None",
+            "non-LocalTx endpoint SPEC should explicitly carry no LocalTx evidence",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_all_http_effect_kind_variants() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "LocalOnly",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\n",
+                "  \"read\",\n",
+                "  \"auth\",\n",
+                "  \"projection\",\n",
+                "  \"write\",\n",
+                "  \"transaction\",\n",
+                "  \"outbox\",\n",
+                "  \"publish\",\n",
+                "  \"workflow\",\n",
+                "  \"saga\",\n",
+                "  \"reconcile\",\n",
+                "  \"worker\",\n",
+                "  \"cross-tenant-audit\",\n",
+                "]\n",
+            )),
+            "",
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        for variant in [
+            "Read",
+            "Auth",
+            "Projection",
+            "Write",
+            "Transaction",
+            "Outbox",
+            "Publish",
+            "Workflow",
+            "Saga",
+            "Reconcile",
+            "Worker",
+            "CrossTenantAudit",
+        ] {
+            assert_generated_contains(
+                &rendered,
+                &format!("super::EffectKind::{variant}"),
+                "all manifest effect values should render to closed generated variants",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_local_tx_registry() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "LocalTx",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"auth\", \"write\", \"transaction\"]\n",
+            )),
+            concat!(
+                "[capabilities.localTx]\n",
+                "boundary = \"single-domain\"\n",
+                "txModel = \"tenant-scoped-uow\"\n",
+                "retry = \"bounded-transient\"\n",
+                "commitUnknown = \"not-retryable\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
+        let local_tx_specs = generated_http_spec_slice(&root_mod, "LOCAL_TX_SPECS")?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &root_mod,
+            "pub struct LocalTxSpec",
+            "HTTP root module should expose generated LocalTx metadata",
+        );
+        assert_generated_contains(
+            &root_mod,
+            "pub const LOCAL_TX_SPECS: &[HttpSpec]",
+            "HTTP root module should expose active LocalTx registry",
+        );
+        assert_generated_contains(
+            local_tx_specs,
+            "_seed_v1::SPEC",
+            "active LocalTx endpoint should enter LOCAL_TX_SPECS",
+        );
+        assert_generated_contains(
+            &rendered,
+            "local_tx: Some(super::LocalTxSpec",
+            "LocalTx endpoint SPEC should carry LocalTx evidence",
+        );
+        for needle in [
+            "boundary: super::LocalTxBoundary::SingleDomain",
+            "tx_model: super::LocalTxModel::TenantScopedUow",
+            "retry: super::LocalTxRetry::BoundedTransient",
+            "commit_unknown: super::LocalTxCommitUnknown::NotRetryable",
+        ] {
+            assert_generated_contains(
+                &rendered,
+                needle,
+                "LocalTx endpoint SPEC should carry generated closed-enum evidence",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_active_http_without_effect_profile() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http_without_effect_profile(
+            &root,
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("effectProfile")),
+            "active HTTP 缺 effectProfile 须被 codegen 自守拒绝: {result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_rejects_local_tx_without_capability() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen");
+        seed_http(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "LocalTx",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"auth\", \"write\", \"transaction\"]\n",
+            )),
+            "",
+        )?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("capabilities.localTx")),
+            "LocalTx HTTP 缺 capabilities.localTx 须被 codegen 自守拒绝: {result:?}"
         );
         Ok(())
     }

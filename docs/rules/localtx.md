@@ -1,7 +1,8 @@
 # LocalTx 规则
 
-本文件记录 L1/LocalTx 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest 与 R22 校验；后续可执行覆盖率、
-runner、metrics 与 journey 见 `docs/spec/006-l0-l1-consistency-hardening/` 的 #1697+ 分解。
+本文件记录 L1/LocalTx 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest、R22 校验与
+`generated::http::LOCAL_TX_SPECS`；后续可执行覆盖率、runner、metrics 与 journey 见
+`docs/spec/006-l0-l1-consistency-hardening/` 的 #1697+ 分解。
 
 ## Contract evidence
 
@@ -41,7 +42,12 @@ LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写�
 - 补齐 LocalTx 三个新增字段。
 - 迁移真实 L1 HTTP `contract.toml`。
 - R22 守住 L1 完整证据与 stray capability。
-- 不生成 `LOCAL_TX_SPECS` registry。
+
+#1688 的边界是 generated metadata：
+
+- `generated::http` 暴露 `LocalTxSpec` 与 LocalTx 闭枚举。
+- LocalTx active HTTP `SPEC` 必填 `local_tx: Some(...)`，非 LocalTx 为 `None`。
+- `LOCAL_TX_SPECS` active-only 派生当前 L1 HTTP contract 子集。
 - 不做 LocalTx runner、coverage gate、metrics label 或 domain proof。
 
 #1697 建 LocalTx coverage gate；#1698 收口 LocalTx vocabulary/closed labels；#1699 以后才接 Postgres runner 与真实

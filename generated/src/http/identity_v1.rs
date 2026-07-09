@@ -196,11 +196,26 @@ pub mod login {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+        super::super::EffectKind::Outbox,
+        super::super::EffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -359,11 +374,29 @@ pub mod logout {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalTx,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: Some(super::super::LocalTxSpec {
+            boundary: super::super::LocalTxBoundary::SingleDomain,
+            tx_model: super::super::LocalTxModel::TenantScopedUow,
+            retry: super::super::LocalTxRetry::BoundedTransient,
+            commit_unknown: super::super::LocalTxCommitUnknown::NotRetryable,
+        }),
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -526,11 +559,29 @@ pub mod password_change {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalTx,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: Some(super::super::LocalTxSpec {
+            boundary: super::super::LocalTxBoundary::SingleDomain,
+            tx_model: super::super::LocalTxModel::TenantScopedUow,
+            retry: super::super::LocalTxRetry::BoundedTransient,
+            commit_unknown: super::super::LocalTxCommitUnknown::NotRetryable,
+        }),
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -2386,11 +2437,26 @@ pub mod policies_create {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+        super::super::EffectKind::Outbox,
+        super::super::EffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -2560,11 +2626,26 @@ pub mod policies_deactivate {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+        super::super::EffectKind::Outbox,
+        super::super::EffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -3464,11 +3545,23 @@ pub mod policies_get {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Read,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -4423,11 +4516,23 @@ pub mod policies_list {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Read,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -6285,11 +6390,26 @@ pub mod policies_update {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+        super::super::EffectKind::Outbox,
+        super::super::EffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "PUT",
         auth: super::super::HttpAuthSpec {
@@ -6581,11 +6701,24 @@ pub mod profile {
         },
     ];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Read,
+        super::super::EffectKind::Projection,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -6769,11 +6902,29 @@ pub mod refresh {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalTx,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: Some(super::super::LocalTxSpec {
+            boundary: super::super::LocalTxBoundary::SingleDomain,
+            tx_model: super::super::LocalTxModel::TenantScopedUow,
+            retry: super::super::LocalTxRetry::BoundedTransient,
+            commit_unknown: super::super::LocalTxCommitUnknown::NotRetryable,
+        }),
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -6932,11 +7083,26 @@ pub mod roles_assign {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+        super::super::EffectKind::Outbox,
+        super::super::EffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "POST",
         auth: super::super::HttpAuthSpec {
@@ -7166,11 +7332,23 @@ pub mod roles_list {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Read,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "GET",
         auth: super::super::HttpAuthSpec {
@@ -7318,11 +7496,26 @@ pub mod roles_revoke {
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
+    /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECTS: &[super::super::EffectKind] = &[
+        super::super::EffectKind::Auth,
+        super::super::EffectKind::Write,
+        super::super::EffectKind::Transaction,
+        super::super::EffectKind::Outbox,
+        super::super::EffectKind::Publish,
+    ];
+
+    /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+    pub const EFFECT_PROFILE: super::super::EffectProfile =
+        super::super::EffectProfile { effects: EFFECTS };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         contract_id: CONTRACT_ID,
         contract: CONTRACT,
         consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
+        effect_profile: EFFECT_PROFILE,
+        local_tx: None,
         path: PATH,
         method: "DELETE",
         auth: super::super::HttpAuthSpec {

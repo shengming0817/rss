@@ -35,7 +35,7 @@ use std::process::Command;
 // curated extras 不是架构 layer，只是安全敏感公开 API 面的定点 golden 例外。
 // `diport`（DI-infra 层，非 basis/engine）：持全部安全敏感 DI port（Signer/SecretResolver/Pdp/Revocation/
 // KeyProvider…），公开 trait/类型面是轴 A SemVer 边界，列入 curated extras 定点冻结（#1470）。
-// `generated` 暴露 contract-derived protection metadata，作为 PR review 审查材料定点冻结（#1472）。
+// `generated` 暴露 contract-derived metadata，作为 PR review 审查材料定点冻结（#1472/#1688）。
 const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated"];
 
 /// public-api baseline（rustdoc-json）用的**钉版 nightly**。cargo-public-api 在 stable 上探测到 stable
@@ -387,6 +387,37 @@ mod tests {
             "pub generated::http::HttpConsistencyLevel::WorkflowEventual",
             "pub generated::http::HttpConsistencyLevel::DeviceLatent",
             "pub generated::http::HttpSpec::consistency_level: generated::http::HttpConsistencyLevel",
+            "pub struct generated::http::EffectProfile",
+            "pub generated::http::EffectProfile::effects: &'static [generated::http::EffectKind]",
+            "pub enum generated::http::EffectKind",
+            "pub generated::http::EffectKind::Read",
+            "pub generated::http::EffectKind::Auth",
+            "pub generated::http::EffectKind::Projection",
+            "pub generated::http::EffectKind::Write",
+            "pub generated::http::EffectKind::Transaction",
+            "pub generated::http::EffectKind::Outbox",
+            "pub generated::http::EffectKind::Publish",
+            "pub generated::http::EffectKind::Workflow",
+            "pub generated::http::EffectKind::Saga",
+            "pub generated::http::EffectKind::Reconcile",
+            "pub generated::http::EffectKind::Worker",
+            "pub generated::http::EffectKind::CrossTenantAudit",
+            "pub generated::http::HttpSpec::effect_profile: generated::http::EffectProfile",
+            "pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>",
+            "pub struct generated::http::LocalTxSpec",
+            "pub generated::http::LocalTxSpec::boundary: generated::http::LocalTxBoundary",
+            "pub generated::http::LocalTxSpec::tx_model: generated::http::LocalTxModel",
+            "pub generated::http::LocalTxSpec::retry: generated::http::LocalTxRetry",
+            "pub generated::http::LocalTxSpec::commit_unknown: generated::http::LocalTxCommitUnknown",
+            "pub enum generated::http::LocalTxBoundary",
+            "pub generated::http::LocalTxBoundary::SingleDomain",
+            "pub enum generated::http::LocalTxModel",
+            "pub generated::http::LocalTxModel::TenantScopedUow",
+            "pub enum generated::http::LocalTxRetry",
+            "pub generated::http::LocalTxRetry::BoundedTransient",
+            "pub enum generated::http::LocalTxCommitUnknown",
+            "pub generated::http::LocalTxCommitUnknown::NotRetryable",
+            "pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]",
         ] {
             assert!(
                 baseline.contains(required),
