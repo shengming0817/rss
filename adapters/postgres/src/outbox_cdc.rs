@@ -271,6 +271,11 @@ mod tests {
             "metadata should carry sealed schema hash: {}",
             record.metadata_json
         );
+        assert!(
+            record.metadata_json.contains(r#""occurredAt":42"#),
+            "metadata should carry sealed occurredAt source: {}",
+            record.metadata_json
+        );
     }
 
     #[test]
@@ -297,6 +302,42 @@ mod tests {
             "REVOKE UPDATE, DELETE ON outbox_log FROM rss_app",
         ] {
             assert!(sql.contains(needle), "0042 migration missing `{needle}`");
+        }
+    }
+
+    #[test]
+    fn outbox_log_transport_headers_are_generated_from_metadata() {
+        let sql = include_str!("../migrations/0049_outbox_log_transport_headers.sql");
+        for needle in [
+            "ADD COLUMN occurred_at text GENERATED ALWAYS AS (metadata ->> 'occurredAt') STORED",
+            "ADD COLUMN trace text GENERATED ALWAYS AS (metadata ->> 'trace') STORED",
+            "ADD COLUMN correlation_id text GENERATED ALWAYS AS (metadata ->> 'correlation') STORED",
+            "outbox_log_metadata_occurred_at_present",
+            "jsonb_typeof(metadata -> 'occurredAt') = 'number'",
+            "outbox_log_trace_valid",
+            "octet_length(trace) <= 512",
+            "outbox_log_correlation_id_valid",
+            "octet_length(correlation_id) <= 256",
+        ] {
+            assert!(sql.contains(needle), "0049 migration missing `{needle}`");
+        }
+    }
+
+    #[test]
+    fn migration_readme_documents_cdc_generated_header_columns() {
+        let readme = include_str!("../migrations/README.md");
+        for needle in [
+            "`0049`",
+            "`occurred_at`、`trace`、`correlation_id`",
+            "stored generated columns",
+            "nullable trace/correlation 保持 persisted-only",
+            "`CREATE PUBLICATION ... WITH (publish_generated_columns = stored)`",
+            "PostgreSQL 18+",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "migration README must document CDC generated-column boundary `{needle}`"
+            );
         }
     }
 }

@@ -4,7 +4,7 @@
 //! journey out of `sqlx` by crate graph while still letting the postgres adapter own the tiny
 //! amount of privileged setup and typed observation needed by the real-backend lane.
 //!
-//! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard", exec = "native-compile", source = "code" }
+//! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard", exec = "native-compile", source = "code", native = "feature-gated typed harness surface" }
 //!
 //! External fault-matrix tests cannot name `PgPool` or raw SQL through this module. The public
 //! surface is closed enums/newtypes and runtime-seam methods; all pool access remains inside the
@@ -980,7 +980,7 @@ impl FaultMatrixSagaFactory {
             steps: specs
                 .iter()
                 .map(|(name, forward_fails)| FaultMatrixSagaStepSpec {
-                    name: *name,
+                    name,
                     forward_fails: *forward_fails,
                     forward_count: Arc::new(AtomicU32::new(0)),
                     compensation_count: Arc::new(AtomicU32::new(0)),

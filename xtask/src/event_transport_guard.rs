@@ -248,6 +248,7 @@ fn scan_bypass_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         .unwrap_or_else(|_| text_bypass_fragments(content));
     forbidden
         .into_iter()
+        .filter(|fragment| !allowed_bypass_exception(path, content, fragment))
         .map(|fragment| {
             finding(
                 Rule::ProductionConsumerBundleBypass,
@@ -258,6 +259,13 @@ fn scan_bypass_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             )
         })
         .collect()
+}
+
+fn allowed_bypass_exception(path: &Path, content: &str, fragment: &str) -> bool {
+    path == Path::new("adapters/postgres/src/fault_matrix.rs")
+        && fragment == "pg.infra().inbox("
+        && content.contains("CONSISTENCY-FAULT-MATRIX-SEAM-01")
+        && content.matches("self.deps.infra().inbox()").count() == 3
 }
 
 fn text_bypass_fragments(content: &str) -> BTreeSet<&'static str> {
@@ -670,5 +678,43 @@ mod tests {
             assert_eq!(findings.len(), 1, "{path:?}");
             assert_eq!(findings[0].rule, Rule::DomainConsumerBundleBypass);
         }
+    }
+
+    #[test]
+    fn scan_bypass_content_accepts_registered_fault_matrix_inbox_harness() {
+        let findings = scan_bypass_content(
+            Path::new("adapters/postgres/src/fault_matrix.rs"),
+            r#"
+            //! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard" }
+            async fn a(&self) { let store = self.deps.infra().inbox(); }
+            async fn b(&self) { let store = self.deps.infra().inbox(); }
+            async fn c(&self) { let store = self.deps.infra().inbox(); }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn production_bypass_allowlist_does_not_skip_fault_matrix_file() {
+        assert!(
+            !BYPASS_ALLOWED_PATHS.contains(&"adapters/postgres/src/fault_matrix.rs"),
+            "fault_matrix.rs must use site-level exceptions so new bypasses are still scanned"
+        );
+    }
+
+    #[test]
+    fn scan_bypass_content_rejects_extra_fault_matrix_inbox_harness() {
+        let findings = scan_bypass_content(
+            Path::new("adapters/postgres/src/fault_matrix.rs"),
+            r#"
+            //! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard" }
+            async fn a(&self) { let store = self.deps.infra().inbox(); }
+            async fn b(&self) { let store = self.deps.infra().inbox(); }
+            async fn c(&self) { let store = self.deps.infra().inbox(); }
+            async fn d(&self) { let store = self.deps.infra().inbox(); }
+            "#,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::ProductionConsumerBundleBypass);
     }
 }

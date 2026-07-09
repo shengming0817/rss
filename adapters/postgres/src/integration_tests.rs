@@ -1227,8 +1227,38 @@ async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
                 "timestamp with time zone".to_string(),
                 "NO".to_string()
             ),
+            (
+                "occurred_at".to_string(),
+                "text".to_string(),
+                "YES".to_string()
+            ),
+            ("trace".to_string(), "text".to_string(), "YES".to_string()),
+            (
+                "correlation_id".to_string(),
+                "text".to_string(),
+                "YES".to_string()
+            ),
         ],
         "outbox_log columns must match the CDC append-only contract"
+    );
+
+    let generated_columns: Vec<(String, String)> = sqlx::query_as(
+        "SELECT attname, attgenerated::text \
+         FROM pg_attribute \
+         WHERE attrelid = 'outbox_log'::regclass \
+           AND attname IN ('occurred_at', 'trace', 'correlation_id') \
+         ORDER BY attname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        generated_columns,
+        vec![
+            ("correlation_id".to_string(), "s".to_string()),
+            ("occurred_at".to_string(), "s".to_string()),
+            ("trace".to_string(), "s".to_string()),
+        ],
+        "CDC header projection columns must be stored generated columns"
     );
 
     let constraint_text: Vec<(String, String)> = sqlx::query_as(
@@ -1254,6 +1284,9 @@ async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
         "outbox_log_metadata_object",
         "outbox_log_metadata_tenant_matches_column",
         "outbox_log_metadata_schema_matches_columns",
+        "outbox_log_metadata_occurred_at_present",
+        "outbox_log_trace_valid",
+        "outbox_log_correlation_id_valid",
         "outbox_log_causation_id_valid",
     ] {
         assert!(
@@ -1323,6 +1356,7 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
         "tenantId": tenant.to_string(),
         "schemaVersion": "v1",
         "schemaHash": TEST_SCHEMA_HASH,
+        "occurredAt": 0,
     });
     insert_outbox_log_with_metadata(
         &store,
@@ -1338,6 +1372,7 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
             serde_json::json!({
                 "tenantId": tenant.to_string(),
                 "schemaHash": TEST_SCHEMA_HASH,
+                "occurredAt": 0,
             }),
         ),
         (
@@ -1345,6 +1380,7 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
             serde_json::json!({
                 "tenantId": tenant.to_string(),
                 "schemaVersion": "v1",
+                "occurredAt": 0,
             }),
         ),
         (
@@ -1353,6 +1389,7 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
                 "tenantId": tenant.to_string(),
                 "schemaVersion": "v1",
                 "schemaHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "occurredAt": 0,
             }),
         ),
         (
@@ -1361,6 +1398,7 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
                 "tenantId": tenant.to_string(),
                 "schemaVersion": 1,
                 "schemaHash": TEST_SCHEMA_HASH,
+                "occurredAt": 0,
             }),
         ),
     ] {
@@ -1377,6 +1415,41 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
                 .message()
                 .contains("outbox_log_metadata_schema_matches_columns")),
             "{label} should fail the schema metadata CHECK, got: {err:?}"
+        );
+    }
+
+    for (label, metadata) in [
+        (
+            "missing occurredAt",
+            serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "schemaVersion": "v1",
+                "schemaHash": TEST_SCHEMA_HASH,
+            }),
+        ),
+        (
+            "string occurredAt",
+            serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "schemaVersion": "v1",
+                "schemaHash": TEST_SCHEMA_HASH,
+                "occurredAt": "0",
+            }),
+        ),
+    ] {
+        let err = insert_outbox_log_with_metadata(
+            &store,
+            &unique_event_id("outbox-log-bad-occurred-at"),
+            tenant,
+            metadata,
+        )
+        .await
+        .expect_err(label);
+        assert!(
+            err.as_database_error().is_some_and(|db| db
+                .message()
+                .contains("outbox_log_metadata_occurred_at_present")),
+            "{label} should fail the occurredAt metadata CHECK, got: {err:?}"
         );
     }
 
@@ -1467,7 +1540,8 @@ async fn outbox_log_append_only_grants_and_tenant_isolation() -> TestResult {
              VALUES \
              ($1, $2::uuid, 'identity', $1, 'identity.session-created', \
               'identity.session-created', 'v1', $3, decode('70', 'hex'), \
-              jsonb_build_object('tenantId', $2, 'schemaVersion', 'v1', 'schemaHash', $3), NULL)",
+              jsonb_build_object('tenantId', $2, 'schemaVersion', 'v1', 'schemaHash', $3, \
+                                 'occurredAt', 0), NULL)",
         )
         .bind(&event_id)
         .bind(&tenant_a)
@@ -2658,7 +2732,7 @@ async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
 // T8: sweep 删超保留期 published、保留 dlx + 保留期内 published/pending anti-vacuity
 // T9: lease_token CAS fencing（stale token 不能结算被新租约接管的行）
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -2669,9 +2743,10 @@ use consistency::{
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
-    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata, KEY_SCHEMA_HASH,
-    KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, PublishRequest, Publisher,
-    PublisherError,
+    DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata, KEY_ACTOR,
+    KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+    KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, Message, PublishRequest,
+    Publisher, PublisherError,
 };
 use eventexec::{
     ConsumerMeta, LeaseConfig, MAX_REDELIVERY, TenantAuthority, TenantAuthorityBinding,
@@ -2685,6 +2760,7 @@ use crate::outbox::{
     MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, PgOutbox, SettleOutcome, append_outbox,
     append_outbox_with_projection,
 };
+use crate::outbox_cdc::append_outbox_log;
 
 static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -3505,6 +3581,162 @@ impl Publisher for ConformancePublisher {
     }
 }
 
+struct CapturedPublishRequestPublisher {
+    requests: Arc<Mutex<Vec<PublishRequest>>>,
+}
+
+impl CapturedPublishRequestPublisher {
+    fn new() -> (Self, Arc<Mutex<Vec<PublishRequest>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                requests: Arc::clone(&requests),
+            },
+            requests,
+        )
+    }
+}
+
+impl Publisher for CapturedPublishRequestPublisher {
+    async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(request);
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), PublisherError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommonBrokerEnvelope {
+    event_id: String,
+    key: String,
+    topic: String,
+    payload: Vec<u8>,
+    headers: BTreeMap<String, String>,
+}
+
+fn common_transport_headers(metadata: &EnvelopeMetadata) -> BTreeMap<String, String> {
+    metadata
+        .iter_transport_headers()
+        .filter(|(key, _)| *key != KEY_TENANT_AUTHORITY)
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+fn assert_no_persisted_only_broker_headers(headers: &BTreeMap<String, String>) {
+    for key in [
+        KEY_TENANT_AUTHORITY,
+        KEY_SUBJECT_ID,
+        KEY_ACTOR,
+        KEY_PRINCIPAL,
+        "causation_id",
+        "aggregate_id",
+        "contract_id",
+    ] {
+        assert!(
+            !headers.contains_key(key),
+            "broker common envelope must not leak persisted-only header {key}"
+        );
+    }
+}
+
+fn relay_common_envelope(request: &PublishRequest) -> CommonBrokerEnvelope {
+    assert!(
+        request.metadata().get(KEY_TENANT_AUTHORITY).is_some(),
+        "tenantAuthority is relay-only and must be signed before exclusion"
+    );
+    let headers = common_transport_headers(request.metadata());
+    assert_no_persisted_only_broker_headers(&headers);
+    CommonBrokerEnvelope {
+        event_id: request.event_id().as_str().to_string(),
+        key: request.event_id().as_str().to_string(),
+        topic: request.topic().as_str().to_string(),
+        payload: request.payload().to_vec(),
+        headers,
+    }
+}
+
+#[derive(Debug)]
+struct DebeziumModeledOutboxLog {
+    event_id: String,
+    topic: String,
+    payload: Vec<u8>,
+    tenant_id: String,
+    contract_version: String,
+    schema_hash: String,
+    occurred_at: String,
+    aggregate_id: String,
+    contract_id: String,
+    metadata: serde_json::Value,
+}
+
+impl DebeziumModeledOutboxLog {
+    fn common_envelope(&self) -> CommonBrokerEnvelope {
+        let headers = BTreeMap::from([
+            (KEY_TENANT_ID.to_string(), self.tenant_id.clone()),
+            (
+                KEY_SCHEMA_VERSION.to_string(),
+                self.contract_version.clone(),
+            ),
+            (KEY_SCHEMA_HASH.to_string(), self.schema_hash.clone()),
+            (KEY_OCCURRED_AT.to_string(), self.occurred_at.clone()),
+        ]);
+        assert_no_persisted_only_broker_headers(&headers);
+        CommonBrokerEnvelope {
+            event_id: self.event_id.clone(),
+            key: self.event_id.clone(),
+            topic: self.topic.clone(),
+            payload: self.payload.clone(),
+            headers,
+        }
+    }
+}
+
+async fn modeled_debezium_eventrouter_outbox_log(
+    store: &PgStore,
+    event_id: &str,
+) -> Result<DebeziumModeledOutboxLog, sqlx::Error> {
+    let row: (
+        String,
+        String,
+        Vec<u8>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        serde_json::Value,
+    ) = sqlx::query_as(
+        r#"
+        SELECT event_id, topic, payload, tenant_id::text, contract_version, schema_hash,
+               occurred_at, aggregate_id, contract_id, metadata
+        FROM outbox_log
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    Ok(DebeziumModeledOutboxLog {
+        event_id: row.0,
+        topic: row.1,
+        payload: row.2,
+        tenant_id: row.3,
+        contract_version: row.4,
+        schema_hash: row.5,
+        occurred_at: row.6,
+        aggregate_id: row.7,
+        contract_id: row.8,
+        metadata: row.9,
+    })
+}
+
 async fn conf_seed_pending(
     store: &PgStore,
     event_id: String,
@@ -3713,6 +3945,114 @@ async fn eventing_conformance_outbox_enrolls_postgres() -> TestResult {
         }),
     })
     .await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn outbox_relay_and_cdc_envelope_parity_conformance() -> TestResult {
+    use consistency::PartitionKey;
+    use diport::EnvelopeCausationId;
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_id = unique_event_id("relay-cdc-parity");
+    let tenant = test_tenant();
+    let subject = "parity-subject-opaque";
+    let entry = Entry::new(
+        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+        IdemKey::parse(&event_id).unwrap(),
+        reviewed_payload(br#"{"sessionId":"parity"}"#),
+    );
+    let env = OutboxEnvelope::new(
+        "identity".to_string(),
+        SESSION_CREATED_TOPIC.to_string(),
+        OutboxMetadata::new(expected_occurred_at(), tenant, session_contract())
+            .with_subject_id(subject_id(subject))
+            .with_actor(actor_for(tenant)),
+    )
+    .with_partition_key_opt(Some(PartitionKey::parse("tenant-7:session-9").unwrap()))
+    .with_causation_id_opt(Some(
+        EnvelopeCausationId::from_opaque("cause-parity-1645").unwrap(),
+    ));
+
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            let entry = entry.clone();
+            let env = env.clone();
+            Box::pin(async move {
+                append_outbox(cap, &entry, &env).await?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let mut tx = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    {
+        let mut cap = crate::cotx::TxCapability::from_transaction(&mut tx);
+        append_outbox_log(&mut cap, &entry, &env, subject).await?;
+    }
+    tx.commit().await?;
+
+    let (publisher, captured_requests) = CapturedPublishRequestPublisher::new();
+    let outbox = make_pg_outbox_with_publisher(&store, publisher);
+    let pending = pending_entry_for_event(&store, &event_id)
+        .await
+        .map_err(std::io::Error::other)?;
+    let disposition = outbox.relay(&pending).await?;
+    assert_eq!(disposition, Disposition::Ack);
+
+    let relay_request = {
+        let mut requests = captured_requests.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            requests.len(),
+            1,
+            "relay should publish the logical fact exactly once"
+        );
+        requests
+            .pop()
+            .ok_or_else(|| std::io::Error::other("missing captured relay publish request"))?
+    };
+    let relay_envelope = relay_common_envelope(&relay_request);
+
+    let cdc_row = modeled_debezium_eventrouter_outbox_log(&store, &event_id).await?;
+    assert_eq!(cdc_row.aggregate_id, subject, "CDC aggregate_id");
+    assert_ne!(
+        cdc_row.aggregate_id, "tenant-7:session-9",
+        "CDC aggregate_id must not be the relay partition key"
+    );
+    assert_eq!(cdc_row.contract_id, SESSION_CREATED_TOPIC);
+    assert_eq!(
+        cdc_row
+            .metadata
+            .get(KEY_SUBJECT_ID)
+            .and_then(serde_json::Value::as_str),
+        Some(subject),
+        "subjectId stays persisted in metadata"
+    );
+    assert!(
+        cdc_row.metadata.get(KEY_ACTOR).is_some(),
+        "actor stays persisted in metadata"
+    );
+    assert!(cdc_row.metadata.get(KEY_TRACE).is_none());
+    assert!(cdc_row.metadata.get(KEY_CORRELATION).is_none());
+    assert_eq!(
+        cdc_row
+            .metadata
+            .get(KEY_OCCURRED_AT)
+            .and_then(serde_json::Value::as_i64),
+        Some(expected_occurred_at())
+    );
+
+    let cdc_envelope = cdc_row.common_envelope();
+    assert_eq!(
+        relay_envelope, cdc_envelope,
+        "relay PublishRequest and modeled Debezium EventRouter output must share the common broker envelope"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -6681,6 +7021,9 @@ type OutboxCdcEmitterRow = (
     Vec<u8>,
     serde_json::Value,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6723,7 +7066,8 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
 
     let row: OutboxCdcEmitterRow = sqlx::query_as(
         "SELECT tenant_id::text, aggregate_type, aggregate_id, topic, contract_id, \
-                contract_version, schema_hash, payload, metadata, causation_id \
+                contract_version, schema_hash, payload, metadata, causation_id, \
+                occurred_at, trace, correlation_id \
          FROM outbox_log \
          WHERE event_id = $1",
     )
@@ -6761,6 +7105,14 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
         "metadata schemaHash"
     );
     assert_eq!(row.9.as_deref(), Some("cdc-cause-1"), "causation_id");
+    let expected_occurred_at_header = expected_occurred_at().to_string();
+    assert_eq!(
+        row.10.as_deref(),
+        Some(expected_occurred_at_header.as_str()),
+        "occurred_at generated column"
+    );
+    assert_eq!(row.11, None, "trace generated column");
+    assert_eq!(row.12, None, "correlation_id generated column");
 
     let relay_count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
         .bind(&event_id)

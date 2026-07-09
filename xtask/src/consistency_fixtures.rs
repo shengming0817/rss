@@ -1456,14 +1456,14 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     fn enum_variants(src: &str, name: &str) -> Result<Vec<String>> {
         let file = syn::parse_file(src)?;
         for item in file.items {
-            if let Item::Enum(item) = item {
-                if item.ident == name {
-                    return Ok(item
-                        .variants
-                        .iter()
-                        .map(|variant| variant.ident.to_string())
-                        .collect());
-                }
+            if let Item::Enum(item) = item
+                && item.ident == name
+            {
+                return Ok(item
+                    .variants
+                    .iter()
+                    .map(|variant| variant.ident.to_string())
+                    .collect());
             }
         }
         anyhow::bail!("enum `{name}` not found")

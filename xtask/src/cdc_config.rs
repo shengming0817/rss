@@ -145,6 +145,10 @@ fn additional_placements() -> &'static [AdditionalHeaderPlacement] {
             field: "schema_hash",
             alias: "schemaHash",
         },
+        AdditionalHeaderPlacement {
+            field: "occurred_at",
+            alias: "occurredAt",
+        },
     ]
 }
 
@@ -281,6 +285,10 @@ mod tests {
         assert!(!json.contains("aggregate_type:"));
         assert!(!json.contains("metadata:header"));
         assert!(!json.contains("causation_id:header"));
+        assert!(!json.contains("tenantAuthority"));
+        assert!(!json.contains("subjectId"));
+        assert!(!json.contains("principal"));
+        assert!(!json.contains("actor"));
         Ok(())
     }
 
@@ -290,8 +298,41 @@ mod tests {
         let config = config(&value)?;
         assert_eq!(
             config["transforms.outbox.table.fields.additional.placement"],
-            "tenant_id:header:tenantId,contract_version:header:schemaVersion,schema_hash:header:schemaHash"
+            "tenant_id:header:tenantId,contract_version:header:schemaVersion,schema_hash:header:schemaHash,occurred_at:header:occurredAt"
         );
         Ok(())
+    }
+
+    #[test]
+    fn debezium_config_does_not_publish_nullable_generated_headers() -> anyhow::Result<()> {
+        let (_json, value) = rendered_config()?;
+        let config = config(&value)?;
+        let placements = config["transforms.outbox.table.fields.additional.placement"]
+            .as_str()
+            .unwrap_or_default();
+        for forbidden in ["trace:header:trace", "correlation_id:header:correlation"] {
+            assert!(
+                !placements.contains(forbidden),
+                "nullable generated column `{forbidden}` would become a null Kafka header when metadata omits it"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_runbook_publishes_generated_header_columns() {
+        let runbook = include_str!("../../docs/runbooks/202607081921-1633-cdc-outbox.md");
+        for needle in [
+            "PostgreSQL 18+",
+            "SHOW server_version_num; -- must be >= 180000",
+            "WITH (publish_generated_columns = stored)",
+            "trace/correlation generated columns stay out of Debezium additional headers",
+            "Debezium 的 additional placement 缺字段行为固定为 `error`",
+        ] {
+            assert!(
+                runbook.contains(needle),
+                "CDC runbook must document generated-column publication guard `{needle}`"
+            );
+        }
     }
 }

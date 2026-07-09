@@ -125,6 +125,14 @@ SELECT/INSERT 并显式 `REVOKE UPDATE, DELETE`。四表均在同一迁移内落
 DELETE`，并在建表迁移内落 `FORCE RLS` 与标准 tenant policy。tenant/schema header 与物理列的一致性由
 DB CHECK 强制，不依赖应用约定。
 
+`0049` 在 `outbox_log` 上新增 `occurred_at`、`trace`、`correlation_id` 三个 stored generated columns，
+全部从 sealed `metadata` 单源派生；应用写路径不得单独赋值这些列。Debezium EventRouter skeleton 只把强制
+非空的 `occurred_at` 发布为 broker header，nullable trace/correlation 保持 persisted-only，直到有 reviewed
+null-stripping SMT/等价机制。迁移同时用 CHECK 强制 `occurredAt` 必填且为数字，trace/correlation 若存在则为非空字符串并受
+长度限制。使用 `pgoutput` 的 CDC deployment 必须运行在 PostgreSQL 18+，并用
+`CREATE PUBLICATION ... WITH (publish_generated_columns = stored)` 发布 stored generated columns；低于
+PostgreSQL 18 的 logical replication 不发布这些 generated columns，不得启用该 CDC skeleton。
+
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
 `saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，

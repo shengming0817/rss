@@ -58,12 +58,15 @@ broker-visible delivery envelope header 的标准字段为：
 
 - `tenantId`：canonical `vocab::TenantId`，缺失或非 canonical 时消费侧 typed header fail-closed。
 - `schemaVersion`：契约版本（`v{N}`），由 generated `CONTRACT.version()` 同源写入 outbox
-  `contract_version` 物理列；relay 以该列覆盖 metadata header 后发布。
+  `contract_version` 物理列；relay 以该列覆盖 metadata header 后发布，CDC 经 `outbox_log.contract_version`
+  映射 header。
 - `schemaHash`：声明 schema bundle 摘要（`sha256:<64 lowercase hex>`），由 generated
-  `CONTRACT.schema_hash()` 同源写入 outbox `schema_hash` 物理列；relay 以该列覆盖 metadata header 后发布。
-- `occurredAt`：事件发生 unix 秒，producer 注入 `Clock` 后写入；缺失或非法只影响观测时间，不参与 relay 查询谓词。
+  `CONTRACT.schema_hash()` 同源写入 outbox `schema_hash` 物理列；relay 以该列覆盖 metadata header 后发布，
+  CDC 经 `outbox_log.schema_hash` 映射 header。
+- `occurredAt`：事件发生 unix 秒，producer 注入 `Clock` 后写入 sealed metadata；relay 从 metadata hydrate，
+  CDC 经 DB generated column `outbox_log.occurred_at` 投影 header。
 - `trace` / `correlation`：观测字段，缺失或畸形 fail-open，不阻断投递。
-- `tenantAuthority`：relay 签发的租户权威 token；消费侧写 app DLX 前必须验签。
+- `tenantAuthority`：relay 签发的租户权威 token；消费侧写 app DLX 前必须验签。CDC 不签发该 header。
 
 `subjectId` / `actor` / `principal` / `causation_id` 与业务 free-form metadata 是 persisted-only，不进 AMQP header / MQTT
 user property。业务写入口 `EnvelopeMetadata::try_insert` 对所有 reserved key fail-closed；adapter 只在
@@ -78,7 +81,8 @@ PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback /
   SECURITY DEFINER 函数，不读取 `outbox_log`。
 - **CDC mode**：显式 opt-in `PgInfraDeps::cdc_emitter(clock)` 写 `outbox_log` append-only ledger。该表面向
   logical decoding / CDC adapter，字段包含 `event_id`、`aggregate_type`、`aggregate_id`、contract
-  id/version、`schema_hash`、`payload bytea`、`metadata jsonb`、`tenant_id` 与 `causation_id`。`aggregate_id`
+  id/version、`schema_hash`、`payload bytea`、`metadata jsonb`、`tenant_id`、`causation_id`，以及从
+  `metadata` 派生的 generated columns `occurred_at`、`trace`、`correlation_id`。`aggregate_id`
   取 envelope `subject_id`；`partition_key` 只保留 relay 排序语义，不暴露到 CDC aggregate id。Debezium
   connector skeleton 由 `cargo xtask cdc-config debezium` 输出，操作步骤见
   `docs/runbooks/202607081921-1633-cdc-outbox.md`。
@@ -87,6 +91,13 @@ PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback /
 policy、`rss_app` 最小 `SELECT/INSERT` 授权与 `UPDATE/DELETE` revoke。tenant、contract version 与
 schema hash 只来自 typed `TenantId` + generated `ContractBinding` 写入列和 metadata，不能从 payload 或
 free-form metadata 反推。
+CDC metadata projection 列必须是 DB generated columns，从 sealed `metadata` 单源派生；应用写路径不得额外赋值
+`occurred_at`、`trace` 或 `correlation_id`。当前 Debezium EventRouter skeleton 只把强制非空的 `occurred_at`
+发布为 broker header；nullable trace/correlation 保持 persisted-only，直到引入 reviewed null-stripping
+SMT/等价机制。CDC deployment 使用 `pgoutput` 时要求 PostgreSQL 18+，并且 publication 必须设置
+`publish_generated_columns = stored`；低于 PostgreSQL 18 的实例不得启用该 CDC skeleton。
+`subjectId`、`actor`、`principal`、`causation_id`、
+`aggregate_id`、`contract_id` 与业务 free-form metadata 保持 persisted-only，除非后续 reviewed 设计明确改变。
 
 ## 复用层选型（claimer / nonce，topology-gated）
 

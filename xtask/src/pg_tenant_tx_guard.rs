@@ -36,6 +36,16 @@ pub(crate) enum Rule {
 
 pub(crate) struct PgTenantTxGuard;
 
+const FAULT_MATRIX_FILE: &str = "fault_matrix.rs";
+const FAULT_MATRIX_LIB_GATE: &str = "#[cfg(feature = \"fault-matrix-test-support\")]";
+const FAULT_MATRIX_OWNER_POOL: &str = "fault-matrix-owner-pool";
+const FAULT_MATRIX_SEED_OUTBOX: &str = "fault-matrix-seed-outbox";
+const FAULT_MATRIX_OUTBOX_STATUS_COUNT: &str = "fault-matrix-outbox-status-count";
+const FAULT_MATRIX_DEAD_LETTER_OBSERVATION: &str = "fault-matrix-dead-letter-observation";
+const FAULT_MATRIX_OUTBOX_CONTRACT_COUNT: &str = "fault-matrix-outbox-contract-count";
+const FAULT_MATRIX_AGE_OUTBOX_PUBLISHING: &str = "fault-matrix-age-outbox-publishing";
+const FAULT_MATRIX_AGE_INBOX_CLAIM: &str = "fault-matrix-age-inbox-claim";
+
 impl GovernanceCheck for PgTenantTxGuard {
     type Rule = Rule;
 
@@ -151,6 +161,7 @@ pub(crate) fn scan_guard(
     let mut tenant_sql_sites = 0usize;
     let mut raw_sites = 0usize;
     let mut allowed_exceptions = BTreeSet::new();
+    findings.extend(fault_matrix_exception_staleness(files));
 
     for (rel, content) in files {
         let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(content));
@@ -162,11 +173,19 @@ pub(crate) fn scan_guard(
         let helper_tables = tenant_pgconnection_helpers(&expanded, &tenant_tables);
         let (raw_hits, site_exceptions) =
             raw_tenant_accesses(rel, &expanded, &tenant_tables, &helper_tables);
-        let raw_outbox_insert_hits = raw_outbox_insert_sites(rel, &expanded);
+        let (raw_outbox_insert_hits, outbox_insert_exceptions) =
+            raw_outbox_insert_sites(rel, &expanded);
         let outbox_append_bypass_hits = outbox_append_bypass_sites(rel, &expanded);
         let tx_capability_mint_hits = tx_capability_mint_sites(rel, &expanded);
         allowed_exceptions.extend(site_exceptions);
+        allowed_exceptions.extend(outbox_insert_exceptions);
         let raw_pool_field_hits = raw_tenant_pool_fields(&expanded);
+        let raw_pool_field_exception = raw_pool_field_exception(rel, &expanded);
+        note_raw_pool_field_exception(
+            &mut allowed_exceptions,
+            raw_pool_field_exception,
+            &raw_pool_field_hits,
+        );
         raw_sites += raw_hits.len();
         raw_sites += raw_pool_field_hits.len();
         raw_sites += raw_outbox_insert_hits.len();
@@ -196,21 +215,12 @@ pub(crate) fn scan_guard(
                 "TxCapability minting is restricted to transaction funnel modules",
             ));
         }
-        if !tenant_hits.is_empty()
-            && !raw_pool_field_hits.is_empty()
-            && !is_raw_pool_field_exception(rel)
-        {
-            for hit in &raw_pool_field_hits {
-                findings.push(finding(
-                    Rule::RawTenantPoolField,
-                    site_subject(rel, hit.line),
-                    format!(
-                        "tenant tables {:?} share a file with raw pool field {:?}; tenant repositories must store PgTenantPool",
-                        tenant_hits, hit.pattern
-                    ),
-                ));
-            }
-        }
+        findings.extend(raw_pool_field_findings(
+            rel,
+            &tenant_hits,
+            &raw_pool_field_hits,
+            raw_pool_field_exception,
+        ));
         if raw_hits.is_empty() {
             continue;
         }
@@ -334,12 +344,16 @@ struct RawOutboxAccess {
     line: usize,
 }
 
-fn raw_outbox_insert_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
+fn raw_outbox_insert_sites(
+    rel: &str,
+    content: &str,
+) -> (Vec<RawOutboxAccess>, BTreeSet<&'static str>) {
     if rel == "outbox.rs" {
-        return Vec::new();
+        return (Vec::new(), BTreeSet::new());
     }
     const NEEDLE: &str = "insert into outbox";
-    content
+    let mut exceptions = BTreeSet::new();
+    let findings = content
         .match_indices(NEEDLE)
         .filter(|(idx, _)| {
             content[*idx + NEEDLE.len()..]
@@ -347,11 +361,20 @@ fn raw_outbox_insert_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
                 .next()
                 .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
         })
-        .map(|(idx, _)| RawOutboxAccess {
-            pattern: "INSERT INTO outbox",
-            line: line_number(content, idx),
+        .filter_map(|(idx, _)| {
+            let (_, end) = raw_access_window(content, idx, ".execute(pool");
+            let window = &content[idx.saturating_sub(400)..end];
+            if let Some(exception) = allowed_fault_matrix_outbox_insert(rel, window) {
+                exceptions.insert(exception);
+                return None;
+            }
+            Some(RawOutboxAccess {
+                pattern: "INSERT INTO outbox",
+                line: line_number(content, idx),
+            })
         })
-        .collect()
+        .collect();
+    (findings, exceptions)
 }
 
 fn outbox_append_bypass_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
@@ -602,6 +625,9 @@ fn allowed_site_exception(
     tables: &[String],
     window: &str,
 ) -> Option<&'static str> {
+    if let Some(exception) = allowed_fault_matrix_raw_tenant_site(rel, tables, window) {
+        return Some(exception);
+    }
     if rel == "migrator.rs"
         && tables == ["config_entries"]
         && window.contains("select count(*)::bigint from config_entries")
@@ -652,6 +678,111 @@ fn allowed_site_exception(
     None
 }
 
+fn allowed_fault_matrix_raw_tenant_site(
+    rel: &str,
+    tables: &[String],
+    window: &str,
+) -> Option<&'static str> {
+    if rel != FAULT_MATRIX_FILE {
+        return None;
+    }
+    if tables == ["outbox"]
+        && window.contains("insert into outbox (")
+        && window.contains(".execute(pool)")
+    {
+        return Some(FAULT_MATRIX_SEED_OUTBOX);
+    }
+    if tables == ["outbox"]
+        && window.contains("select count(*)::bigint from outbox")
+        && window.contains("event_id = $2")
+        && window.contains("status = $3")
+        && window.contains(".fetch_one(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_OUTBOX_STATUS_COUNT);
+    }
+    if tables == ["dead_letter"]
+        && window.contains("from dead_letter")
+        && window.contains("source_kind")
+        && window.contains("message_id = $2")
+        && window.contains(".fetch_optional(&self.owner_pool)")
+    {
+        return Some(FAULT_MATRIX_DEAD_LETTER_OBSERVATION);
+    }
+    if tables == ["outbox"]
+        && window.contains("select count(*)::bigint from outbox")
+        && window.contains("topic = $2")
+        && window.contains("contract_id = $3")
+        && window.contains(".fetch_one(pool)")
+    {
+        return Some(FAULT_MATRIX_OUTBOX_CONTRACT_COUNT);
+    }
+    if tables == ["outbox"]
+        && window.contains("update outbox set updated_at")
+        && window.contains("status = $3")
+        && window.contains(".execute(pool)")
+    {
+        return Some(FAULT_MATRIX_AGE_OUTBOX_PUBLISHING);
+    }
+    if tables == ["inbox_receipts"]
+        && window.contains("update inbox_receipts set claimed_at")
+        && window.contains("consumer_group = $3")
+        && window.contains(".execute(pool)")
+    {
+        return Some(FAULT_MATRIX_AGE_INBOX_CLAIM);
+    }
+    None
+}
+
+fn allowed_fault_matrix_outbox_insert(rel: &str, window: &str) -> Option<&'static str> {
+    if rel == FAULT_MATRIX_FILE
+        && window.contains("insert into outbox (")
+        && window.contains(".execute(pool)")
+    {
+        return Some(FAULT_MATRIX_SEED_OUTBOX);
+    }
+    None
+}
+
+fn note_raw_pool_field_exception(
+    allowed_exceptions: &mut BTreeSet<&'static str>,
+    is_exception: bool,
+    hits: &[RawPoolFieldAccess],
+) {
+    if is_exception && !hits.is_empty() {
+        allowed_exceptions.insert(FAULT_MATRIX_OWNER_POOL);
+    }
+}
+
+fn raw_pool_field_findings(
+    rel: &str,
+    tenant_hits: &[String],
+    hits: &[RawPoolFieldAccess],
+    is_exception: bool,
+) -> Vec<Finding> {
+    if tenant_hits.is_empty() || hits.is_empty() || is_exception {
+        return Vec::new();
+    }
+    hits.iter()
+        .map(|hit| {
+            finding(
+                Rule::RawTenantPoolField,
+                site_subject(rel, hit.line),
+                format!(
+                    "tenant tables {:?} share a file with raw pool field {:?}; tenant repositories must store PgTenantPool",
+                    tenant_hits, hit.pattern
+                ),
+            )
+        })
+        .collect()
+}
+
+fn raw_pool_field_exception(rel: &str, content: &str) -> bool {
+    if rel == FAULT_MATRIX_FILE {
+        return content.matches("owner_pool: pgpool").count() == 1;
+    }
+    is_raw_pool_field_exception(rel)
+}
+
 fn is_raw_pool_field_exception(rel: &str) -> bool {
     matches!(
         rel,
@@ -664,6 +795,86 @@ fn is_raw_pool_field_exception(rel: &str) -> bool {
             | "outbox.rs"
             | "projection_events.rs"
     )
+}
+
+fn fault_matrix_exception_staleness(files: &[(String, String)]) -> Vec<Finding> {
+    let Some((_, fault_matrix)) = files.iter().find(|(rel, _)| rel == FAULT_MATRIX_FILE) else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    let gate_ok = files.iter().any(|(rel, content)| {
+        rel == "lib.rs"
+            && content.contains(FAULT_MATRIX_LIB_GATE)
+            && content.contains("pub mod fault_matrix;")
+    });
+    if !gate_ok {
+        findings.push(finding(
+            Rule::StaleException,
+            "fault-matrix-test-support-gate",
+            "fault_matrix raw-access exceptions require the lib.rs feature gate",
+        ));
+    }
+
+    let content = strip_rust_comment_lines(&strip_cfg_test_modules(fault_matrix)).to_lowercase();
+    for (name, needles) in [
+        (FAULT_MATRIX_OWNER_POOL, &["owner_pool: pgpool"][..]),
+        (
+            FAULT_MATRIX_SEED_OUTBOX,
+            &["insert into outbox (", ".execute(pool)"][..],
+        ),
+        (
+            FAULT_MATRIX_OUTBOX_STATUS_COUNT,
+            &[
+                "select count(*)::bigint from outbox",
+                "event_id = $2",
+                "status = $3",
+                ".fetch_one(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_DEAD_LETTER_OBSERVATION,
+            &[
+                "from dead_letter",
+                "source_kind",
+                "message_id = $2",
+                ".fetch_optional(&self.owner_pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_OUTBOX_CONTRACT_COUNT,
+            &[
+                "select count(*)::bigint from outbox",
+                "topic = $2",
+                "contract_id = $3",
+                ".fetch_one(pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_AGE_OUTBOX_PUBLISHING,
+            &[
+                "update outbox set updated_at",
+                "status = $3",
+                ".execute(pool)",
+            ][..],
+        ),
+        (
+            FAULT_MATRIX_AGE_INBOX_CLAIM,
+            &[
+                "update inbox_receipts set claimed_at",
+                "consumer_group = $3",
+                ".execute(pool)",
+            ][..],
+        ),
+    ] {
+        if !needles.iter().all(|needle| content.contains(needle)) {
+            findings.push(finding(
+                Rule::StaleException,
+                name,
+                "fault_matrix raw-access exception target is absent or no longer exact",
+            ));
+        }
+    }
+    findings
 }
 
 fn site_subject(rel: &str, line: usize) -> String {
@@ -1220,6 +1431,63 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.rule == Rule::RawTenantTableAccess
                 && f.subject.starts_with("dead_letter.rs:")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn green_fault_matrix_test_support_is_file_level_exception() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "role_repo.rs",
+                    "fn safe_site(){ sqlx::query(\"SELECT id FROM roles WHERE tenant_id = $1\"); }",
+                ),
+                (
+                    "fault_matrix.rs",
+                    "struct Harness { owner_pool: PgPool } \
+                     async fn seed(pool: &PgPool) { \
+                         sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(pool).await; \
+                         sqlx::query(\"DELETE FROM inbox_receipts WHERE tenant_id = $1\").execute(pool).await; \
+                     }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().all(|finding| !matches!(
+                finding.rule,
+                Rule::RawTenantTableAccess | Rule::RawTenantPoolField | Rule::RawOutboxInsert
+            )),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_fault_matrix_extra_raw_tenant_access_is_not_file_level_exception() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "role_repo.rs",
+                    "fn safe_site(){ sqlx::query(\"SELECT id FROM roles WHERE tenant_id = $1\"); }",
+                ),
+                (
+                    "fault_matrix.rs",
+                    "struct Harness { owner_pool: PgPool } \
+                     async fn seed(pool: &PgPool) { \
+                         sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(pool).await; \
+                     } \
+                     async fn accidental(&self) { \
+                         sqlx::query(\"DELETE FROM roles WHERE tenant_id = $1\").execute(&self.owner_pool).await; \
+                     }",
+                ),
+            ]),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RawTenantTableAccess),
             "{findings:?}"
         );
     }
