@@ -1,4 +1,5 @@
-//! `command-symmetry` —— generated command 模块双侧对称性 + 裸 emit 出口封堵 + impl-site 收口（治理门）。
+//! `command-symmetry` —— generated command 模块双侧对称性 + 裸 emit / durable journal 出口封堵 +
+//! impl-site 收口（治理门）。
 //!
 //! INVARIANT: COMMAND-SYMMETRY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，Rule 1+2）· COMMAND-IMPL-ALLOWLIST-01（Medium，Rule 3）
 //!
@@ -27,13 +28,19 @@
 //! 扫描根**比 `pdpallow` 宽**（含 `adapters`/`assemblies`/`journeys`——infra 与组合根亦不得裸 emit），
 //! 故二者根集不共享（#1124 review F5）。
 //!
-//! **Rule 3：impl-site 收口（`CommandImplOutsideRoot`，`syn` AST 扫描）**
+//! **Rule 3：durable journal 出口封堵（`BareJournalExit`，`syn` AST 扫描）**
+//! 生产 / 组合根 src 不得直接构造 `ReviewedCommandJournal::new` 或直接调用
+//! `CommandJournalStore::record_command` / `record_command_with_business_write`；这些调用点只允许在
+//! Postgres sanctioned seam `adapters/postgres/src/command_journal.rs` 内出现（测试夹具除外）。业务 durable
+//! command 必须经 generated wrapper / domain-shaped postgres UoW 接线，不得从任意 crate 直接开 journal path。
+//!
+//! **Rule 4：impl-site 收口（`CommandImplOutsideRoot`，`syn` AST 扫描）**
 //! `impl CommandEmit` / `impl CommandRegister`（generated seam 实现）**仅允许**在组合根 `bins/` /
 //! `assemblies/`（sanctioned bridge / registrar 站点）。扫非组合根根集（`crates` / `adapters` + leaf
 //! `journeys`），出现 such impl 即 finding（旁路唯一 sanctioned bridge；对齐 `DIPORT-IMPL-ALLOWLIST-01`）。
 //! 当前 bridge 延迟落地 ⇒ 此扫描 vacuous-green，作 canary 守未来违例（anti-vacuity 见 `#[cfg(test)]`）。
 //!
-//! **载体说明（AI-robust）：** Rule 2/3 均 Medium（`syn` AST governance 扫描，CMD-FUNNEL-01 同款范式）。
+//! **载体说明（AI-robust）：** Rule 2/3/4 均 Medium（`syn` AST governance 扫描，CMD-FUNNEL-01 同款范式）。
 //! Hard 不可达——generated `CommandEmit`/`CommandRegister` 是 **public** trait，无法 seal 阻止外部 crate
 //! impl（同 `diport` DI port 之困，ADR-003 §4.2）；真 Hard 化（base crate sealed `CommandTopic` 阻
 //! 裸 `Entry::new` 构造 command topic）见 follow-up issue（#1124 review F2 defer）。AST 级 ⇒ 字符串 /
@@ -44,7 +51,7 @@
 //! sealed `CommandTopic`）覆盖此残留。
 //!
 //! 评级 Medium（接入 `cargo xtask verify`，no-compile meta 步）；synthetic red + anti-vacuity green 见
-//! `#[cfg(test)]`：红向（缺侧 / 裸 emit 多形态 / 越界 impl）+ 绿向（完整 module / 字符串注释不误报 /
+//! `#[cfg(test)]`：红向（缺侧 / 裸 emit 多形态 / 裸 journal / 越界 impl）+ 绿向（完整 module / 字符串注释不误报 /
 //! 真工作区 0 finding）。
 
 use std::path::{Path, PathBuf};
@@ -68,6 +75,8 @@ pub(crate) enum Rule {
     MissingCommandConst,
     /// COMMAND-SYMMETRY-01：生产/组合根 src 内 `command::emit_async` 裸调（旁路 generated typed wrapper）。
     BareEmitExit,
+    /// COMMAND-SYMMETRY-01：生产/组合根 src 内 durable journal 裸调（旁路 sanctioned wrapper/UoW）。
+    BareJournalExit,
     /// COMMAND-IMPL-ALLOWLIST-01：非组合根 src 内 `impl CommandEmit`/`impl CommandRegister`（旁路 sanctioned bridge）。
     CommandImplOutsideRoot,
 }
@@ -82,6 +91,16 @@ const BARE_EMIT_NEEDLE: &str = "command::emit_async";
 const EMIT_FN: &str = "emit_async";
 /// runtime emit 的所属 module 段名（path 末二段 `command::emit_async` / use 前缀含 `command`）。
 const EMIT_MOD: &str = "command";
+/// durable command journal DTO 构造器类型名。
+const JOURNAL_DTO: &str = "ReviewedCommandJournal";
+/// durable command journal store trait 名。
+const JOURNAL_STORE: &str = "CommandJournalStore";
+/// durable command journal DTO 构造器方法名。
+const JOURNAL_NEW: &str = "new";
+/// durable command public record function name.
+const JOURNAL_RECORD: &str = "record_command";
+/// Postgres-only co-tx helper method name.
+const JOURNAL_RECORD_WITH_BUSINESS: &str = "record_command_with_business_write";
 /// generated seam trait 名（Rule 3 impl-site 收口目标）。
 const SEAM_TRAITS: &[&str] = &["CommandEmit", "CommandRegister"];
 
@@ -130,7 +149,7 @@ impl GovernanceCheck for CommandSymmetry {
 
         let summary = format!(
             "{mod_scanned} 个 per-command module 双侧对称完整；\
-             {src_scanned} 个生产/组合根 src 无裸 `{BARE_EMIT_NEEDLE}` 出口、无越界 CommandEmit/CommandRegister impl"
+             {src_scanned} 个生产/组合根 src 无裸 `{BARE_EMIT_NEEDLE}` / durable journal 出口、无越界 CommandEmit/CommandRegister impl"
         );
         Ok((summary, findings))
     }
@@ -181,6 +200,9 @@ fn scan_command_modules(root: &Path) -> Result<(usize, Vec<Finding>)> {
                     "per-command module 缺 `pub const CONTRACT_ID` 或 `pub const TOPIC`（routing 常量缺失）"
                 }
                 Rule::BareEmitExit | Rule::CommandImplOutsideRoot => {
+                    unreachable!("scan_command_module 只产出对称/常量规则")
+                }
+                Rule::BareJournalExit => {
                     unreachable!("scan_command_module 只产出对称/常量规则")
                 }
             };
@@ -273,6 +295,15 @@ fn scan_src_dir(
                 ),
             ));
         }
+        if !is_sanctioned_journal_call_site(&path) && file_bare_journal_count(&file) > 0 {
+            bare.push(finding(
+                Rule::BareJournalExit,
+                path.display().to_string(),
+                "src 内 durable command journal 裸调（ReviewedCommandJournal::new / \
+                 CommandJournalStore::record_command / record_command_with_business_write）——\
+                 业务须经 generated durable wrapper 或 sanctioned Postgres UoW seam",
+            ));
+        }
         if impl_forbidden && file_command_impl_count(&file) > 0 {
             impls.push(finding(
                 Rule::CommandImplOutsideRoot,
@@ -283,6 +314,14 @@ fn scan_src_dir(
         }
     }
     Ok(())
+}
+
+fn is_sanctioned_journal_call_site(path: &Path) -> bool {
+    path.ends_with("adapters/postgres/src/command_journal.rs")
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("_tests.rs") || name == "integration_tests.rs")
 }
 
 /// AST 访问者：检测旁路 generated wrapper 的 runtime command emit 调用。AST 级 ⇒ 字符串 / 注释内
@@ -357,6 +396,44 @@ fn file_bare_emit_count(file: &syn::File) -> usize {
     calls.hits
 }
 
+/// AST 访问者：检测 durable command journal 裸出口。AST 级 ⇒ 字符串 / 注释内同名文本不计。
+#[derive(Default)]
+struct JournalCallVisitor {
+    hits: usize,
+}
+
+impl<'ast> Visit<'ast> for JournalCallVisitor {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = node.func.as_ref()
+            && call_path_is_runtime_journal(&p.path)
+        {
+            self.hits += 1;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == JOURNAL_RECORD || node.method == JOURNAL_RECORD_WITH_BUSINESS {
+            self.hits += 1;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn call_path_is_runtime_journal(path: &syn::Path) -> bool {
+    let segs = &path.segments;
+    let n = segs.len();
+    n >= 2
+        && ((segs[n - 1].ident == JOURNAL_NEW && segs[n - 2].ident == JOURNAL_DTO)
+            || (segs[n - 1].ident == JOURNAL_RECORD && segs[n - 2].ident == JOURNAL_STORE))
+}
+
+fn file_bare_journal_count(file: &syn::File) -> usize {
+    let mut v = JournalCallVisitor::default();
+    v.visit_file(file);
+    v.hits
+}
+
 /// AST 访问者：统计 `impl CommandEmit`/`impl CommandRegister`（trait path 末段匹配 SEAM_TRAITS）。
 /// 含 `impl super::CommandEmit` / `impl generated::command::CommandRegister`。
 #[derive(Default)]
@@ -392,6 +469,10 @@ mod tests {
     /// 测试辅助：parse + 计裸 emit 调用。
     fn bare_emit_count(src: &str) -> syn::Result<usize> {
         Ok(file_bare_emit_count(&syn::parse_file(src)?))
+    }
+    /// 测试辅助：parse + 计 durable journal 裸调用。
+    fn bare_journal_count(src: &str) -> syn::Result<usize> {
+        Ok(file_bare_journal_count(&syn::parse_file(src)?))
     }
     /// 测试辅助：parse + 计 seam impl。
     fn command_impl_count(src: &str) -> syn::Result<usize> {
@@ -516,6 +597,60 @@ pub const TOPIC: &str = "foo.commands.do-bar";
         let src = "fn f() { let _ = command::emit_async(a); }";
         assert_eq!(bare_emit_count(src)?, 1);
         Ok(())
+    }
+
+    /// 红向：直接构造 durable journal DTO → 命中。
+    #[test]
+    fn bare_journal_dto_new_is_flagged() -> syn::Result<()> {
+        let src = "fn f() { let _ = eventexec::command::ReviewedCommandJournal::new(a, b, c, d, e, f, g, h); }";
+        assert_eq!(bare_journal_count(src)?, 1);
+        Ok(())
+    }
+
+    /// 红向：直接调 public journal store trait → 命中。
+    #[test]
+    fn bare_journal_store_record_is_flagged() -> syn::Result<()> {
+        let src = "fn f() { let _ = CommandJournalStore::record_command(&store, cmd, summary); }";
+        assert_eq!(bare_journal_count(src)?, 1);
+        Ok(())
+    }
+
+    /// 红向：直接调 public journal store trait method-call → 命中。
+    #[test]
+    fn bare_journal_store_record_method_call_is_flagged() -> syn::Result<()> {
+        let src = "fn f() { let _ = store.record_command(cmd, summary); }";
+        assert_eq!(bare_journal_count(src)?, 1);
+        Ok(())
+    }
+
+    /// 红向：直接调 Postgres co-tx helper → 命中。
+    #[test]
+    fn bare_journal_business_helper_is_flagged() -> syn::Result<()> {
+        let src = "fn f() { let _ = store.record_command_with_business_write(cmd, op); }";
+        assert_eq!(bare_journal_count(src)?, 1);
+        Ok(())
+    }
+
+    /// 绿向：字符串中的 durable journal 名称不误报。
+    #[test]
+    fn bare_journal_string_literal_is_not_flagged() -> syn::Result<()> {
+        let src = r#"fn f() { let _ = "ReviewedCommandJournal::new"; }"#;
+        assert_eq!(bare_journal_count(src)?, 0);
+        Ok(())
+    }
+
+    /// 绿向：sanctioned adapter seam / test fixtures are allowed call sites.
+    #[test]
+    fn journal_call_site_allowlist_is_narrow() {
+        assert!(is_sanctioned_journal_call_site(Path::new(
+            "/repo/adapters/postgres/src/command_journal.rs"
+        )));
+        assert!(is_sanctioned_journal_call_site(Path::new(
+            "/repo/adapters/postgres/src/integration_tests.rs"
+        )));
+        assert!(!is_sanctioned_journal_call_site(Path::new(
+            "/repo/crates/foo/src/lib.rs"
+        )));
     }
 
     /// 红向（F4 修复点 #1 whitespace）：`command :: emit_async (..)` 含空格——AST 归一化，substring 旧扫描

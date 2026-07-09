@@ -19,12 +19,14 @@
 //! | 模块 | 等级 |
 //! |------|------|
 //! | idempotency | L0 |
+//! | command_journal | L1/L2 |
 //! | inbox | L0/L2 |
 //! | outbox | L1/L2 |
 //! | saga | L3 |
 //! | reconcile | L4 |
 //! | projection | L3 |
 
+pub mod command_journal;
 pub mod error;
 pub mod idempotency;
 pub mod inbox;
@@ -34,6 +36,12 @@ pub mod reconcile;
 pub mod saga;
 pub mod tx_retry;
 
+pub use command_journal::{
+    CommandAttempt, CommandAttemptError, CommandErrorSummary, CommandId, CommandIdempotencyKey,
+    CommandJournalOutcome, CommandJournalRecord, CommandJournalStatus,
+    CommandJournalTerminalSummary, CommandJournalValueError, CommandRequestFingerprint,
+    CommandResultSummary,
+};
 pub use error::{EngineError, EngineErrorKind};
 pub use idempotency::{
     ConsumerGroup, ConsumerGroupError, IdemKey, IdemKeyError, LeaseOutcome, LeaseToken, SeenState,

@@ -64,14 +64,14 @@ use crate::projection_events::ProjectionWriteRegistry;
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections,
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
-    PgAuthAuditSink, PgCheckpointStore, PgConfig, PgConfigRepo, PgConfigValueMaintenance,
-    PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError,
-    PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter, PgOutboxMaintenance,
-    PgPolicyLifecycle, PgPolicyRepo, PgProjectionControl, PgProjectionEvents, PgReadinessSampler,
-    PgReconcileStore, PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle,
-    PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo, PgServiceTokenReplayGuard,
-    PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore, PgStoreGuard,
-    ProjectionMaintenanceCapability,
+    PgAuthAuditSink, PgCheckpointStore, PgCommandJournal, PgConfig, PgConfigRepo,
+    PgConfigValueMaintenance, PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore,
+    PgEmitter, PgError, PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter,
+    PgOutboxMaintenance, PgPolicyLifecycle, PgPolicyRepo, PgProjectionControl, PgProjectionEvents,
+    PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore, PgResourceAttributeRepo,
+    PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo,
+    PgServiceTokenReplayGuard, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
+    PgStoreGuard, ProjectionMaintenanceCapability,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -952,6 +952,16 @@ impl PgInfraDeps {
         self.store.reconcile()
     }
 
+    /// command journal foundation store（schema-level capability，#1441）。
+    ///
+    /// This accessor exposes only the reviewed command journal API; it does not start a command
+    /// worker or expose raw transaction handles. Its outbox envelope `occurred_at` source is an
+    /// injected producer clock, matching [`PgInfraDeps::emitter`].
+    #[must_use]
+    pub fn command_journal(&self, clock: Box<dyn Clock>) -> PgCommandJournal {
+        self.store.command_journal(clock)
+    }
+
     /// saga instance/lease store（L3 saga claim/fencing）。
     #[must_use]
     pub fn saga_instance_store(&self) -> PgSagaInstanceStore {
@@ -1216,6 +1226,7 @@ mod tests {
         let _ = infra.saga_journal();
         let _ = infra.projection_events();
         let _ = infra.cas_store();
+        let _ = infra.command_journal(Box::new(EpochClock));
     }
 
     #[tokio::test]

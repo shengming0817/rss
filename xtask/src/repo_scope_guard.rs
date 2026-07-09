@@ -203,6 +203,10 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
         "append_and_mark_done",
     ),
     ("adapters/postgres/src/consumer_tx.rs", "mark_done_only"),
+    (
+        "adapters/postgres/src/command_journal.rs",
+        "record_command_with_business_write",
+    ),
     ("adapters/postgres/src/dead_letter.rs", "write_dead_letter"),
     ("adapters/postgres/src/dlq.rs", "inspect_dead_letter"),
     ("adapters/postgres/src/dlq.rs", "inspect_outbox_dlx"),
@@ -696,6 +700,11 @@ mod tests {
             (
                 "adapters/postgres/src/outbox.rs".to_string(),
                 "async fn settle_dlx() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/command_journal.rs".to_string(),
+                "async fn record_command_with_business_write() { infra_tenant_scope(tenant); }"
+                    .to_string(),
             ),
             (
                 "adapters/postgres/src/saga.rs".to_string(),

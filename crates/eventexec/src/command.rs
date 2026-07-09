@@ -18,15 +18,19 @@
 
 use std::sync::Arc;
 
-use consistency::HandleResult;
-use consistency::InboxStore;
 use consistency::idempotency::IdemKey;
 use consistency::outbox::{Entry, OutboxPayload, PermanentError, PermanentErrorKind, Topic};
+use consistency::{
+    CommandId, CommandIdempotencyKey, CommandJournalOutcome, CommandJournalRecord,
+    CommandJournalValueError, CommandRequestFingerprint, CommandResultSummary, HandleResult,
+    InboxStore,
+};
 use diport::dead_letter_store::DynDeadLetterStore;
 use diport::{
     DynOutboxEmitter, EnvelopeSubjectId, Message, MessageStream, OutboxActor, OutboxEmitError,
-    OutboxEmitter, OutboxEnvelopeParts,
+    OutboxEmitter, OutboxEnvelopeParts, RedactedSource,
 };
+use sha2::{Digest as _, Sha256};
 
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
 use crate::tenant_authority::TenantAuthority;
@@ -66,9 +70,198 @@ pub enum CommandEmitError {
     /// dispatch id 非法（空幂等 key）。
     #[error("command dispatch id is invalid")]
     DispatchId,
+    /// runtime 派生请求指纹失败。
+    #[error("command request fingerprint is invalid")]
+    Fingerprint,
     /// 底层 durable outbox 发射失败（source 已经 [`OutboxEmitError`] 脱敏）。
     #[error("command outbox emit failed")]
     Emit(#[source] OutboxEmitError),
+}
+
+/// Command journal storage failure.
+#[derive(Debug, thiserror::Error)]
+#[error("command journal operation failed")]
+pub struct CommandJournalError {
+    #[source]
+    source: RedactedSource,
+}
+
+impl CommandJournalError {
+    /// Wrap a provider/storage error without exposing its Display text to callers.
+    pub fn new<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: RedactedSource::new(source),
+        }
+    }
+}
+
+impl From<CommandEmitError> for CommandJournalError {
+    fn from(source: CommandEmitError) -> Self {
+        Self::new(source)
+    }
+}
+
+impl From<CommandJournalValueError> for CommandJournalError {
+    fn from(source: CommandJournalValueError) -> Self {
+        Self::new(source)
+    }
+}
+
+/// Provider-agnostic durable command journal seam.
+#[allow(async_fn_in_trait)]
+// reason: eventexec runtime seam uses native AFIT + static dispatch, matching reconcile store.
+pub trait CommandJournalStore {
+    /// Record command intent and enqueue its outbox command atomically in the provider.
+    async fn record_command(
+        &self,
+        command: ReviewedCommandJournal,
+        result_summary: CommandResultSummary,
+    ) -> Result<CommandJournalOutcome, CommandJournalError>;
+}
+
+/// Reviewed command journal write. Fields are private so callers must supply tenant, topic,
+/// contract, idempotency key, payload, subject and actor through the constructor.
+pub struct ReviewedCommandJournal {
+    journal: CommandJournalRecord,
+    entry: Entry,
+    envelope: OutboxEnvelopeParts,
+}
+
+impl ReviewedCommandJournal {
+    /// Build a reviewed command journal write.
+    #[allow(clippy::too_many_arguments)]
+    // reason: reviewed command write is the hard boundary that requires all authority/routing/idempotency inputs at once.
+    pub fn new(
+        idempotency_key: CommandIdempotencyKey,
+        topic: &str,
+        contract: vocab::ContractBinding,
+        tenant: vocab::TenantId,
+        payload: Vec<u8>,
+        subject_id: EnvelopeSubjectId,
+        actor: OutboxActor,
+    ) -> Result<Self, CommandEmitError> {
+        let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
+        let request_fingerprint = command_request_fingerprint(
+            tenant,
+            &parsed_topic,
+            contract,
+            &idempotency_key,
+            &payload,
+            &subject_id,
+            &actor,
+        )?;
+        let scoped_digest = scoped_command_digest(tenant, &parsed_topic, &idempotency_key);
+        let scoped_command_id = format!("command:v1:sha256:{scoped_digest}");
+        let storage_idempotency_key = format!("sha256:{scoped_digest}");
+        let command_id = CommandId::parse(scoped_command_id.as_str())
+            .map_err(|_| CommandEmitError::DispatchId)?;
+        let storage_idempotency_key = CommandIdempotencyKey::parse(storage_idempotency_key)
+            .map_err(|_| CommandEmitError::DispatchId)?;
+        let dispatch_id = DispatchId::from_idempotency_key(&scoped_command_id)?;
+        let journal = CommandJournalRecord::new(
+            tenant,
+            command_id,
+            storage_idempotency_key,
+            request_fingerprint,
+        );
+        let entry = Entry::new(
+            parsed_topic,
+            dispatch_id.into_idem_key(),
+            OutboxPayload::from_reviewed_event_bytes(payload),
+        );
+        let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id, actor);
+        Ok(Self {
+            journal,
+            entry,
+            envelope,
+        })
+    }
+
+    /// Borrow the journal record.
+    pub fn journal(&self) -> &CommandJournalRecord {
+        &self.journal
+    }
+
+    /// Borrow the outbox entry.
+    pub fn entry(&self) -> &Entry {
+        &self.entry
+    }
+
+    /// Consume into provider-owned primitives.
+    pub fn into_parts(self) -> (CommandJournalRecord, Entry, OutboxEnvelopeParts) {
+        (self.journal, self.entry, self.envelope)
+    }
+}
+
+fn command_request_fingerprint(
+    tenant: vocab::TenantId,
+    topic: &Topic,
+    contract: vocab::ContractBinding,
+    idempotency_key: &CommandIdempotencyKey,
+    payload: &[u8],
+    subject_id: &EnvelopeSubjectId,
+    actor: &OutboxActor,
+) -> Result<CommandRequestFingerprint, CommandEmitError> {
+    let mut hasher = Sha256::new();
+    hash_component(&mut hasher, "rss-command-request-v1");
+    hash_component(&mut hasher, contract.domain());
+    hash_component(&mut hasher, contract.contract_id());
+    hash_component(&mut hasher, contract.version());
+    hash_component(&mut hasher, contract.schema_hash());
+    hash_component(&mut hasher, &tenant.to_string());
+    hash_component(&mut hasher, topic.as_str());
+    hash_component(&mut hasher, idempotency_key.as_str());
+    hash_component(&mut hasher, subject_id.as_str());
+    hash_component(&mut hasher, actor.kind().as_actor_metadata_label());
+    hash_component(&mut hasher, actor.actor_id().as_str());
+    match actor.tenant() {
+        Some(actor_tenant) => hash_component(&mut hasher, &actor_tenant.to_string()),
+        None => hash_component(&mut hasher, ""),
+    }
+    hash_component(&mut hasher, actor.scope().as_label());
+    hash_bytes_component(&mut hasher, payload);
+    CommandRequestFingerprint::parse(format!("sha256:{}", lower_hex(&hasher.finalize())))
+        .map_err(|_| CommandEmitError::Fingerprint)
+}
+
+fn scoped_command_digest(
+    tenant: vocab::TenantId,
+    topic: &Topic,
+    idempotency_key: &CommandIdempotencyKey,
+) -> String {
+    let mut hasher = Sha256::new();
+    hash_component(&mut hasher, "rss-command-journal-v1");
+    hash_component(&mut hasher, &tenant.to_string());
+    hash_component(&mut hasher, topic.as_str());
+    hash_component(&mut hasher, idempotency_key.as_str());
+    lower_hex(&hasher.finalize())
+}
+
+fn hash_component(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
+}
+
+fn hash_bytes_component(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value);
+    hasher.update(b"\0");
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Runtime 命令 emit —— 命令 topic [`Entry`] 的**唯一** sanctioned 构造点。
@@ -200,8 +393,8 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use consistency::HandleResult;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
+    use consistency::{CommandIdempotencyKey, HandleResult};
     use consistency::{InboxReceiptContext, InboxStore};
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
@@ -213,7 +406,9 @@ mod tests {
     };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
-    use super::{DispatchId, LeaseConfig, emit_async, register_command_handler};
+    use super::{
+        DispatchId, LeaseConfig, ReviewedCommandJournal, emit_async, register_command_handler,
+    };
     use crate::MAX_REDELIVERY;
     use crate::TenantAuthority;
     use crate::tenant_authority::TenantAuthorityBinding;
@@ -244,6 +439,11 @@ mod tests {
         OutboxActor::service(OpaqueActorId::from_opaque("command-test-service").expect("actor"))
     }
 
+    #[allow(clippy::expect_used)]
+    fn idem(raw: &str) -> CommandIdempotencyKey {
+        CommandIdempotencyKey::parse(raw).expect("idempotency key")
+    }
+
     #[derive(Debug)]
     struct TestMac;
 
@@ -257,6 +457,118 @@ mod tests {
         fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
             self.sign(key, algorithm, message).as_bytes() == tag.as_bytes()
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test uses known-valid reviewed command inputs.
+    fn reviewed_command_journal_scopes_command_id_by_tenant_and_topic() {
+        let first = ReviewedCommandJournal::new(
+            idem("same-key"),
+            "seed.commands.do-thing",
+            command_contract(),
+            tenant(),
+            br#"{"op":"one"}"#.to_vec(),
+            subject("subject-1"),
+            actor(),
+        )
+        .expect("reviewed command");
+        let second_tenant =
+            vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant");
+        let second = ReviewedCommandJournal::new(
+            idem("same-key"),
+            "seed.commands.do-thing",
+            command_contract(),
+            second_tenant,
+            br#"{"op":"one"}"#.to_vec(),
+            subject("subject-1"),
+            actor(),
+        )
+        .expect("reviewed command");
+
+        assert_ne!(
+            first.journal().command_id().as_str(),
+            second.journal().command_id().as_str(),
+            "same raw key must be tenant scoped"
+        );
+        assert_eq!(
+            first.entry().idem_key().as_str(),
+            first.journal().command_id().as_str(),
+            "outbox dispatch id and journal command id must share the scoped key"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test uses known-valid reviewed command inputs.
+    fn reviewed_command_journal_persists_fingerprint_for_conflict_detection() {
+        let raw_key = "idem-conflict-customer@example.test";
+        let command = ReviewedCommandJournal::new(
+            idem(raw_key),
+            "seed.commands.do-thing",
+            command_contract(),
+            tenant(),
+            br#"{"op":"one"}"#.to_vec(),
+            subject("subject-1"),
+            actor(),
+        )
+        .expect("reviewed command");
+
+        assert!(!command.journal().command_id().as_str().contains(raw_key));
+        assert!(!command.entry().idem_key().as_str().contains(raw_key));
+        assert!(
+            !command
+                .journal()
+                .idempotency_key()
+                .as_str()
+                .contains(raw_key)
+        );
+        assert!(
+            command
+                .journal()
+                .idempotency_key()
+                .as_str()
+                .starts_with("sha256:")
+        );
+        assert!(
+            command
+                .journal()
+                .request_fingerprint()
+                .as_str()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test uses known-valid reviewed command inputs.
+    fn reviewed_command_journal_derives_fingerprint_from_payload() {
+        let first = ReviewedCommandJournal::new(
+            idem("same-key"),
+            "seed.commands.do-thing",
+            command_contract(),
+            tenant(),
+            br#"{"op":"one"}"#.to_vec(),
+            subject("subject-1"),
+            actor(),
+        )
+        .expect("reviewed command");
+        let changed_payload = ReviewedCommandJournal::new(
+            idem("same-key"),
+            "seed.commands.do-thing",
+            command_contract(),
+            tenant(),
+            br#"{"op":"two"}"#.to_vec(),
+            subject("subject-1"),
+            actor(),
+        )
+        .expect("reviewed command");
+
+        assert_ne!(
+            first.journal().request_fingerprint().as_str(),
+            changed_payload.journal().request_fingerprint().as_str(),
+            "same key with different payload must not let caller-reused fingerprint bypass conflict detection"
+        );
     }
 
     #[allow(clippy::expect_used)]

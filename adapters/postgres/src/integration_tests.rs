@@ -11,10 +11,13 @@
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use consistency::{
-    ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope, InboxReceiptContext,
-    InboxStore, LeaseToken, OutboxPayload, Outcome, SeenState,
+    CommandErrorSummary, CommandIdempotencyKey, CommandJournalOutcome,
+    CommandJournalTerminalSummary, CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey,
+    InboxBacklog, InboxBacklogScope, InboxReceiptContext, InboxStore, LeaseToken, OutboxPayload,
+    Outcome, SeenState,
 };
 use diport::ManagedResource;
+use eventexec::command::{CommandJournalError, CommandJournalStore, ReviewedCommandJournal};
 use eventexec::{
     AttemptResult, AttemptTrigger, ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome,
     StableDispatchKey,
@@ -28,7 +31,8 @@ use crate::{
 
 // 统一 Send+Sync 错误（= testkit::FixtureError）：sqlx::Error / PgError / FixtureError 均 Send+Sync，
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
-type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type TestError = Box<dyn std::error::Error + Send + Sync>;
+type TestResult = Result<(), TestError>;
 
 const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
@@ -1156,6 +1160,720 @@ async fn inbox_receipts_rls_grants_and_tenant_isolation() -> TestResult {
         );
         tx.rollback().await?;
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+// ── command_journal foundation (#1441) ───────────────────────────────────────
+
+const COMMAND_JOURNAL_TOPIC: &str = "test.commands.journal";
+
+fn command_journal_fingerprint(nibble: char) -> String {
+    format!("sha256:{}", nibble.to_string().repeat(64))
+}
+
+fn command_journal_command_id(nibble: char) -> String {
+    format!("command:v1:sha256:{}", nibble.to_string().repeat(64))
+}
+
+fn command_journal_command(
+    tenant: vocab::TenantId,
+    key: &str,
+    payload: &[u8],
+) -> Result<ReviewedCommandJournal, TestError> {
+    let command = ReviewedCommandJournal::new(
+        CommandIdempotencyKey::parse(key)?,
+        COMMAND_JOURNAL_TOPIC,
+        test_contract(),
+        tenant,
+        payload.to_vec(),
+        subject_id("command-journal-subject"),
+        actor_for(tenant),
+    )?;
+    Ok(command)
+}
+
+async fn prepare_command_journal_markers(store: &PgStore) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS command_journal_test_markers \
+         (marker text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now())",
+    )
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+async fn command_journal_marker_count(store: &PgStore, marker: &str) -> Result<i64, sqlx::Error> {
+    let count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM command_journal_test_markers WHERE marker = $1")
+            .bind(marker)
+            .fetch_one(&store.pool)
+            .await?;
+    Ok(count.0)
+}
+
+async fn command_journal_outbox_count(
+    store: &PgStore,
+    command_id: &str,
+) -> Result<i64, sqlx::Error> {
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(command_id)
+        .fetch_one(&store.pool)
+        .await?;
+    Ok(count.0)
+}
+
+async fn command_journal_row_count(store: &PgStore, command_id: &str) -> Result<i64, sqlx::Error> {
+    let count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM command_journal WHERE command_id = $1")
+            .bind(command_id)
+            .fetch_one(&store.pool)
+            .await?;
+    Ok(count.0)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_schema_rls_grants_after_migrations() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let (rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT c.relrowsecurity, c.relforcerowsecurity, \
+                has_table_privilege('rss_app', 'command_journal', 'SELECT'), \
+                has_table_privilege('rss_app', 'command_journal', 'INSERT'), \
+                has_table_privilege('rss_app', 'command_journal', 'UPDATE'), \
+                has_table_privilege('rss_app', 'command_journal', 'DELETE') \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'command_journal'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(rls_enabled, "command_journal must ENABLE RLS");
+    assert!(rls_forced, "command_journal must FORCE RLS");
+    assert!(can_select, "rss_app must SELECT command_journal");
+    assert!(can_insert, "rss_app must INSERT command_journal");
+    assert!(can_update, "rss_app must UPDATE command_journal");
+    assert!(!can_delete, "rss_app must not DELETE command_journal");
+
+    let pk_columns: (String,) = sqlx::query_as(
+        "SELECT string_agg(a.attname, ',' ORDER BY k.ord) \
+         FROM pg_constraint c \
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+         WHERE c.conrelid = 'command_journal'::regclass AND c.contype = 'p'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        pk_columns.0, "tenant_id,command_id",
+        "command_journal primary key must be tenant-first"
+    );
+
+    let constraint_text: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname, pg_get_constraintdef(oid) \
+         FROM pg_constraint \
+         WHERE conrelid = 'command_journal'::regclass \
+         ORDER BY conname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let constraint_text = constraint_text
+        .iter()
+        .map(|(name, def)| format!("{name}: {def}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for name in [
+        "command_journal_idempotency_unique",
+        "command_journal_command_id_valid",
+        "command_journal_idempotency_key_valid",
+        "command_journal_fingerprint_valid",
+        "command_journal_outbox_event_id_valid",
+        "command_journal_status_valid",
+        "command_journal_attempt_positive",
+        "command_journal_terminal_summary_matches_status",
+    ] {
+        assert!(
+            constraint_text.contains(name),
+            "missing command_journal constraint `{name}` in:\n{constraint_text}"
+        );
+    }
+
+    let (qual, with_check): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT qual, with_check \
+         FROM pg_policies \
+         WHERE schemaname = 'public' \
+           AND tablename = 'command_journal' \
+           AND policyname = 'tenant_isolation'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    for body in [qual.as_deref(), with_check.as_deref()] {
+        let body = body.ok_or_else(|| {
+            std::io::Error::other("command_journal tenant policy missing USING/WITH CHECK")
+        })?;
+        assert!(
+            body.to_lowercase().contains("nullif(current_setting"),
+            "command_journal policy must use NULLIF(current_setting(...)): {body}"
+        );
+        assert!(
+            body.contains("rss.tenant_id"),
+            "command_journal policy must reference rss.tenant_id: {body}"
+        );
+    }
+
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+    let tenant_a = uuid::Uuid::new_v4().to_string();
+    let tenant_b = uuid::Uuid::new_v4().to_string();
+    let command_id = command_journal_command_id('a');
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO command_journal \
+             (tenant_id, command_id, idempotency_key, topic, contract_id, contract_version, \
+              schema_hash, request_fingerprint, outbox_event_id) \
+             VALUES ($1::uuid, $2, $3, $4, 'test.contract', 'v1', $5, $6, $2)",
+        )
+        .bind(&tenant_a)
+        .bind(&command_id)
+        .bind(command_journal_fingerprint('b'))
+        .bind(COMMAND_JOURNAL_TOPIC)
+        .bind(TEST_SCHEMA_HASH)
+        .bind(command_journal_fingerprint('1'))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    for (tenant, expected, label) in [(&tenant_a, 1_i64, "tenant A"), (&tenant_b, 0, "tenant B")] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await?;
+        let cnt: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM command_journal WHERE command_id = $1")
+                .bind(&command_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        assert_eq!(
+            cnt.0, expected,
+            "{label} command_journal visibility mismatch"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_b)
+            .execute(&mut *tx)
+            .await?;
+        let denied = sqlx::query(
+            "INSERT INTO command_journal \
+             (tenant_id, command_id, idempotency_key, topic, contract_id, contract_version, \
+              schema_hash, request_fingerprint, outbox_event_id) \
+             VALUES ($1::uuid, $2, $3, $4, 'test.contract', 'v1', $5, $6, $2)",
+        )
+        .bind(&tenant_a)
+        .bind(command_journal_command_id('c'))
+        .bind(command_journal_fingerprint('2'))
+        .bind(COMMAND_JOURNAL_TOPIC)
+        .bind(TEST_SCHEMA_HASH)
+        .bind(command_journal_fingerprint('3'))
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            denied.is_err(),
+            "tenant B scope must not insert tenant A command_journal rows"
+        );
+        tx.rollback().await?;
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_records_business_marker_and_outbox_atomically() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    prepare_command_journal_markers(&store).await?;
+
+    let tenant = test_tenant();
+    let command = command_journal_command(
+        tenant,
+        &unique_event_id("command-journal-key"),
+        br#"{"op":"recorded"}"#,
+    )?;
+    let command_id = command.journal().command_id().as_str().to_string();
+    let marker = unique_event_id("command-journal-marker");
+    let marker_for_write = marker.clone();
+
+    let outcome = store
+        .command_journal(fixed_clock())
+        .record_command_with_business_write(command, move |tx| {
+            Box::pin(async move {
+                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                    .bind(marker_for_write)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(CommandJournalError::new)?;
+                Ok(CommandJournalTerminalSummary::Completed(
+                    CommandResultSummary::ENQUEUED,
+                ))
+            })
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+        })
+        .await?;
+
+    assert_eq!(outcome, CommandJournalOutcome::Recorded);
+    assert_eq!(command_journal_marker_count(&store, &marker).await?, 1);
+    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 1);
+    let row: (String, Option<String>, i32) = sqlx::query_as(
+        "SELECT status, result_summary, attempt \
+         FROM command_journal WHERE tenant_id = $1::uuid AND command_id = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "completed".to_string(),
+            Some("command enqueued".to_string()),
+            1
+        )
+    );
+    let outbox_metadata: (serde_json::Value,) =
+        sqlx::query_as("SELECT metadata FROM outbox WHERE event_id = $1")
+            .bind(&command_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        outbox_metadata.0.get("occurredAt").and_then(|v| v.as_i64()),
+        Some(expected_occurred_at()),
+        "command journal outbox metadata must use the injected producer clock"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_runtime_deps_serving_role_records_and_replays() -> TestResult {
+    let (pg, deps) = setup_runtime_deps_with_projection_inputs(&[]).await?;
+    let owner_pool = runtime_assertion_pool(pg.params()).await?;
+
+    let tenant = test_tenant();
+    let idempotency_key = unique_event_id("command-journal-serving-key");
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#)?;
+    let command_id = first.journal().command_id().as_str().to_string();
+    let journal = deps.infra().command_journal(fixed_clock());
+
+    assert_eq!(
+        CommandJournalStore::record_command(&journal, first, CommandResultSummary::ENQUEUED)
+            .await?,
+        CommandJournalOutcome::Recorded
+    );
+
+    let replay = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#)?;
+    assert_eq!(
+        CommandJournalStore::record_command(&journal, replay, CommandResultSummary::ENQUEUED)
+            .await?,
+        CommandJournalOutcome::AlreadyCompleted(CommandResultSummary::ENQUEUED)
+    );
+
+    let count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM command_journal WHERE tenant_id = $1::uuid AND command_id = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .fetch_one(&owner_pool)
+    .await?;
+    assert_eq!(count.0, 1, "serving role path must persist one journal row");
+    owner_pool.close().await;
+    deps.store_guard().shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_business_error_rolls_back_journal_marker_and_outbox() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    prepare_command_journal_markers(&store).await?;
+
+    let tenant = test_tenant();
+    let command = command_journal_command(
+        tenant,
+        &unique_event_id("command-journal-rollback-key"),
+        br#"{"op":"rollback"}"#,
+    )?;
+    let command_id = command.journal().command_id().as_str().to_string();
+    let marker = unique_event_id("command-journal-rollback-marker");
+    let marker_for_write = marker.clone();
+
+    let result = store
+        .command_journal(fixed_clock())
+        .record_command_with_business_write(command, move |tx| {
+            Box::pin(async move {
+                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                    .bind(marker_for_write)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(CommandJournalError::new)?;
+                Err(CommandJournalError::new(std::io::Error::other(
+                    "forced command journal rollback",
+                )))
+            })
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+        })
+        .await;
+
+    assert!(result.is_err(), "business error must surface to caller");
+    assert_eq!(command_journal_marker_count(&store, &marker).await?, 0);
+    assert_eq!(command_journal_row_count(&store, &command_id).await?, 0);
+    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 0);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_outbox_conflict_rolls_back_journal_and_marker() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    prepare_command_journal_markers(&store).await?;
+
+    let tenant = test_tenant();
+    let command = command_journal_command(
+        tenant,
+        &unique_event_id("command-journal-outbox-conflict-key"),
+        br#"{"op":"outbox-conflict"}"#,
+    )?;
+    let command_id = command.journal().command_id().as_str().to_string();
+    let marker = unique_event_id("command-journal-outbox-conflict-marker");
+    let marker_for_write = marker.clone();
+
+    sqlx::query(
+        "INSERT INTO outbox (
+             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+             payload, metadata, status
+         ) VALUES ($1, $2::uuid, 'test', $3, 'test.contract', 'v1', $4, $5, $6::jsonb, 'pending')",
+    )
+    .bind(&command_id)
+    .bind(tenant.to_string())
+    .bind(COMMAND_JOURNAL_TOPIC)
+    .bind(TEST_SCHEMA_HASH)
+    .bind(b"conflicting-payload".as_slice())
+    .bind(serde_json::json!({ "tenantId": tenant.to_string() }).to_string())
+    .execute(&store.pool)
+    .await?;
+
+    let result = store
+        .command_journal(fixed_clock())
+        .record_command_with_business_write(command, move |tx| {
+            Box::pin(async move {
+                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                    .bind(marker_for_write)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(CommandJournalError::new)?;
+                Ok(CommandJournalTerminalSummary::Completed(
+                    CommandResultSummary::ENQUEUED,
+                ))
+            })
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "outbox event_id conflict with different row must fail the UoW"
+    );
+    assert_eq!(command_journal_marker_count(&store, &marker).await?, 0);
+    assert_eq!(command_journal_row_count(&store, &command_id).await?, 0);
+    assert_eq!(
+        command_journal_outbox_count(&store, &command_id).await?,
+        1,
+        "pre-existing conflicting outbox row remains, but journal/marker must roll back"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_duplicate_replays_completed_summary_without_business_write() -> TestResult
+{
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    prepare_command_journal_markers(&store).await?;
+
+    let tenant = test_tenant();
+    let idempotency_key = unique_event_id("command-journal-replay-key");
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"replay"}"#)?;
+    let command_id = first.journal().command_id().as_str().to_string();
+    let first_marker = unique_event_id("command-journal-replay-first");
+    let first_marker_for_write = first_marker.clone();
+    assert_eq!(
+        store
+            .command_journal(fixed_clock())
+            .record_command_with_business_write(first, move |tx| {
+                Box::pin(async move {
+                    sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                        .bind(first_marker_for_write)
+                        .execute(tx.conn())
+                        .await
+                        .map_err(CommandJournalError::new)?;
+                    Ok(CommandJournalTerminalSummary::Completed(
+                        CommandResultSummary::ENQUEUED,
+                    ))
+                })
+                    as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+            },)
+            .await?,
+        CommandJournalOutcome::Recorded
+    );
+
+    let second = command_journal_command(tenant, &idempotency_key, br#"{"op":"replay"}"#)?;
+    let second_marker = unique_event_id("command-journal-replay-second");
+    let second_marker_for_write = second_marker.clone();
+    let replay = store
+        .command_journal(fixed_clock())
+        .record_command_with_business_write(second, move |tx| {
+            Box::pin(async move {
+                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                    .bind(second_marker_for_write)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(CommandJournalError::new)?;
+                Ok(CommandJournalTerminalSummary::Completed(
+                    CommandResultSummary::ENQUEUED,
+                ))
+            })
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+        })
+        .await?;
+
+    assert_eq!(
+        replay,
+        CommandJournalOutcome::AlreadyCompleted(CommandResultSummary::ENQUEUED)
+    );
+    assert_eq!(
+        command_journal_marker_count(&store, &first_marker).await?,
+        1
+    );
+    assert_eq!(
+        command_journal_marker_count(&store, &second_marker).await?,
+        0,
+        "duplicate must not re-run business write"
+    );
+    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_duplicate_replays_failed_summary_without_business_write() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    prepare_command_journal_markers(&store).await?;
+
+    let tenant = test_tenant();
+    let idempotency_key = unique_event_id("command-journal-failed-replay-key");
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"failed-replay"}"#)?;
+    let command_id = first.journal().command_id().as_str().to_string();
+    assert_eq!(
+        store
+            .command_journal(fixed_clock())
+            .record_command_with_business_write(first, |_tx| {
+                Box::pin(async move {
+                    Ok(CommandJournalTerminalSummary::Failed(
+                        CommandErrorSummary::FAILED,
+                    ))
+                })
+                    as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+            },)
+            .await?,
+        CommandJournalOutcome::Recorded
+    );
+
+    let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT status, result_summary, error_summary \
+         FROM command_journal WHERE tenant_id = $1::uuid AND command_id = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "failed".to_string(),
+            None,
+            Some("command failed".to_string())
+        )
+    );
+    assert_eq!(
+        command_journal_outbox_count(&store, &command_id).await?,
+        0,
+        "failed terminal command must not enqueue outbox"
+    );
+
+    let second = command_journal_command(tenant, &idempotency_key, br#"{"op":"failed-replay"}"#)?;
+    let marker = unique_event_id("command-journal-failed-replay-marker");
+    let marker_for_write = marker.clone();
+    let replay = store
+        .command_journal(fixed_clock())
+        .record_command_with_business_write(second, move |tx| {
+            Box::pin(async move {
+                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                    .bind(marker_for_write)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(CommandJournalError::new)?;
+                Ok(CommandJournalTerminalSummary::Completed(
+                    CommandResultSummary::ENQUEUED,
+                ))
+            })
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+        })
+        .await?;
+
+    assert_eq!(
+        replay,
+        CommandJournalOutcome::AlreadyFailed(CommandErrorSummary::FAILED)
+    );
+    assert_eq!(
+        command_journal_marker_count(&store, &marker).await?,
+        0,
+        "failed duplicate must not re-run business write"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_same_key_different_fingerprint_conflicts() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    prepare_command_journal_markers(&store).await?;
+
+    let tenant = test_tenant();
+    let idempotency_key = unique_event_id("command-journal-conflict-key");
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"a"}"#)?;
+    let command_id = first.journal().command_id().as_str().to_string();
+    assert_eq!(
+        CommandJournalStore::record_command(
+            &store.command_journal(fixed_clock()),
+            first,
+            CommandResultSummary::ENQUEUED,
+        )
+        .await?,
+        CommandJournalOutcome::Recorded
+    );
+
+    let conflicting = command_journal_command(tenant, &idempotency_key, br#"{"op":"b"}"#)?;
+    let marker = unique_event_id("command-journal-conflict-marker");
+    let marker_for_write = marker.clone();
+    let outcome = store
+        .command_journal(fixed_clock())
+        .record_command_with_business_write(conflicting, move |tx| {
+            Box::pin(async move {
+                sqlx::query("INSERT INTO command_journal_test_markers (marker) VALUES ($1)")
+                    .bind(marker_for_write)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(CommandJournalError::new)?;
+                Ok(CommandJournalTerminalSummary::Completed(
+                    CommandResultSummary::ENQUEUED,
+                ))
+            })
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+        })
+        .await?;
+
+    assert_eq!(outcome, CommandJournalOutcome::Conflict);
+    assert_eq!(command_journal_marker_count(&store, &marker).await?, 0);
+    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_same_key_isolated_by_tenant() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let idempotency_key = unique_event_id("command-journal-cross-tenant-key");
+
+    let first = command_journal_command(tenant_a, &idempotency_key, br#"{"op":"tenant-a"}"#)?;
+    let first_id = first.journal().command_id().as_str().to_string();
+    let second = command_journal_command(tenant_b, &idempotency_key, br#"{"op":"tenant-b"}"#)?;
+    let second_id = second.journal().command_id().as_str().to_string();
+
+    assert_ne!(
+        first_id, second_id,
+        "scoped command id must include tenant identity"
+    );
+    assert_eq!(
+        CommandJournalStore::record_command(
+            &store.command_journal(fixed_clock()),
+            first,
+            CommandResultSummary::ENQUEUED,
+        )
+        .await?,
+        CommandJournalOutcome::Recorded
+    );
+    assert_eq!(
+        CommandJournalStore::record_command(
+            &store.command_journal(fixed_clock()),
+            second,
+            CommandResultSummary::ENQUEUED,
+        )
+        .await?,
+        CommandJournalOutcome::Recorded
+    );
+    assert_eq!(command_journal_outbox_count(&store, &first_id).await?, 1);
+    assert_eq!(command_journal_outbox_count(&store, &second_id).await?, 1);
+
+    let command_ids = vec![first_id.clone(), second_id.clone()];
+    let row_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM command_journal WHERE command_id = ANY($1::text[])")
+            .bind(command_ids.as_slice())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(row_count.0, 2, "same raw key must be tenant-scoped");
 
     store.shutdown().await?;
     Ok(())

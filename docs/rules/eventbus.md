@@ -420,6 +420,25 @@ xtask` `syn` AST 扫描——含 `command::emit_async` 路径 / use-import / whi
 `consistencyLevel = OutboxFact`（R15 机器锁定）；command topic = `<domain>.commands.<name>`（稳定
 dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx）。
 
+### Durable command journal
+
+durable command（调用方需要幂等 claim、稳定结果回放、业务写与 command outbox append 同事务提交的命令）
+必须走 command journal seam：`ReviewedCommandJournal`（eventexec provider-neutral reviewed DTO）负责
+review tenant/topic/contract/fingerprint/payload，并以 tenant + topic + raw idempotency key 派生
+storage-safe digest scoped command id；Postgres `PgCommandJournal` 负责持久化 journal 与 outbox。public
+`CommandJournalStore::record_command` 只表示 foundation 级 “journal + outbox enqueue” seam；需要本地业务写
+共提交时，必须由 Postgres/domain-shaped UoW 在 crate 内经 `PgTenantPool` + crate-private `TxCapability`
+封装业务写、journal claim、`append_outbox` 和终态更新，外部 handler/domain 不得拿 raw
+`PgPool`/`PgConnection` 自行拼事务。重复同 fingerprint 只回放
+`CommandJournalOutcome::AlreadyCompleted/AlreadyFailed` 等稳定 summary，不重执行业务写；同 key 不同
+fingerprint 必须返回 conflict，不能静默吞 outbox conflict。commit result unknown 不作为普通 transient
+自动重放整个 UoW，后续同 key 只能通过 journal/outbox 已持久化状态恢复。
+
+纯请求内 L1 同步命令（不 durable、不入 outbox、不跨进程恢复）可以不使用 command journal；一旦命令需要
+durable outbox / 幂等请求重放 / 本地业务写共提交，journal 是唯一 sanctioned path。不提供 dual-write、
+旧字段 fallback、raw `PgPool` / `PgConnection` path，也不把完整 command worker、device ack/timeout 或
+Temporal scheduler 塞进本 seam。
+
 ### Reconcile transactional command seam
 
 durable reconcile scheduler 有一条专用 sanctioned path：domain reconciler 不拿 `OutboxEmitter` / publisher，

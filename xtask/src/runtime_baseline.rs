@@ -1441,11 +1441,11 @@ kind = "health"
         let plan = RUNTIME_ANCHORS
             .iter()
             .find(|anchor| anchor.id == "run.plan.load")
-            .expect("plan anchor");
+            .context("plan anchor")?;
         let oidc = RUNTIME_ANCHORS
             .iter()
             .find(|anchor| anchor.id == "run.provider.oidc")
-            .expect("oidc anchor");
+            .context("oidc anchor")?;
         lines.push(oidc.pattern);
         lines.push(plan.pattern);
         for anchor in RUNTIME_ANCHORS

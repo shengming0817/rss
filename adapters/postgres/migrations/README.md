@@ -133,6 +133,15 @@ null-stripping SMT/等价机制。迁移同时用 CHECK 强制 `occurredAt` 必�
 `CREATE PUBLICATION ... WITH (publish_generated_columns = stored)` 发布 stored generated columns；低于
 PostgreSQL 18 的 logical replication 不发布这些 generated columns，不得启用该 CDC skeleton。
 
+`0051` 新增 `command_journal` tenant 表，作为 durable command 的 producer-side journal / idempotency
+foundation。主键为 `(tenant_id, command_id)`，另以 `(tenant_id, topic, idempotency_key)` UNIQUE 锁同租户同
+topic 的幂等 claim；`command_id` / `idempotency_key` 存 storage-safe `sha256` digest，不落 raw caller key；
+`request_fingerprint` 区分真实重放与 same-key payload conflict；`status` / `result_summary` /
+`error_summary` 由 CHECK 固定闭值集和终态一致性。该表授予 `rss_app`
+SELECT/INSERT/UPDATE 且不授 DELETE，并在建表迁移内落 `FORCE RLS` 与标准 tenant policy。业务写、
+command journal claim 和 relay outbox append 必须在同一个 tenant-scoped transaction 内提交，不提供
+dual-write、旧字段 fallback 或 raw pool path。
+
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
 `saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，

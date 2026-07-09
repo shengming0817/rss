@@ -1081,6 +1081,7 @@ mod tests {
              CREATE TABLE credentials (tenant_id uuid NOT NULL, id text);\n\
              CREATE TABLE config_entries (tenant_id uuid NOT NULL, key text, protection_scheme int);\n\
              CREATE TABLE audit_entries (tenant_id uuid NOT NULL, seq bigint);\n\
+             CREATE TABLE command_journal (tenant_id uuid NOT NULL, command_id text);\n\
              CREATE TABLE outbox (event_id text);\n\
              CREATE TABLE dead_letter (tenant_id uuid NOT NULL, id uuid);"
                 .to_string(),
@@ -1163,6 +1164,35 @@ pub mod fault_matrix;
             findings
                 .iter()
                 .any(|f| f.rule == Rule::RawTenantTableAccess)
+        );
+    }
+
+    #[test]
+    fn command_journal_is_derived_as_tenant_table_and_raw_access_is_reported() {
+        let tenant_tables = tenant_tables_from_migrations(&migrations());
+        assert!(
+            tenant_tables.contains("command_journal"),
+            "{tenant_tables:?}"
+        );
+
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "command_journal.rs",
+                    "async fn f(){ sqlx::query(\"SELECT * FROM command_journal\").fetch_one(&self.pool).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::RawTenantTableAccess && f.subject.starts_with("command_journal.rs:")
+            }),
+            "{findings:?}"
         );
     }
 

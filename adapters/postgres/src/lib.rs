@@ -23,6 +23,7 @@ mod auth_audit_sink;
 mod bundle;
 mod cas_store;
 mod checkpoint;
+mod command_journal;
 mod config_repo;
 mod consumer_tx;
 mod cotx;
@@ -64,6 +65,7 @@ pub use bundle::{
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
+pub use command_journal::PgCommandJournal;
 pub use config_repo::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
@@ -222,6 +224,8 @@ mod smoke {
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
     fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
+    fn assert_command_journal_store<T: eventexec::command::CommandJournalStore>(_: PhantomData<T>) {
+    }
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
     fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
     fn assert_audit_repo<T: audit::ports::AuditRepo>(_: PhantomData<T>) {}
@@ -254,6 +258,7 @@ mod smoke {
         assert_saga_journal(PhantomData::<super::PgSagaJournal>);
         assert_cas_store(PhantomData::<super::PgCasStore>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
+        assert_command_journal_store(PhantomData::<super::PgCommandJournal>);
         // `PgSecretRepo: SecretRepo` 真实 impl（非 edge proof）——secret 引用坐标仓储（#1274）。
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);
         // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。

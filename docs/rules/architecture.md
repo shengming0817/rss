@@ -58,7 +58,7 @@ rss/
 │   ├── support/          # http / pg / validation 杂项
 │   ├── runctx/           # 请求上下文(tenant/principal)；可观测 ID 走 tracing span
 │   ├── diagctx/          # 诊断信道 fail-open correlation（ADR-002 §D1-bis）
-│   ├── consistency/      # outbox / saga / reconcile / projection / idempotency（纯态机 + trait，L0–L4）
+│   ├── consistency/      # outbox / saga / reconcile / projection / command_journal / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
 │   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点，#1224）
 │   ├── diport/           # DI-infra：可替换 provider 的 DI port trait 单源（Clock / Signer / Publisher / Subscriber / AuditSink / ManagedResource…）+ dynosaur Dyn wrapper
@@ -166,7 +166,7 @@ rss/
 | 分层依赖残留(无 back-path 反向边 / 兄弟域互斥 / adapter·generated scope / wrappers⟷源一致) | `cargo xtask layer-deps`(source-centric：读各成员 Cargo.toml [dependencies] 按 §分层 矩阵校验；接入 `verify`；符号/规则/盲区见 `xtask/src/layerdeps.rs` rustdoc 的 LAYER-DEPS-01..07) | Medium(CI 门) |
 | `SharedRuntimeDeps` 字段仅基础设施 / value object（禁域 service / repo） | `cargo xtask runtime-deps guard`(syn 字段扫描 + `xtask/runtime-deps-guard.toml` 配置单源 + synthetic red；接入 `verify`) | Medium(CI 门) |
 | 组合根 DI 接线(SharedDeps / `module()`) | 手工 `main` + `bootstrap` crate | — |
-| outbox/saga/reconcile/projection 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
+| outbox/saga/reconcile/projection/command_journal 引擎 + topology-gated resolver | tokio 自写(`consistency` 态机 + `eventexec` 执行 + 各 deps resolver) | — |
 
 **残留运行期/CI 检查**(类型系统 / crate 图管不到)显式为 **Medium(xtask/CI 门),严禁 Soft**:active subscriber
 存在性、active HTTP outbox producer 目标 readiness、consistency capability evidence、contract 扇出完整性、migration 只增不改、覆盖率阈值、no-op 业务理由、分层依赖残留(crate 图仅 Hard
@@ -217,6 +217,9 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   （如 PG `40001`/`40P01`/连接瞬断/池获取超时）可在预算内重试；`Conflict`（CAS/version 冲突）必须向上返回，
   由 command 层显式 refetch/recompute；`Permanent`（约束/解码/租户 envelope mismatch/损坏行）fail-closed；
   `OwnershipLost`（lease lost/fencing miss/stale owner）是终态围栏，不得把当前 side effect 当 transient 重跑。
+  durable command 的 request-side 幂等不靠重试包自动重放：`command_journal` 先 claim request fingerprint；
+  需要业务写共提交时，由 Postgres/domain-shaped UoW 在同一 tenant transaction 内提交业务写与 outbox
+  append；重复请求只按 journal 结果回放，same-key different-fingerprint 返回 conflict。
   **INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }**:
   闭枚举 + postgres SQLSTATE 单源映射 + `testkit::repo_conformance::assert_retry_boundary_policy` 防止
   retry 规则散落为 bool/string 约定。
