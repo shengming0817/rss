@@ -1,11 +1,11 @@
-# ADR-010：持久化能力分层 — module result / capability bundle / adapter bundle 单源
+# ADR-010：持久化能力分层 — domain binding / module result / capability bundle 单源
 
-- **状态**：Accepted（**设计单源**；执行体随 #1419 runtime base / #1421 settings closure / W 阶段各域逐个落地，本 ADR **不实现** funnel 执行体，只定语义与归属）
+- **状态**：Accepted，2026-07-09 经 #1669 amendment（`DomainBinding` + `DomainModuleResult` 已落；live runtime 切换仍按 runtime assembly Phase 4 推进）
 - **日期**：2026-06-27
 - **关联**：issue #1425 [PERSIST-004] · Parent Feature #1419 [PERSIST-FEA-A] · Parent Epic #1418 [PERSIST-EPIC] · 同批 #1432（defer gate 落地）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发）· **ADR-005**（域形 repo/UoW port 归属 + category line，本 ADR 复用其归属判据不重证）· **ADR-009**（typed route funnel）
 - **归属**：framework（分层 / DI 接缝 / 组合根装配约定，provider-agnostic 基础设施治理）
-- **AI-robust 评级**：见 §6（defer gate Medium；module-result / bundle funnel 落地时 Hard via 构造器必填参数）
+- **AI-robust 评级**：见 §6（binding 所有权与构造器注入 Hard；result 聚合顺序由类型 + 测试承载）
 
 ---
 
@@ -32,15 +32,19 @@ postgres adapter 已有 `PgConfigRepo`/`PgSecretRepo`/`ConfigUnitOfWork`、`asse
 
 归属反向测试（「此 port 能否在 `diport` 内编译而不让 `diport` 新增域依赖」）见 ADR-005 §2.1，本 ADR 不重述。
 
-### 2.2 DomainModuleResult — 域能力的标准装配出口
+### 2.2 DomainBinding + DomainModuleResult — 单一所有权装配出口
 
-现状 `bootstrap::DomainModule` 仅承载 `{ name, domain: Box<dyn Domain> }`（`crates/bootstrap/src/module.rs`），组合根经
-`module()` 收集后驱动 init + shutdown。PERSIST 要求域不止暴露「一个 init 入口」，而是一组装配产物：**services / routes /
-probes / resources（`ManagedResource`）/ workers**。`DomainModuleResult` 是 `module()` 的**演进结果型**：域构造期把这组产物
-聚合为单一结果，组合根**只聚合各域 result**（不再逐项手工接线）。
+Phase 4 的域 `module()` 目标返回 `DomainBinding::new(name, Box<dyn Domain>, DomainModuleResult)`；统一 module funnel
+当前尚未接入 live runtime。`DomainBinding` 把已构造的域实例与其生命周期输出绑定在同一 owner 下且字段私有；
+组合根把 bindings 交给 `compose_bindings`，它先按顺序临时借出 `Vec<&dyn Domain>` 执行 fail-fast compose，只有成功后
+才排空 bindings 并返回聚合 output。compose 失败时 bindings 与 outputs 原样保留。
 
-- 形态：`DomainModuleResult { name, domain, routes / probes / resources / workers 聚合 }`（具体字段随 #1419 落地——本 ADR 定语义、不冻字段）。
-- 强制：必填依赖（pool / clock / publisher …）经**构造器必填位置参**注入（ADR-005 C5），`module()` 内完成 DI、返回 ready 结果——缺失即编译错误（Hard）。
+`DomainModuleResult` 只承载 **probes / resources（`ManagedResource`）/ workers** 三条生命周期出口：
+
+- `merge` 与 `Extend<DomainModuleResult>` 逐字段直接 `Vec::extend`，严格保留 binding 输入顺序与域内顺序；空输出为 identity，重复项原样保留。
+- `name` / `domain` 只属于 `DomainBinding` 且不提供 output getter；domain service / routes 不进入 result 或其它 generic service bag。service 留在 typed domain 内，由 `Domain::init` 捕获并注册 typed route。
+- 必填依赖（pool / clock / publisher …）由现有具体 domain 的 **typed 构造器必填位置参**注入（ADR-005 C5），缺失即编译错误（Hard）；统一 `module() -> DomainBinding` funnel 是 runtime assembly Phase 4 目标，当前尚不存在。
+- `Domain: Send + Sync`；binding 与 output 可跨线程转移（`Send`），但包含单 owner resource / `FnOnce` worker 的完整 output 不承诺 `Sync`、`Clone` 或重复消费。
 - 对标：omicron 组合根（`bins`/`nexus`）手工注入具体 impl + 聚合（见 §对标证据）。
 
 ### 2.3 Pg capability bundle — postgres 能力按运行时 / 域打包
@@ -97,7 +101,7 @@ transport / vault signer）或 per-domain DomainDeps（域消费：vault resolve
 能力**自底向上**长出，按序（每步标已落 / 待落）：
 
 1. provider-agnostic infra port + 域形 port 归属 — **已落**（ADR-003 / ADR-005）。
-2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **已落**（#1422）。
+2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **已落**（#1422）；`DomainBinding` 单一所有权形状 + result `Extend` — **已落**（#1669）。
 3. Pg capability bundle（`PgRuntimeDeps` / `PgDomainDeps`）— **已落**（#1423）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；redis/amqp live durable 接入 — **待后续**（#1116-1120）。
 4. L1/L2 repo/UoW conformance（CAS / rollback / tenant / co-tx both-or-neither）— session 维度**已落**（ADR-005 §9/§10），其余 W 阶段。
 5. 第一条 durable 闭环：settings module + routes / probes / resources / journey — **待落**（#1421）。
@@ -108,9 +112,13 @@ transport / vault signer）或 per-domain DomainDeps（域消费：vault resolve
 ## 3. 范式（设计意图，执行体随 #1419 / #1421）
 
 ```rust
-// 域 module() 返回 DomainModuleResult（设计意图，字段随 #1419 落地；构造器必填依赖注入 = Hard）
-pub fn module(deps: SettingsDomainDeps) -> DomainModuleResult {
-    // 构造期完成 DI，聚合 services / routes / probes / resources / workers；组合根只聚合 result。
+// 域 module() 返回单一所有权 binding；构造器必填依赖注入 = Hard。
+pub fn module(deps: SettingsDomainDeps) -> DomainBinding {
+    DomainBinding::new(
+        "settings",
+        Box::new(SettingsDomain::new(/* typed services */)),
+        DomainModuleResult { /* probes / resources / workers */ },
+    )
 }
 
 // postgres capability bundle（设计意图）
@@ -122,25 +130,37 @@ impl PgRuntimeDeps {
 
 ## 4. 后果
 
-- **正**：横切接线压成少数 funnel；新增能力自底向上、组合根只聚合 result；散装 defer 受门约束；**零新增 crate / 零新增分层**
-  （沿用 ADR-005 域形 port + diport，bundle / module-result 是组合根装配层概念，非新层）。
-- **负 / 代价**：① `DomainModuleResult` / bundle 字段需随首条闭环（#1419 / #1421）定形并冻结（届时 codegen / golden 视需要）；
+- **正**：横切接线压成少数 funnel；`DomainBinding` 私有字段 + `compose_bindings` 唯一 output 出口在类型/API 边界
+  强制 compose 成功后才 drain，并守住 single owner、禁止重复消费；三出口保序由 bootstrap 测试锁定，runtime baseline
+  检查三字段 merge 完整性；不引入 service locator，
+  **零新增 crate / 零新增分层**（沿用 ADR-005 域形 port + diport）。
+- **负 / 代价**：① binding/output 含单 owner worker/resource，不提供 `Clone` 或完整 `Sync`；确需并发共享时必须拆出窄只读视图；
   ② defer gate v1 标记集窄（精度取舍——自由词散文不触发，见 §6 + `xtask/src/defergate.rs` rustdoc 盲区）。
 - **下游**：各域 W 阶段照 §2.6 顺序 + ADR-005 §8.1 同步点清单落 repo/UoW port + adapter bundle。
 
-## 5. 对 ADR-003 / 005 / 009 的关系（叠加，无 amendment）
+## 5. #1669 amendment 的安全 / 威胁重评
 
-本 ADR **不修改** ADR-003 / 005 / 009 的决策或威胁矩阵——它在其上**叠加**「能力如何被组合根聚合 + defer 受门」的装配层
-约定。ADR-005 的 `adapter→域` DIP 内向边、dynosaur 白名单、co-tx UoW（OUTBOX-COTX-SESSION-01）不变；ADR-009 typed route
-funnel 不变（`DomainModuleResult` 的 routes 仍经 `bootstrap::finalize_routes` → `httpserve::finalize_auth` funnel，
-ROUTE-AUTH-FUNNEL-01）。故**无威胁矩阵重评**（ai-robust「ADR amendment 同步重评」不触发——本 ADR 非 amendment）。
+#1669 把原先拟议的扁平 result 修正为私有字段 `DomainBinding` + 受控 `compose_bindings`，因此本节完成 amendment 重评：
+
+- ADR-005 的 `adapter→域` DIP 内向边、dynosaur 白名单与跨域仅经 contract 的隔离边界不变；bootstrap 仍不依赖 adapter。
+- ADR-009 typed route/auth funnel 不变：route 由 binding 内的 typed domain 在 `Domain::init` 注册，仍经
+  `bootstrap::Registry::finalize_routes` → `httpserve::finalize_auth`，不通过 `DomainModuleResult` 绕过 funnel。
+- `DomainModuleResult` 固定为生命周期三出口，不接受 domain service、route、`Any` 或无类型 bag；新形状减少了跨域 service
+  泄漏与 service-locator 扩张面。
+- 所有权威胁收敛：外部调用方无法直接取得 domain/output；`compose_bindings` 在 compose 成功前不 drain，失败时 bindings
+  与 outputs 原样保留；成功后 `FnOnce` worker 与 managed resource 只转移一次，避免提前启动、clone 后重复启动或重复关闭。
+
+结论：既有 adapter/domain、typed route/auth 与跨域隔离安全边界均不降级；binding/output 分离进一步强化这些边界。
 
 ## 6. AI-robust 分级（本 ADR 引入 / 锚定的 enforcement）
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
 | defer / follow-up 结构化完整性（governed scope） | **Medium（xtask + CI 门）** | `cargo xtask defer-gate`（DEFER-GATE-01）；synthetic red + anti-vacuity green，`xtask/src/defergate.rs` |
-| `DomainModuleResult` 必填依赖注入（落地时） | **Hard（构造器必填参数）** | `module()` 构造器必填位置参，缺失即编译错误（继承 ADR-005 C5） |
+| `DomainBinding` 形状 / domain ownership | **Hard（类型 + 所有权）** | 私有字段 + `DomainBinding::new` 必填位置参 + `Box<dyn Domain>` + owned `DomainModuleResult`；`Domain: Send + Sync + 'static` supertrait；错误 domain 类型或重复 move 均编译失败 |
+| compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
+| 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | 由各具体 domain 构造器的必填位置参承载；当前不存在统一 `module()` 参数 funnel，`DomainBinding` 本身不声称验证这些依赖 |
+| result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
 无 Soft 新增 enforcement。
@@ -154,7 +174,7 @@ ROUTE-AUTH-FUNNEL-01）。故**无威胁矩阵重评**（ai-robust「ADR amendme
 
 ## 8. Follow-up（落地同步点 + 后续 issue）
 
-- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）。字段冻结（codegen / golden）仍随首条 durable 闭环（#1421）后续。
+- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）。各域 `module()`、live runtime bindings 与生成列表按 runtime assembly Phase 4 后续切换。
 - settings durable 第一条闭环（routes / probes / resources / journey）：**#1421**。
 - defer gate ratchet 扩域（自由词散文 + 代码注释 `crates/*`、`xtask/*` + 历史约 6700 baseline 冻结轨道）：登记为 #1447（不阻塞本 PR）。
 - 各域 repo/UoW conformance（CAS / rollback / tenant / co-tx）：W 阶段逐域。

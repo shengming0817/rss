@@ -31,6 +31,14 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - Domain required capability validation is carried by `ASSEMBLY-REQUIRED-CAPABILITY-01` in `xtask/src/assembly.rs`: declared domains/topology must have the minimum provider/dependency facts needed by the current handwritten runtime composition.
 - This phase must not make runtime read `assembly.toml` to decide topology, route mounting, auth scheme, provider construction, or live readiness.
 
+### Phase 4
+
+- Domain construction converges on private-field `bootstrap::DomainBinding` values created by `DomainBinding::new`; do not introduce a second runtime output type, DI container, generic service bag, `Any`, or compatibility alias.
+- `compose_bindings` is the only public output transition: it borrows domains in declared manifest order, drains and extends outputs only after compose succeeds, and leaves bindings/outputs unchanged on failure.
+- `DomainModuleResult` remains the sole probes/resources/workers output. Merge/extend preserves manifest order and each domain's internal order, including duplicates; generators must not lexically sort domains.
+- Domain services and routes remain typed and are captured by the domain/route funnel; they must not enter `SharedRuntimeDeps` or `DomainModuleResult`.
+- Defining the binding/output shape does not itself change live `runtime::run()` behavior. Moving wire functions, generating the module list, and switching the live path remain separate dependent changes with baseline verification.
+
 ## PR Size Planning Budget
 
 - This section is a planning and review budget, not a current `INVARIANT:` or machine-enforced merge gate.

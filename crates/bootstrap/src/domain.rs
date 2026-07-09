@@ -6,9 +6,10 @@
 //! `Domain` trait 是 bootstrap 驱动所有域 crate 初始化的统一入口：
 //! - `init` 纯同步声明，不做 I/O、不 spawn tokio task。
 //! - 注册失败返回 `Err`，不得 `panic!` / `unwrap`。
-//! - 组合根收集所有 [`DomainModule`] → 逐个调 `init` → 交给服务层（httpserve / eventexec）驱动。
+//! - 组合根收集所有 [`DomainBinding`] → 交 [`compose_bindings`] 借用 domain 逐个调 `init` → 成功后消费 output。
 //!
-//! [`DomainModule`]: crate::module::DomainModule
+//! [`DomainBinding`]: crate::module::DomainBinding
+//! [`compose_bindings`]: crate::module::compose_bindings
 
 use crate::registry::Registry;
 
@@ -76,7 +77,7 @@ pub enum KernelError {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use crate::module::{DomainModule, ModuleFactory};
+    use crate::module::{DomainBinding, DomainModuleResult};
 
     // Finding#11: NoopDomain::init body 改为 Ok(()) 而非 todo!()，
     // 避免测试 stub 被意外调用时 panic（smoke 阶段只构造不调用是约定，
@@ -105,13 +106,9 @@ mod smoke {
 
     #[test]
     fn signatures_consumable() {
-        let _m = DomainModule {
-            name: "x",
-            domain: Box::new(NoopDomain),
-        };
+        let _binding = DomainBinding::new("x", Box::new(NoopDomain), DomainModuleResult::default());
         fn _assert_send_sync<T: Send + Sync>() {}
         _assert_send_sync::<KernelError>();
-        let _f: ModuleFactory = || todo!();
         // reason: 演示外部 crate 消费 #[non_exhaustive] enum 时必须有 `_` 臂；
         // 本 crate 内 match 时 clippy 报 unreachable_patterns（编译器知道所有变体），
         // 故 item-level carve-out（error-handling.md §Carve-out 要求 item-level）。

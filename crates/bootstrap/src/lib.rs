@@ -52,7 +52,7 @@ pub use domaintransport::{
     DomainTransportConfig, DomainTransportResolveError, DomainTransportUrl, ResolvedDomainTransport,
 };
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
-pub use module::{DomainModule, DomainModuleResult, ModuleFactory, WorkerSpec};
+pub use module::{DomainBinding, DomainModuleResult, WorkerSpec, compose_bindings};
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
 pub use registry::{
     ConsumerHandlerFn, HealthProbe, HealthReporter, Registry, SubscriberBinding,

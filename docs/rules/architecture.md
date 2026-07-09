@@ -191,10 +191,14 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
 
 ## 关键模式的 Rust 形态
 
-- **组合根 / `module()`**:域 crate 暴露 `pub fn module() -> DomainModule`;adapter↔域绑定在 `bins/server` /
-  assembly 用构造器注入完成(无独立组合层)。topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
+- **组合根 / `module()`**:当前 `bootstrap` 已落私有字段 `DomainBinding` + `DomainBinding::new` +
+  `compose_bindings(&mut Vec<DomainBinding>)`;该受控出口只在 compose 成功后返回聚合 `DomainModuleResult`,失败保持
+  bindings/outputs 原样。各域 `pub fn module() -> DomainBinding` 与 live generated list 是 runtime assembly Phase 4 后续目标;
+  当前 live 仍由 `wire_X` 手工接线。adapter↔域绑定在 `bins/server` / assembly 用构造器注入完成(无独立组合层)。
+  topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。
-- **持久化能力分层**:`DomainModuleResult`(域 `module()` 的标准装配出口,聚合 services/routes/probes/resources/workers) / Pg
+- **持久化能力分层**:`DomainBinding`(域实例+生命周期输出的单一 owner) / `DomainModuleResult`(仅聚合
+  probes/resources/workers,不承载 domain service/routes/generic bag) / Pg
   capability bundle(`PgRuntimeDeps`·`PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
   (`docs/architecture/202606270148-010-persistence-capability-layering.md`);执行体随 #1419(runtime base) / #1421(settings
   闭环) / W 阶段落地,本处不复制未强制细节。
@@ -203,8 +207,9 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   / `ShutdownStack`,**归属 ADR-010 §2.2 = `bootstrap`**) + `assemblies/runtime` 的 `SharedRuntimeDeps`(infra 流入,持
   `Arc<PgStore>` 故必留组合根层);`wire_settings` 首用。**INVARIANT WIRING-DEPS-NO-HANDOFF-01(Hard)**:
   `wire_X(deps: &SharedRuntimeDeps) -> Result<DomainModuleResult>` 签名无参数可塞别域 result ⇒ 跨 module value handoff
-  编译期不可表达。**首切与 ADR-010 §2.2 的差异(字段未冻,随 #1421 细化)**:`DomainModuleResult` 暂为独立 struct(未演进
-  `DomainModule`)、暂无 `name/domain` 与 `services/routes` 字段(域 service 留 `wire_X` 内部经 route 闭包捕获、不出向)。
+  编译期不可表达。`DomainModuleResult` 固定为 `DomainBinding.output` 的生命周期三出口；`name/domain` 属 binding，
+  domain service 留在 typed domain 内经 route 闭包捕获、不出向。live `wire_X` 切换 binding 属 runtime assembly Phase 4，
+  不改变当前运行时顺序。
   **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }**:
   `cargo xtask runtime-deps guard` 解析字段类型，按 `xtask/runtime-deps-guard.toml` 读取 provider bundle / infra
   value object 允许根与精确 `Arc<dyn distributed::DomainTransport>` 例外，拒绝域 service / repo 经 deps bag 跨
