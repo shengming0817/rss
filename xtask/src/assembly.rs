@@ -5,11 +5,12 @@
 //! 但 provider 选择属于组合根部署事实：哪个 assembly 注入哪个 provider、是否持久、是否已 active，必须有机器可读
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, de};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
@@ -36,6 +37,10 @@ pub(crate) enum Rule {
     EmptyDomains,
     /// assembly manifest 中 `domains` 不得重复。
     DuplicateDomain,
+    /// manifest 声明的 active domain 必须是 assembly crate 的直接 normal dependency。
+    ActiveDomainDependency,
+    /// 未声明 domain 不得进入 assembly normal dependency closure。
+    InactiveDomainDependencyClosure,
     /// assembly manifest 必须声明至少一个 listener。
     EmptyListeners,
     /// assembly manifest 中 `listeners` 不得重复。
@@ -279,6 +284,7 @@ impl fmt::Display for ProviderDurability {
 
 struct DiscoveredAssembly {
     dir: PathBuf,
+    cargo_path: PathBuf,
     manifest_label: String,
     cargo_label: String,
     manifest_src: String,
@@ -288,8 +294,12 @@ struct DiscoveredAssembly {
 
 pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let (assemblies, mut findings) = discover(root)?;
+    let metadata = load_workspace_metadata(root)?;
     for assembly in &assemblies {
         findings.extend(validate_assembly(assembly));
+        if let Some(metadata) = &metadata {
+            findings.extend(validate_domain_closure(root, assembly, metadata)?);
+        }
     }
     Ok((assemblies.len(), findings))
 }
@@ -342,6 +352,7 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
         let cargo_label = rel_label(root, &cargo_path);
         assemblies.push(DiscoveredAssembly {
             dir,
+            cargo_path,
             manifest_label,
             cargo_label,
             manifest_src,
@@ -534,6 +545,236 @@ fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>)
             ));
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    packages: Vec<MetadataPackage>,
+    workspace_members: BTreeSet<String>,
+    resolve: MetadataResolve,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataResolve {
+    #[serde(default)]
+    nodes: Vec<MetadataNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataNode {
+    id: String,
+    #[serde(default)]
+    deps: Vec<MetadataDep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataDep {
+    name: String,
+    pkg: String,
+    #[serde(default)]
+    dep_kinds: Vec<MetadataDepKind>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataDepKind {
+    kind: Option<String>,
+}
+
+fn load_workspace_metadata(root: &Path) -> Result<Option<CargoMetadata>> {
+    let manifest = root.join("Cargo.toml");
+    if !manifest.exists() {
+        return Ok(None);
+    }
+
+    let manifest_arg = manifest.display().to_string();
+    let args = cargo_metadata_args(manifest_arg.as_str());
+    let mut cmd = crate::cmd::clean_cmd("cargo", &args, &[], Some(root));
+    let output = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("执行 cargo metadata 失败：{}", manifest.display()))?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata --locked 失败（{}）：{}",
+            manifest.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let metadata = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("解析 cargo metadata JSON 失败：{}", manifest.display()))?;
+    Ok(Some(metadata))
+}
+
+fn cargo_metadata_args(manifest_arg: &str) -> [&str; 6] {
+    [
+        "metadata",
+        "--format-version=1",
+        "--locked",
+        "--all-features",
+        "--manifest-path",
+        manifest_arg,
+    ]
+}
+
+fn validate_domain_closure(
+    root: &Path,
+    a: &DiscoveredAssembly,
+    metadata: &CargoMetadata,
+) -> Result<Vec<Finding>> {
+    // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "verify", source = "code" } —
+    // assembly.toml `domains` 必须与 assembly Cargo normal dependency graph 闭合：active domain 是直接
+    // normal dependency；inactive domain 不得出现在 normal dependency closure。red/green tests 覆盖 alias、
+    // dev/build、direct/transitive inactive 与真实 runtime canary。
+    let assembly = package_by_manifest(metadata, &a.cargo_path).with_context(|| {
+        format!(
+            "{} 未出现在 cargo metadata packages 中；manifest_path={}",
+            a.cargo_label,
+            a.cargo_path.display()
+        )
+    })?;
+    let direct_domains = direct_normal_domain_deps(root, metadata, &assembly.id)?;
+    let closure_domains = normal_domain_closure(root, metadata, &assembly.id)?;
+    let manifest_domains: BTreeSet<&str> = a
+        .manifest
+        .domains
+        .iter()
+        .map(AssemblyDomain::as_str)
+        .collect();
+
+    let mut findings = Vec::new();
+    for domain in &manifest_domains {
+        if !direct_domains.contains(*domain) {
+            findings.push(finding(
+                Rule::ActiveDomainDependency,
+                &a.manifest_label,
+                format!(
+                    "field=domains domain `{domain}` 必须在 {} [dependencies] 中以同名 normal dependency 直接依赖同名 workspace domain crate；dev/build/alias/package rename/crates.io 同名包均不满足",
+                    a.cargo_label
+                ),
+            ));
+        }
+    }
+
+    for domain in closure_domains {
+        if !manifest_domains.contains(domain.as_str()) {
+            findings.push(finding(
+                Rule::InactiveDomainDependencyClosure,
+                &a.cargo_label,
+                format!(
+                    "field=domains inactive domain `{domain}` 出现在 assembly normal dependency closure；必须加入 {} domains 或移除/拆分该 normal 依赖",
+                    a.manifest_label
+                ),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn package_by_manifest<'a>(
+    metadata: &'a CargoMetadata,
+    manifest_path: &Path,
+) -> Option<&'a MetadataPackage> {
+    metadata
+        .packages
+        .iter()
+        .find(|package| package.manifest_path == manifest_path)
+}
+
+fn package_by_id<'a>(metadata: &'a CargoMetadata, id: &str) -> Result<&'a MetadataPackage> {
+    metadata
+        .packages
+        .iter()
+        .find(|package| package.id == id)
+        .with_context(|| format!("cargo metadata resolve 引用未知 package id `{id}`"))
+}
+
+fn node_by_id<'a>(metadata: &'a CargoMetadata, id: &str) -> Result<&'a MetadataNode> {
+    metadata
+        .resolve
+        .nodes
+        .iter()
+        .find(|node| node.id == id)
+        .with_context(|| format!("cargo metadata resolve 缺 package node `{id}`"))
+}
+
+fn direct_normal_domain_deps(
+    root: &Path,
+    metadata: &CargoMetadata,
+    package_id: &str,
+) -> Result<BTreeSet<String>> {
+    let mut domains = BTreeSet::new();
+    for dep in node_by_id(metadata, package_id)?
+        .deps
+        .iter()
+        .filter(|dep| is_normal_dep(dep))
+    {
+        let package = package_by_id(metadata, &dep.pkg)?;
+        if package_is_workspace_domain(root, metadata, package) && dep.name == package.name {
+            domains.insert(package.name.clone());
+        }
+    }
+    Ok(domains)
+}
+
+fn normal_domain_closure(
+    root: &Path,
+    metadata: &CargoMetadata,
+    package_id: &str,
+) -> Result<BTreeSet<String>> {
+    let mut domains = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![package_id.to_owned()];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        for dep in node_by_id(metadata, &id)?
+            .deps
+            .iter()
+            .filter(|dep| is_normal_dep(dep))
+        {
+            let package = package_by_id(metadata, &dep.pkg)?;
+            if !metadata.workspace_members.contains(&package.id) {
+                continue;
+            }
+            if package_is_workspace_domain(root, metadata, package) {
+                domains.insert(package.name.clone());
+            }
+            stack.push(package.id.clone());
+        }
+    }
+    Ok(domains)
+}
+
+fn is_normal_dep(dep: &MetadataDep) -> bool {
+    dep.dep_kinds.iter().any(|kind| kind.kind.is_none())
+}
+
+fn package_is_workspace_domain(
+    root: &Path,
+    metadata: &CargoMetadata,
+    package: &MetadataPackage,
+) -> bool {
+    if !metadata.workspace_members.contains(&package.id) {
+        return false;
+    }
+    let Some(package_dir) = package.manifest_path.parent() else {
+        return false;
+    };
+    let Ok(member_path) = package_dir.strip_prefix(root) else {
+        return false;
+    };
+    crate::layers::classify(&package.name, &member_path.display().to_string())
+        == Some(crate::layers::Layer::Domain)
 }
 
 struct CriticalProviderSpec {
@@ -1299,6 +1540,97 @@ purpose = "device-certificate-revocation"
         .to_string()
     }
 
+    fn manifest_with_domains(domains: &[&str]) -> String {
+        let rendered = domains
+            .iter()
+            .map(|domain| format!(r#""{domain}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        manifest_with_intent().replace(
+            r#"domains = ["identity", "settings", "audit"]"#,
+            &format!("domains = [{rendered}]"),
+        )
+    }
+
+    fn cargo_runtime_manifest(extra: &str) -> String {
+        format!(
+            r#"[package]
+name = "runtime"
+
+{extra}
+"#
+        )
+    }
+
+    fn metadata_fixture(
+        root: &Path,
+        runtime_deps: &str,
+        extra_nodes: &str,
+    ) -> anyhow::Result<CargoMetadata> {
+        let runtime_manifest = root.join("assemblies/runtime/Cargo.toml");
+        let identity_manifest = root.join("crates/identity/Cargo.toml");
+        let settings_manifest = root.join("crates/settings/Cargo.toml");
+        let audit_manifest = root.join("crates/audit/Cargo.toml");
+        let postgres_manifest = root.join("adapters/postgres/Cargo.toml");
+        let metadata = serde_json::from_str(&format!(
+            r#"{{
+  "packages": [
+    {{"id": "runtime", "name": "runtime", "manifest_path": "{}"}},
+    {{"id": "identity", "name": "identity", "manifest_path": "{}"}},
+    {{"id": "settings", "name": "settings", "manifest_path": "{}"}},
+    {{"id": "audit", "name": "audit", "manifest_path": "{}"}},
+    {{"id": "postgres", "name": "postgres", "manifest_path": "{}"}}
+  ],
+  "workspace_members": ["runtime", "identity", "settings", "audit", "postgres"],
+  "resolve": {{
+    "nodes": [
+      {{"id": "runtime", "deps": [{}]}},
+      {{"id": "identity", "deps": []}},
+      {{"id": "settings", "deps": []}},
+      {{"id": "audit", "deps": []}}
+      {}
+    ]
+  }}
+}}"#,
+            runtime_manifest.display(),
+            identity_manifest.display(),
+            settings_manifest.display(),
+            audit_manifest.display(),
+            postgres_manifest.display(),
+            runtime_deps,
+            extra_nodes
+        ))?;
+        Ok(metadata)
+    }
+
+    fn domain_findings(
+        root: &Path,
+        manifest: &str,
+        runtime_deps: &str,
+        extra_nodes: &str,
+    ) -> anyhow::Result<Vec<Finding>> {
+        write_assembly(root, manifest, &cargo_runtime_manifest(""))?;
+        let (assemblies, discovery_findings) = discover(root)?;
+        assert!(
+            discovery_findings.is_empty(),
+            "domain fixture discovery should be clean: {discovery_findings:?}"
+        );
+        let assembly = assemblies
+            .first()
+            .context("domain fixture writes one assembly")?;
+        let metadata = metadata_fixture(root, runtime_deps, extra_nodes)?;
+        validate_domain_closure(root, assembly, &metadata)
+    }
+
+    #[test]
+    fn assembly_domain_metadata_uses_all_features_resolve() {
+        let args = cargo_metadata_args("/tmp/rss/Cargo.toml");
+        assert!(
+            args.contains(&"--all-features"),
+            "assembly domain closure metadata must match verify all-features compile surface: {args:?}"
+        );
+    }
+
     fn production_security_manifest(
         profile: &str,
         include_oidc: bool,
@@ -1581,6 +1913,19 @@ durability = "ephemeral-memory""#
     }
 
     #[test]
+    fn assembly_manifest_accepts_all_registered_domains() -> anyhow::Result<()> {
+        let manifest =
+            AssemblyManifest::from_toml_str(&manifest_with_domains(crate::layers::DOMAIN_CRATES))?;
+        let domains: Vec<_> = manifest
+            .domains
+            .iter()
+            .map(AssemblyDomain::as_str)
+            .collect();
+        assert_eq!(domains, crate::layers::DOMAIN_CRATES);
+        Ok(())
+    }
+
+    #[test]
     fn assembly_manifest_requires_domains_topology_and_listeners() {
         assert!(
             AssemblyManifest::from_toml_str(
@@ -1653,6 +1998,156 @@ name = "runtime"
             findings.iter().any(|f| f.rule == Rule::DuplicateDomain),
             "duplicate domains must be rejected: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_active_manifest_domain_requires_direct_normal_dependency()
+    -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-missing-active");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity", "settings"]),
+            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]}"#,
+            "",
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDomainDependency),
+            "manifest domain missing from direct normal dependencies must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_dev_or_build_dependency_does_not_satisfy_active_domain() -> anyhow::Result<()>
+    {
+        let root = unique_tmp("assembly-domain-dev-build");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity"]),
+            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": "dev"}, {"kind": "build"}]}"#,
+            "",
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDomainDependency),
+            "dev/build domain dependencies must not satisfy active domain closure: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_alias_or_package_rename_mismatch_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-alias");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity"]),
+            r#"{"name": "id", "pkg": "identity", "dep_kinds": [{"kind": null}]}"#,
+            "",
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDomainDependency),
+            "alias/package rename must not satisfy active domain dependency: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_inactive_direct_dependency_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-inactive-direct");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity"]),
+            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
+               {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null}]}"#,
+            "",
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::InactiveDomainDependencyClosure),
+            "inactive direct domain dependency must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_all_features_optional_inactive_dependency_is_rejected() -> anyhow::Result<()>
+    {
+        let root = unique_tmp("assembly-domain-feature-optional");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity"]),
+            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
+               {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null, "target": "cfg(feature = \"settings-domain\")"}]}"#,
+            "",
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::InactiveDomainDependencyClosure),
+            "inactive domain resolved through an all-features optional edge must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_inactive_transitive_normal_dependency_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-inactive-transitive");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity"]),
+            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
+               {"name": "postgres", "pkg": "postgres", "dep_kinds": [{"kind": null}]}"#,
+            r#",
+      {"id": "postgres", "deps": [
+        {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null}]}
+      ]}"#,
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::InactiveDomainDependencyClosure),
+            "inactive transitive normal domain dependency must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_declared_domains_with_normal_closure_pass() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-green");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity", "settings", "audit"]),
+            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
+               {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null}]},
+               {"name": "audit", "pkg": "audit", "dep_kinds": [{"kind": null}]}"#,
+            "",
+        )?;
+        assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_domain_real_runtime_closure_excludes_inactive_domains() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let (assemblies, discovery_findings) = discover(&root)?;
+        assert!(
+            discovery_findings.is_empty(),
+            "real workspace discovery should be clean: {discovery_findings:?}"
+        );
+        let assembly = assemblies
+            .iter()
+            .find(|assembly| assembly.manifest.name == "runtime")
+            .context("runtime assembly exists")?;
+        let metadata = load_workspace_metadata(&root)?.context("real workspace has Cargo.toml")?;
+        let findings = validate_domain_closure(&root, assembly, &metadata)?;
+        assert!(findings.is_empty(), "{findings:?}");
         Ok(())
     }
 

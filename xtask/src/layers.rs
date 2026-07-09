@@ -281,6 +281,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn domain_crate_registry_is_exact() {
+        assert_eq!(
+            DOMAIN_CRATES,
+            &["identity", "settings", "audit", "contractreg", "syshealth"]
+        );
+    }
+
     /// 路径判分类不靠 crate 名——adapter 即使叫 `redis`（与 crates.io 同名）仍按路径归 Adapter。
     #[test]
     fn classify_adapter_immune_to_name() {
