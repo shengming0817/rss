@@ -56,8 +56,22 @@ saga ADR 和 runbook 中。
 
 `eventexec` crate 的 saga 模块（执行器）必填依赖走构造器**必填位置参**（非 `Option` /
 trait 对象），缺失即编译错误。`SagaExecutorDeps::new` 必须接收 `TypedSagaActionFactory`，禁止外部注入
-raw erased factory。`SagaExecutorConfig::new` 必须接收 `SagaPolicy` 位置参，禁止无策略 constructor、builder
-option 或兼容 shim。
+raw erased factory。`SagaExecutorConfig` 必须从同一 generated `SPEC` 派生 `SagaWorkerIdentity`
+（owner + `SagaContractId`）和 `SagaPolicy`，禁止无策略 constructor、builder option 或兼容 shim。
+
+## Worker runtime
+
+saga background worker 是生产运行形态，不替代 direct executor primitive：
+
+- worker identity 必须是 `SagaWorkerIdentity`，禁止在组合根分别传裸 owner / contract id。
+- worker 只做 polling/orchestration：`SagaTenantSource` 返回候选 tenant，`SagaInstanceStore::list_runnable`
+  在 tenant scope 下列 `Ready` / `Running` / `Compensating` 且 lease 空闲或过期的 instance。
+- worker 对 `Ready` 调 `run`，对 `Running` / `Compensating` 调 `resume`；正确性仍由 runtime lock +
+  instance lease CAS + journal CAS 保证，listing 只是 advisory。
+- readyz probe 名从 identity 单源派生：`saga_executor:<owner>__<contract_slug>`，不带 `_ready`。
+- 无 live saga contract/factory registration 时不得注册假 worker 或假 probe。
+- health 语义：无任务 / 成功 / 业务失败但已 durable 记录为 Healthy；tenant source、store、journal、DLX
+  等基础设施错误为 Degraded；worker 停止或 panic 为 Unhealthy。
 
 ## 参考
 

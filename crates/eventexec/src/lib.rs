@@ -74,10 +74,15 @@ pub use projection::{
 
 pub mod saga;
 pub use saga::{
-    SagaActionError, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
-    SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome, SagaPolicy, SagaPolicyError,
-    SagaRuntimeLock, SagaTailer, TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
-    TypedSagaFactoryError,
+    SagaActionError, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError,
+    SagaExecutorDeps, SagaExecutorImpl, SagaId, SagaInterruption, SagaOutcome, SagaPolicy,
+    SagaPolicyError, SagaRuntimeLock, SagaTailer, TypedSagaActionFactory,
+    TypedSagaActionFactoryBuilder, TypedSagaFactoryError,
+};
+
+pub mod saga_worker;
+pub use saga_worker::{
+    SAGA_EXECUTOR_PROBE, SagaWorker, SagaWorkerConfig, saga_executor_probe_name, spawn_saga_worker,
 };
 
 use std::sync::Arc;

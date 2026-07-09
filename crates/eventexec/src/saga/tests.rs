@@ -5,6 +5,7 @@
 //! 避免单进程 `cargo test` 下多个全局 subscriber 竞争。
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -27,7 +28,8 @@ use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, LockAcquireOutcome, LockRenewOutcome,
     LockStore, LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaInstanceRegistration,
-    SagaInstanceStore, SagaInstanceStoreError, SagaJournal, SagaJournalError, SaveOutcome,
+    SagaInstanceStore, SagaInstanceStoreError, SagaJournal, SagaJournalError, SagaRunnableInstance,
+    SagaWorkerIdentity, SaveOutcome,
 };
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -550,6 +552,30 @@ impl SagaInstanceStore for FakeInstanceStore {
         Ok(SagaLeaseOutcome::Held)
     }
 
+    #[allow(clippy::unwrap_used)]
+    async fn list_runnable(
+        &self,
+        _identity: &SagaWorkerIdentity,
+        tenant: vocab::TenantId,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError> {
+        let rows = self.registered.lock().unwrap();
+        Ok(rows
+            .iter()
+            .filter(|(instance, status)| {
+                instance.tenant() == tenant
+                    && matches!(
+                        status,
+                        SagaInstanceStatus::Ready
+                            | SagaInstanceStatus::Running
+                            | SagaInstanceStatus::Compensating
+                    )
+            })
+            .take(limit.get())
+            .map(|(instance, status)| SagaRunnableInstance::new(*instance, *status).unwrap())
+            .collect())
+    }
+
     async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
         Ok(())
     }
@@ -719,6 +745,7 @@ fn disabled_policy() -> SagaPolicy {
     policy_from_millis(0, 0)
 }
 
+#[allow(clippy::expect_used)] // reason: 测试常量必须能构造合法 executor config
 fn executor_config_with_policy_and_lease_ttl(
     policy: SagaPolicy,
     lease_ttl: Duration,
@@ -730,6 +757,7 @@ fn executor_config_with_policy_and_lease_ttl(
         lease_ttl,
         policy,
     )
+    .expect("valid test saga executor config")
 }
 
 #[test]
@@ -759,7 +787,7 @@ fn executor_config_from_contract_spec_derives_contract_and_policy() {
     )
     .expect("generated test spec is valid");
 
-    assert_eq!(config.contract_id, CONTRACT);
+    assert_eq!(config.identity().contract_id().as_str(), CONTRACT);
     assert!(matches!(config.policy, SagaPolicy::Bounded(_)));
 }
 

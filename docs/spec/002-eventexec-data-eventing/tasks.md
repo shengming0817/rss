@@ -110,7 +110,8 @@
 - [ ] T009.4 [US7] `eventexec/saga.rs`：SagaId/SagaActionCtx body + SagaExecutor run/resume（前向 append + 失败逆序补偿，补偿失败→saga dead-letter）+ SagaTailer status
 - [ ] T009.5 [US7] `bootstrap/sagaprojectiondeps.rs` resolver（demo paired mem instance+journal+lock / durable pg tenant-scoped instance+journal+checkpoint + Redis runtime lock；fail-closed）
 - [ ] T009.6 [US7] saga dead-letter observability 字段测试：验证补偿失败写 dead-letter 时 `tracing::error!` 含 saga_id / step_name / error_summary 非空，dead-letter 记录的 contract_id / domain 取 saga owner（refs: SC-006）
-- [ ] T009.7 [US7] `contracts/saga/` kind + xtask SAGA-CONTRACT-01 governance（Medium，正/负用例）；clippy/fmt 绿
+- [ ] T009.7 [US7] saga worker health/readyz（#1247）：`SagaWorkerIdentity` + tenant candidate source + tenant-scoped runnable listing；`saga_executor:<owner>__<contract_slug>` probe；source/store infra error Degraded，stop/panic Unhealthy；无 live registration 不注册假 probe
+- [ ] T009.8 [US7] `contracts/saga/` kind + xtask SAGA-CONTRACT-01 governance（Medium，正/负用例）；clippy/fmt 绿
 
 ### T010 [US8] P10 · projection/CQRS + 断点续投
 **触及**: `crates/eventexec/src/projection.rs` · `adapters/postgres/src/projection_events.rs`+migration · `lints/rss_projection_append_only/` · **等级**: L3 · **blocked-by**: T002,T003,T007,**T009(checkpoint 接缝)** · **并行**: 否（依赖 T009 checkpoint）。

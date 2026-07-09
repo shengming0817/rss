@@ -111,8 +111,9 @@ sealed resolver + `pub(crate)` 构造器从类型层封闭（Hard，编译期不
 
 ## saga 实例资源选型（instance / journal / checkpoint / dead-letter / runtime lock，topology-gated）
 
-L3 saga runtime 是 direct `run` / `resume` / `status` 调用路径，不提供 background 投影 worker、
-resume-all 扫描器。组合根注入的最小资源集合是 tenant-scoped `SagaInstanceStore` +
+L3 saga runtime 的 primitive API 是 direct `run` / `resume` / `status`；生产运行形态可把同一
+executor 封装为 background `saga_executor:<owner>__<contract_slug>` worker，由 tenant candidate source +
+tenant-scoped runnable listing 驱动。组合根注入的最小资源集合是 tenant-scoped `SagaInstanceStore` +
 tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterStore` + runtime lock provider：
 
 - demo/memory → paired `MemSagaInstanceStore` / `MemSagaJournal`（共享 lease state）+
@@ -121,6 +122,8 @@ tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterSt
   `saga_instances` 承载 register/claim/extend/release/status CAS，`saga_journal` 承载 durable append-only
   step facts；runtime lock provider 必须来自 Redis，作为 `run` / `resume` 进入 Postgres lease 前的 multi-pod
   外层 gate。
+- worker tenant discovery → `SagaTenantSource` 只返回候选 tenant id；真实 runnable instance 列表仍回到
+  tenant-scoped `SagaInstanceStore::list_runnable`，且 `run` / `resume` 仍需 runtime lock + instance lease CAS。
 - fail-closed：tenant scope 缺失、lease token/epoch/expiry 不匹配、或 `(tenant_id, saga_id, seq)` 内容冲突，
   必须返回 typed interrupted outcome，不触发补偿或 app DLX。
 - runtime lock fail-closed：durable 拓扑缺 Redis URL 启动期 fail-closed；执行时 lock busy / lost /
@@ -129,6 +132,8 @@ tenant-scoped append-only `SagaJournal` + `OwnerCheckpointStore` + `DeadLetterSt
 
 `saga_instances` 与 `saga_journal` 均为 tenant 表：迁移必须同时落 `ENABLE/FORCE RLS`、标准
 `rss.tenant_id` policy 和 serving role 最小权限；`saga_journal` 仅 `SELECT/INSERT`，撤销 `UPDATE/DELETE`。
+跨租户 worker discovery 只允许通过窄 `saga_worker_tenant_index` + fixed `SECURITY DEFINER` function 返回
+tenant id；`rss_app` 不得直接读该 index。
 checkpoint 表不改 schema，saga checkpoint id 必须包含 tenant，避免跨租户同 saga UUID 碰撞。
 
 ## ConsumerBase

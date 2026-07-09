@@ -27,8 +27,8 @@ use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeSubjectId, KeyName,
     KeyProvider, KeyProviderError, KeyRef, KeyVersion, LockStore, OpaqueActorId, OutboxActor,
-    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, RedactedBytes,
-    SagaInstanceRegistration, SagaInstanceStore, SagaJournal, SaveOutcome,
+    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, RedactedBytes, SagaContractId,
+    SagaInstanceRegistration, SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
 use eventexec::reconcile::{
     ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
@@ -470,11 +470,7 @@ impl PgFaultMatrixHarness {
         let journal = infra.saga_journal();
         let instance = saga_instance(tenant, saga_uuid)?;
         instances
-            .register(SagaInstanceRegistration::new(
-                instance,
-                "billing",
-                "billing.checkout",
-            )?)
+            .register(fault_matrix_saga_registration(instance)?)
             .await?;
         let lease = instances
             .acquire_lease(&instance, "fault-matrix", Duration::from_secs(60))
@@ -512,11 +508,7 @@ impl PgFaultMatrixHarness {
         let journal = infra.saga_journal();
         let instance = saga_instance(tenant, saga_uuid)?;
         instances
-            .register(SagaInstanceRegistration::new(
-                instance,
-                "billing",
-                "billing.checkout",
-            )?)
+            .register(fault_matrix_saga_registration(instance)?)
             .await?;
         let lease = instances
             .acquire_lease(&instance, "fault-matrix", Duration::from_secs(60))
@@ -964,6 +956,13 @@ fn saga_instance(
     saga_uuid: uuid::Uuid,
 ) -> FaultMatrixResult<SagaInstanceRef> {
     Ok(SagaInstanceRef::new(tenant, SagaId::new(saga_uuid))?)
+}
+
+fn fault_matrix_saga_registration(
+    instance: SagaInstanceRef,
+) -> FaultMatrixResult<SagaInstanceRegistration> {
+    let identity = SagaWorkerIdentity::new("billing", SagaContractId::parse("billing.checkout")?)?;
+    Ok(SagaInstanceRegistration::new(instance, identity))
 }
 
 struct FaultMatrixSagaFactory {

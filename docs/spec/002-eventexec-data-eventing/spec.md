@@ -134,7 +134,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 
 **Why this priority**: L3 高阶能力，依赖 outbox + ConsumerBase + 持久化 journal。是多步跨聚合一致性的载体，但非地基。
 
-**Independent Test**: 3-step saga 全成→journal 顺序记录；step 2 返回失败→逆序补偿已完成前缀 step 1 journal 记录；从 step 2 checkpoint resume→跳过 step 1；kind:saga 契约 governance（xtask）正/负用例；forward retry success、forward timeout compensation、retry budget exhaustion、compensation retry success、compensation timeout DLX。
+**Independent Test**: 3-step saga 全成→journal 顺序记录；step 2 返回失败→逆序补偿已完成前缀 step 1 journal 记录；从 step 2 checkpoint resume→跳过 step 1；kind:saga 契约 governance（xtask）正/负用例；forward retry success、forward timeout compensation、retry budget exhaustion、compensation retry success、compensation timeout DLX；background worker 注册 `saga_executor:<owner>__<contract_slug>` readyz probe，source/store infra error 降级，worker stop/panic 变 unhealthy。
 
 **Acceptance Scenarios**:
 
@@ -217,7 +217,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-009**: 消费框架 MUST 经 `HandleResult` 三路（ack/requeue/reject）收口，瞬态退避有预算上限，耗尽或永久失败 MUST 进 DLX 并结构化记录（不静默丢消息）。DLX 写入 MUST 触发 `tracing::error!` 并带 span 定位字段（domain / contract_id / topic / num_attempts / error_summary，均无 PII）。
 - **FR-010**: 订阅注册 MUST 与域 crate `contract.toml` 同源（codegen 派生 glue），active 事件契约 MUST 至少有一个订阅 handler（死事件守卫）。
 - **FR-011**: `LoginService::login`（#1100）MUST 改为写 durable outbox entry 替换直接 publish；audit 消费 MUST 以 EventId 幂等去重；MUST 通过 L2 原子性 + 幂等治理测试与 replay/投影重建测试。
-- **FR-012**: saga executor MUST 逐步前向执行并 append durable journal，action 返回失败、timeout 或重试预算耗尽 MUST 逆序补偿已完成步；补偿失败、timeout 或预算耗尽 MUST 上报（saga dead-letter）不静默吞；MUST 支持从 journal/checkpoint resume。
+- **FR-012**: saga executor MUST 逐步前向执行并 append durable journal，action 返回失败、timeout 或重试预算耗尽 MUST 逆序补偿已完成步；补偿失败、timeout 或预算耗尽 MUST 上报（saga dead-letter）不静默吞；MUST 支持从 journal/checkpoint resume。background worker 形态 MUST 注册运行时操作 health probe `saga_executor:<owner>__<contract_slug>`（无 `_ready` 后缀），通过 tenant candidate source + tenant-scoped runnable listing 调用 `run` / `resume`；source/store/journal/DLX infra error MUST 降级，worker stop/panic MUST 反映为 unhealthy。
 - **FR-013**: `kind: saga` 契约 governance MUST 校验：非空 saga block、≥1 step、step name 合法标识符、每步 output schema、compensation order 仅 reverse、consistencyLevel=L3、retry/timeout 合法非负；codegen MUST 派生 saga `CONTRACT_ID` / `CONTRACT` / `POLICY` / `SPEC`；runtime conversion MUST 拒绝 `retryMillis > 0 && timeoutMillis = 0`，并将 `0/0` 解释为禁用策略。
 - **FR-014**: 投影器 MUST 从 checkpoint(Lsn) 断点续投，崩溃重启 MUST 从 checkpoint 继续（不重做不遗漏）；从 offset 0 重放结果 MUST 与增量更新一致；`projection_events` MUST append-only（DML DELETE/TRUNCATE 被守卫拒）。
 - **FR-015**: reconcile Loop MUST 仅经 `Builder`（必填 sealed Tenancy + Trigger）构造，缺 Tenancy MUST 编译错；level-triggered 触发、`Request::default()`=resync 全量、瞬态错误 per-entity 指数退避。

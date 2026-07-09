@@ -135,9 +135,15 @@ const VAULT_TOKEN_ENV: &str = "RSS_VAULT_TOKEN";
 const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
 
 /// worker 健康 → readyz `HealthCheck` 适配探针。
-struct WorkerHealthProbe {
+pub(crate) struct WorkerHealthProbe {
     name: ProbeName,
     health: Arc<WorkerHealth>,
+}
+
+impl WorkerHealthProbe {
+    pub(crate) fn new(name: ProbeName, health: Arc<WorkerHealth>) -> Self {
+        Self { name, health }
+    }
 }
 
 impl bootstrap::HealthProbe for WorkerHealthProbe {

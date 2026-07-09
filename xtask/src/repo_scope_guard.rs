@@ -236,6 +236,7 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/saga.rs", "append"),
     ("adapters/postgres/src/saga.rs", "cas_lease"),
     ("adapters/postgres/src/saga.rs", "get"),
+    ("adapters/postgres/src/saga.rs", "list_runnable"),
     ("adapters/postgres/src/saga.rs", "read"),
     ("adapters/postgres/src/saga.rs", "register"),
 ];
@@ -691,10 +692,16 @@ mod tests {
 
     #[test]
     fn green_infra_tenant_scope_allowed_for_infra_funnels() {
-        let files = vec![(
-            "adapters/postgres/src/outbox.rs".to_string(),
-            "async fn settle_dlx() { infra_tenant_scope(tenant); }".to_string(),
-        )];
+        let files = vec![
+            (
+                "adapters/postgres/src/outbox.rs".to_string(),
+                "async fn settle_dlx() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/saga.rs".to_string(),
+                "async fn list_runnable() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+        ];
         let (_, findings) = scan_infra_tenant_scope(&files);
         assert!(findings.is_empty(), "{findings:?}");
     }

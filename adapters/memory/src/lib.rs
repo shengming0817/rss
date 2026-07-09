@@ -13,8 +13,9 @@
 //! `take_until(token)` 替代 Go channel + `<-closing`。runtime-agnostic：用 `futures::channel::mpsc`
 //! （receiver 即 `Stream`），不绑 tokio runtime。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -34,8 +35,9 @@ use diport::{
     LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
     OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
     PublisherError, SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError,
-    SagaJournal, SagaJournalError, SaveOutcome, SecretCoordinate, SecretMaterial, SecretResolver,
-    SecretResolverError, Subscriber, SubscriberError, Topic, WriteOutcome,
+    SagaJournal, SagaJournalError, SagaRunnableInstance, SagaTenantSource, SagaWorkerIdentity,
+    SaveOutcome, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, Subscriber,
+    SubscriberError, Topic, WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -996,6 +998,15 @@ impl MemSagaInstanceState {
         self.lease_token.is_none() || self.expires_at.is_some_and(|expires| expires <= now)
     }
 
+    fn is_runnable(&self, now: SystemTime) -> bool {
+        matches!(
+            self.status,
+            SagaInstanceStatus::Ready
+                | SagaInstanceStatus::Running
+                | SagaInstanceStatus::Compensating
+        ) && self.lease_is_free(now)
+    }
+
     fn lease_matches(&self, lease: &SagaLease, now: SystemTime) -> bool {
         self.lease_token == Some(lease.lease_token())
             && self.epoch == lease.epoch()
@@ -1166,8 +1177,76 @@ impl SagaInstanceStore for MemSagaInstanceStore {
         Ok(SagaLeaseOutcome::Held)
     }
 
+    async fn list_runnable(
+        &self,
+        identity: &SagaWorkerIdentity,
+        tenant: vocab::TenantId,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError> {
+        let now = saga_now();
+        let tenant_key = tenant.to_string();
+        let g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut rows = Vec::new();
+        for ((row_tenant, saga_id), state) in &*g {
+            if rows.len() >= limit.get() {
+                break;
+            }
+            if row_tenant != &tenant_key
+                || state.owner != identity.owner()
+                || state.contract_id != identity.contract_id().as_str()
+                || !state.is_runnable(now)
+            {
+                continue;
+            }
+            let instance = SagaInstanceRef::new(tenant, consistency::SagaId::new(*saga_id))
+                .map_err(SagaInstanceStoreError::new)?;
+            rows.push(
+                SagaRunnableInstance::new(instance, state.status)
+                    .map_err(SagaInstanceStoreError::new)?,
+            );
+        }
+        rows.sort_by_key(|row| row.instance().saga_id().as_uuid());
+        Ok(rows)
+    }
+
     async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
         Ok(())
+    }
+}
+
+impl SagaTenantSource for MemSagaInstanceStore {
+    async fn list_candidate_tenants(
+        &self,
+        identity: &SagaWorkerIdentity,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<vocab::TenantId>, SagaInstanceStoreError> {
+        let now = saga_now();
+        let g = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut seen = HashSet::new();
+        let mut tenants = Vec::new();
+        for ((tenant, _), state) in &*g {
+            if tenants.len() >= limit.get() {
+                break;
+            }
+            if state.owner != identity.owner()
+                || state.contract_id != identity.contract_id().as_str()
+                || !state.is_runnable(now)
+                || !seen.insert(tenant.clone())
+            {
+                continue;
+            }
+            tenants.push(vocab::TenantId::parse(tenant).map_err(SagaInstanceStoreError::new)?);
+        }
+        tenants.sort_by_key(|tenant| tenant.to_string());
+        Ok(tenants)
     }
 }
 
@@ -1460,6 +1539,19 @@ mod tests {
     const OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000abc";
     const TOPIC: &str = "identity.session-created";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_identity(contract_id: &str) -> SagaWorkerIdentity {
+        SagaWorkerIdentity::new(
+            "billing",
+            diport::SagaContractId::parse(contract_id).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn saga_registration(instance: SagaInstanceRef, contract_id: &str) -> SagaInstanceRegistration {
+        SagaInstanceRegistration::new(instance, saga_identity(contract_id))
+    }
 
     #[derive(Default)]
     struct RecordingTenantSigner {
@@ -2900,7 +2992,7 @@ mod tests {
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let instance = SagaInstanceRef::new(tenant, SagaId::new(Uuid::from_u128(1))).unwrap();
         store
-            .register(SagaInstanceRegistration::new(instance, "billing", "checkout").unwrap())
+            .register(saga_registration(instance, "checkout"))
             .await
             .unwrap();
         let lease = store
@@ -3010,7 +3102,7 @@ mod tests {
         let instance_b = SagaInstanceRef::new(tenant_b, saga_id).unwrap();
         for instance in [instance_a, instance_b] {
             store
-                .register(SagaInstanceRegistration::new(instance, "billing", "checkout").unwrap())
+                .register(saga_registration(instance, "checkout"))
                 .await
                 .unwrap();
         }
@@ -3066,8 +3158,7 @@ mod tests {
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
-        let registration =
-            SagaInstanceRegistration::new(instance, "billing", "billing.checkout").unwrap();
+        let registration = saga_registration(instance, "billing.checkout");
 
         let record = store.register(registration).await.unwrap();
         assert_eq!(record.status(), SagaInstanceStatus::Ready);
@@ -3129,9 +3220,7 @@ mod tests {
         let instance_b =
             SagaInstanceRef::new(tenant_b, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
         store
-            .register(
-                SagaInstanceRegistration::new(instance_b, "billing", "billing.checkout").unwrap(),
-            )
+            .register(saga_registration(instance_b, "billing.checkout"))
             .await
             .unwrap();
         assert_eq!(
@@ -3153,6 +3242,73 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "same saga UUID in another tenant must acquire independently"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    // reason: 测试 canonical literal 构造，item-level carve-out。
+    async fn mem_saga_worker_discovery_filters_identity_lease_and_terminal_status() {
+        use consistency::SagaId;
+
+        let store = MemSagaInstanceStore::new();
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let runnable_instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(2001))).unwrap();
+        let other_contract =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(2002))).unwrap();
+        store
+            .register(saga_registration(runnable_instance, "billing.checkout"))
+            .await
+            .unwrap();
+        store
+            .register(saga_registration(other_contract, "billing.refund"))
+            .await
+            .unwrap();
+
+        let identity = saga_identity("billing.checkout");
+        assert_eq!(
+            store
+                .list_candidate_tenants(&identity, NonZeroUsize::new(8).unwrap())
+                .await
+                .unwrap(),
+            vec![tenant]
+        );
+        assert_eq!(
+            store
+                .list_runnable(&identity, tenant, NonZeroUsize::new(8).unwrap())
+                .await
+                .unwrap()
+                .iter()
+                .map(SagaRunnableInstance::instance)
+                .collect::<Vec<_>>(),
+            vec![runnable_instance]
+        );
+
+        let lease = store
+            .acquire_lease(&runnable_instance, "runner-a", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .list_candidate_tenants(&identity, NonZeroUsize::new(8).unwrap())
+                .await
+                .unwrap()
+                .is_empty(),
+            "held lease should not be listed as runnable candidate"
+        );
+        store
+            .mark_status(&lease, SagaInstanceStatus::Succeeded)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_runnable(&identity, tenant, NonZeroUsize::new(8).unwrap())
+                .await
+                .unwrap()
+                .is_empty(),
+            "terminal saga should not be worker-runnable"
         );
     }
 

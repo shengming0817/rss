@@ -195,5 +195,7 @@ runtime durable event transport 现在把 outbox relay / sampler / sweeper 与 c
 - consumer bundle：`event_consumer`（或按 topic 后缀区分）readyz probe，按 subscriber binding 接入
   PG `inbox_receipts`、DLX store、AckableSubscriber 与 ConsumerWorker；`inbox_sweeper` readyz probe 按同一
   sweep interval 清理超 `INBOX_RECEIPT_RETENTION_SECONDS` 的 done 去重行。
+- saga worker：live saga contract/factory registration 才注册 `saga_executor:<owner>__<contract_slug>` readyz
+  probe；source/store infra 错误 Degraded，worker 停止 Unhealthy。无 live registration 不注册假 probe。
 - dead-letter sweeper：`dead_letter_sweeper` readyz probe，按 `RSS_OUTBOX_SWEEP_INTERVAL_MS` 清理超
   `RSS_DEAD_LETTER_RETAIN_SECONDS` 的 dead_letter 行。

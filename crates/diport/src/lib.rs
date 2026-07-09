@@ -179,8 +179,9 @@ pub use revocation_store::{
     RevocationStoreError,
 };
 pub use saga_instance_store::{
-    DynSagaInstanceStore, SagaInstanceRegistration, SagaInstanceRegistrationError,
-    SagaInstanceStore, SagaInstanceStoreError,
+    DynSagaInstanceStore, DynSagaTenantSource, SagaContractId, SagaContractIdError,
+    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaRunnableInstance,
+    SagaRunnableInstanceError, SagaTenantSource, SagaWorkerIdentity, SagaWorkerIdentityError,
 };
 pub use saga_journal::{DynSagaJournal, SagaJournal, SagaJournalError};
 pub use secret_resolver::{

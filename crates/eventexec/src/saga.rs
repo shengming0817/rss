@@ -11,8 +11,8 @@
 //! resume 真正崩溃恢复：journal 只存 step 名，执行器经注入的 typed factory（saga 模板，对标
 //! steno saga template registry）按声明序重物化整个 action 序，再据 journal 已完成前缀跳过、续跑或续补偿。
 //!
-//! 本 executor 无 background worker、不注册 readyz probe（on-demand 调用）；若未来封装为 worker 形态
-//! 须补 `WorkerHealth` + probe，参考 `relay.rs`（见 issue #1247）。
+//! 本 executor 仍是 direct primitive；background worker / `WorkerHealth` / readyz probe 封装在
+//! [`crate::saga_worker`]，由组合根按 live saga registration 显式接线。
 //!
 //! ref: oxidecomputer/steno src/saga_action_generic.rs@main（`Action::do_it`/`undo_it`/`name` + 逆序补偿）。
 //! ref: oxidecomputer/steno src/saga_log.rs@main（journal event replay 到 load status）。
@@ -34,8 +34,8 @@ use consistency::{
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
     DeadLetterSummary, EnvelopeMetadata, LockAcquireOutcome, LockRenewOutcome, LockStoreError,
-    LockStoreKey, OwnerCheckpointStore, SagaInstanceRegistration, SagaInstanceStore, SagaJournal,
-    SaveOutcome, WritableDeadLetterSource,
+    LockStoreKey, OwnerCheckpointStore, SagaContractId, SagaInstanceRegistration,
+    SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome, WritableDeadLetterSource,
 };
 
 /// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
@@ -804,7 +804,7 @@ pub struct SagaExecutorImpl<J, C, D, S> {
     factory: Arc<dyn SagaActionFactory>,
     runtime_lock: SagaRuntimeLock,
     owner: CheckpointOwner,
-    contract_id: String,
+    identity: SagaWorkerIdentity,
     holder_id: String,
     lease_ttl: Duration,
     policy: SagaPolicy,
@@ -862,10 +862,25 @@ impl<J, C, D, S> SagaExecutorDeps<J, C, D, S> {
 /// Saga executor identity and lease configuration.
 pub struct SagaExecutorConfig {
     owner: CheckpointOwner,
-    contract_id: String,
+    identity: SagaWorkerIdentity,
     holder_id: String,
     lease_ttl: Duration,
     policy: SagaPolicy,
+}
+
+/// Error constructing [`SagaExecutorConfig`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SagaExecutorConfigError {
+    /// Generated saga policy was invalid.
+    #[error(transparent)]
+    Policy(#[from] SagaPolicyError),
+    /// Generated contract id was invalid.
+    #[error(transparent)]
+    ContractId(#[from] diport::SagaContractIdError),
+    /// Saga worker identity was invalid.
+    #[error(transparent)]
+    Identity(#[from] diport::SagaWorkerIdentityError),
 }
 
 impl SagaExecutorConfig {
@@ -878,7 +893,7 @@ impl SagaExecutorConfig {
         holder_id: impl Into<String>,
         lease_ttl: Duration,
         factory: &TypedSagaActionFactory,
-    ) -> Result<Self, SagaPolicyError> {
+    ) -> Result<Self, SagaExecutorConfigError> {
         Self::from_contract_spec(owner, holder_id, lease_ttl, factory.spec())
     }
 
@@ -887,15 +902,9 @@ impl SagaExecutorConfig {
         holder_id: impl Into<String>,
         lease_ttl: Duration,
         spec: vocab::SagaContractBinding,
-    ) -> Result<Self, SagaPolicyError> {
+    ) -> Result<Self, SagaExecutorConfigError> {
         let policy = SagaPolicy::try_from(spec.policy())?;
-        Ok(Self::new(
-            owner,
-            spec.contract_id(),
-            holder_id,
-            lease_ttl,
-            policy,
-        ))
+        Self::new(owner, spec.contract_id(), holder_id, lease_ttl, policy)
     }
 
     fn new(
@@ -904,14 +913,32 @@ impl SagaExecutorConfig {
         holder_id: impl Into<String>,
         lease_ttl: Duration,
         policy: SagaPolicy,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SagaExecutorConfigError> {
+        let contract_id = contract_id.into();
+        let contract_id = SagaContractId::parse(&contract_id)?;
+        let identity = SagaWorkerIdentity::new(owner.as_str(), contract_id)?;
+        Ok(Self {
             owner,
-            contract_id: contract_id.into(),
+            identity,
             holder_id: holder_id.into(),
             lease_ttl,
             policy,
-        }
+        })
+    }
+
+    /// Worker identity derived from the generated saga contract binding.
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    /// Lease holder id used by this executor.
+    pub fn holder_id(&self) -> &str {
+        &self.holder_id
+    }
+
+    /// Lease ttl used by this executor.
+    pub fn lease_ttl(&self) -> Duration {
+        self.lease_ttl
     }
 }
 
@@ -935,7 +962,7 @@ where
             factory: deps.factory,
             runtime_lock: deps.runtime_lock,
             owner: config.owner,
-            contract_id: config.contract_id,
+            identity: config.identity,
             holder_id: config.holder_id,
             lease_ttl: config.lease_ttl,
             policy: config.policy,
@@ -956,7 +983,7 @@ where
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
         let owner = self.owner.clone();
-        let contract_id = self.contract_id.clone();
+        let identity = self.identity.clone();
         let holder_id = self.holder_id.clone();
         let lease_ttl = self.lease_ttl;
         let policy = self.policy;
@@ -964,7 +991,7 @@ where
         let runtime_lock = self.runtime_lock.clone();
         Box::pin(async move {
             let grant = match runtime_lock
-                .acquire(instance, &contract_id, "run", lease_ttl)
+                .acquire(instance, identity.contract_id().as_str(), "run", lease_ttl)
                 .await
             {
                 Ok(grant) => grant,
@@ -988,8 +1015,7 @@ where
                 let lease = match acquire_run_lease(
                     &*instance_store,
                     instance,
-                    &owner,
-                    &contract_id,
+                    identity.clone(),
                     &holder_id,
                     lease_ttl,
                 )
@@ -1004,7 +1030,7 @@ where
                     checkpoint: &*checkpoint,
                     dead_letter: &*dead_letter,
                     owner: &owner,
-                    contract_id: &contract_id,
+                    contract_id: identity.contract_id().as_str(),
                     instance,
                     lease,
                     lease_ttl,
@@ -1023,7 +1049,7 @@ where
         let checkpoint = self.checkpoint.clone();
         let dead_letter = self.dead_letter.clone();
         let owner = self.owner.clone();
-        let contract_id = self.contract_id.clone();
+        let identity = self.identity.clone();
         let holder_id = self.holder_id.clone();
         let lease_ttl = self.lease_ttl;
         let policy = self.policy;
@@ -1031,7 +1057,12 @@ where
         let runtime_lock = self.runtime_lock.clone();
         Box::pin(async move {
             let grant = match runtime_lock
-                .acquire(instance, &contract_id, "resume", lease_ttl)
+                .acquire(
+                    instance,
+                    identity.contract_id().as_str(),
+                    "resume",
+                    lease_ttl,
+                )
                 .await
             {
                 Ok(grant) => grant,
@@ -1058,7 +1089,7 @@ where
                     checkpoint: &*checkpoint,
                     dead_letter: &*dead_letter,
                     owner: &owner,
-                    contract_id: &contract_id,
+                    contract_id: identity.contract_id().as_str(),
                     instance,
                     lease,
                     lease_ttl,
@@ -1093,8 +1124,7 @@ where
 async fn acquire_run_lease<S>(
     store: &S,
     instance: SagaInstanceRef,
-    owner: &CheckpointOwner,
-    contract_id: &str,
+    identity: SagaWorkerIdentity,
     holder_id: &str,
     lease_ttl: Duration,
 ) -> Result<SagaLease, SagaInterruption>
@@ -1108,8 +1138,7 @@ where
             _ => return Err(SagaInterruption::AlreadyStarted),
         },
         Ok(None) => {
-            let registration = SagaInstanceRegistration::new(instance, owner.as_str(), contract_id)
-                .map_err(|_| SagaInterruption::StoreUnavailable)?;
+            let registration = SagaInstanceRegistration::new(instance, identity);
             store
                 .register(registration)
                 .await

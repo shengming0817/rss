@@ -81,6 +81,8 @@ codegen` 派生 `#[derive(secure::Redact)]` 和字段 `#[redact(...)]`。`cargo 
 
 - 依赖可用性 probe 用 `_ready` 后缀。
 - 运行时操作 probe 不带 `_ready`。
+- saga worker probe 是运行时操作 probe，命名为 `saga_executor:<owner>__<contract_slug>`，禁止按 tenant /
+  saga_id / step 生成高基数 probe。
 - probe 名是运维契约，改名必须同步运维文档、tests、dashboard、alert。
 - 域 crate repo readiness 由域 crate 边界显式注册，禁止静默吞掉缺失 repo。
 - remote peer readiness 只探测 resolved endpoint 的 TCP 可达性，不反向调用对端 `/readyz`。
@@ -258,8 +260,8 @@ saga executor 写补偿失败 dead-letter 时发射：
 
 label 闭值集纪律：
 
-- `domain` / `contract_id` 来自 `eventexec::SagaExecutorConfig` 的 owner / contract_id，均为组合根或 generated
-  bridge 在注册期绑定的低基数值；禁止从 saga_id、step、tenant、payload 或错误文本派生 label。
+- `domain` / `contract_id` 来自 `eventexec::SagaExecutorConfig` 派生的 `SagaWorkerIdentity`，均为组合根或
+  generated bridge 在注册期绑定的低基数值；禁止从 saga_id、step、tenant、payload 或错误文本派生 label。
 - `outcome` 闭合于 `eventexec::saga` emit site 的模块内 literal：`written` / `write_error`。`write_error`
   仍会发结构化 `tracing::error!`，字段包含 domain、contract_id 与 `DeadLetterStoreError` 安全 Display。
 - 告警面见 `docs/ops/outbox-relay-alerts.rules.yaml`：任意 `written` 增长代表需要人工介入的 saga DLX，

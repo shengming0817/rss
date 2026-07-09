@@ -6,16 +6,17 @@
 //! ref: oxidecomputer/steno src/store.rs@5b0d1be32fb3e3047ff4e4f972b59dc52f9c89ba
 //! ref: apalis-postgres migrations/20220530084123_jobs_workers.sql@5a930218b6b4128fc4c9e191cecc7cd0e1cbbbed
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use consistency::{
-    SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaJournalAppendOutcome,
+    SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaJournalAppendOutcome,
     SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseOutcome,
     StepName,
 };
 use diport::{
     SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaJournal,
-    SagaJournalError,
+    SagaJournalError, SagaRunnableInstance, SagaTenantSource, SagaWorkerIdentity,
 };
 
 use crate::PgStore;
@@ -26,6 +27,7 @@ const HOLDER_ID_MAX_BYTES: usize = 256;
 /// PostgreSQL saga instance store.
 pub struct PgSagaInstanceStore {
     pool: PgTenantPool,
+    raw_pool: sqlx::PgPool,
 }
 
 /// PostgreSQL saga journal adapter.
@@ -38,6 +40,7 @@ impl PgStore {
     pub(crate) fn saga_instance_store(&self) -> PgSagaInstanceStore {
         PgSagaInstanceStore {
             pool: PgTenantPool::new(self),
+            raw_pool: self.pool.clone(),
         }
     }
 
@@ -212,8 +215,81 @@ impl SagaInstanceStore for PgSagaInstanceStore {
         self.cas_lease(lease, None, Some(status.as_str())).await
     }
 
+    async fn list_runnable(
+        &self,
+        identity: &SagaWorkerIdentity,
+        tenant: vocab::TenantId,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError> {
+        let tenant_id = tenant.to_string();
+        let owner = identity.owner().to_string();
+        let contract_id = identity.contract_id().as_str().to_string();
+        let limit = i64::try_from(limit.get()).map_err(SagaInstanceStoreError::new)?;
+        self.pool
+            .read_map(
+                infra_tenant_scope(tenant),
+                move |conn| {
+                    Box::pin(async move {
+                        let rows: Vec<(String, String)> = sqlx::query_as(
+                            r#"
+                            SELECT saga_id::text, status
+                            FROM saga_instances
+                            WHERE tenant_id = $1::uuid
+                              AND owner = $2
+                              AND contract_id = $3
+                              AND status IN ('ready', 'running', 'compensating')
+                              AND (
+                                    lease_token IS NULL
+                                 OR expires_at <= now()
+                              )
+                            ORDER BY updated_at, saga_id
+                            LIMIT $4
+                            "#,
+                        )
+                        .bind(&tenant_id)
+                        .bind(&owner)
+                        .bind(&contract_id)
+                        .bind(limit)
+                        .fetch_all(conn)
+                        .await
+                        .map_err(SagaInstanceStoreError::new)?;
+                        rows.into_iter()
+                            .map(|(saga_id, status)| runnable_from_row(tenant, &saga_id, &status))
+                            .collect()
+                    })
+                },
+                SagaInstanceStoreError::new,
+            )
+            .await
+    }
+
     async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
         Ok(())
+    }
+}
+
+impl SagaTenantSource for PgSagaInstanceStore {
+    async fn list_candidate_tenants(
+        &self,
+        identity: &SagaWorkerIdentity,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<vocab::TenantId>, SagaInstanceStoreError> {
+        let limit = i64::try_from(limit.get()).map_err(SagaInstanceStoreError::new)?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"
+            SELECT tenant_id::text
+            FROM rss_saga_candidate_tenants($1, $2, $3)
+            "#,
+        )
+        .bind(identity.owner())
+        .bind(identity.contract_id().as_str())
+        .bind(limit)
+        .fetch_all(&self.raw_pool)
+        .await
+        .map_err(SagaInstanceStoreError::new)?;
+        rows.into_iter()
+            .map(|(tenant,)| vocab::TenantId::parse(&tenant).map_err(SagaInstanceStoreError::new))
+            .collect()
     }
 }
 
@@ -561,6 +637,19 @@ fn parse_instance_status(raw: &str) -> Result<SagaInstanceStatus, SagaInstanceSt
         .ok_or_else(|| SagaInstanceStoreError::new(InvariantError("invalid saga instance status")))
 }
 
+fn runnable_from_row(
+    tenant: vocab::TenantId,
+    saga_id: &str,
+    status: &str,
+) -> Result<SagaRunnableInstance, SagaInstanceStoreError> {
+    let saga_id = uuid::Uuid::parse_str(saga_id)
+        .map(SagaId::new)
+        .map_err(SagaInstanceStoreError::new)?;
+    let instance = SagaInstanceRef::new(tenant, saga_id).map_err(SagaInstanceStoreError::new)?;
+    let status = parse_instance_status(status)?;
+    SagaRunnableInstance::new(instance, status).map_err(SagaInstanceStoreError::new)
+}
+
 fn lease_from_row(
     instance: SagaInstanceRef,
     holder_id: String,
@@ -588,9 +677,31 @@ impl std::error::Error for InvariantError {}
 mod integration_tests {
     use super::*;
     use consistency::{SagaId, SagaJournalAppendOutcome, SagaJournalAppendRecord};
-    use diport::{ManagedResource, SagaInstanceStore, SagaJournal};
+    use diport::{
+        ManagedResource, SagaContractId, SagaInstanceStore, SagaJournal, SagaTenantSource,
+        SagaWorkerIdentity,
+    };
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    fn saga_identity(
+        contract_id: &str,
+    ) -> Result<SagaWorkerIdentity, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(SagaWorkerIdentity::new(
+            "billing",
+            SagaContractId::parse(contract_id)?,
+        )?)
+    }
+
+    fn saga_registration(
+        instance: SagaInstanceRef,
+        contract_id: &str,
+    ) -> Result<SagaInstanceRegistration, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(SagaInstanceRegistration::new(
+            instance,
+            saga_identity(contract_id)?,
+        ))
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
@@ -602,10 +713,24 @@ mod integration_tests {
         let instance = SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::new_v4()))?;
         let instances = store.saga_instance_store();
         let journal = store.saga_journal();
-        let registration = SagaInstanceRegistration::new(instance, "billing", "billing.checkout")?;
+        let registration = saga_registration(instance, "billing.checkout")?;
 
         let registered = instances.register(registration).await?;
         assert_eq!(registered.status(), SagaInstanceStatus::Ready);
+        let identity = saga_identity("billing.checkout")?;
+        assert_eq!(
+            instances
+                .list_candidate_tenants(&identity, std::num::NonZeroUsize::new(8).unwrap())
+                .await?,
+            vec![tenant]
+        );
+        assert_eq!(
+            instances
+                .list_runnable(&identity, tenant, std::num::NonZeroUsize::new(8).unwrap())
+                .await?
+                .len(),
+            1
+        );
         let lease = instances
             .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
             .await?
@@ -676,11 +801,7 @@ mod integration_tests {
         let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let instance_b = SagaInstanceRef::new(tenant_b, instance.saga_id())?;
         instances
-            .register(SagaInstanceRegistration::new(
-                instance_b,
-                "billing",
-                "billing.checkout",
-            )?)
+            .register(saga_registration(instance_b, "billing.checkout")?)
             .await?;
         let lease_b = instances
             .acquire_lease(&instance_b, "runner-b", Duration::from_secs(30))
@@ -704,11 +825,7 @@ mod integration_tests {
 
         let expiring = SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::new_v4()))?;
         instances
-            .register(SagaInstanceRegistration::new(
-                expiring,
-                "billing",
-                "billing.checkout",
-            )?)
+            .register(saga_registration(expiring, "billing.checkout")?)
             .await?;
         let expiring_lease = instances
             .acquire_lease(&expiring, "runner-expiring", Duration::from_secs(30))
@@ -912,6 +1029,52 @@ mod smoke {
         port_values.sort_unstable();
         assert_eq!(values, port_values);
         Ok(())
+    }
+
+    #[test]
+    fn saga_worker_tenant_index_migration_is_narrow_and_function_gated() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0050_create_saga_worker_tenant_index.sql");
+        for needle in [
+            "CREATE TABLE saga_worker_tenant_index",
+            "FORCE ROW LEVEL SECURITY",
+            "CREATE POLICY saga_worker_tenant_index_no_direct_app_access",
+            "tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid",
+            "AND false",
+            "REVOKE ALL ON saga_worker_tenant_index FROM rss_app",
+            "CREATE OR REPLACE FUNCTION rss_saga_candidate_tenants",
+            "SECURITY DEFINER",
+            "ALTER FUNCTION rss_saga_candidate_tenants(text, text, bigint) OWNER TO rss_saga_maintenance",
+            "GRANT EXECUTE ON FUNCTION rss_saga_candidate_tenants(text, text, bigint) TO rss_app",
+        ] {
+            assert!(
+                MIGRATION.contains(needle),
+                "0050 migration missing `{needle}`"
+            );
+        }
+        assert!(
+            !MIGRATION.contains("GRANT SELECT ON saga_worker_tenant_index TO rss_app"),
+            "rss_app must not receive direct saga worker tenant index SELECT"
+        );
+    }
+
+    #[test]
+    fn saga_worker_tenant_index_migration_has_poll_path_index() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0050_create_saga_worker_tenant_index.sql");
+
+        for needle in [
+            "CREATE INDEX idx_saga_worker_tenant_index_owner_contract_updated",
+            "ON saga_worker_tenant_index (owner, contract_id, updated_at, tenant_id)",
+            "WHERE idx.owner = p_owner",
+            "AND idx.contract_id = p_contract_id",
+            "ORDER BY idx.updated_at, idx.tenant_id",
+        ] {
+            assert!(
+                MIGRATION.contains(needle),
+                "0050 migration missing `{needle}`"
+            );
+        }
     }
 
     fn extract_check_values<'a>(
