@@ -66,7 +66,7 @@ const INSTALL_HINT_AUDIT: &str = "cargo install cargo-audit@0.22.2 --locked";
 const INSTALL_HINT_DYLINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
 const INSTALL_HINT_NEXTEST: &str = "cargo install cargo-nextest@0.9.137 --locked";
 const INSTALL_HINT_INTEGRATION: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker 或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 等 env URL）";
-const INSTALL_HINT_FAULT_MATRIX: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker，或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + RSS_AMQP_TEST_URL；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权）";
+const INSTALL_HINT_FAULT_MATRIX: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker，或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权）";
 const INSTALL_HINT_LLVM_COV: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
 const INSTALL_HINT_PUBLIC_API: &str =
     "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
@@ -639,7 +639,7 @@ fn step_consistency_fault_matrix_run() -> Step {
             "--profile",
             "integration",
             "-p",
-            "journeys",
+            "journeys-fault-matrix",
             "--features",
             "integration",
             "-E",
@@ -1014,8 +1014,9 @@ fn fault_matrix_env_urls_present() -> bool {
         .iter()
         .all(|k| std::env::var_os(k).is_some());
     let pg_all = pg_opt_in && pg_five_tuple;
+    let redis = std::env::var_os("REDIS_TEST_URL").is_some();
     let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
-    pg_all && amqp
+    pg_all && redis && amqp
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::clean_cmd`]
@@ -1075,7 +1076,7 @@ pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
     Ok(())
 }
 
-/// N-028 consistency fault matrix runner（opt-in）：Postgres + RabbitMQ only.
+/// N-028 consistency fault matrix runner（opt-in）：Postgres + RabbitMQ + Redis.
 pub(crate) fn run_consistency_fault_matrix(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
@@ -1089,14 +1090,14 @@ pub(crate) fn run_consistency_fault_matrix(allow_missing_tools: bool) -> Result<
                 eprintln!(
                     "consistency-fault-matrix: [跳过] docker daemon 不可达（--allow-missing-tools 宽限）。\
                      外部路径需同时设置：RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD；\
-                     + RSS_AMQP_TEST_URL 指向长存 RabbitMQ base broker URL；并预建 vhost rss_fault_matrix 且授权该 URL 用户。"
+                     + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向长存 Redis/RabbitMQ base broker URL；并预建 vhost rss_fault_matrix 且授权该 URL 用户。"
                 );
                 return Ok(());
             }
             ToolAction::Fail => bail!(
                 "consistency-fault-matrix: docker daemon 不可达（容器 self-provision 需 docker）。\
                  启动 Docker，或同时设置 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD \
-                 + RSS_AMQP_TEST_URL 指向运行中的 Postgres/RabbitMQ；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权；\
+                 + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向运行中的 Postgres/Redis/RabbitMQ；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权；\
                  确需跳过用 --allow-missing-tools。"
             ),
         }
@@ -1816,7 +1817,7 @@ mod tests {
             "须 --profile integration，实际 {:?}",
             step.args
         );
-        assert!(step.args.contains(&"-p") && step.args.contains(&"journeys"));
+        assert!(step.args.contains(&"-p") && step.args.contains(&"journeys-fault-matrix"));
         assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
         assert!(
             step.args

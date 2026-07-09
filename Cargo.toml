@@ -62,6 +62,8 @@ members = [
   "xtask",
   # 验收 journey 组合根（demo 组装根 + 端到端集成测试；RW-G1 追踪弹）
   "journeys",
+  # N-028 consistency fault matrix 专用 journey：crate 图不依赖 sqlx，直写 PG 表不可表达。
+  "journeys-fault-matrix",
   # 契约派生（committed，被域依赖）
   "generated",
 ]

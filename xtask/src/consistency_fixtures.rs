@@ -22,7 +22,8 @@ const MIN_READY_CASES: usize = 12;
 const MIN_READY_PER_MECHANISM: usize = 2;
 const MAX_ALIAS_LEN: usize = 128;
 const LONG_MATERIAL_MIN: usize = 32;
-const JOURNEY_RUNNER_SOURCE: &str = "journeys/tests/consistency_fault_matrix_journey.rs";
+const JOURNEY_RUNNER_SOURCE: &str =
+    "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -90,6 +91,7 @@ enum CrashRunner {
     Postgres,
     Rabbitmq,
     PostgresRabbitmq,
+    PostgresRedis,
 }
 
 impl CrashRunner {
@@ -98,7 +100,194 @@ impl CrashRunner {
             "Postgres" => Some(Self::Postgres),
             "Rabbitmq" => Some(Self::Rabbitmq),
             "PostgresRabbitmq" => Some(Self::PostgresRabbitmq),
+            "PostgresRedis" => Some(Self::PostgresRedis),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrashFaultSpec {
+    OutboxAfterPublishBeforeSettle,
+    OutboxTransientPublishFailure,
+    OutboxPermanentPublishFailure,
+    InboxClaimCrashBeforeCommit,
+    InboxCommitBeforeAckCrash,
+    InboxLeaseLostBeforeCommit,
+    SagaForwardCompletedBeforeCheckpoint,
+    SagaCompensationInterrupted,
+    ProjectionAfterApplyBeforeCheckpoint,
+    ProjectionStaleCheckpointWriter,
+    ReconcileDispatchBeforeResultRecord,
+    ReconcileLeaseLostBeforeWrite,
+}
+
+impl CrashFaultSpec {
+    fn from_rust_variant(value: &str) -> Option<Self> {
+        match value {
+            "OutboxAfterPublishBeforeSettle" => Some(Self::OutboxAfterPublishBeforeSettle),
+            "OutboxTransientPublishFailure" => Some(Self::OutboxTransientPublishFailure),
+            "OutboxPermanentPublishFailure" => Some(Self::OutboxPermanentPublishFailure),
+            "InboxClaimCrashBeforeCommit" => Some(Self::InboxClaimCrashBeforeCommit),
+            "InboxCommitBeforeAckCrash" => Some(Self::InboxCommitBeforeAckCrash),
+            "InboxLeaseLostBeforeCommit" => Some(Self::InboxLeaseLostBeforeCommit),
+            "SagaForwardCompletedBeforeCheckpoint" => {
+                Some(Self::SagaForwardCompletedBeforeCheckpoint)
+            }
+            "SagaCompensationInterrupted" => Some(Self::SagaCompensationInterrupted),
+            "ProjectionAfterApplyBeforeCheckpoint" => {
+                Some(Self::ProjectionAfterApplyBeforeCheckpoint)
+            }
+            "ProjectionStaleCheckpointWriter" => Some(Self::ProjectionStaleCheckpointWriter),
+            "ReconcileDispatchBeforeResultRecord" => {
+                Some(Self::ReconcileDispatchBeforeResultRecord)
+            }
+            "ReconcileLeaseLostBeforeWrite" => Some(Self::ReconcileLeaseLostBeforeWrite),
+            _ => None,
+        }
+    }
+
+    fn from_fixture(fixture: &Fixture) -> Option<Self> {
+        match (
+            fixture.mechanism,
+            fixture.crash_point.as_str(),
+            fixture.expected_invariant.as_str(),
+        ) {
+            (
+                CrashMechanism::Outbox,
+                "after-publish-before-settle",
+                "outbox-publish-settled-once",
+            ) => Some(Self::OutboxAfterPublishBeforeSettle),
+            (
+                CrashMechanism::Outbox,
+                "during-transient-publish",
+                "outbox-transient-remains-retryable",
+            ) => Some(Self::OutboxTransientPublishFailure),
+            (CrashMechanism::Outbox, "during-permanent-publish", "outbox-dlx-summary-redacted") => {
+                Some(Self::OutboxPermanentPublishFailure)
+            }
+            (
+                CrashMechanism::Inbox,
+                "after-claim-before-commit",
+                "inbox-stale-claim-reclaimable",
+            ) => Some(Self::InboxClaimCrashBeforeCommit),
+            (CrashMechanism::Inbox, "after-commit-before-ack", "inbox-redelivery-dedupes-once") => {
+                Some(Self::InboxCommitBeforeAckCrash)
+            }
+            (
+                CrashMechanism::Inbox,
+                "lease-lost-before-commit",
+                "inbox-stale-lease-cannot-commit",
+            ) => Some(Self::InboxLeaseLostBeforeCommit),
+            (
+                CrashMechanism::Saga,
+                "after-forward-before-checkpoint",
+                "saga-resume-skips-completed-step",
+            ) => Some(Self::SagaForwardCompletedBeforeCheckpoint),
+            (CrashMechanism::Saga, "during-compensation", "saga-compensation-resumes-once") => {
+                Some(Self::SagaCompensationInterrupted)
+            }
+            (
+                CrashMechanism::Projection,
+                "after-apply-before-checkpoint",
+                "projection-replay-idempotent",
+            ) => Some(Self::ProjectionAfterApplyBeforeCheckpoint),
+            (
+                CrashMechanism::Projection,
+                "stale-checkpoint-writer",
+                "projection-stale-writer-rejected",
+            ) => Some(Self::ProjectionStaleCheckpointWriter),
+            (
+                CrashMechanism::Reconcile,
+                "after-dispatch-before-result-record",
+                "reconcile-dispatch-key-stable",
+            ) => Some(Self::ReconcileDispatchBeforeResultRecord),
+            (
+                CrashMechanism::Reconcile,
+                "lease-lost-before-write",
+                "reconcile-stale-writer-rejected",
+            ) => Some(Self::ReconcileLeaseLostBeforeWrite),
+            _ => None,
+        }
+    }
+
+    fn expected_runner(self) -> CrashRunner {
+        match self {
+            Self::OutboxAfterPublishBeforeSettle | Self::InboxCommitBeforeAckCrash => {
+                CrashRunner::PostgresRabbitmq
+            }
+            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
+                CrashRunner::PostgresRedis
+            }
+            Self::OutboxTransientPublishFailure
+            | Self::OutboxPermanentPublishFailure
+            | Self::InboxClaimCrashBeforeCommit
+            | Self::InboxLeaseLostBeforeCommit
+            | Self::ProjectionAfterApplyBeforeCheckpoint
+            | Self::ProjectionStaleCheckpointWriter
+            | Self::ReconcileDispatchBeforeResultRecord
+            | Self::ReconcileLeaseLostBeforeWrite => CrashRunner::Postgres,
+        }
+    }
+
+    fn expected_domain(self) -> &'static str {
+        match self {
+            Self::OutboxTransientPublishFailure | Self::ProjectionStaleCheckpointWriter => {
+                "settings"
+            }
+            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
+                "billing"
+            }
+            Self::ProjectionAfterApplyBeforeCheckpoint => "audit",
+            Self::OutboxAfterPublishBeforeSettle
+            | Self::OutboxPermanentPublishFailure
+            | Self::InboxClaimCrashBeforeCommit
+            | Self::InboxCommitBeforeAckCrash
+            | Self::InboxLeaseLostBeforeCommit
+            | Self::ReconcileDispatchBeforeResultRecord
+            | Self::ReconcileLeaseLostBeforeWrite => "identity",
+        }
+    }
+
+    fn expected_contract_id(self) -> &'static str {
+        match self {
+            Self::OutboxAfterPublishBeforeSettle
+            | Self::InboxClaimCrashBeforeCommit
+            | Self::InboxCommitBeforeAckCrash
+            | Self::InboxLeaseLostBeforeCommit => "identity.session-created",
+            Self::OutboxTransientPublishFailure => "settings.config-version-changed",
+            Self::OutboxPermanentPublishFailure => "identity.role-assigned",
+            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
+                "billing.checkout"
+            }
+            Self::ProjectionAfterApplyBeforeCheckpoint => "audit.session-projection",
+            Self::ProjectionStaleCheckpointWriter => "settings.config-projection",
+            Self::ReconcileDispatchBeforeResultRecord | Self::ReconcileLeaseLostBeforeWrite => {
+                "identity.reconcile-loop"
+            }
+        }
+    }
+
+    fn expected_run_fn(self) -> &'static str {
+        match self {
+            Self::OutboxAfterPublishBeforeSettle => "run_outbox_after_publish_before_settle",
+            Self::OutboxTransientPublishFailure => "run_outbox_transient_publish_failure",
+            Self::OutboxPermanentPublishFailure => "run_outbox_permanent_publish_failure",
+            Self::InboxClaimCrashBeforeCommit => "run_inbox_claim_crash_before_commit",
+            Self::InboxCommitBeforeAckCrash => "run_inbox_commit_before_ack_crash",
+            Self::InboxLeaseLostBeforeCommit => "run_inbox_lease_lost_before_commit",
+            Self::SagaForwardCompletedBeforeCheckpoint => {
+                "run_saga_forward_completed_before_checkpoint"
+            }
+            Self::SagaCompensationInterrupted => "run_saga_compensation_interrupted",
+            Self::ProjectionAfterApplyBeforeCheckpoint => {
+                "run_projection_after_apply_before_checkpoint"
+            }
+            Self::ProjectionStaleCheckpointWriter => "run_projection_stale_checkpoint_writer",
+            Self::ReconcileDispatchBeforeResultRecord => {
+                "run_reconcile_dispatch_before_result_record"
+            }
+            Self::ReconcileLeaseLostBeforeWrite => "run_reconcile_lease_lost_before_write",
         }
     }
 }
@@ -145,11 +334,9 @@ struct Fixture {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunnerContract {
-    domain: String,
-    contract_id: String,
-    crash_point: String,
-    expected_invariant: String,
+    fault_spec: CrashFaultSpec,
     runner: CrashRunner,
+    run_fn: String,
 }
 
 #[derive(Debug, Clone)]
@@ -475,6 +662,12 @@ fn validate_fixture(
             "mechanism and level are inconsistent with consistency-runtime rules",
         ));
     }
+    if CrashFaultSpec::from_fixture(fixture).is_none() {
+        findings.push(invalid(
+            rel_path,
+            "crashPoint/expectedInvariant must map to a closed CrashFaultSpec",
+        ));
+    }
     if fixture.status == CrashStatus::Ready {
         match journey_runners.get(&fixture.id) {
             Some(runner) => validate_runner_contract(&mut findings, rel_path, fixture, runner),
@@ -507,34 +700,24 @@ fn validate_runner_contract(
     fixture: &Fixture,
     runner: &RunnerContract,
 ) {
-    for (field, declared, mapped) in [
-        ("domain", fixture.domain.as_str(), runner.domain.as_str()),
-        (
-            "contractId",
-            fixture.contract_id.as_str(),
-            runner.contract_id.as_str(),
-        ),
-        (
-            "crashPoint",
-            fixture.crash_point.as_str(),
-            runner.crash_point.as_str(),
-        ),
-        (
-            "expectedInvariant",
-            fixture.expected_invariant.as_str(),
-            runner.expected_invariant.as_str(),
-        ),
-    ] {
-        if declared != mapped {
-            findings.push(finding(
-                Rule::RunnerMismatch,
-                rel_path,
-                format!(
-                    "ready fixture `{}` declares {field} `{declared}`, but journey runner contract is `{mapped}`",
-                    fixture.id
-                ),
-            ));
-        }
+    match CrashFaultSpec::from_fixture(fixture) {
+        Some(spec) if spec == runner.fault_spec => {}
+        Some(spec) => findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "ready fixture `{}` maps to fault spec {:?}, but journey runner contract is {:?}",
+                fixture.id, spec, runner.fault_spec
+            ),
+        )),
+        None => findings.push(finding(
+            Rule::InvalidFixture,
+            rel_path,
+            format!(
+                "ready fixture `{}` crashPoint/expectedInvariant does not map to a closed CrashFaultSpec",
+                fixture.id
+            ),
+        )),
     }
     if fixture.runner != runner.runner {
         findings.push(finding(
@@ -543,6 +726,58 @@ fn validate_runner_contract(
             format!(
                 "ready fixture `{}` declares runner {:?}, but journey runner contract is {:?}",
                 fixture.id, fixture.runner, runner.runner
+            ),
+        ));
+    }
+    if runner.runner != runner.fault_spec.expected_runner() {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "journey runner for `{}` binds runner {:?}, but fault spec {:?} expects {:?}",
+                fixture.id,
+                runner.runner,
+                runner.fault_spec,
+                runner.fault_spec.expected_runner()
+            ),
+        ));
+    }
+    if runner.run_fn != runner.fault_spec.expected_run_fn() {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "journey runner for `{}` binds function `{}`, but fault spec {:?} expects `{}`",
+                fixture.id,
+                runner.run_fn,
+                runner.fault_spec,
+                runner.fault_spec.expected_run_fn()
+            ),
+        ));
+    }
+    if fixture.domain != runner.fault_spec.expected_domain() {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "ready fixture `{}` declares domain `{}`, but fault spec {:?} expects `{}`",
+                fixture.id,
+                fixture.domain,
+                runner.fault_spec,
+                runner.fault_spec.expected_domain()
+            ),
+        ));
+    }
+    if fixture.contract_id != runner.fault_spec.expected_contract_id() {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "ready fixture `{}` declares contract `{}`, but fault spec {:?} expects `{}`",
+                fixture.id,
+                fixture.contract_id,
+                runner.fault_spec,
+                runner.fault_spec.expected_contract_id()
             ),
         ));
     }
@@ -589,27 +824,23 @@ fn parse_journey_runner_entry(entry: &Expr) -> Result<(String, RunnerContract), 
     if !expr_path_ends_with(&call.func, &["ReadyCaseRunner", "new"]) {
         return Err("READY_CASE_RUNNERS entry must call ReadyCaseRunner::new".to_string());
     }
-    if call.args.len() != 7 {
+    if call.args.len() != 4 {
         return Err(format!(
-            "ReadyCaseRunner::new must have 7 arguments, got {}",
+            "ReadyCaseRunner::new must have 4 arguments, got {}",
             call.args.len()
         ));
     }
     let mut args = call.args.iter();
     let id = string_arg(args.next(), "id")?;
-    let domain = string_arg(args.next(), "domain")?;
-    let contract_id = string_arg(args.next(), "contractId")?;
-    let crash_point = string_arg(args.next(), "crashPoint")?;
-    let expected_invariant = string_arg(args.next(), "expectedInvariant")?;
+    let fault_spec = crash_fault_spec_arg(args.next())?;
     let runner = crash_runner_arg(args.next())?;
+    let run_fn = function_arg(args.next())?;
     Ok((
         id,
         RunnerContract {
-            domain,
-            contract_id,
-            crash_point,
-            expected_invariant,
+            fault_spec,
             runner,
+            run_fn,
         },
     ))
 }
@@ -652,6 +883,31 @@ fn crash_runner_arg(expr: Option<&Expr>) -> Result<CrashRunner, String> {
         .unwrap_or_default();
     CrashRunner::from_rust_variant(&variant)
         .ok_or_else(|| format!("unknown READY_CASE_RUNNERS runner `{variant}`"))
+}
+
+fn crash_fault_spec_arg(expr: Option<&Expr>) -> Result<CrashFaultSpec, String> {
+    let Some(Expr::Path(path)) = expr else {
+        return Err("ReadyCaseRunner::fault_spec must be a CrashFaultSpec variant".to_string());
+    };
+    let variant = path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default();
+    CrashFaultSpec::from_rust_variant(&variant)
+        .ok_or_else(|| format!("unknown READY_CASE_RUNNERS fault spec `{variant}`"))
+}
+
+fn function_arg(expr: Option<&Expr>) -> Result<String, String> {
+    let Some(Expr::Path(path)) = expr else {
+        return Err("ReadyCaseRunner::run must be a function path".to_string());
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .ok_or_else(|| "ReadyCaseRunner::run must be a function path".to_string())
 }
 
 fn fixture_strings(fixture: &Fixture) -> [(&'static str, &str); 10] {
@@ -1006,10 +1262,7 @@ readiness = "required"
 const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     ReadyCaseRunner::new(
         "outbox-after-publish-before-settle",
-        "identity",
-        "identity.session-created",
-        "after-publish-before-settle",
-        "outbox-publish-settled-once",
+        CrashFaultSpec::OutboxAfterPublishBeforeSettle,
         CrashRunner::PostgresRabbitmq,
         run_outbox_after_publish_before_settle,
     ),
@@ -1032,7 +1285,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             root.join("contracts/event/identity/v1/session-created/contract.toml"),
             VALID_CONTRACT,
         )?;
-        fs::create_dir_all(root.join("journeys/tests"))?;
+        fs::create_dir_all(root.join("journeys-fault-matrix/tests"))?;
         fs::write(root.join(JOURNEY_RUNNER_SOURCE), VALID_JOURNEY_RUNNERS)?;
         Ok(root)
     }
@@ -1143,6 +1396,42 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     }
 
     #[test]
+    fn red_runner_function_mismatch_is_reported() -> Result<()> {
+        let root = temp_root("runner-fn-mismatch")?;
+        fs::write(
+            root.join(JOURNEY_RUNNER_SOURCE),
+            VALID_JOURNEY_RUNNERS.replace(
+                "run_outbox_after_publish_before_settle",
+                "run_outbox_transient_publish_failure",
+            ),
+        )?;
+        write_fixture(&root, "runner-fn", VALID)?;
+        let (_, findings) = check_root(&root);
+        assert!(
+            findings
+                .iter()
+                .any(|f| { f.rule == Rule::RunnerMismatch && f.detail.contains("binds function") }),
+            "runner function mismatch should be reported: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn crash_fault_spec_variants_match_testkit() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let xtask_src = fs::read_to_string(root.join("xtask/src/consistency_fixtures.rs"))?;
+        let testkit_src = fs::read_to_string(root.join("crates/testkit/src/crash_matrix.rs"))?;
+        let xtask_variants = enum_variants(&xtask_src, "CrashFaultSpec")?;
+        let testkit_variants = enum_variants(&testkit_src, "CrashFaultSpec")?;
+
+        assert_eq!(
+            xtask_variants, testkit_variants,
+            "xtask and testkit CrashFaultSpec variants drifted"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn red_runner_contract_invariant_mismatch_is_reported() -> Result<()> {
         let root = temp_root("runner-invariant")?;
         write_fixture(
@@ -1156,11 +1445,28 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         let (_, findings) = check_root(&root);
         assert!(
             findings.iter().any(|f| {
-                f.rule == Rule::RunnerMismatch && f.detail.contains("expectedInvariant")
+                f.rule == Rule::InvalidFixture
+                    && f.detail.contains("crashPoint/expectedInvariant must map")
             }),
-            "runner expectedInvariant mismatch should be reported: {findings:?}"
+            "closed fault spec mismatch should be reported: {findings:?}"
         );
         Ok(())
+    }
+
+    fn enum_variants(src: &str, name: &str) -> Result<Vec<String>> {
+        let file = syn::parse_file(src)?;
+        for item in file.items {
+            if let Item::Enum(item) = item {
+                if item.ident == name {
+                    return Ok(item
+                        .variants
+                        .iter()
+                        .map(|variant| variant.ident.to_string())
+                        .collect());
+                }
+            }
+        }
+        anyhow::bail!("enum `{name}` not found")
     }
 
     #[test]
@@ -1178,8 +1484,8 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         assert!(
             findings
                 .iter()
-                .any(|f| { f.rule == Rule::RunnerMismatch && f.detail.contains("contractId") }),
-            "runner contractId mismatch should be reported: {findings:?}"
+                .any(|f| { f.rule == Rule::InvalidFixture && f.detail.contains("not declared") }),
+            "contractId mismatch should be reported by contract validation: {findings:?}"
         );
         Ok(())
     }

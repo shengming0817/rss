@@ -81,6 +81,206 @@ pub enum CrashRunner {
     Postgres,
     Rabbitmq,
     PostgresRabbitmq,
+    PostgresRedis,
+}
+
+/// Closed semantic fault covered by the consistency crash matrix.
+///
+/// # INVARIANT: CONSISTENCY-FAULT-SPEC-01 { level = "Hard", exec = "native-compile", source = "code" }
+///
+/// Ready-case runners bind this enum, not free-form `crashPoint` / `expectedInvariant`
+/// strings. Adding a new executable fault therefore requires extending this closed type and the
+/// parser below; a typo cannot silently become a runtime-only mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CrashFaultSpec {
+    OutboxAfterPublishBeforeSettle,
+    OutboxTransientPublishFailure,
+    OutboxPermanentPublishFailure,
+    InboxClaimCrashBeforeCommit,
+    InboxCommitBeforeAckCrash,
+    InboxLeaseLostBeforeCommit,
+    SagaForwardCompletedBeforeCheckpoint,
+    SagaCompensationInterrupted,
+    ProjectionAfterApplyBeforeCheckpoint,
+    ProjectionStaleCheckpointWriter,
+    ReconcileDispatchBeforeResultRecord,
+    ReconcileLeaseLostBeforeWrite,
+}
+
+impl CrashFaultSpec {
+    /// Derive the closed fault spec from the provider-agnostic fixture fields.
+    pub fn from_parts(
+        mechanism: CrashMechanism,
+        crash_point: &str,
+        expected_invariant: &str,
+    ) -> Option<Self> {
+        match (mechanism, crash_point, expected_invariant) {
+            (
+                CrashMechanism::Outbox,
+                "after-publish-before-settle",
+                "outbox-publish-settled-once",
+            ) => Some(Self::OutboxAfterPublishBeforeSettle),
+            (
+                CrashMechanism::Outbox,
+                "during-transient-publish",
+                "outbox-transient-remains-retryable",
+            ) => Some(Self::OutboxTransientPublishFailure),
+            (CrashMechanism::Outbox, "during-permanent-publish", "outbox-dlx-summary-redacted") => {
+                Some(Self::OutboxPermanentPublishFailure)
+            }
+            (
+                CrashMechanism::Inbox,
+                "after-claim-before-commit",
+                "inbox-stale-claim-reclaimable",
+            ) => Some(Self::InboxClaimCrashBeforeCommit),
+            (CrashMechanism::Inbox, "after-commit-before-ack", "inbox-redelivery-dedupes-once") => {
+                Some(Self::InboxCommitBeforeAckCrash)
+            }
+            (
+                CrashMechanism::Inbox,
+                "lease-lost-before-commit",
+                "inbox-stale-lease-cannot-commit",
+            ) => Some(Self::InboxLeaseLostBeforeCommit),
+            (
+                CrashMechanism::Saga,
+                "after-forward-before-checkpoint",
+                "saga-resume-skips-completed-step",
+            ) => Some(Self::SagaForwardCompletedBeforeCheckpoint),
+            (CrashMechanism::Saga, "during-compensation", "saga-compensation-resumes-once") => {
+                Some(Self::SagaCompensationInterrupted)
+            }
+            (
+                CrashMechanism::Projection,
+                "after-apply-before-checkpoint",
+                "projection-replay-idempotent",
+            ) => Some(Self::ProjectionAfterApplyBeforeCheckpoint),
+            (
+                CrashMechanism::Projection,
+                "stale-checkpoint-writer",
+                "projection-stale-writer-rejected",
+            ) => Some(Self::ProjectionStaleCheckpointWriter),
+            (
+                CrashMechanism::Reconcile,
+                "after-dispatch-before-result-record",
+                "reconcile-dispatch-key-stable",
+            ) => Some(Self::ReconcileDispatchBeforeResultRecord),
+            (
+                CrashMechanism::Reconcile,
+                "lease-lost-before-write",
+                "reconcile-stale-writer-rejected",
+            ) => Some(Self::ReconcileLeaseLostBeforeWrite),
+            _ => None,
+        }
+    }
+
+    /// Parse a Rust enum variant spelling from the journey runner table.
+    pub fn from_rust_variant(value: &str) -> Option<Self> {
+        match value {
+            "OutboxAfterPublishBeforeSettle" => Some(Self::OutboxAfterPublishBeforeSettle),
+            "OutboxTransientPublishFailure" => Some(Self::OutboxTransientPublishFailure),
+            "OutboxPermanentPublishFailure" => Some(Self::OutboxPermanentPublishFailure),
+            "InboxClaimCrashBeforeCommit" => Some(Self::InboxClaimCrashBeforeCommit),
+            "InboxCommitBeforeAckCrash" => Some(Self::InboxCommitBeforeAckCrash),
+            "InboxLeaseLostBeforeCommit" => Some(Self::InboxLeaseLostBeforeCommit),
+            "SagaForwardCompletedBeforeCheckpoint" => {
+                Some(Self::SagaForwardCompletedBeforeCheckpoint)
+            }
+            "SagaCompensationInterrupted" => Some(Self::SagaCompensationInterrupted),
+            "ProjectionAfterApplyBeforeCheckpoint" => {
+                Some(Self::ProjectionAfterApplyBeforeCheckpoint)
+            }
+            "ProjectionStaleCheckpointWriter" => Some(Self::ProjectionStaleCheckpointWriter),
+            "ReconcileDispatchBeforeResultRecord" => {
+                Some(Self::ReconcileDispatchBeforeResultRecord)
+            }
+            "ReconcileLeaseLostBeforeWrite" => Some(Self::ReconcileLeaseLostBeforeWrite),
+            _ => None,
+        }
+    }
+
+    /// Expected real-backend runner for this closed fault.
+    pub fn expected_runner(self) -> CrashRunner {
+        match self {
+            Self::OutboxAfterPublishBeforeSettle | Self::InboxCommitBeforeAckCrash => {
+                CrashRunner::PostgresRabbitmq
+            }
+            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
+                CrashRunner::PostgresRedis
+            }
+            Self::OutboxTransientPublishFailure
+            | Self::OutboxPermanentPublishFailure
+            | Self::InboxClaimCrashBeforeCommit
+            | Self::InboxLeaseLostBeforeCommit
+            | Self::ProjectionAfterApplyBeforeCheckpoint
+            | Self::ProjectionStaleCheckpointWriter
+            | Self::ReconcileDispatchBeforeResultRecord
+            | Self::ReconcileLeaseLostBeforeWrite => CrashRunner::Postgres,
+        }
+    }
+
+    /// Expected fixture domain for this closed fault.
+    pub fn expected_domain(self) -> &'static str {
+        match self {
+            Self::OutboxTransientPublishFailure | Self::ProjectionStaleCheckpointWriter => {
+                "settings"
+            }
+            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
+                "billing"
+            }
+            Self::ProjectionAfterApplyBeforeCheckpoint => "audit",
+            Self::OutboxAfterPublishBeforeSettle
+            | Self::OutboxPermanentPublishFailure
+            | Self::InboxClaimCrashBeforeCommit
+            | Self::InboxCommitBeforeAckCrash
+            | Self::InboxLeaseLostBeforeCommit
+            | Self::ReconcileDispatchBeforeResultRecord
+            | Self::ReconcileLeaseLostBeforeWrite => "identity",
+        }
+    }
+
+    /// Expected fixture contract id for this closed fault.
+    pub fn expected_contract_id(self) -> &'static str {
+        match self {
+            Self::OutboxAfterPublishBeforeSettle
+            | Self::InboxClaimCrashBeforeCommit
+            | Self::InboxCommitBeforeAckCrash
+            | Self::InboxLeaseLostBeforeCommit => "identity.session-created",
+            Self::OutboxTransientPublishFailure => "settings.config-version-changed",
+            Self::OutboxPermanentPublishFailure => "identity.role-assigned",
+            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
+                "billing.checkout"
+            }
+            Self::ProjectionAfterApplyBeforeCheckpoint => "audit.session-projection",
+            Self::ProjectionStaleCheckpointWriter => "settings.config-projection",
+            Self::ReconcileDispatchBeforeResultRecord | Self::ReconcileLeaseLostBeforeWrite => {
+                "identity.reconcile-loop"
+            }
+        }
+    }
+
+    /// Expected journey runner function name for this closed fault.
+    pub fn expected_run_fn(self) -> &'static str {
+        match self {
+            Self::OutboxAfterPublishBeforeSettle => "run_outbox_after_publish_before_settle",
+            Self::OutboxTransientPublishFailure => "run_outbox_transient_publish_failure",
+            Self::OutboxPermanentPublishFailure => "run_outbox_permanent_publish_failure",
+            Self::InboxClaimCrashBeforeCommit => "run_inbox_claim_crash_before_commit",
+            Self::InboxCommitBeforeAckCrash => "run_inbox_commit_before_ack_crash",
+            Self::InboxLeaseLostBeforeCommit => "run_inbox_lease_lost_before_commit",
+            Self::SagaForwardCompletedBeforeCheckpoint => {
+                "run_saga_forward_completed_before_checkpoint"
+            }
+            Self::SagaCompensationInterrupted => "run_saga_compensation_interrupted",
+            Self::ProjectionAfterApplyBeforeCheckpoint => {
+                "run_projection_after_apply_before_checkpoint"
+            }
+            Self::ProjectionStaleCheckpointWriter => "run_projection_stale_checkpoint_writer",
+            Self::ReconcileDispatchBeforeResultRecord => {
+                "run_reconcile_dispatch_before_result_record"
+            }
+            Self::ReconcileLeaseLostBeforeWrite => "run_reconcile_lease_lost_before_write",
+        }
+    }
 }
 
 /// State of broker tenant authority represented by a fixture.
@@ -215,6 +415,17 @@ impl CrashCase {
         self.runner
     }
 
+    /// Closed fault spec derived from the fixture's data-only DSL fields.
+    pub fn fault_spec(&self) -> Result<CrashFaultSpec, CrashFixtureError> {
+        CrashFaultSpec::from_parts(self.mechanism, &self.crash_point, &self.expected_invariant)
+            .ok_or_else(|| {
+                invalid(
+                    &self.id,
+                    "crashPoint/expectedInvariant must map to a closed CrashFaultSpec",
+                )
+            })
+    }
+
     fn validate(&self) -> Result<(), CrashFixtureError> {
         if self.schema_version != 1 {
             return Err(invalid(
@@ -232,6 +443,14 @@ impl CrashCase {
         validate_slug("crashPoint", &self.crash_point, &self.id)?;
         validate_slug("expectedInvariant", &self.expected_invariant, &self.id)?;
         validate_mechanism_level(self)?;
+        if CrashFaultSpec::from_parts(self.mechanism, &self.crash_point, &self.expected_invariant)
+            .is_none()
+        {
+            return Err(invalid(
+                &self.id,
+                "crashPoint/expectedInvariant must map to a closed CrashFaultSpec",
+            ));
+        }
         match self.status {
             CrashStatus::Pending => {
                 let Some(reason) = self.pending_reason.as_deref() else {
@@ -631,4 +850,59 @@ fn looks_name_like_pii(lower: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const READY_OUTBOX: &str = r#"
+schemaVersion = 1
+id = "outbox-after-publish-before-settle"
+title = "publish succeeds before settle crash"
+level = "L2"
+mechanism = "outbox"
+status = "ready"
+domain = "identity"
+contractId = "identity.session-created"
+tenantAlias = "tenant-a"
+messageAlias = "message-a"
+partitionKeyAlias = "aggregate-a"
+tenantAuthority = "valid"
+crashPoint = "after-publish-before-settle"
+expectedInvariant = "outbox-publish-settled-once"
+runner = "postgres-rabbitmq"
+"#;
+
+    #[test]
+    fn ready_case_derives_closed_fault_spec() -> Result<(), CrashFixtureError> {
+        let case = CrashCase::from_toml_str(READY_OUTBOX)?;
+
+        assert_eq!(
+            case.fault_spec()?,
+            CrashFaultSpec::OutboxAfterPublishBeforeSettle
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_fault_spec_is_rejected() -> Result<(), CrashFixtureError> {
+        let result = CrashCase::from_toml_str(&READY_OUTBOX.replace(
+            "expectedInvariant = \"outbox-publish-settled-once\"",
+            "expectedInvariant = \"outbox-drifted-invariant\"",
+        ));
+        match result {
+            Err(err) => {
+                assert!(
+                    err.to_string().contains("closed CrashFaultSpec"),
+                    "unexpected error: {err}"
+                );
+                Ok(())
+            }
+            Ok(case) => Err(invalid(
+                case.id(),
+                "unknown fault spec unexpectedly passed validation",
+            )),
+        }
+    }
 }

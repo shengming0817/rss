@@ -4,7 +4,7 @@
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain）；
-//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `examples/*` / `journeys` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `examples/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -128,6 +128,7 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
         || member_path.starts_with("assemblies/")
         || member_path == "journeys"
         || member_path.starts_with("journeys/")
+        || member_path == "journeys-fault-matrix"
     {
         return Some(Layer::Root);
     }
@@ -247,6 +248,7 @@ mod tests {
     #[case("iotdevice", "examples/iotdevice", Some(Layer::Example))]
     #[case("xtask", "xtask", Some(Layer::Root))]
     #[case("journeys", "journeys", Some(Layer::Root))]
+    #[case("journeys-fault-matrix", "journeys-fault-matrix", Some(Layer::Root))]
     #[case("memory", "adapters/memory", Some(Layer::Adapter))]
     fn classify_maps_known_members(
         #[case] name: &str,

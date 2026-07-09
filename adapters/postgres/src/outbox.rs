@@ -701,6 +701,66 @@ impl PgOutbox {
     }
 }
 
+#[cfg(feature = "fault-matrix-test-support")]
+pub(crate) async fn fault_matrix_publish_before_settle(
+    pool: &sqlx::PgPool,
+    publisher: Box<DynPublisher<'static>>,
+    tenant_authority: Arc<TenantAuthority>,
+    payload_protector: DlxPayloadProtector,
+    pending: &PendingEntry,
+) -> Result<(), EngineError> {
+    let store = PgStore { pool: pool.clone() };
+    let relay = PgOutbox::new(&store, publisher, tenant_authority, payload_protector);
+    let entry = pending.entry();
+    let event_id = entry.idem_key().as_str();
+    let Some((
+        _retry_count,
+        _lease_token,
+        tenant_id,
+        metadata_json,
+        domain,
+        contract_id,
+        topic,
+        contract_version,
+        schema_hash,
+        now_epoch,
+    )) = acquire_lease(pool, event_id).await?
+    else {
+        return Err(EngineError::new(EngineErrorKind::Invariant));
+    };
+    let tenant = parse_tenant_id(&tenant_id)?;
+    let row_contract = parse_outbox_contract_id(&contract_id)?;
+    validate_lease_scope(event_id, pending.subject(), tenant, &row_contract)?;
+    let mut metadata = hydrate_envelope_metadata(&metadata_json);
+    metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
+    apply_schema_headers_from_columns(&mut metadata, &contract_version, &schema_hash);
+    let metadata = relay.sign_metadata(
+        metadata,
+        TenantAuthoritySignInput {
+            tenant,
+            domain: &domain,
+            contract_id: &contract_id,
+            topic: &topic,
+            event_id,
+            now_epoch,
+        },
+    )?;
+    let request = PublishRequest::new(
+        diport::Topic::new(entry.topic().as_str()),
+        diport::MessageId::new(event_id),
+        entry.payload().to_vec(),
+    )
+    .with_metadata(metadata);
+    validate_publish_request_envelope(&request)
+        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+    relay
+        .publisher
+        .publish(request)
+        .await
+        .map_err(|_| EngineError::new(EngineErrorKind::Transient))?;
+    Ok(())
+}
+
 /// PostgreSQL outbox maintenance adapter：impl [`OutboxBacklog`] + [`RetentionSweeper`]，不持 publisher。
 ///
 /// relay 需要 per-domain publisher，因此仍由 [`PgOutbox`] 承载；sampler/sweeper 只需要 DB pool，不应为了

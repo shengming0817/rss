@@ -58,11 +58,15 @@ base64 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（tokio_util::sync::CancellationToken）——adopt 式 worker 两阶段关闭。
 tokio-util = { workspace = true }
+# fault-matrix-test-support 专用边界错误聚合；默认 feature 不启用。
+anyhow = { workspace = true, optional = true }
 
 [features]
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
 # testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。
 integration = ["testkit/containers"]
+# N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。
+fault-matrix-test-support = ["dep:anyhow"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

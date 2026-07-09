@@ -1,0 +1,33 @@
+[package]
+name = "journeys-fault-matrix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+amqp = { path = "../adapters/amqp" }
+consistency = { path = "../crates/consistency" }
+deadpool-redis = { workspace = true }
+diport = { path = "../crates/diport" }
+eventexec = { path = "../crates/eventexec" }
+generated = { path = "../generated" }
+postgres = { path = "../adapters/postgres", features = ["fault-matrix-test-support"] }
+redis-adapter = { path = "../adapters/redis", features = ["backend"] }
+secure = { path = "../crates/secure" }
+testkit = { path = "../crates/testkit" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+vocab = { path = "../crates/vocab" }
+
+[features]
+integration = ["testkit/containers", "amqp/integration", "redis-adapter/integration"]

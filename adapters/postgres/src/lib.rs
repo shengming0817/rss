@@ -31,6 +31,8 @@ mod dead_letter;
 mod dead_letter_payload;
 mod dlq;
 mod emitter;
+#[cfg(feature = "fault-matrix-test-support")]
+pub mod fault_matrix;
 mod inbox;
 mod migrator;
 mod outbox;

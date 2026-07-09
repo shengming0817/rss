@@ -13,7 +13,7 @@ must survive it, and the real backend runner used by the opt-in journey.
    match that contract's owner and `consistencyLevel`; do not use placeholder or
    future contract IDs.
 4. Use `status = "ready"` only after adding a matching runner in
-   `journeys/tests/consistency_fault_matrix_journey.rs`.
+   `journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs`.
 5. Include a non-empty `pendingReason` only for `status = "pending"`.
 6. Run `cargo test -p testkit` and `cargo xtask consistency-fixtures`.
 7. Run the real backend matrix with `cargo xtask consistency-fault-matrix`.
@@ -53,13 +53,13 @@ body-like field.
 coverage, and runner mappings.
 
 `cargo xtask consistency-fault-matrix` runs the real backend journey. It uses
-`cargo-nextest`, Postgres, and RabbitMQ. With Docker available, `testkit`
+`cargo-nextest`, Postgres, Redis, and RabbitMQ. With Docker available, `testkit`
 self-provisions containers. To use long-lived services instead, set
 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` plus `PGHOST`, `PGPORT`, `PGDATABASE`,
-`PGUSER`, `PGPASSWORD`, and set `RSS_AMQP_TEST_URL` to a base broker URL.
+`PGUSER`, `PGPASSWORD`, `REDIS_TEST_URL`, and set `RSS_AMQP_TEST_URL` to a base broker URL.
 For the RabbitMQ env path, pre-create vhost `rss_fault_matrix` and grant the
 URL user configure/write/read permissions on that vhost; the testkit env path
 only appends the vhost name and does not create it.
 
 Local cost is integration-test cost: expect container startup plus one targeted
-`journeys` test binary. It is intentionally not part of default `verify`.
+`journeys-fault-matrix` test binary. It is intentionally not part of default `verify`.
