@@ -1,0 +1,650 @@
+pub mod assembly_schema
+pub enum assembly_schema::AssemblyDomain
+pub assembly_schema::AssemblyDomain::Audit
+pub assembly_schema::AssemblyDomain::Contractreg
+pub assembly_schema::AssemblyDomain::Identity
+pub assembly_schema::AssemblyDomain::Settings
+pub assembly_schema::AssemblyDomain::Syshealth
+impl assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::as_str(&self) -> &'static str
+impl core::clone::Clone for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::clone(&self) -> assembly_schema::AssemblyDomain
+impl core::cmp::Eq for assembly_schema::AssemblyDomain
+impl core::cmp::Ord for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::cmp(&self, &assembly_schema::AssemblyDomain) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::eq(&self, &assembly_schema::AssemblyDomain) -> bool
+impl core::cmp::PartialOrd for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::partial_cmp(&self, &assembly_schema::AssemblyDomain) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::AssemblyDomain
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyDomain
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyDomain
+impl core::marker::Send for assembly_schema::AssemblyDomain
+impl core::marker::Sync for assembly_schema::AssemblyDomain
+impl core::marker::Unpin for assembly_schema::AssemblyDomain
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyDomain
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyDomain
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyDomain
+impl<Q, K> equivalent::Comparable<K> for assembly_schema::AssemblyDomain where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyDomain::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::AssemblyDomain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyDomain::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::AssemblyDomain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyDomain::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::AssemblyDomain where U: core::convert::From<T>
+pub fn assembly_schema::AssemblyDomain::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::AssemblyDomain where U: core::convert::Into<T>
+pub type assembly_schema::AssemblyDomain::Error = core::convert::Infallible
+pub fn assembly_schema::AssemblyDomain::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::AssemblyDomain where U: core::convert::TryFrom<T>
+pub type assembly_schema::AssemblyDomain::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::AssemblyDomain::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::AssemblyDomain where T: core::clone::Clone
+pub type assembly_schema::AssemblyDomain::Owned = T
+pub fn assembly_schema::AssemblyDomain::clone_into(&self, &mut T)
+pub fn assembly_schema::AssemblyDomain::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::AssemblyDomain where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::AssemblyDomain::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::AssemblyDomain where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyDomain::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::AssemblyDomain where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyDomain::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::AssemblyDomain where T: core::clone::Clone
+pub unsafe fn assembly_schema::AssemblyDomain::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::AssemblyDomain
+pub fn assembly_schema::AssemblyDomain::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::AssemblyDomain where T: for<'de> serde_core::de::Deserialize<'de>
+pub enum assembly_schema::AssemblyListenerKind
+pub assembly_schema::AssemblyListenerKind::Admin
+pub assembly_schema::AssemblyListenerKind::Health
+pub assembly_schema::AssemblyListenerKind::Internal
+pub assembly_schema::AssemblyListenerKind::Primary
+impl assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::clone(&self) -> assembly_schema::AssemblyListenerKind
+impl core::cmp::Eq for assembly_schema::AssemblyListenerKind
+impl core::cmp::Ord for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::cmp(&self, &assembly_schema::AssemblyListenerKind) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::eq(&self, &assembly_schema::AssemblyListenerKind) -> bool
+impl core::cmp::PartialOrd for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::partial_cmp(&self, &assembly_schema::AssemblyListenerKind) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::AssemblyListenerKind
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyListenerKind
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyListenerKind
+impl core::marker::Send for assembly_schema::AssemblyListenerKind
+impl core::marker::Sync for assembly_schema::AssemblyListenerKind
+impl core::marker::Unpin for assembly_schema::AssemblyListenerKind
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyListenerKind
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyListenerKind
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyListenerKind
+impl<Q, K> equivalent::Comparable<K> for assembly_schema::AssemblyListenerKind where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListenerKind::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::AssemblyListenerKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListenerKind::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::AssemblyListenerKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListenerKind::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::AssemblyListenerKind where U: core::convert::From<T>
+pub fn assembly_schema::AssemblyListenerKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::AssemblyListenerKind where U: core::convert::Into<T>
+pub type assembly_schema::AssemblyListenerKind::Error = core::convert::Infallible
+pub fn assembly_schema::AssemblyListenerKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::AssemblyListenerKind where U: core::convert::TryFrom<T>
+pub type assembly_schema::AssemblyListenerKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::AssemblyListenerKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::AssemblyListenerKind where T: core::clone::Clone
+pub type assembly_schema::AssemblyListenerKind::Owned = T
+pub fn assembly_schema::AssemblyListenerKind::clone_into(&self, &mut T)
+pub fn assembly_schema::AssemblyListenerKind::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::AssemblyListenerKind where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListenerKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::AssemblyListenerKind where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyListenerKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::AssemblyListenerKind where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyListenerKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::AssemblyListenerKind where T: core::clone::Clone
+pub unsafe fn assembly_schema::AssemblyListenerKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::AssemblyListenerKind::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::AssemblyListenerKind where T: for<'de> serde_core::de::Deserialize<'de>
+pub enum assembly_schema::AssemblyProfile
+pub assembly_schema::AssemblyProfile::Demo
+pub assembly_schema::AssemblyProfile::Production
+pub assembly_schema::AssemblyProfile::Test
+impl assembly_schema::AssemblyProfile
+pub fn assembly_schema::AssemblyProfile::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::AssemblyProfile
+pub fn assembly_schema::AssemblyProfile::clone(&self) -> assembly_schema::AssemblyProfile
+impl core::cmp::Eq for assembly_schema::AssemblyProfile
+impl core::cmp::PartialEq for assembly_schema::AssemblyProfile
+pub fn assembly_schema::AssemblyProfile::eq(&self, &assembly_schema::AssemblyProfile) -> bool
+impl core::fmt::Debug for assembly_schema::AssemblyProfile
+pub fn assembly_schema::AssemblyProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::AssemblyProfile
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyProfile
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyProfile
+pub fn assembly_schema::AssemblyProfile::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyProfile
+impl core::marker::Send for assembly_schema::AssemblyProfile
+impl core::marker::Sync for assembly_schema::AssemblyProfile
+impl core::marker::Unpin for assembly_schema::AssemblyProfile
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyProfile
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyProfile
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyProfile
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::AssemblyProfile where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyProfile::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::AssemblyProfile where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyProfile::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::AssemblyProfile where U: core::convert::From<T>
+pub fn assembly_schema::AssemblyProfile::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::AssemblyProfile where U: core::convert::Into<T>
+pub type assembly_schema::AssemblyProfile::Error = core::convert::Infallible
+pub fn assembly_schema::AssemblyProfile::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::AssemblyProfile where U: core::convert::TryFrom<T>
+pub type assembly_schema::AssemblyProfile::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::AssemblyProfile::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::AssemblyProfile where T: core::clone::Clone
+pub type assembly_schema::AssemblyProfile::Owned = T
+pub fn assembly_schema::AssemblyProfile::clone_into(&self, &mut T)
+pub fn assembly_schema::AssemblyProfile::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::AssemblyProfile where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::AssemblyProfile::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::AssemblyProfile where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyProfile::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::AssemblyProfile where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyProfile::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::AssemblyProfile where T: core::clone::Clone
+pub unsafe fn assembly_schema::AssemblyProfile::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::AssemblyProfile
+pub fn assembly_schema::AssemblyProfile::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::AssemblyProfile where T: for<'de> serde_core::de::Deserialize<'de>
+pub enum assembly_schema::AssemblyTopology
+pub assembly_schema::AssemblyTopology::Demo
+pub assembly_schema::AssemblyTopology::DurableIsolated
+pub assembly_schema::AssemblyTopology::DurableShared
+impl assembly_schema::AssemblyTopology
+pub fn assembly_schema::AssemblyTopology::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::AssemblyTopology
+pub fn assembly_schema::AssemblyTopology::clone(&self) -> assembly_schema::AssemblyTopology
+impl core::cmp::Eq for assembly_schema::AssemblyTopology
+impl core::cmp::PartialEq for assembly_schema::AssemblyTopology
+pub fn assembly_schema::AssemblyTopology::eq(&self, &assembly_schema::AssemblyTopology) -> bool
+impl core::fmt::Debug for assembly_schema::AssemblyTopology
+pub fn assembly_schema::AssemblyTopology::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::AssemblyTopology
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyTopology
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyTopology
+pub fn assembly_schema::AssemblyTopology::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyTopology
+impl core::marker::Send for assembly_schema::AssemblyTopology
+impl core::marker::Sync for assembly_schema::AssemblyTopology
+impl core::marker::Unpin for assembly_schema::AssemblyTopology
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyTopology
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyTopology
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyTopology
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::AssemblyTopology where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyTopology::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::AssemblyTopology where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyTopology::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::AssemblyTopology where U: core::convert::From<T>
+pub fn assembly_schema::AssemblyTopology::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::AssemblyTopology where U: core::convert::Into<T>
+pub type assembly_schema::AssemblyTopology::Error = core::convert::Infallible
+pub fn assembly_schema::AssemblyTopology::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::AssemblyTopology where U: core::convert::TryFrom<T>
+pub type assembly_schema::AssemblyTopology::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::AssemblyTopology::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::AssemblyTopology where T: core::clone::Clone
+pub type assembly_schema::AssemblyTopology::Owned = T
+pub fn assembly_schema::AssemblyTopology::clone_into(&self, &mut T)
+pub fn assembly_schema::AssemblyTopology::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::AssemblyTopology where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::AssemblyTopology::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::AssemblyTopology where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyTopology::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::AssemblyTopology where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyTopology::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::AssemblyTopology where T: core::clone::Clone
+pub unsafe fn assembly_schema::AssemblyTopology::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::AssemblyTopology
+pub fn assembly_schema::AssemblyTopology::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::AssemblyTopology where T: for<'de> serde_core::de::Deserialize<'de>
+pub enum assembly_schema::DiportPort
+pub assembly_schema::DiportPort::AckableSubscriber
+pub assembly_schema::DiportPort::AuditSink
+pub assembly_schema::DiportPort::Cas
+pub assembly_schema::DiportPort::KeyProvider
+pub assembly_schema::DiportPort::Lock
+pub assembly_schema::DiportPort::ObjectStore
+pub assembly_schema::DiportPort::Pdp
+pub assembly_schema::DiportPort::Publisher
+pub assembly_schema::DiportPort::RateLimiter
+pub assembly_schema::DiportPort::RevocationStore
+pub assembly_schema::DiportPort::Signer
+impl assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::clone(&self) -> assembly_schema::DiportPort
+impl core::cmp::Eq for assembly_schema::DiportPort
+impl core::cmp::Ord for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::cmp(&self, &assembly_schema::DiportPort) -> core::cmp::Ordering
+impl core::cmp::PartialEq for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::eq(&self, &assembly_schema::DiportPort) -> bool
+impl core::cmp::PartialOrd for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::partial_cmp(&self, &assembly_schema::DiportPort) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::DiportPort
+impl core::marker::StructuralPartialEq for assembly_schema::DiportPort
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::DiportPort
+impl core::marker::Send for assembly_schema::DiportPort
+impl core::marker::Sync for assembly_schema::DiportPort
+impl core::marker::Unpin for assembly_schema::DiportPort
+impl core::marker::UnsafeUnpin for assembly_schema::DiportPort
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::DiportPort
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::DiportPort
+impl<Q, K> equivalent::Comparable<K> for assembly_schema::DiportPort where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::DiportPort::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::DiportPort where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::DiportPort::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::DiportPort where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::DiportPort::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::DiportPort where U: core::convert::From<T>
+pub fn assembly_schema::DiportPort::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::DiportPort where U: core::convert::Into<T>
+pub type assembly_schema::DiportPort::Error = core::convert::Infallible
+pub fn assembly_schema::DiportPort::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::DiportPort where U: core::convert::TryFrom<T>
+pub type assembly_schema::DiportPort::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::DiportPort::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::DiportPort where T: core::clone::Clone
+pub type assembly_schema::DiportPort::Owned = T
+pub fn assembly_schema::DiportPort::clone_into(&self, &mut T)
+pub fn assembly_schema::DiportPort::to_owned(&self) -> T
+impl<T> alloc::string::ToString for assembly_schema::DiportPort where T: core::fmt::Display + ?core::marker::Sized
+pub fn assembly_schema::DiportPort::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for assembly_schema::DiportPort where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::DiportPort::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::DiportPort where T: ?core::marker::Sized
+pub fn assembly_schema::DiportPort::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::DiportPort where T: ?core::marker::Sized
+pub fn assembly_schema::DiportPort::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::DiportPort where T: core::clone::Clone
+pub unsafe fn assembly_schema::DiportPort::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::DiportPort
+pub fn assembly_schema::DiportPort::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::DiportPort where T: for<'de> serde_core::de::Deserialize<'de>
+pub enum assembly_schema::ManifestValidationError
+pub assembly_schema::ManifestValidationError::Duplicate
+pub assembly_schema::ManifestValidationError::Duplicate::field: &'static str
+pub assembly_schema::ManifestValidationError::Empty
+pub assembly_schema::ManifestValidationError::Empty::field: &'static str
+impl core::clone::Clone for assembly_schema::ManifestValidationError
+pub fn assembly_schema::ManifestValidationError::clone(&self) -> assembly_schema::ManifestValidationError
+impl core::cmp::Eq for assembly_schema::ManifestValidationError
+impl core::cmp::PartialEq for assembly_schema::ManifestValidationError
+pub fn assembly_schema::ManifestValidationError::eq(&self, &assembly_schema::ManifestValidationError) -> bool
+impl core::fmt::Debug for assembly_schema::ManifestValidationError
+pub fn assembly_schema::ManifestValidationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ManifestValidationError
+impl core::marker::StructuralPartialEq for assembly_schema::ManifestValidationError
+impl core::marker::Freeze for assembly_schema::ManifestValidationError
+impl core::marker::Send for assembly_schema::ManifestValidationError
+impl core::marker::Sync for assembly_schema::ManifestValidationError
+impl core::marker::Unpin for assembly_schema::ManifestValidationError
+impl core::marker::UnsafeUnpin for assembly_schema::ManifestValidationError
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ManifestValidationError
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ManifestValidationError
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::ManifestValidationError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationError::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::ManifestValidationError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationError::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::ManifestValidationError where U: core::convert::From<T>
+pub fn assembly_schema::ManifestValidationError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::ManifestValidationError where U: core::convert::Into<T>
+pub type assembly_schema::ManifestValidationError::Error = core::convert::Infallible
+pub fn assembly_schema::ManifestValidationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::ManifestValidationError where U: core::convert::TryFrom<T>
+pub type assembly_schema::ManifestValidationError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::ManifestValidationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::ManifestValidationError where T: core::clone::Clone
+pub type assembly_schema::ManifestValidationError::Owned = T
+pub fn assembly_schema::ManifestValidationError::clone_into(&self, &mut T)
+pub fn assembly_schema::ManifestValidationError::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::ManifestValidationError where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::ManifestValidationError where T: ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::ManifestValidationError where T: ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::ManifestValidationError where T: core::clone::Clone
+pub unsafe fn assembly_schema::ManifestValidationError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::ManifestValidationError
+pub fn assembly_schema::ManifestValidationError::from(T) -> T
+pub enum assembly_schema::ProviderDurability
+pub assembly_schema::ProviderDurability::EphemeralMemory
+pub assembly_schema::ProviderDurability::Persistent
+impl assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::clone(&self) -> assembly_schema::ProviderDurability
+impl core::cmp::Eq for assembly_schema::ProviderDurability
+impl core::cmp::PartialEq for assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::eq(&self, &assembly_schema::ProviderDurability) -> bool
+impl core::fmt::Debug for assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ProviderDurability
+impl core::marker::StructuralPartialEq for assembly_schema::ProviderDurability
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::ProviderDurability
+impl core::marker::Send for assembly_schema::ProviderDurability
+impl core::marker::Sync for assembly_schema::ProviderDurability
+impl core::marker::Unpin for assembly_schema::ProviderDurability
+impl core::marker::UnsafeUnpin for assembly_schema::ProviderDurability
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderDurability
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderDurability
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::ProviderDurability where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ProviderDurability::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::ProviderDurability where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ProviderDurability::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::ProviderDurability where U: core::convert::From<T>
+pub fn assembly_schema::ProviderDurability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::ProviderDurability where U: core::convert::Into<T>
+pub type assembly_schema::ProviderDurability::Error = core::convert::Infallible
+pub fn assembly_schema::ProviderDurability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::ProviderDurability where U: core::convert::TryFrom<T>
+pub type assembly_schema::ProviderDurability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::ProviderDurability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::ProviderDurability where T: core::clone::Clone
+pub type assembly_schema::ProviderDurability::Owned = T
+pub fn assembly_schema::ProviderDurability::clone_into(&self, &mut T)
+pub fn assembly_schema::ProviderDurability::to_owned(&self) -> T
+impl<T> alloc::string::ToString for assembly_schema::ProviderDurability where T: core::fmt::Display + ?core::marker::Sized
+pub fn assembly_schema::ProviderDurability::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for assembly_schema::ProviderDurability where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::ProviderDurability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::ProviderDurability where T: ?core::marker::Sized
+pub fn assembly_schema::ProviderDurability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::ProviderDurability where T: ?core::marker::Sized
+pub fn assembly_schema::ProviderDurability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::ProviderDurability where T: core::clone::Clone
+pub unsafe fn assembly_schema::ProviderDurability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::ProviderDurability
+pub fn assembly_schema::ProviderDurability::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::ProviderDurability where T: for<'de> serde_core::de::Deserialize<'de>
+pub enum assembly_schema::ProviderLifecycle
+pub assembly_schema::ProviderLifecycle::Active
+pub assembly_schema::ProviderLifecycle::Deprecated
+pub assembly_schema::ProviderLifecycle::Draft
+impl assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::as_str(self) -> &'static str
+impl core::clone::Clone for assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::clone(&self) -> assembly_schema::ProviderLifecycle
+impl core::cmp::Eq for assembly_schema::ProviderLifecycle
+impl core::cmp::PartialEq for assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::eq(&self, &assembly_schema::ProviderLifecycle) -> bool
+impl core::fmt::Debug for assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::ProviderLifecycle
+impl core::marker::StructuralPartialEq for assembly_schema::ProviderLifecycle
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::ProviderLifecycle
+impl core::marker::Send for assembly_schema::ProviderLifecycle
+impl core::marker::Sync for assembly_schema::ProviderLifecycle
+impl core::marker::Unpin for assembly_schema::ProviderLifecycle
+impl core::marker::UnsafeUnpin for assembly_schema::ProviderLifecycle
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderLifecycle
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderLifecycle
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::ProviderLifecycle where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ProviderLifecycle::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::ProviderLifecycle where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ProviderLifecycle::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::ProviderLifecycle where U: core::convert::From<T>
+pub fn assembly_schema::ProviderLifecycle::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::ProviderLifecycle where U: core::convert::Into<T>
+pub type assembly_schema::ProviderLifecycle::Error = core::convert::Infallible
+pub fn assembly_schema::ProviderLifecycle::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::ProviderLifecycle where U: core::convert::TryFrom<T>
+pub type assembly_schema::ProviderLifecycle::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::ProviderLifecycle::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::ProviderLifecycle where T: core::clone::Clone
+pub type assembly_schema::ProviderLifecycle::Owned = T
+pub fn assembly_schema::ProviderLifecycle::clone_into(&self, &mut T)
+pub fn assembly_schema::ProviderLifecycle::to_owned(&self) -> T
+impl<T> alloc::string::ToString for assembly_schema::ProviderLifecycle where T: core::fmt::Display + ?core::marker::Sized
+pub fn assembly_schema::ProviderLifecycle::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for assembly_schema::ProviderLifecycle where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::ProviderLifecycle::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::ProviderLifecycle where T: ?core::marker::Sized
+pub fn assembly_schema::ProviderLifecycle::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::ProviderLifecycle where T: ?core::marker::Sized
+pub fn assembly_schema::ProviderLifecycle::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::ProviderLifecycle where T: core::clone::Clone
+pub unsafe fn assembly_schema::ProviderLifecycle::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::ProviderLifecycle
+pub fn assembly_schema::ProviderLifecycle::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::ProviderLifecycle where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct assembly_schema::AssemblyListener
+pub assembly_schema::AssemblyListener::kind: assembly_schema::AssemblyListenerKind
+impl core::clone::Clone for assembly_schema::AssemblyListener
+pub fn assembly_schema::AssemblyListener::clone(&self) -> assembly_schema::AssemblyListener
+impl core::cmp::Eq for assembly_schema::AssemblyListener
+impl core::cmp::PartialEq for assembly_schema::AssemblyListener
+pub fn assembly_schema::AssemblyListener::eq(&self, &assembly_schema::AssemblyListener) -> bool
+impl core::fmt::Debug for assembly_schema::AssemblyListener
+pub fn assembly_schema::AssemblyListener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyListener
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyListener
+pub fn assembly_schema::AssemblyListener::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyListener
+impl core::marker::Send for assembly_schema::AssemblyListener
+impl core::marker::Sync for assembly_schema::AssemblyListener
+impl core::marker::Unpin for assembly_schema::AssemblyListener
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyListener
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyListener
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyListener
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::AssemblyListener where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListener::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::AssemblyListener where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListener::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::AssemblyListener where U: core::convert::From<T>
+pub fn assembly_schema::AssemblyListener::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::AssemblyListener where U: core::convert::Into<T>
+pub type assembly_schema::AssemblyListener::Error = core::convert::Infallible
+pub fn assembly_schema::AssemblyListener::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::AssemblyListener where U: core::convert::TryFrom<T>
+pub type assembly_schema::AssemblyListener::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::AssemblyListener::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::AssemblyListener where T: core::clone::Clone
+pub type assembly_schema::AssemblyListener::Owned = T
+pub fn assembly_schema::AssemblyListener::clone_into(&self, &mut T)
+pub fn assembly_schema::AssemblyListener::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::AssemblyListener where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::AssemblyListener::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::AssemblyListener where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyListener::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::AssemblyListener where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyListener::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::AssemblyListener where T: core::clone::Clone
+pub unsafe fn assembly_schema::AssemblyListener::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::AssemblyListener
+pub fn assembly_schema::AssemblyListener::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::AssemblyListener where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct assembly_schema::AssemblyManifest
+pub assembly_schema::AssemblyManifest::diport_providers: alloc::vec::Vec<assembly_schema::DiportProvider>
+pub assembly_schema::AssemblyManifest::domains: alloc::vec::Vec<assembly_schema::AssemblyDomain>
+pub assembly_schema::AssemblyManifest::listeners: alloc::vec::Vec<assembly_schema::AssemblyListener>
+pub assembly_schema::AssemblyManifest::name: alloc::string::String
+pub assembly_schema::AssemblyManifest::profile: assembly_schema::AssemblyProfile
+pub assembly_schema::AssemblyManifest::topology: assembly_schema::AssemblyTopology
+impl assembly_schema::AssemblyManifest
+pub fn assembly_schema::AssemblyManifest::basic_validation_errors(&self) -> alloc::vec::Vec<assembly_schema::ManifestValidationError>
+pub fn assembly_schema::AssemblyManifest::from_toml_str(&str) -> core::result::Result<Self, toml::de::Error>
+pub fn assembly_schema::AssemblyManifest::validate_basic(&self) -> core::result::Result<(), assembly_schema::ManifestValidationErrors>
+impl core::clone::Clone for assembly_schema::AssemblyManifest
+pub fn assembly_schema::AssemblyManifest::clone(&self) -> assembly_schema::AssemblyManifest
+impl core::cmp::Eq for assembly_schema::AssemblyManifest
+impl core::cmp::PartialEq for assembly_schema::AssemblyManifest
+pub fn assembly_schema::AssemblyManifest::eq(&self, &assembly_schema::AssemblyManifest) -> bool
+impl core::fmt::Debug for assembly_schema::AssemblyManifest
+pub fn assembly_schema::AssemblyManifest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::AssemblyManifest
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::AssemblyManifest
+pub fn assembly_schema::AssemblyManifest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::AssemblyManifest
+impl core::marker::Send for assembly_schema::AssemblyManifest
+impl core::marker::Sync for assembly_schema::AssemblyManifest
+impl core::marker::Unpin for assembly_schema::AssemblyManifest
+impl core::marker::UnsafeUnpin for assembly_schema::AssemblyManifest
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::AssemblyManifest
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyManifest
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::AssemblyManifest where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyManifest::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::AssemblyManifest where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::AssemblyManifest::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::AssemblyManifest where U: core::convert::From<T>
+pub fn assembly_schema::AssemblyManifest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::AssemblyManifest where U: core::convert::Into<T>
+pub type assembly_schema::AssemblyManifest::Error = core::convert::Infallible
+pub fn assembly_schema::AssemblyManifest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::AssemblyManifest where U: core::convert::TryFrom<T>
+pub type assembly_schema::AssemblyManifest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::AssemblyManifest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::AssemblyManifest where T: core::clone::Clone
+pub type assembly_schema::AssemblyManifest::Owned = T
+pub fn assembly_schema::AssemblyManifest::clone_into(&self, &mut T)
+pub fn assembly_schema::AssemblyManifest::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::AssemblyManifest where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::AssemblyManifest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::AssemblyManifest where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyManifest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::AssemblyManifest where T: ?core::marker::Sized
+pub fn assembly_schema::AssemblyManifest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::AssemblyManifest where T: core::clone::Clone
+pub unsafe fn assembly_schema::AssemblyManifest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::AssemblyManifest
+pub fn assembly_schema::AssemblyManifest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::AssemblyManifest where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct assembly_schema::DiportProvider
+pub assembly_schema::DiportProvider::consumer: alloc::string::String
+pub assembly_schema::DiportProvider::durability: assembly_schema::ProviderDurability
+pub assembly_schema::DiportProvider::lifecycle: assembly_schema::ProviderLifecycle
+pub assembly_schema::DiportProvider::port: assembly_schema::DiportPort
+pub assembly_schema::DiportProvider::provider: alloc::string::String
+pub assembly_schema::DiportProvider::provider_crate: alloc::string::String
+pub assembly_schema::DiportProvider::purpose: alloc::string::String
+pub assembly_schema::DiportProvider::required_features: alloc::vec::Vec<alloc::string::String>
+impl core::clone::Clone for assembly_schema::DiportProvider
+pub fn assembly_schema::DiportProvider::clone(&self) -> assembly_schema::DiportProvider
+impl core::cmp::Eq for assembly_schema::DiportProvider
+impl core::cmp::PartialEq for assembly_schema::DiportProvider
+pub fn assembly_schema::DiportProvider::eq(&self, &assembly_schema::DiportProvider) -> bool
+impl core::fmt::Debug for assembly_schema::DiportProvider
+pub fn assembly_schema::DiportProvider::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::DiportProvider
+impl<'de> serde_core::de::Deserialize<'de> for assembly_schema::DiportProvider
+pub fn assembly_schema::DiportProvider::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for assembly_schema::DiportProvider
+impl core::marker::Send for assembly_schema::DiportProvider
+impl core::marker::Sync for assembly_schema::DiportProvider
+impl core::marker::Unpin for assembly_schema::DiportProvider
+impl core::marker::UnsafeUnpin for assembly_schema::DiportProvider
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::DiportProvider
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::DiportProvider
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::DiportProvider where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::DiportProvider::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::DiportProvider where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::DiportProvider::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::DiportProvider where U: core::convert::From<T>
+pub fn assembly_schema::DiportProvider::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::DiportProvider where U: core::convert::Into<T>
+pub type assembly_schema::DiportProvider::Error = core::convert::Infallible
+pub fn assembly_schema::DiportProvider::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::DiportProvider where U: core::convert::TryFrom<T>
+pub type assembly_schema::DiportProvider::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::DiportProvider::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::DiportProvider where T: core::clone::Clone
+pub type assembly_schema::DiportProvider::Owned = T
+pub fn assembly_schema::DiportProvider::clone_into(&self, &mut T)
+pub fn assembly_schema::DiportProvider::to_owned(&self) -> T
+impl<T> core::any::Any for assembly_schema::DiportProvider where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::DiportProvider::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::DiportProvider where T: ?core::marker::Sized
+pub fn assembly_schema::DiportProvider::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::DiportProvider where T: ?core::marker::Sized
+pub fn assembly_schema::DiportProvider::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::DiportProvider where T: core::clone::Clone
+pub unsafe fn assembly_schema::DiportProvider::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::DiportProvider
+pub fn assembly_schema::DiportProvider::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for assembly_schema::DiportProvider where T: for<'de> serde_core::de::Deserialize<'de>
+pub struct assembly_schema::ManifestValidationErrors
+impl assembly_schema::ManifestValidationErrors
+pub fn assembly_schema::ManifestValidationErrors::as_slice(&self) -> &[assembly_schema::ManifestValidationError]
+pub fn assembly_schema::ManifestValidationErrors::into_vec(self) -> alloc::vec::Vec<assembly_schema::ManifestValidationError>
+impl core::clone::Clone for assembly_schema::ManifestValidationErrors
+pub fn assembly_schema::ManifestValidationErrors::clone(&self) -> assembly_schema::ManifestValidationErrors
+impl core::cmp::Eq for assembly_schema::ManifestValidationErrors
+impl core::cmp::PartialEq for assembly_schema::ManifestValidationErrors
+pub fn assembly_schema::ManifestValidationErrors::eq(&self, &assembly_schema::ManifestValidationErrors) -> bool
+impl core::error::Error for assembly_schema::ManifestValidationErrors
+impl core::fmt::Debug for assembly_schema::ManifestValidationErrors
+pub fn assembly_schema::ManifestValidationErrors::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::ManifestValidationErrors
+pub fn assembly_schema::ManifestValidationErrors::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::ManifestValidationErrors
+impl core::marker::Freeze for assembly_schema::ManifestValidationErrors
+impl core::marker::Send for assembly_schema::ManifestValidationErrors
+impl core::marker::Sync for assembly_schema::ManifestValidationErrors
+impl core::marker::Unpin for assembly_schema::ManifestValidationErrors
+impl core::marker::UnsafeUnpin for assembly_schema::ManifestValidationErrors
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ManifestValidationErrors
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ManifestValidationErrors
+impl<Q, K> equivalent::Equivalent<K> for assembly_schema::ManifestValidationErrors where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationErrors::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for assembly_schema::ManifestValidationErrors where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationErrors::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for assembly_schema::ManifestValidationErrors where U: core::convert::From<T>
+pub fn assembly_schema::ManifestValidationErrors::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for assembly_schema::ManifestValidationErrors where U: core::convert::Into<T>
+pub type assembly_schema::ManifestValidationErrors::Error = core::convert::Infallible
+pub fn assembly_schema::ManifestValidationErrors::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for assembly_schema::ManifestValidationErrors where U: core::convert::TryFrom<T>
+pub type assembly_schema::ManifestValidationErrors::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn assembly_schema::ManifestValidationErrors::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for assembly_schema::ManifestValidationErrors where T: core::clone::Clone
+pub type assembly_schema::ManifestValidationErrors::Owned = T
+pub fn assembly_schema::ManifestValidationErrors::clone_into(&self, &mut T)
+pub fn assembly_schema::ManifestValidationErrors::to_owned(&self) -> T
+impl<T> alloc::string::ToString for assembly_schema::ManifestValidationErrors where T: core::fmt::Display + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationErrors::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for assembly_schema::ManifestValidationErrors where T: 'static + ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationErrors::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for assembly_schema::ManifestValidationErrors where T: ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationErrors::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for assembly_schema::ManifestValidationErrors where T: ?core::marker::Sized
+pub fn assembly_schema::ManifestValidationErrors::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for assembly_schema::ManifestValidationErrors where T: core::clone::Clone
+pub unsafe fn assembly_schema::ManifestValidationErrors::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for assembly_schema::ManifestValidationErrors
+pub fn assembly_schema::ManifestValidationErrors::from(T) -> T
+pub const assembly_schema::REGISTERED_DOMAIN_LABELS: &[&str]

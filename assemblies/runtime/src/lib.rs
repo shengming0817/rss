@@ -29,6 +29,7 @@ pub(crate) mod launch;
 pub mod listeners;
 pub mod module;
 pub mod phase;
+pub mod plan;
 pub mod routes;
 
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
@@ -183,6 +184,15 @@ impl diport::AuditSink for TracingAuthAuditSink {
 /// 从 `std::env` 构造 [`event_transport::EventTransportConfig`]。
 pub fn build_event_transport_config() -> anyhow::Result<event_transport::EventTransportConfig> {
     event_transport::build_event_transport_config_from(|name| std::env::var(name).ok())
+}
+
+fn topology_label(topology: bootstrap::Topology) -> &'static str {
+    match topology {
+        bootstrap::Topology::Demo => "demo",
+        bootstrap::Topology::DurableShared => "durable-shared",
+        bootstrap::Topology::DurableIsolated => "durable-isolated",
+        _ => "unknown",
+    }
 }
 
 fn domain_transport_required_domains_from(
@@ -3759,6 +3769,25 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()> {
+    let runtime_plan = plan::RuntimePlan::bundled().context("build runtime assembly plan")?;
+    let runtime_plan_summary = runtime_plan.summary();
+    let provider_counts = runtime_plan_summary.provider_counts();
+    tracing::info!(
+        assembly.name = runtime_plan_summary.name(),
+        assembly.profile = runtime_plan_summary.profile(),
+        assembly.declared_topology = runtime_plan_summary.topology(),
+        assembly.domains = ?runtime_plan_summary.domains(),
+        assembly.listeners = ?runtime_plan_summary.listeners(),
+        assembly.providers.total = provider_counts.total,
+        assembly.providers.active = provider_counts.active,
+        assembly.providers.draft = provider_counts.draft,
+        assembly.providers.deprecated = provider_counts.deprecated,
+        assembly.providers.persistent = provider_counts.persistent,
+        assembly.providers.ephemeral_memory = provider_counts.ephemeral_memory,
+        "runtime assembly plan loaded"
+    );
+    drop(runtime_plan);
+
     let runtime_inputs = RuntimeInputs::new(trace_export);
 
     // BuildProvider phase: production credential verifier provider.
@@ -3805,6 +3834,10 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             let s3_canary_config = build_s3_canary_config_from(|name| std::env::var(name).ok())
                 .context("s3 canary config")?;
             let event_cfg = build_event_transport_config().context("event transport config")?;
+            tracing::info!(
+                runtime.event_topology = topology_label(event_cfg.topology),
+                "runtime event topology loaded"
+            );
             if event_cfg.topology == bootstrap::Topology::Demo {
                 anyhow::bail!(
                     "RSS_TOPOLOGY=demo is not supported in the production runtime; \

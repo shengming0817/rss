@@ -23,6 +23,7 @@
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
 pub(crate) const BASIS_CRATES: &[&str] = &[
+    "assembly-schema",
     "diagctx",
     "vocab",
     "ids",
@@ -61,8 +62,7 @@ pub(crate) const SERVICE_CRATES: &[&str] = &[
     "testkit",
 ];
 /// 域层（依赖基础 + 引擎 + 服务 + generated；兄弟域互不依赖）。
-pub(crate) const DOMAIN_CRATES: &[&str] =
-    &["identity", "settings", "audit", "contractreg", "syshealth"];
+pub(crate) const DOMAIN_CRATES: &[&str] = assembly_schema::REGISTERED_DOMAIN_LABELS;
 
 /// dev/test-only adapter（demo / in-mem provider）：**禁生产 bin 依赖**，只准 test/tooling 组合根
 /// （[`DEV_ADAPTER_ROOTS`]）依赖。普通 adapter 须被全部组合根 wrapper 覆盖（LAYER-DEPS-06）；dev adapter

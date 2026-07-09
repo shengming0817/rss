@@ -13,6 +13,7 @@ members = [
   "crates/support",
   "crates/runctx",
   "crates/diagctx",
+  "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）
   "crates/consistency",
   "crates/primitives",

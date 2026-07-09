@@ -10,10 +10,10 @@
 //! and fails on missing baseline, content drift, empty dependency/provider inventories, or missing
 //! required wiring anchors. Synthetic red/green tests cover every failure class.
 
-use crate::assembly::{AssemblyManifest, ProviderLifecycle};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
 use anyhow::{Context, Result};
+use assembly_schema::AssemblyManifest;
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fs;
 use std::path::Path;
@@ -340,20 +340,12 @@ fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
             provider_crate: provider.provider_crate.clone(),
             required_features: provider.required_features.clone(),
             consumer: provider.consumer.clone(),
-            lifecycle: lifecycle_as_str(provider.lifecycle).to_string(),
+            lifecycle: provider.lifecycle.to_string(),
             durability: provider.durability.to_string(),
             purpose: provider.purpose.clone(),
         });
     }
     Ok(providers)
-}
-
-fn lifecycle_as_str(lifecycle: ProviderLifecycle) -> &'static str {
-    match lifecycle {
-        ProviderLifecycle::Draft => "draft",
-        ProviderLifecycle::Active => "active",
-        ProviderLifecycle::Deprecated => "deprecated",
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -482,6 +474,11 @@ struct AnchorSearchScope<'a> {
 }
 
 const RUNTIME_ANCHORS: &[AnchorSpec] = &[
+    AnchorSpec {
+        id: "run.plan.load",
+        path: RUNTIME_LIB_PATH,
+        pattern: "plan::RuntimePlan::bundled().context(",
+    },
     AnchorSpec {
         id: "run.provider.oidc",
         path: RUNTIME_LIB_PATH,
@@ -1319,8 +1316,8 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("35 | launch.register-plan"));
-        assert!(report.rendered.contains("36 | launch.listeners"));
+        assert!(report.rendered.contains("36 | launch.register-plan"));
+        assert!(report.rendered.contains("37 | launch.listeners"));
         Ok(())
     }
 
@@ -1433,6 +1430,46 @@ kind = "health"
                 f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.oidc")
             }),
             "provider phase marker alone must not satisfy the real provider construction anchor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_baseline_requires_plan_load_before_provider_construction() -> Result<()> {
+        let root = fixture_root("runtime-baseline-plan-load-before-provider")?;
+        let mut lines = Vec::new();
+        let plan = RUNTIME_ANCHORS
+            .iter()
+            .find(|anchor| anchor.id == "run.plan.load")
+            .expect("plan anchor");
+        let oidc = RUNTIME_ANCHORS
+            .iter()
+            .find(|anchor| anchor.id == "run.provider.oidc")
+            .expect("oidc anchor");
+        lines.push(oidc.pattern);
+        lines.push(plan.pattern);
+        for anchor in RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| anchor.path == RUNTIME_LIB_PATH)
+        {
+            if matches!(anchor.id, "run.plan.load" | "run.provider.oidc") {
+                continue;
+            }
+            lines.push(anchor.pattern);
+            if anchor.id == "run.shared-deps" {
+                lines.push("}");
+            }
+        }
+        write(
+            &root.join(RUNTIME_LIB_PATH),
+            &format!("pub async fn run() {{\n{}\n}}\n", lines.join("\n")),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.provider.oidc")
+            }),
+            "plan load anchor must precede provider construction"
         );
         Ok(())
     }

@@ -188,6 +188,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "assembly-schema"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4697,6 +4705,7 @@ version = "0.0.0"
 dependencies = [
  "amqp",
  "anyhow",
+ "assembly-schema",
  "audit",
  "authn",
  "aws-sdk-s3",
@@ -7121,6 +7130,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "assembly-schema",
  "consistency",
  "generated",
  "prettyplease",

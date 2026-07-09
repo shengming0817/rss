@@ -6,27 +6,18 @@
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Deserializer, de};
+use assembly_schema::{
+    AssemblyDomain, AssemblyManifest, AssemblyProfile, AssemblyTopology, DiportPort,
+    DiportProvider, ManifestValidationError, ProviderDurability, ProviderLifecycle,
+};
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
-
-const REVOCATION_STORE_PORT: &str = "diport::RevocationStore";
-const PUBLISHER_PORT: &str = "diport::Publisher";
-const ACKABLE_SUBSCRIBER_PORT: &str = "diport::AckableSubscriber";
-const SIGNER_PORT: &str = "diport::Signer";
-const KEY_PROVIDER_PORT: &str = "diport::KeyProvider";
-const PDP_PORT: &str = "diport::Pdp";
-const RATE_LIMITER_PORT: &str = "diport::RateLimiter";
-const LOCK_STORE_PORT: &str = "diport::LockStore";
-const CAS_STORE_PORT: &str = "diport::CasStore";
-const OBJECT_STORE_PORT: &str = "diport::ObjectStore";
-const AUDIT_SINK_PORT: &str = "diport::AuditSink";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -48,6 +39,10 @@ pub(crate) enum Rule {
     DuplicateListener,
     /// assembly manifest 不能空转：至少声明一个 DI provider。
     EmptyDiportProviders,
+    /// assembly manifest 中 `diportProviders` 不得重复。
+    DuplicateDiportProvider,
+    /// assembly manifest 中 provider 字段不得为空。
+    InvalidDiportProvider,
     /// production `diport::RevocationStore` provider 必须持久。
     RevocationDurability,
     /// active provider 必须由 assembly Cargo.toml `[dependencies]` 声明。
@@ -93,213 +88,6 @@ impl GovernanceCheck for AssemblyValidate {
         let root = crate::workspace_root()?;
         let (count, findings) = validate_root(&root)?;
         Ok((format!("{count} assembly 声明全部通过"), findings))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AssemblyManifest {
-    pub(crate) name: String,
-    pub(crate) profile: AssemblyProfile,
-    pub(crate) domains: Vec<AssemblyDomain>,
-    pub(crate) topology: AssemblyTopology,
-    pub(crate) listeners: Vec<AssemblyListener>,
-    #[serde(rename = "diportProviders")]
-    pub(crate) diport_providers: Vec<DiportProvider>,
-}
-
-impl AssemblyManifest {
-    pub(crate) fn from_toml_str(text: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(text)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum AssemblyProfile {
-    Production,
-    Demo,
-    Test,
-}
-
-impl AssemblyProfile {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Production => "production",
-            Self::Demo => "demo",
-            Self::Test => "test",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct AssemblyDomain(String);
-
-impl AssemblyDomain {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for AssemblyDomain {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let domain = String::deserialize(deserializer)?;
-        if crate::layers::DOMAIN_CRATES.contains(&domain.as_str()) {
-            return Ok(Self(domain));
-        }
-        Err(de::Error::custom(format!(
-            "unknown assembly domain `{}`; expected one of {}",
-            domain,
-            crate::layers::DOMAIN_CRATES.join(", ")
-        )))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum AssemblyTopology {
-    Demo,
-    DurableShared,
-    DurableIsolated,
-}
-
-impl AssemblyTopology {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Demo => "demo",
-            Self::DurableShared => "durable-shared",
-            Self::DurableIsolated => "durable-isolated",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AssemblyListener {
-    pub(crate) kind: AssemblyListenerKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum AssemblyListenerKind {
-    Primary,
-    Internal,
-    Admin,
-    Health,
-}
-
-impl AssemblyListenerKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Primary => "primary",
-            Self::Internal => "internal",
-            Self::Admin => "admin",
-            Self::Health => "health",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DiportProvider {
-    pub(crate) port: DiportPort,
-    pub(crate) provider: String,
-    #[serde(rename = "providerCrate")]
-    pub(crate) provider_crate: String,
-    #[serde(default, rename = "requiredFeatures")]
-    pub(crate) required_features: Vec<String>,
-    pub(crate) consumer: String,
-    pub(crate) lifecycle: ProviderLifecycle,
-    pub(crate) durability: ProviderDurability,
-    pub(crate) purpose: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) enum DiportPort {
-    #[serde(rename = "diport::RevocationStore")]
-    RevocationStore,
-    /// `diport::Publisher` —— at-most-once 事件发布端口（amqp publisher 实现，#1251）。
-    #[serde(rename = "diport::Publisher")]
-    Publisher,
-    /// `diport::AckableSubscriber` —— manual-ack at-least-once 订阅端口（amqp subscriber 实现，#1251）。
-    #[serde(rename = "diport::AckableSubscriber")]
-    AckableSubscriber,
-    #[serde(rename = "diport::Signer")]
-    Signer,
-    #[serde(rename = "diport::KeyProvider")]
-    KeyProvider,
-    #[serde(rename = "diport::Pdp")]
-    Pdp,
-    #[serde(rename = "diport::RateLimiter")]
-    RateLimiter,
-    #[serde(rename = "diport::LockStore")]
-    Lock,
-    #[serde(rename = "diport::CasStore")]
-    Cas,
-    #[serde(rename = "diport::ObjectStore")]
-    ObjectStore,
-    #[serde(rename = "diport::AuditSink")]
-    AuditSink,
-}
-
-impl DiportPort {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::RevocationStore => REVOCATION_STORE_PORT,
-            Self::Publisher => PUBLISHER_PORT,
-            Self::AckableSubscriber => ACKABLE_SUBSCRIBER_PORT,
-            Self::Signer => SIGNER_PORT,
-            Self::KeyProvider => KEY_PROVIDER_PORT,
-            Self::Pdp => PDP_PORT,
-            Self::RateLimiter => RATE_LIMITER_PORT,
-            Self::Lock => LOCK_STORE_PORT,
-            Self::Cas => CAS_STORE_PORT,
-            Self::ObjectStore => OBJECT_STORE_PORT,
-            Self::AuditSink => AUDIT_SINK_PORT,
-        }
-    }
-}
-
-impl fmt::Display for DiportPort {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ProviderLifecycle {
-    Draft,
-    Active,
-    Deprecated,
-}
-
-impl fmt::Display for ProviderLifecycle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Draft => f.write_str("draft"),
-            Self::Active => f.write_str("active"),
-            Self::Deprecated => f.write_str("deprecated"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ProviderDurability {
-    EphemeralMemory,
-    Persistent,
-}
-
-impl fmt::Display for ProviderDurability {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EphemeralMemory => f.write_str("ephemeral-memory"),
-            Self::Persistent => f.write_str("persistent"),
-        }
     }
 }
 
@@ -387,13 +175,6 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
 fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
     let mut findings = Vec::new();
     validate_manifest_intent(a, &mut findings);
-    if a.manifest.diport_providers.is_empty() {
-        findings.push(finding(
-            Rule::EmptyDiportProviders,
-            &a.manifest_label,
-            "field=diportProviders 至少声明一个 provider，避免 assembly fact source 空转通过",
-        ));
-    }
 
     for (index, provider) in a.manifest.diport_providers.iter().enumerate() {
         let source = format!(
@@ -515,7 +296,11 @@ fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    if a.manifest.name.trim().is_empty() || a.manifest.name != dir_name {
+    for error in a.manifest.basic_validation_errors() {
+        push_manifest_validation_finding(a, error, findings);
+    }
+
+    if !a.manifest.name.trim().is_empty() && a.manifest.name != dir_name {
         findings.push(finding(
             Rule::ManifestNameMismatch,
             &a.manifest_label,
@@ -525,44 +310,79 @@ fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>)
             ),
         ));
     }
+}
 
-    if a.manifest.domains.is_empty() {
-        findings.push(finding(
-            Rule::EmptyDomains,
-            &a.manifest_label,
-            "field=domains 至少声明一个 domain，避免 assembly intent 空转通过",
-        ));
-    }
-    let mut domains = BTreeSet::new();
-    for domain in &a.manifest.domains {
-        if !domains.insert(domain.as_str()) {
+fn push_manifest_validation_finding(
+    a: &DiscoveredAssembly,
+    error: ManifestValidationError,
+    findings: &mut Vec<Finding>,
+) {
+    match error {
+        ManifestValidationError::Empty { field: "name" } => {
+            findings.push(finding(
+                Rule::ManifestNameMismatch,
+                &a.manifest_label,
+                "field=name 必须非空且等于 assembly 目录名",
+            ));
+        }
+        ManifestValidationError::Empty { field: "domains" } => {
+            findings.push(finding(
+                Rule::EmptyDomains,
+                &a.manifest_label,
+                "field=domains 至少声明一个 domain，避免 assembly intent 空转通过",
+            ));
+        }
+        ManifestValidationError::Duplicate { field: "domains" } => {
             findings.push(finding(
                 Rule::DuplicateDomain,
                 &a.manifest_label,
-                format!("field=domains domain `{}` 重复声明", domain.as_str()),
+                "field=domains domain 重复声明",
             ));
         }
-    }
-
-    if a.manifest.listeners.is_empty() {
-        findings.push(finding(
-            Rule::EmptyListeners,
-            &a.manifest_label,
-            "field=listeners 至少声明一个 listener，避免 assembly listener surface 空转通过",
-        ));
-    }
-    let mut listeners = BTreeSet::new();
-    for (index, listener) in a.manifest.listeners.iter().enumerate() {
-        let kind = listener.kind.as_str();
-        if !listeners.insert(kind) {
+        ManifestValidationError::Empty { field: "listeners" } => {
+            findings.push(finding(
+                Rule::EmptyListeners,
+                &a.manifest_label,
+                "field=listeners 至少声明一个 listener，避免 assembly listener surface 空转通过",
+            ));
+        }
+        ManifestValidationError::Duplicate { field: "listeners" } => {
             findings.push(finding(
                 Rule::DuplicateListener,
-                format!(
-                    "{}:{}",
-                    a.manifest_label,
-                    listener_table_line(&a.manifest_src, index)
-                ),
-                format!("field=listeners listener `{kind}` 重复声明"),
+                &a.manifest_label,
+                "field=listeners listener 重复声明",
+            ));
+        }
+        ManifestValidationError::Empty {
+            field: "diportProviders",
+        } => {
+            findings.push(finding(
+                Rule::EmptyDiportProviders,
+                &a.manifest_label,
+                "field=diportProviders 至少声明一个 provider，避免 assembly fact source 空转通过",
+            ));
+        }
+        ManifestValidationError::Duplicate {
+            field: "diportProviders",
+        } => {
+            findings.push(finding(
+                Rule::DuplicateDiportProvider,
+                &a.manifest_label,
+                "field=diportProviders provider 声明重复",
+            ));
+        }
+        ManifestValidationError::Empty { field } if field.starts_with("diportProviders.") => {
+            findings.push(finding(
+                Rule::InvalidDiportProvider,
+                &a.manifest_label,
+                format!("field={field} must not be empty"),
+            ));
+        }
+        ManifestValidationError::Empty { field } | ManifestValidationError::Duplicate { field } => {
+            findings.push(finding(
+                Rule::InvalidDiportProvider,
+                &a.manifest_label,
+                format!("field={field} invalid assembly manifest declaration"),
             ));
         }
     }
@@ -1743,19 +1563,6 @@ fn provider_table_line(src: &str, provider_index: usize) -> usize {
     for (line_index, line) in src.lines().enumerate() {
         if line.trim() == "[[diportProviders]]" {
             if seen == provider_index {
-                return line_index + 1;
-            }
-            seen += 1;
-        }
-    }
-    1
-}
-
-fn listener_table_line(src: &str, listener_index: usize) -> usize {
-    let mut seen = 0;
-    for (line_index, line) in src.lines().enumerate() {
-        if line.trim() == "[[listeners]]" {
-            if seen == listener_index {
                 return line_index + 1;
             }
             seen += 1;

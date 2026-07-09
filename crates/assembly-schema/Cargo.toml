@@ -1,0 +1,17 @@
+[package]
+name = "assembly-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "assembly_schema"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+
+[lints]
+workspace = true

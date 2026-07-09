@@ -15,6 +15,7 @@ name = "runtime"
 path = "src/lib.rs"
 
 [dependencies]
+assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 httpserve = { path = "../../crates/httpserve" }
 authn = { path = "../../crates/authn" }
