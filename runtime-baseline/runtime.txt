@@ -55,6 +55,13 @@ uuid = workspace=true; features=[v4]
 vault = path=../../adapters/vault; features=[backend]
 vocab = path=../../crates/vocab
 
+[assembly.intent]
+name = runtime
+profile = demo
+topology = durable-shared
+domains = [identity,settings,audit]
+listeners = [primary,internal,admin,health]
+
 [assembly.diportProviders]
 01 | port=diport::RevocationStore | provider=softca::InMemRevocationLedger | providerCrate=softca | requiredFeatures=[] | consumer=deviceloop | lifecycle=draft | durability=ephemeral-memory | purpose=device-certificate-revocation
 02 | port=diport::Publisher | provider=amqp::AmqpPublisher | providerCrate=amqp | requiredFeatures=[backend] | consumer=eventexec | lifecycle=active | durability=persistent | purpose=outbox-relay-amqp-publish

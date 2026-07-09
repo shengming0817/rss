@@ -23,6 +23,13 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - Infra-only wiring is enforced by `WIRING-DEPS-INFRA-ONLY-01` via `cargo xtask runtime-deps guard`; its allowlist and extension flow are governed by `docs/rules/runtime-wiring.md`.
 - Changes to the guard must keep a Medium or Hard carrier plus red/green tests.
 
+### Phase 3
+
+- `assembly.toml` must declare static assembly intent through required `name`, `profile`, `domains`, `topology`, `listeners`, and `diportProviders` fields.
+- `domains`, `topology`, and `listeners` are declaration and validation inputs only. They do not replace contracts, Cargo dependencies, env/secrets, listener bind config, or Rust constructor wiring.
+- Manifest intent validation is carried by `ASSEMBLY-MANIFEST-INTENT-01` in `xtask/src/assembly.rs` and runs through `cargo xtask assembly validate`, `cargo xtask verify`, and CI.
+- This phase must not make runtime read `assembly.toml` to decide topology, route mounting, auth scheme, provider construction, or live readiness.
+
 ## PR Size Planning Budget
 
 - This section is a planning and review budget, not a current `INVARIANT:` or machine-enforced merge gate.

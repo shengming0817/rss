@@ -6,7 +6,7 @@
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,16 @@ const OBJECT_STORE_PORT: &str = "diport::ObjectStore";
 pub(crate) enum Rule {
     /// `assemblies/*/Cargo.toml` 必须有同目录 `assembly.toml`。
     MissingManifest,
+    /// manifest `name` 必须非空且匹配 assembly 目录名。
+    ManifestNameMismatch,
+    /// assembly manifest 必须声明至少一个 domain。
+    EmptyDomains,
+    /// assembly manifest 中 `domains` 不得重复。
+    DuplicateDomain,
+    /// assembly manifest 必须声明至少一个 listener。
+    EmptyListeners,
+    /// assembly manifest 中 `listeners` 不得重复。
+    DuplicateListener,
     /// assembly manifest 不能空转：至少声明一个 DI provider。
     EmptyDiportProviders,
     /// production `diport::RevocationStore` provider 必须持久。
@@ -78,6 +88,9 @@ impl GovernanceCheck for AssemblyValidate {
 pub(crate) struct AssemblyManifest {
     pub(crate) name: String,
     pub(crate) profile: AssemblyProfile,
+    pub(crate) domains: Vec<AssemblyDomain>,
+    pub(crate) topology: AssemblyTopology,
+    pub(crate) listeners: Vec<AssemblyListener>,
     #[serde(rename = "diportProviders")]
     pub(crate) diport_providers: Vec<DiportProvider>,
 }
@@ -94,6 +107,86 @@ pub(crate) enum AssemblyProfile {
     Production,
     Demo,
     Test,
+}
+
+impl AssemblyProfile {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Demo => "demo",
+            Self::Test => "test",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AssemblyDomain(String);
+
+impl AssemblyDomain {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AssemblyDomain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let domain = String::deserialize(deserializer)?;
+        if crate::layers::DOMAIN_CRATES.contains(&domain.as_str()) {
+            return Ok(Self(domain));
+        }
+        Err(de::Error::custom(format!(
+            "unknown assembly domain `{}`; expected one of {}",
+            domain,
+            crate::layers::DOMAIN_CRATES.join(", ")
+        )))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AssemblyTopology {
+    Demo,
+    DurableShared,
+    DurableIsolated,
+}
+
+impl AssemblyTopology {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Demo => "demo",
+            Self::DurableShared => "durable-shared",
+            Self::DurableIsolated => "durable-isolated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AssemblyListener {
+    pub(crate) kind: AssemblyListenerKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AssemblyListenerKind {
+    Primary,
+    Internal,
+    Admin,
+    Health,
+}
+
+impl AssemblyListenerKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Internal => "internal",
+            Self::Admin => "admin",
+            Self::Health => "health",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -261,6 +354,7 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
 
 fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
     let mut findings = Vec::new();
+    validate_manifest_intent(a, &mut findings);
     if a.manifest.diport_providers.is_empty() {
         findings.push(finding(
             Rule::EmptyDiportProviders,
@@ -378,6 +472,68 @@ fn validate_assembly(a: &DiscoveredAssembly) -> Vec<Finding> {
         validate_production_security_closeout(a, &mut findings);
     }
     findings
+}
+
+fn validate_manifest_intent(a: &DiscoveredAssembly, findings: &mut Vec<Finding>) {
+    // INVARIANT: ASSEMBLY-MANIFEST-INTENT-01 { level = "Medium", exec = "verify", source = "code" } —
+    // assembly manifest intent 字段是静态声明源，必须非空、闭值、去重，并绑定到 assembly 目录名；
+    // anti-vacuity red/green tests 覆盖 name/domains/topology/listeners。
+    let dir_name = a
+        .dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if a.manifest.name.trim().is_empty() || a.manifest.name != dir_name {
+        findings.push(finding(
+            Rule::ManifestNameMismatch,
+            &a.manifest_label,
+            format!(
+                "field=name 必须非空且等于 assembly 目录名 `{dir_name}`；实际 `{}`",
+                a.manifest.name
+            ),
+        ));
+    }
+
+    if a.manifest.domains.is_empty() {
+        findings.push(finding(
+            Rule::EmptyDomains,
+            &a.manifest_label,
+            "field=domains 至少声明一个 domain，避免 assembly intent 空转通过",
+        ));
+    }
+    let mut domains = BTreeSet::new();
+    for domain in &a.manifest.domains {
+        if !domains.insert(domain.as_str()) {
+            findings.push(finding(
+                Rule::DuplicateDomain,
+                &a.manifest_label,
+                format!("field=domains domain `{}` 重复声明", domain.as_str()),
+            ));
+        }
+    }
+
+    if a.manifest.listeners.is_empty() {
+        findings.push(finding(
+            Rule::EmptyListeners,
+            &a.manifest_label,
+            "field=listeners 至少声明一个 listener，避免 assembly listener surface 空转通过",
+        ));
+    }
+    let mut listeners = BTreeSet::new();
+    for (index, listener) in a.manifest.listeners.iter().enumerate() {
+        let kind = listener.kind.as_str();
+        if !listeners.insert(kind) {
+            findings.push(finding(
+                Rule::DuplicateListener,
+                format!(
+                    "{}:{}",
+                    a.manifest_label,
+                    listener_table_line(&a.manifest_src, index)
+                ),
+                format!("field=listeners listener `{kind}` 重复声明"),
+            ));
+        }
+    }
 }
 
 struct CriticalProviderSpec {
@@ -1029,6 +1185,19 @@ fn provider_table_line(src: &str, provider_index: usize) -> usize {
     1
 }
 
+fn listener_table_line(src: &str, listener_index: usize) -> usize {
+    let mut seen = 0;
+    for (line_index, line) in src.lines().enumerate() {
+        if line.trim() == "[[listeners]]" {
+            if seen == listener_index {
+                return line_index + 1;
+            }
+            seen += 1;
+        }
+    }
+    1
+}
+
 fn rel_label(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -1069,6 +1238,20 @@ mod tests {
             r#"
 name = "runtime"
 profile = "{profile}"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::RevocationStore"
@@ -1085,6 +1268,37 @@ purpose = "device-certificate-revocation"
         valid_manifest_with_profile("production", provider_extra)
     }
 
+    fn manifest_with_intent() -> String {
+        r#"
+name = "runtime"
+profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
+
+[[diportProviders]]
+port = "diport::RevocationStore"
+provider = "softca::InMemRevocationLedger"
+providerCrate = "softca"
+consumer = "deviceloop"
+lifecycle = "draft"
+durability = "ephemeral-memory"
+purpose = "device-certificate-revocation"
+"#
+        .to_string()
+    }
+
     fn production_security_manifest(
         profile: &str,
         include_oidc: bool,
@@ -1095,6 +1309,20 @@ purpose = "device-certificate-revocation"
             r#"
 name = "runtime"
 profile = "{profile}"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 "#
         );
         if include_oidc {
@@ -1294,21 +1522,11 @@ fn mtls_config_from_env() {
 
     #[test]
     fn manifest_rejects_unknown_fields() {
-        let raw = r#"
-name = "runtime"
-profile = "production"
-unknown = true
-
-[[diportProviders]]
-port = "diport::RevocationStore"
-provider = "softca::InMemRevocationLedger"
-providerCrate = "softca"
-consumer = "deviceloop"
-lifecycle = "draft"
-durability = "ephemeral-memory"
-purpose = "device-certificate-revocation"
-"#;
-        assert!(AssemblyManifest::from_toml_str(raw).is_err());
+        let raw = manifest_with_intent().replace(
+            "topology = \"durable-shared\"",
+            "topology = \"durable-shared\"\nunknown = true",
+        );
+        assert!(AssemblyManifest::from_toml_str(&raw).is_err());
     }
 
     #[test]
@@ -1344,6 +1562,196 @@ durability = "ephemeral-memory""#
     }
 
     #[test]
+    fn assembly_manifest_accepts_domains_topology_and_listeners() -> anyhow::Result<()> {
+        let manifest = AssemblyManifest::from_toml_str(&manifest_with_intent())?;
+        let domains: Vec<_> = manifest
+            .domains
+            .iter()
+            .map(AssemblyDomain::as_str)
+            .collect();
+        assert_eq!(domains, vec!["identity", "settings", "audit"]);
+        assert_eq!(manifest.topology.as_str(), "durable-shared");
+        let listeners: Vec<_> = manifest
+            .listeners
+            .iter()
+            .map(|listener| listener.kind.as_str())
+            .collect();
+        assert_eq!(listeners, vec!["primary", "internal", "admin", "health"]);
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_manifest_requires_domains_topology_and_listeners() {
+        assert!(
+            AssemblyManifest::from_toml_str(
+                r#"
+name = "runtime"
+profile = "demo"
+
+[[diportProviders]]
+port = "diport::RevocationStore"
+provider = "softca::InMemRevocationLedger"
+providerCrate = "softca"
+consumer = "deviceloop"
+lifecycle = "draft"
+durability = "ephemeral-memory"
+purpose = "device-certificate-revocation"
+"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn assembly_manifest_rejects_unknown_domain() {
+        assert!(
+            AssemblyManifest::from_toml_str(
+                &manifest_with_intent().replace("\"identity\"", "\"billing\"")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn assembly_manifest_validate_rejects_empty_domains() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-empty-domains");
+        write_assembly(
+            &root,
+            &manifest_with_intent().replace(
+                r#"domains = ["identity", "settings", "audit"]"#,
+                "domains = []",
+            ),
+            r#"[package]
+name = "runtime"
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::EmptyDomains),
+            "empty domains must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_manifest_validate_rejects_duplicate_domains() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-duplicate-domains");
+        write_assembly(
+            &root,
+            &manifest_with_intent().replace(
+                r#"domains = ["identity", "settings", "audit"]"#,
+                r#"domains = ["identity", "settings", "identity"]"#,
+            ),
+            r#"[package]
+name = "runtime"
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::DuplicateDomain),
+            "duplicate domains must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_manifest_rejects_unknown_topology() {
+        assert!(
+            AssemblyManifest::from_toml_str(
+                &manifest_with_intent().replace("durable-shared", "single-node")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn assembly_manifest_rejects_unknown_listener() {
+        assert!(
+            AssemblyManifest::from_toml_str(
+                &manifest_with_intent().replace("kind = \"primary\"", "kind = \"public\"")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn assembly_manifest_validate_rejects_empty_listeners() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-empty-listeners");
+        let manifest = manifest_with_intent().replace(
+            r#"
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
+"#,
+            "listeners = []\n",
+        );
+        write_assembly(
+            &root,
+            &manifest,
+            r#"[package]
+name = "runtime"
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::EmptyListeners),
+            "empty listeners must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_manifest_validate_rejects_duplicate_listeners() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-duplicate-listeners");
+        write_assembly(
+            &root,
+            &manifest_with_intent().replace("kind = \"internal\"", "kind = \"primary\""),
+            r#"[package]
+name = "runtime"
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::DuplicateListener),
+            "duplicate listeners must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_manifest_validate_rejects_name_mismatch() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-name-mismatch");
+        write_assembly(
+            &root,
+            &manifest_with_intent().replace("name = \"runtime\"", "name = \"other\""),
+            r#"[package]
+name = "runtime"
+"#,
+        )?;
+
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ManifestNameMismatch),
+            "manifest name must match assembly directory: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn assembly_crate_without_manifest_is_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-missing-manifest");
         let dir = root.join("assemblies/runtime");
@@ -1372,7 +1780,21 @@ name = "runtime"
             r#"
 name = "runtime"
 profile = "production"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
 diportProviders = []
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 "#,
             r#"[package]
 name = "runtime"
@@ -1439,7 +1861,7 @@ name = "runtime"
         assert!(
             finding
                 .subject
-                .contains("assemblies/runtime/assembly.toml:5"),
+                .contains("assemblies/runtime/assembly.toml:"),
             "{finding:?}"
         );
         assert!(finding.detail.contains("field=durability"), "{finding:?}");
@@ -1848,6 +2270,20 @@ softca = { path = "../../adapters/softca", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::RevocationStore"
@@ -1894,6 +2330,20 @@ ratelimit = { path = "../../adapters/ratelimit" }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -1956,6 +2406,20 @@ pub struct DistributedRuntimeDeps;
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -2017,6 +2481,20 @@ fn wire_event_transport(_: &(), _: DistributedRuntimeDeps, _: Vec<()>, _: ()) {}
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -2055,6 +2533,20 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::RateLimiter"
@@ -2093,6 +2585,20 @@ softca = { path = "../../adapters/softca" }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::RateLimiter"
@@ -2150,6 +2656,20 @@ name = "runtime"
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "{port}"
@@ -2224,6 +2744,20 @@ amqp = { path = "../../adapters/amqp" }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::Signer"
@@ -2257,6 +2791,20 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::KeyProvider"
@@ -2289,6 +2837,20 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -2322,6 +2884,20 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::ObjectStore"

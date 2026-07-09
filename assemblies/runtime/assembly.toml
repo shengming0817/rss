@@ -1,5 +1,19 @@
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::RevocationStore"

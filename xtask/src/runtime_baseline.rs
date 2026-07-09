@@ -121,6 +121,7 @@ struct Report {
 
 fn collect_report(root: &Path) -> Result<Report> {
     let dependencies = runtime_dependencies(root)?;
+    let intent = assembly_intent(root)?;
     let providers = assembly_providers(root)?;
     let shared_fields = struct_fields(
         root,
@@ -176,7 +177,14 @@ fn collect_report(root: &Path) -> Result<Report> {
     }
 
     Ok(Report {
-        rendered: render_baseline(&dependencies, &providers, &shared_fields, &domain, &anchors),
+        rendered: render_baseline(
+            &dependencies,
+            &intent,
+            &providers,
+            &shared_fields,
+            &domain,
+            &anchors,
+        ),
         dependencies: dependencies.len(),
         providers: providers.len(),
         shared_fields: shared_fields.len(),
@@ -287,11 +295,42 @@ struct ProviderEntry {
     purpose: String,
 }
 
-fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssemblyIntentEntry {
+    name: String,
+    profile: String,
+    topology: String,
+    domains: Vec<String>,
+    listeners: Vec<String>,
+}
+
+fn assembly_manifest(root: &Path) -> Result<AssemblyManifest> {
     let path = root.join(ASSEMBLY_MANIFEST_PATH);
     let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
-    let manifest = AssemblyManifest::from_toml_str(&text)
-        .with_context(|| format!("解析 {} 失败", path.display()))?;
+    AssemblyManifest::from_toml_str(&text).with_context(|| format!("解析 {} 失败", path.display()))
+}
+
+fn assembly_intent(root: &Path) -> Result<AssemblyIntentEntry> {
+    let manifest = assembly_manifest(root)?;
+    Ok(AssemblyIntentEntry {
+        name: manifest.name,
+        profile: manifest.profile.as_str().to_string(),
+        topology: manifest.topology.as_str().to_string(),
+        domains: manifest
+            .domains
+            .iter()
+            .map(|domain| domain.as_str().to_string())
+            .collect(),
+        listeners: manifest
+            .listeners
+            .iter()
+            .map(|listener| listener.kind.as_str().to_string())
+            .collect(),
+    })
+}
+
+fn assembly_providers(root: &Path) -> Result<Vec<ProviderEntry>> {
+    let manifest = assembly_manifest(root)?;
     let mut providers = Vec::new();
     for (index, provider) in manifest.diport_providers.iter().enumerate() {
         providers.push(ProviderEntry {
@@ -893,6 +932,7 @@ fn mask_range(bytes: &[u8], start: usize, end: usize, out: &mut Vec<u8>) {
 
 fn render_baseline(
     dependencies: &[DependencyEntry],
+    intent: &AssemblyIntentEntry,
     providers: &[ProviderEntry],
     shared_fields: &[FieldEntry],
     domain: &DomainModuleInventory,
@@ -925,6 +965,20 @@ fn render_baseline(
     for dep in dependencies {
         push_line(&mut out, format_args!("{} = {}", dep.name, dep.spec));
     }
+    out.push('\n');
+
+    out.push_str("[assembly.intent]\n");
+    push_line(&mut out, format_args!("name = {}", intent.name));
+    push_line(&mut out, format_args!("profile = {}", intent.profile));
+    push_line(&mut out, format_args!("topology = {}", intent.topology));
+    push_line(
+        &mut out,
+        format_args!("domains = {}", render_string_list(&intent.domains)),
+    );
+    push_line(
+        &mut out,
+        format_args!("listeners = {}", render_string_list(&intent.listeners)),
+    );
     out.push('\n');
 
     out.push_str("[assembly.diportProviders]\n");
@@ -997,10 +1051,14 @@ fn push_line(out: &mut String, args: std::fmt::Arguments<'_>) {
 }
 
 fn render_feature_list(features: &[String]) -> String {
-    if features.is_empty() {
+    render_string_list(features)
+}
+
+fn render_string_list(items: &[String]) -> String {
+    if items.is_empty() {
         "[]".to_string()
     } else {
-        format!("[{}]", features.join(","))
+        format!("[{}]", items.join(","))
     }
 }
 
@@ -1045,6 +1103,20 @@ serde = { workspace = true, features = ["derive"] }
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -1170,6 +1242,21 @@ impl DomainModuleResult {
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
+
 [[diportProviders]]
 port = "diport::Pdp"
 provider = "oidc::OidcProvider"
@@ -1209,6 +1296,20 @@ serde = workspace=true; features=[derive]
             report.rendered.starts_with(expected_prefix),
             "{}",
             report.rendered
+        );
+        assert!(report.rendered.contains("[assembly.intent]"));
+        assert!(report.rendered.contains("name = runtime"));
+        assert!(report.rendered.contains("profile = demo"));
+        assert!(report.rendered.contains("topology = durable-shared"));
+        assert!(
+            report
+                .rendered
+                .contains("domains = [identity,settings,audit]")
+        );
+        assert!(
+            report
+                .rendered
+                .contains("listeners = [primary,internal,admin,health]")
         );
         assert!(report.rendered.contains(
             "01 | port=diport::Pdp | provider=oidc::OidcProvider | providerCrate=oidc | requiredFeatures=[backend] | consumer=httpserve | lifecycle=active | durability=persistent | purpose=jwt-credential-verification"
@@ -1256,7 +1357,21 @@ name = "runtime"
             r#"
 name = "runtime"
 profile = "demo"
+domains = ["identity", "settings", "audit"]
+topology = "durable-shared"
 diportProviders = []
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "internal"
+
+[[listeners]]
+kind = "admin"
+
+[[listeners]]
+kind = "health"
 "#,
         )?;
         let report = collect_report(&root)?;
