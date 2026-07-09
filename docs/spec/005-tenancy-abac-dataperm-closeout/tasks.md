@@ -8,7 +8,7 @@
 
 **Organization**: Each user story maps to one or more PR-sized PBI work items. Every PBI is independently trackable in Azure Boards.
 
-**Tracking**: Feature #1576; child PBI #1577, #1579, #1580, #1581, #1582, #1583, #1584, #1585, #1586, #1587, #1596.
+**Tracking**: Feature #1576; child PBI #1577, #1579, #1580, #1581, #1582, #1583, #1584, #1585, #1586, #1587, #1596, #1597.
 
 ## Phase 1: Setup (Shared Infrastructure)
 
@@ -134,6 +134,14 @@
 **Independent Test**: `cargo xtask tenancy-closeout` fails if the consumer guide, compilable example, or required AuthZ/tenant/projection anchors disappear; `cargo check -p tenancyconsumer` proves shipped example code uses current public types; `cargo test -p xtask tenancy_closeout` compiles the generated-spec smoke test.
 
 - [x] T041 [US6] Add #1596 consumer migration guide and `examples/tenancy-consumer` compile check
+
+## Phase 11: User Story 6 - Service Identity Tenancy Closeout (Priority: P3)
+
+**Goal**: Lock the service identity tenancy boundary: service-token can assert tenant only through MAC-bound canonical `X-Tenant-ID`; mTLS/SPIFFE remains tenantless service identity evidence.
+
+**Independent Test**: `cargo xtask tenancy-closeout` fails if the service-token tenant assertion rule, mTLS tenantless rule, exact SPIFFE allow-set route-authorizer rule, or #1597 closeout trail disappears.
+
+- [x] T042 [US6] Add #1597 service identity tenancy closeout coverage across runtime e2e, tenancy-closeout anchors, tenancy rules, ADR-007, and the consumer migration guide
 
 ## Dependencies
 

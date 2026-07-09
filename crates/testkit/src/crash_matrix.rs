@@ -86,7 +86,7 @@ pub enum CrashRunner {
 
 /// Closed semantic fault covered by the consistency crash matrix.
 ///
-/// # INVARIANT: CONSISTENCY-FAULT-SPEC-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum and parser boundary" }
+/// # INVARIANT: CONSISTENCY-FAULT-SPEC-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum plus parser make executable fault ids compile-time named variants instead of free-form strings" }
 ///
 /// Ready-case runners bind this enum, not free-form `crashPoint` / `expectedInvariant`
 /// strings. Adding a new executable fault therefore requires extending this closed type and the

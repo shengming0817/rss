@@ -3,6 +3,9 @@
 //! INVARIANT: TENANCY-CLOSEOUT-REVERSE-01 { level = "Medium", exec = "verify", source = "code" } -- final
 //! tenancy governance facts must stay machine-visible in verify/ci membership, dylint registration,
 //! projection wiring, and governed closeout docs.
+//! INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01 { level = "Medium", exec = "verify", source = "code" } -- service-token
+//! MAC-bound canonical tenant headers and mTLS/SPIFFE tenantless service identity must remain locked by reverse
+//! closeout anchors.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -115,6 +118,11 @@ const TENANCY_CONSUMER_GUIDE_PATH: &str =
 const TENANCY_CONSUMER_EXAMPLE_PATH: &str = "examples/tenancy-consumer/src/main.rs";
 const TENANCY_CONSUMER_GENERATED_SPEC_TEST_PATH: &str =
     "xtask/tests/tenancy_closeout_generated_specs.rs";
+const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
+const SERVICE_IDENTITY_SCOPE_INVARIANT: &str = "TENANCY-SERVICE-IDENTITY-SCOPE-01";
+const MTLS_NOT_TENANT_SOURCE_ANCHOR: &str = "mTLS/SPIFFE service identity is not a tenant source";
+const SERVICE_TOKEN_MAC_SCOPE_ANCHOR: &str =
+    "service-token MAC-bound tenant scope is the only service identity tenant assertion";
 
 const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
     RequiredAnchor {
@@ -167,6 +175,24 @@ const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
+        path: "docs/rules/tenancy.md",
+        needle: SERVICE_IDENTITY_SCOPE_INVARIANT,
+        detail: "tenancy rule doc must lock the service identity tenant-scope invariant",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "docs/rules/tenancy.md",
+        needle: SERVICE_TOKEN_MAC_SCOPE_ANCHOR,
+        detail: "tenancy rule doc must state the service-token MAC-bound tenant assertion",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: "docs/rules/tenancy.md",
+        needle: MTLS_NOT_TENANT_SOURCE_ANCHOR,
+        detail: "tenancy rule doc must state mTLS/SPIFFE does not mint tenant scope",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
         path: "Cargo.toml",
         needle: "\"examples/tenancy-consumer\"",
         detail: "tenancy consumer example must be a workspace member",
@@ -191,6 +217,12 @@ const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
+        path: "docs/spec/005-tenancy-abac-dataperm-closeout/tasks.md",
+        needle: "#1597",
+        detail: "tenancy closeout tasks must track service identity integration closeout",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
         path: "docs/spec/005-tenancy-abac-dataperm-closeout/quickstart.md",
         needle: "cargo check -p tenancyconsumer",
         detail: "tenancy closeout quickstart must include the compilable consumer example check",
@@ -206,6 +238,36 @@ const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
         path: TENANCY_CONSUMER_GUIDE_PATH,
         needle: "service-token-tenant-bound",
         detail: "consumer guide must document service-token tenant binding",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: SERVICE_TOKEN_MAC_SCOPE_ANCHOR,
+        detail: "consumer guide must document service-token MAC-bound tenant scope",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: MTLS_NOT_TENANT_SOURCE_ANCHOR,
+        detail: "consumer guide must document mTLS/SPIFFE as tenantless service identity",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: AUTH_E2E_TEST_PATH,
+        needle: "internal_mtls_verified_peer_remains_tenantless_scope",
+        detail: "runtime auth e2e must lock mTLS service principal as tenantless",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: AUTH_E2E_TEST_PATH,
+        needle: "VerifiedMtlsPeer",
+        detail: "runtime auth e2e must inject verified mTLS evidence",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: AUTH_E2E_TEST_PATH,
+        needle: "body, SCOPE_MISSING",
+        detail: "runtime auth e2e must assert mTLS does not establish ambient tenant scope",
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
@@ -294,12 +356,17 @@ const ADR_CLOSEOUT_COVERAGE: &[AdrCloseoutCoverage] = &[
             "MAC verifier 随 #1109",
             "service-token 验签空窗",
             "MAC binding 尚未实装",
+            "`AuthScheme::Mtls` 仅作类型层接缝预留",
+            "无 verifier 实现",
         ],
         closeout_needles: &[
-            "Closeout addendum（#1577 / #1586）",
+            "Closeout addendum（#1500 / #1577 / #1586 / #1597）",
             "ServiceTokenTenantBinding",
             "service_token_mac_input",
             "service_token_tenant_binding",
+            "VerifiedMtlsPeer",
+            "MtlsRouteAuthorizer",
+            SERVICE_IDENTITY_SCOPE_INVARIANT,
         ],
         detail: "ADR 007 historical service-token/MAC future wording must be covered by final closeout addendum",
     },
@@ -363,6 +430,21 @@ const STALE_CLOSEOUT_PATTERNS: &[ForbiddenPattern] = &[
         path: "lints/README.md",
         needle: "tenant/AuthZ/projection lint 待补",
         detail: "tenant/AuthZ/projection dylints are registered; lint README must not describe them as pending",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+        needle: "内部 svc-to-svc 现阶段用 service-token",
+        detail: "ADR 007 is superseded: Internal svc-to-svc production default is mTLS/SPIFFE",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+        needle: "`AuthScheme::Mtls` 仅作类型层接缝预留",
+        detail: "ADR 007 must not describe mTLS as only a reserved seam after #1500/#1597",
+    },
+    ForbiddenPattern {
+        path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+        needle: "无 verifier 实现",
+        detail: "ADR 007 must not describe mTLS verifier implementation as absent after #1500/#1597",
     },
 ];
 
@@ -1271,6 +1353,48 @@ mod tests {
     }
 
     #[test]
+    fn missing_service_identity_scope_anchor_is_reported() {
+        let anchor = RequiredAnchor {
+            rule: Rule::DocAnchor,
+            path: "docs/rules/tenancy.md",
+            needle: SERVICE_IDENTITY_SCOPE_INVARIANT,
+            detail: "must exist",
+        };
+        let findings = scan_required_anchor(&anchor, "service-token tenant binding");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::DocAnchor);
+        assert!(
+            findings[0]
+                .subject
+                .contains(SERVICE_IDENTITY_SCOPE_INVARIANT),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn missing_mtls_tenantless_e2e_anchor_is_reported() {
+        let anchor = RequiredAnchor {
+            rule: Rule::DocAnchor,
+            path: AUTH_E2E_TEST_PATH,
+            needle: "internal_mtls_verified_peer_remains_tenantless_scope",
+            detail: "must exist",
+        };
+        let findings = scan_required_anchor(
+            &anchor,
+            "// internal_mtls_verified_peer_remains_tenantless_scope documented only\n\
+             async fn service_token_establishes_scope_from_mac_bound_tenant() {}",
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::DocAnchor);
+        assert!(
+            findings[0]
+                .subject
+                .contains("internal_mtls_verified_peer_remains_tenantless_scope"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn root_lint_registry_ignores_comment_only_lint() {
         let content = r#"
 [workspace.metadata.dylint]
@@ -1412,6 +1536,19 @@ async fn password_change_handler() {}
             }),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn stale_service_identity_mtls_reserved_wording_is_reported() {
+        let pattern = ForbiddenPattern {
+            path: "docs/architecture/202606232319-007-service-identity-service-token-vs-spiffe-mtls.md",
+            needle: "`AuthScheme::Mtls` 仅作类型层接缝预留",
+            detail: "stale service identity wording",
+        };
+        let findings =
+            scan_forbidden_pattern(&pattern, "当前 `AuthScheme::Mtls` 仅作类型层接缝预留");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, Rule::StaleCloseoutWording);
     }
 
     #[test]

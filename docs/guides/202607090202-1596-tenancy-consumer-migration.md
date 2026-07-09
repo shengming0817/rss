@@ -51,11 +51,14 @@ tenant 不一致都必须 401。
 
 ## Tenant source
 
-tenant scope 只能来自已声明入口：
+tenant scope 只能来自已声明且已认证入口：
 
 - JWT tenant claim，经 auth bridge 写入 request context。
-- `X-Tenant-ID = "populate-only"`，仅 public/pre-auth 填充路径使用。
-- `X-Tenant-ID = "service-token-tenant-bound"`，仅 serviceOwned service-token MAC 绑定路径使用。
+- `X-Tenant-ID = "service-token-tenant-bound"`，仅 serviceOwned service-token MAC 绑定路径使用；service-token MAC-bound tenant scope is the only service identity tenant assertion。
+
+`X-Tenant-ID = "populate-only"` 仅 public/pre-auth 填充路径使用，不是 authenticated ambient tenant source。
+mTLS/SPIFFE service identity is not a tenant source；SPIFFE-ID / `VerifiedMtlsPeer` 只证明 service
+principal，必须再通过 exact SPIFFE allow-set / `RouteAuthorizer`，不会建立 request tenant scope。
 
 request body `tenantId` 不是 tenant source。body 不在 service-token tenant header MAC 绑定输入内，因此
 HTTP request schema 不得声明 `tenantId`。唯一当前例外是 `audit.list-entries` 的 GET query `tenantId`，

@@ -68,6 +68,8 @@ const BYPASS_ALLOWED_PATHS: &[&str] = &[
     "adapters/postgres/src/inbox.rs",
     "adapters/redis/src/bundle.rs",
 ];
+const POSTGRES_FAULT_MATRIX_HARNESS: &str = "adapters/postgres/src/fault_matrix.rs";
+const POSTGRES_LIB_PATH: &str = "adapters/postgres/src/lib.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -195,10 +197,7 @@ fn scan_production_bypasses(root: &Path) -> Result<Vec<Finding<Rule>>> {
 fn scan_bypass_dir(root: &Path, dir: &Path, findings: &mut Vec<Finding<Rule>>) -> Result<()> {
     for path in rs_files(dir)? {
         let rel = rel_path(root, &path);
-        if BYPASS_ALLOWED_PATHS
-            .iter()
-            .any(|allowed| rel == Path::new(allowed))
-        {
+        if is_bypass_allowed(root, &rel)? {
             continue;
         }
         let content = std::fs::read_to_string(&path)
@@ -226,6 +225,50 @@ fn rust_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(files)
+}
+
+fn is_bypass_allowed(root: &Path, rel: &Path) -> Result<bool> {
+    if BYPASS_ALLOWED_PATHS
+        .iter()
+        .any(|allowed| rel == Path::new(allowed))
+    {
+        return Ok(true);
+    }
+    if rel != Path::new(POSTGRES_FAULT_MATRIX_HARNESS) {
+        return Ok(false);
+    }
+    let lib_path = root.join(POSTGRES_LIB_PATH);
+    let lib_content = std::fs::read_to_string(&lib_path)
+        .with_context(|| format!("event-transport-guard: read {}", lib_path.display()))?;
+    Ok(is_feature_gated_fault_matrix_harness(rel, &lib_content))
+}
+
+fn is_feature_gated_fault_matrix_harness(rel: &Path, lib_content: &str) -> bool {
+    rel == Path::new(POSTGRES_FAULT_MATRIX_HARNESS)
+        && fault_matrix_module_has_feature_gate(lib_content)
+}
+
+fn fault_matrix_module_has_feature_gate(lib_content: &str) -> bool {
+    let stripped = strip_rust_comment_lines(lib_content);
+    let mut pending_attrs = Vec::new();
+    for line in stripped.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("#[") {
+            pending_attrs.push(line);
+            continue;
+        }
+        if matches!(line, "pub mod fault_matrix;" | "mod fault_matrix;") {
+            return pending_attrs.iter().any(|attr| {
+                attr.starts_with("#[cfg(")
+                    && attr.contains("feature")
+                    && attr.contains("\"fault-matrix-test-support\"")
+            });
+        }
+        pending_attrs.clear();
+    }
+    false
 }
 
 fn scan_domain_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
@@ -274,6 +317,20 @@ fn text_bypass_fragments(content: &str) -> BTreeSet<&'static str> {
         .copied()
         .filter(|forbidden| content.contains(forbidden))
         .collect()
+}
+
+fn strip_rust_comment_lines(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[derive(Default)]
@@ -593,6 +650,44 @@ mod tests {
     }
 
     #[test]
+    fn fault_matrix_harness_skip_requires_exact_path_and_feature_gate() {
+        let gated_lib = r#"
+#[cfg(feature = "fault-matrix-test-support")]
+pub mod fault_matrix;
+"#;
+        assert!(is_feature_gated_fault_matrix_harness(
+            Path::new(POSTGRES_FAULT_MATRIX_HARNESS),
+            gated_lib
+        ));
+        assert!(!is_feature_gated_fault_matrix_harness(
+            Path::new("adapters/postgres/src/nested/fault_matrix.rs"),
+            gated_lib
+        ));
+    }
+
+    #[test]
+    fn fault_matrix_harness_skip_rejects_missing_or_wrong_gate() {
+        assert!(!is_feature_gated_fault_matrix_harness(
+            Path::new(POSTGRES_FAULT_MATRIX_HARNESS),
+            "pub mod fault_matrix;"
+        ));
+        assert!(!is_feature_gated_fault_matrix_harness(
+            Path::new(POSTGRES_FAULT_MATRIX_HARNESS),
+            r#"
+#[cfg(test)]
+pub mod fault_matrix;
+"#
+        ));
+        assert!(!is_feature_gated_fault_matrix_harness(
+            Path::new(POSTGRES_FAULT_MATRIX_HARNESS),
+            r#"
+// #[cfg(feature = "fault-matrix-test-support")]
+pub mod fault_matrix;
+"#
+        ));
+    }
+
+    #[test]
     fn scan_bypass_content_rejects_production_spawn_outside_bridge() {
         let findings = scan_bypass_content(
             Path::new("assemblies/runtime/src/other.rs"),
@@ -685,7 +780,7 @@ mod tests {
         let findings = scan_bypass_content(
             Path::new("adapters/postgres/src/fault_matrix.rs"),
             r#"
-            //! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard" }
+            const MARKER: &str = "CONSISTENCY-FAULT-MATRIX-SEAM-01";
             async fn a(&self) { let store = self.deps.infra().inbox(); }
             async fn b(&self) { let store = self.deps.infra().inbox(); }
             async fn c(&self) { let store = self.deps.infra().inbox(); }
@@ -707,7 +802,7 @@ mod tests {
         let findings = scan_bypass_content(
             Path::new("adapters/postgres/src/fault_matrix.rs"),
             r#"
-            //! # INVARIANT: CONSISTENCY-FAULT-MATRIX-SEAM-01 { level = "Hard" }
+            const MARKER: &str = "CONSISTENCY-FAULT-MATRIX-SEAM-01";
             async fn a(&self) { let store = self.deps.infra().inbox(); }
             async fn b(&self) { let store = self.deps.infra().inbox(); }
             async fn c(&self) { let store = self.deps.infra().inbox(); }

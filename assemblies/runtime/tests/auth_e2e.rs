@@ -377,6 +377,32 @@ fn internal_mtls_router_with_authorizer(
 }
 
 #[allow(clippy::expect_used)]
+fn internal_mtls_scope_router_with_authorizer(
+    authorizer: Arc<dyn RouteAuthorizer>,
+) -> httpserve::AuthenticatedRoutes {
+    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
+        rb.mount(
+            httpserve::Route {
+                method: Method::GET,
+                path: "/scope",
+                contract_id: "test.internal.mtls.scope",
+            },
+            get(scope_probe),
+        )
+    });
+    let plan = AuthPlan::new(ListenerKind::Internal, AuthScheme::Mtls).expect("plan");
+    let authed = httpserve::finalize_auth_with_audit_and_authorizer(
+        routes,
+        plan,
+        httpserve::AuditSinkHandle::new(RecordingAuditSink::default()),
+        Arc::new(FixedClock(NOW)),
+        authorizer,
+    )
+    .expect("finalize_auth_with_authorizer");
+    apply_verify_bridge(authed, Arc::new(es256_provider()), RequiredScheme::Mtls)
+}
+
+#[allow(clippy::expect_used)]
 fn verified_mtls_peer() -> authn::VerifiedMtlsPeer {
     let allow =
         authn::MtlsAllowSet::new(["spiffe://example.org/ns/rss/sa/internal"]).expect("allow-set");
@@ -1062,6 +1088,32 @@ async fn internal_mtls_route_authorizer_allows_verified_peer() {
         resp.status(),
         StatusCode::OK,
         "mTLS Internal route must pass only after caller authorization"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn internal_mtls_verified_peer_remains_tenantless_scope() {
+    let mut req = axum::http::Request::builder()
+        .method(Method::GET)
+        .uri("/scope")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(verified_mtls_peer());
+
+    let resp = internal_mtls_scope_router_with_authorizer(allow_authorizer())
+        .into_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert_eq!(status, StatusCode::OK, "mTLS service principal is accepted");
+    assert_eq!(
+        body, SCOPE_MISSING,
+        "mTLS/SPIFFE service identity is auth evidence, not a tenant source"
     );
 }
 

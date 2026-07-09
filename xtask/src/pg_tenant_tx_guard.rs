@@ -92,7 +92,7 @@ fn load_prod_rs(dir: &Path) -> Result<Vec<(String, String)>> {
     paths.sort();
     let mut files = Vec::new();
     for path in paths {
-        if is_test_file(&path) {
+        if is_test_file(&path) || is_feature_gated_harness(dir, &path)? {
             continue;
         }
         let rel = path
@@ -126,6 +126,47 @@ fn collect_rs_paths(dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+fn is_feature_gated_harness(src_dir: &Path, path: &Path) -> Result<bool> {
+    let rel = path
+        .strip_prefix(src_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if rel != "fault_matrix.rs" {
+        return Ok(false);
+    }
+    let lib_content = std::fs::read_to_string(src_dir.join("lib.rs"))
+        .with_context(|| format!("读 {} 失败", src_dir.join("lib.rs").display()))?;
+    Ok(is_feature_gated_harness_rel(&rel, &lib_content))
+}
+
+fn is_feature_gated_harness_rel(rel: &str, lib_content: &str) -> bool {
+    rel == "fault_matrix.rs" && fault_matrix_module_has_feature_gate(lib_content)
+}
+
+fn fault_matrix_module_has_feature_gate(lib_content: &str) -> bool {
+    let stripped = strip_rust_comment_lines(lib_content);
+    let mut pending_attrs = Vec::new();
+    for line in stripped.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("#[") {
+            pending_attrs.push(line);
+            continue;
+        }
+        if matches!(line, "pub mod fault_matrix;" | "mod fault_matrix;") {
+            return pending_attrs.iter().any(|attr| {
+                attr.starts_with("#[cfg(")
+                    && attr.contains("feature")
+                    && attr.contains("\"fault-matrix-test-support\"")
+            });
+        }
+        pending_attrs.clear();
+    }
+    false
 }
 
 fn is_test_file(path: &Path) -> bool {
@@ -1051,6 +1092,34 @@ mod tests {
             .iter()
             .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn feature_harness_skip_requires_exact_fault_matrix_module_gate() {
+        let gated_lib = r#"
+#[cfg(feature = "fault-matrix-test-support")]
+pub mod fault_matrix;
+"#;
+        assert!(is_feature_gated_harness_rel("fault_matrix.rs", gated_lib));
+        assert!(!is_feature_gated_harness_rel(
+            "subsystem/fault_matrix.rs",
+            gated_lib
+        ));
+    }
+
+    #[test]
+    fn feature_harness_skip_requires_feature_gate() {
+        assert!(!is_feature_gated_harness_rel(
+            "fault_matrix.rs",
+            "pub mod fault_matrix;"
+        ));
+        assert!(!is_feature_gated_harness_rel(
+            "fault_matrix.rs",
+            r#"
+#[cfg(test)]
+pub mod fault_matrix;
+"#
+        ));
     }
 
     #[test]

@@ -43,7 +43,11 @@ admin 池未配置时返回 501 `ERR_CORE_NOT_IMPLEMENTED`；配置不完整或�
 
 ## Tenant source（认证通道，非 request body）
 
-tenant scope 只能来自**声明过的入口**：JWT tenant claim（→ ctx）或 `X-Tenant-ID` header。
+tenant scope 只能来自**声明过且已认证的入口**：JWT tenant claim（→ ctx）或 service-token MAC-bound
+canonical `X-Tenant-ID`（→ ctx）。`INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01`：
+service-token MAC-bound tenant scope is the only service identity tenant assertion。mTLS/SPIFFE service identity is not a tenant source；
+`VerifiedMtlsPeer` / SPIFFE-ID 只证明 workload service principal，并经 exact SPIFFE allow-set /
+`RouteAuthorizer` 做 route allow/deny，不隐式建立 ambient tenant scope。
 `X-Tenant-ID = "populate-only"` 仅用于 public / pre-auth 填充路径（如 login），由
 contract/codegen/header-shape + handler fail-closed 解析保证形态，**不是** cryptographic header
 authenticity；service-token 路径必须使用 `service-token-tenant-bound`，runtime bridge 将 canonical
@@ -73,6 +77,9 @@ service-token tenant MAC 仍按上一节治理。
 issuer，单独走 tenant-bound HS256 service-token 路径，并把 canonical `X-Tenant-ID` 纳入 MAC 输入。
 
 JWT tenant claim 在 auth 边界解析并写入 context。service principal 无 tenant。
+service-token principal 自身同样无 tenant；只有验签通过的 service-token MAC-bound canonical
+`X-Tenant-ID` 可单独写入 request tenant scope。mTLS/SPIFFE service principal 不携带 tenant assertion，
+不会从 `VerifiedMtlsPeer` 或 SPIFFE-ID 派生 ambient tenant。
 `Principal::row_visibility(ctx)` 是身份到 row-scope 的框架级派生入口：
 
 - normal user -> self
