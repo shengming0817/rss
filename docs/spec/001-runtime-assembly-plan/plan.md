@@ -98,7 +98,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 | PR-012 | future | Phase 3 | Validate domain required capabilities and providers | PR-011 | assembly capability tests |
 | PR-013 | future | Phase 3 | Introduce AssemblyPlan/RuntimePlan builder | PR-012 | runtime plan tests |
 | PR-014 | #1669 | Phase 4 | Define domain binding/output shape | PR-013 | bootstrap/runtime module tests |
-| PR-015 | future | Phase 4 | Move `wire_settings`, `wire_identity`, `wire_audit` | PR-014 | wire function tests |
+| PR-015 | #1670 | Phase 4 | Move `wire_settings`, `wire_identity`, `wire_audit` | PR-014 | wire function tests |
 | PR-016 | future | Phase 4 | Generate runtime modules file | PR-015 | codegen check |
 | PR-017 | future | Phase 4 | Use generated modules in runtime run path | PR-016 | runtime tests |
 | PR-018 | future | Phase 4 | Add settings-only assembly | PR-017 | assembly validate + smoke test |

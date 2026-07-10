@@ -8,9 +8,10 @@
 //!
 //! # 不变式
 //!
-//! - **INVARIANT: WIRING-DEPS-NO-HANDOFF-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard，签名强制）**：域接线函数签名为
-//!   `wire_X(deps: &SharedRuntimeDeps) -> anyhow::Result<bootstrap::DomainModuleResult>`——只收
-//!   `&SharedRuntimeDeps`，无参数可塞别域的 `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达
+//! - **INVARIANT: WIRING-DEPS-NO-HANDOFF-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（Hard，签名强制）**：域接线入口
+//!   `domains::X::module(source: &impl XModuleSource) -> Future<Result<DomainBinding>>` 统一为 async；
+//!   每个 source trait 均 sealed，生产实现仅 [`SharedRuntimeDeps`]，测试实现仅提供同域 provider，且签名
+//!   无参数可塞别域的 `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达
 //!   （type-system 一档载体）。
 //! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }（Medium，xtask 字段扫描）**：
 //!   `SharedRuntimeDeps` 字段类型只允许 provider bundle / infra value object 允许列表，以及精确例外

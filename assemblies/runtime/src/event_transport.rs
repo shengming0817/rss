@@ -1027,7 +1027,7 @@ fn consumer_tx_handler_for_subscription(
 ) -> anyhow::Result<ConsumerTxHandlerFn> {
     match consumer_tx_kind_for_subscription(subscription) {
         Some(ConsumerTxKind::AuditSessionCreated) => {
-            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit session-created consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
@@ -1035,7 +1035,7 @@ fn consumer_tx_handler_for_subscription(
                 .into_handler())
         }
         Some(ConsumerTxKind::AuditRoleAssigned) => {
-            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit role-assigned consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
@@ -1043,7 +1043,7 @@ fn consumer_tx_handler_for_subscription(
                 .into_handler())
         }
         Some(ConsumerTxKind::AuditRoleRevoked) => {
-            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit role-revoked consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()
@@ -1051,7 +1051,7 @@ fn consumer_tx_handler_for_subscription(
                 .into_handler())
         }
         Some(ConsumerTxKind::AuditPolicyUpdated) => {
-            let hasher = crate::build_audit_hasher(|name| std::env::var(name).ok())
+            let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit policy-updated consumer tx chain key")?;
             Ok(pg
                 .for_domain::<caps::Audit>()

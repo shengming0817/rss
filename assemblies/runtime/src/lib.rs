@@ -23,6 +23,7 @@
 
 pub mod auth_bridge;
 pub mod distributed_runtime;
+pub mod domains;
 pub mod event_transport;
 pub mod infra;
 pub(crate) mod launch;
@@ -34,6 +35,9 @@ pub mod routes;
 pub mod saga_runtime;
 
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
+pub use domains::audit::wire_audit;
+pub use domains::identity::{wire_identity, wire_identity_with};
+pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe, wire_settings};
 pub use infra::oidc::{build_provider, provider_from_b64};
 pub use infra::pg::{build_pg_audit_admin_config, build_pg_config, build_pg_migrator_config};
 pub use infra::redis::build_redis_runtime_deps;
@@ -55,11 +59,7 @@ use infra::redis::{
     spawn_redis_readiness_sampler,
 };
 use infra::s3::{build_s3_canary_config_from, wire_s3_canary};
-use infra::vault::{
-    KeyProviderReadyProbe, build_keyprovider_readiness_interval,
-    spawn_keyprovider_readiness_sampler, verify_keyprovider_ready,
-};
-use infra::vault::{build_vault_key_provider_from, build_vault_signer_with};
+use infra::vault::build_vault_key_provider_from;
 use phase::{RuntimeInputs, RuntimeOutputs, RuntimePhase, phase_result};
 
 use std::collections::{BTreeMap, HashMap};
@@ -67,10 +67,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use audit::AuditDomain;
-use audit::ports::{AuditAdminRepo as _, AuditChainHasher, AuditLedgerVerifyReport, DynAuditRepo};
+use audit::ports::{AuditAdminRepo as _, AuditLedgerVerifyReport};
 use base64::Engine as _;
 use consistency::{EngineErrorKind, IdemKey, ProjectionBatchLimit, SerialInOrder};
+#[cfg(test)]
 use crypto::RustCryptoMacVerifier;
 use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
 use eventexec::{
@@ -79,25 +79,15 @@ use eventexec::{
     ProjectionId, ProjectionReplayProjector, ProjectionSelector, ProjectionStop,
     ProjectionTargetRegistry, ProjectionVersion, projection_runner_once,
 };
-use identity::{
-    IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
-    RefreshService,
-    ports::{
-        DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-        DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
-    },
-};
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
-    ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
-    MaintenanceAuditOutcome, PgAuthAuditSink, PgDbReadiness, PgDlqStore, PgMaintenanceDeps,
-    PgRuntimeDeps, PoolReadiness, ProjectionPointerPrecondition, caps,
+    ConfigValueMaintenanceOptions, ConfigValueProtection, MaintenanceAuditOutcome, PgDlqStore,
+    PgMaintenanceDeps, PgRuntimeDeps, ProjectionPointerPrecondition, caps,
 };
-use primitives::{HealthCheck, HealthStatus, MacKey, ProbeName};
-use settings::ports::DynSecretRepo;
-use settings::{SettingsDomain, SettingsService, empty_flag_store};
+#[cfg(test)]
+use primitives::MacKey;
+use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
-use vault::{VaultSigner, caps as vault_caps};
 
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
 const SPIFFE_ENDPOINT_SOCKET_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
@@ -1828,8 +1818,8 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime {
         session: &Self::Session,
         parsed: &AuditLedgerVerifyArgs,
     ) -> anyhow::Result<AuditLedgerVerifyReport> {
-        let hasher =
-            build_audit_hasher(|name| std::env::var(name).ok()).context("audit chain key")?;
+        let hasher = domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
+            .context("audit chain key")?;
         let repo = session.audit_admin_repo(hasher).context(
             "audit ledger verify requires RSS_PG_AUDIT_ADMIN_USERNAME/RSS_PG_AUDIT_ADMIN_PASSWORD",
         )?;
@@ -3152,63 +3142,6 @@ pub async fn run_settings_config_value_maintenance(args: &[String]) -> anyhow::R
     Ok(())
 }
 
-// ── ConfigsReadyProbe ─────────────────────────────────────────────────────────────────────────
-
-/// probe 探针稳定名（`ProbeName::parse` 校验合法字符；underscore_case，与 prometheus metric 约定一致）。
-///
-/// `pub const`：e2e 测试（`configs_ready_e2e.rs`）经 `runtime::CONFIGS_READY_PROBE_NAME` 引用，
-/// 避免硬编码字符串——改名即编译期捕获（[D6] #1309 review）。
-pub const CONFIGS_READY_PROBE_NAME: &str = "configs_ready";
-
-/// DB readiness 采样探针——读 [`PgDbReadiness`] 采样状态，非 pool 计数器。
-///
-/// `check`（sync，non-blocking）：读 `PgDbReadiness::snapshot()` 原子状态，无 I/O：
-/// - `PoolReadiness::Ready` → `Healthy`（`detail = "ready"`）
-/// - `PoolReadiness::Down` → `Unhealthy`（`detail = "down"`）
-///
-/// `detail` 固定 `&'static str` const（`HealthCheck::detail` 类型约束，禁夹带 runtime PII）。
-pub struct ConfigsReadyProbe {
-    health: Arc<PgDbReadiness>,
-    /// 探针自报名（重建 `HealthCheck` 时 registry 使用声明名权威，此字段保留供 debug inspect）。
-    name: ProbeName,
-}
-
-impl ConfigsReadyProbe {
-    /// 构造 `ConfigsReadyProbe`（读 `PgDbReadiness` 采样状态，非 pool 计数器）。
-    ///
-    /// `name` 应使用 [`CONFIGS_READY_PROBE_NAME`] 常量以确保与 registry 声明名一致。
-    #[allow(clippy::expect_used)]
-    pub fn new(health: Arc<PgDbReadiness>) -> Self {
-        // reason: CONFIGS_READY_PROBE_NAME 是 kebab-case const literal，ProbeName::parse 仅失败于
-        // 非法字符；const 已手工验证，expect 是构造期 programmer error（此处不可恢复）。
-        let name = ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
-        Self { health, name }
-    }
-}
-
-/// `PoolReadiness` → `(HealthStatus, detail)`（纯函数，可独立测试）。
-///
-/// - `Ready` → `Healthy`/"ready"（HTTP 200）
-/// - `Saturated` → `Degraded`/"saturated"（HTTP 200；池饱和可服务，编排器不摘流）
-/// - `Down` → `Unhealthy`/"down"（HTTP 503）
-/// - 未知（non_exhaustive）→ `Unhealthy`/"unknown"（fail-closed）
-fn readiness_to_health(r: PoolReadiness) -> (HealthStatus, &'static str) {
-    match r {
-        PoolReadiness::Ready => (HealthStatus::Healthy, "ready"),
-        PoolReadiness::Saturated => (HealthStatus::Degraded, "saturated"),
-        PoolReadiness::Down => (HealthStatus::Unhealthy, "down"),
-        // reason: PoolReadiness 是 non_exhaustive；未知变体 fail-closed（Unhealthy）。
-        _ => (HealthStatus::Unhealthy, "unknown"),
-    }
-}
-
-impl bootstrap::HealthProbe for ConfigsReadyProbe {
-    fn check(&self) -> HealthCheck {
-        let (status, detail) = readiness_to_health(self.health.snapshot());
-        HealthCheck::new(self.name.clone(), status, detail)
-    }
-}
-
 // ── RlsReadyProbe ──────────────────────────────────────────────────────────────────────────────
 
 /// RLS 能力门 readyz 兜底探针稳定名（underscore_case，与 prometheus 约定一致）。
@@ -3412,326 +3345,6 @@ fn wire_session_sweeper(pg: &PgRuntimeDeps) -> anyhow::Result<DomainModuleResult
         "session sweeper interval configured"
     );
     session_sweeper_module_result(worker, health)
-}
-
-// ── settings + secret wiring ─────────────────────────────────────────────────────────────────
-
-/// 接线 settings 域（#1430 PERSIST-009 settings 首条 durable module 闭环）：构造 config 应用服务 + secret
-/// 仓储端口、产出 `configs_ready` readiness 探针，返回 `(SettingsDomain, DomainModuleResult)`。
-///
-/// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——内部持 [`PgRuntimeDeps`] capability bundle；settings
-///   wiring 只拿 `PgDomainDeps<caps::Settings>`，拿不到 identity repo 或裸 pool。
-///
-/// [`SettingsDomain`] 持构造好的 config 服务 + secret 仓储端口，经 `Domain::init` 挂 config-publish /
-/// secret-publish 路由；同一 config service 也交给 event transport 的 settings ConsumerTx handler，用于刷新同一
-/// 进程内 cache 后再提交 inbox。
-/// `configs_ready` 探针经 [`DomainModuleResult`] 出向（探针包 `PgDbReadiness` = adapter 类型，须在组合根构造、
-/// 不能放域 crate `Domain::init`）。组合根 `compose(&[&settings_domain, ..])` 装配路由 + `merge(module)` 聚合探针。
-///
-/// secret-publish 路由 State 持 `Arc<DynSecretRepo>`（publish 路径不需 resolver）：**不构造 `SecretService`**——
-/// 其 `Box<DynSecretResolver>`（diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）使整体非 `Sync`、
-/// 不可作 axum State。vault resolver 句柄经 `deps.vault.runtime_resources()` 在 `run()` 注册 guard（lifecycle 不变）。
-///
-/// # 注意
-///
-/// 当前 `empty_flag_store()` 返回空 in-mem store（`seed-data` feature，fail-closed 语义）；生产 flag store
-/// 待 #1120。`SystemClock` 仍硬编码——clock 注入（rust-standards「Clock 构造器位置参」）属 tangential，不在本 PR scope。
-pub async fn wire_settings(
-    deps: &SharedRuntimeDeps,
-) -> anyhow::Result<(SettingsDomain, DomainModuleResult)> {
-    let vault_settings = deps.vault.for_domain::<vault_caps::Settings>();
-    let key_name = deps.settings_config_value_key_name.clone();
-    let probe_provider = vault_settings.key_provider();
-    verify_keyprovider_ready(&probe_provider, key_name.clone())
-        .await
-        .context("verify settings config value key provider")?;
-
-    // 单一 settings bundle（PERSIST-003）：read+write config + secret repo 同 pool、单 clock 经 Arc 扇出，预包装
-    // 域形 dyn port——组合根不再散装构造 repo / 手工 DynX 包裹 / 配对 read↔write。
-    let (configs, writer, secrets) = deps
-        .pg
-        .for_domain::<caps::Settings>()
-        .settings_bundle(
-            Arc::new(SystemClock),
-            ConfigValueProtections::new(
-                vault_settings.key_provider(),
-                vault_settings.key_provider(),
-                key_name.clone(),
-            ),
-        )
-        .into_parts();
-
-    // config 应用服务（L2 OutboxFact：CAS 写 + outbox co-tx）→ 经 Arc 作 config-publish 路由 axum State。
-    let config_svc =
-        SettingsService::with_postgres(configs, writer, empty_flag_store(), Box::new(SystemClock));
-    // secret 仓储端口 → 经 Arc 作 secret-publish 路由 axum State（`DynSecretRepo` 已 Send+Sync）。
-    let secret_repo: Arc<DynSecretRepo<'static>> = Arc::from(secrets);
-
-    let keyprovider_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let mut module =
-        settings_module_result(deps.pg.readiness_handle(), Arc::clone(&keyprovider_ready))?;
-    let vault_for_sampler = deps.vault.clone();
-    module.workers.push(Box::new(move |token| {
-        DynManagedResource::new_box(spawn_keyprovider_readiness_sampler(
-            vault_for_sampler.clone(),
-            key_name.clone(),
-            build_keyprovider_readiness_interval(),
-            token,
-            Arc::clone(&keyprovider_ready),
-        ))
-    }));
-    Ok((
-        SettingsDomain::new(Arc::new(config_svc), secret_repo),
-        module,
-    ))
-}
-
-/// settings 域 readiness 产物：`configs_ready` 探针（读共享 `PgDbReadiness`）。
-///
-/// 从 [`wire_settings`] 抽出——后者前半段 vault resolver / pg repo 构造受 env + 真实 pg 门控（integration only），
-/// 而本探针 emission 只需 `Arc<PgDbReadiness>`（无 I/O）。独立成纯函数后 `#[cfg(test)]` 可脱离 vault env / 真实 pg
-/// 单测探针 emission 契约（恰一条 configs_ready、无 resources/workers）。
-fn settings_module_result(
-    readiness: Arc<PgDbReadiness>,
-    keyprovider_ready: Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<DomainModuleResult> {
-    // configs_ready 探针：读 SharedRuntimeDeps 注入的共享 PgDbReadiness（框架 sampler 写）。作 settings 域
-    // readiness 产物经 result 出向——不能放纯声明的 `Domain::init`（需运行时构造的 handle）。
-    let probe_name = ProbeName::parse(CONFIGS_READY_PROBE_NAME)
-        .context("configs_ready probe name is invalid")?;
-    let keyprovider_probe_name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME)
-        .context("keyprovider_ready probe name is invalid")?;
-    Ok(DomainModuleResult {
-        probes: vec![
-            (probe_name, Box::new(ConfigsReadyProbe::new(readiness))),
-            (
-                keyprovider_probe_name,
-                Box::new(KeyProviderReadyProbe::new(keyprovider_ready)),
-            ),
-        ],
-        ..Default::default()
-    })
-}
-
-// ── audit wiring（#1230）────────────────────────────────────────────────────────────────────────
-
-/// 从 env 构造审计 keyed-HMAC 链 hasher（生产 [`RustCryptoMacVerifier`] backend；DI：注入读取器供测试，
-/// 无 env 副作用——workspace `forbid(unsafe)` 下测试不能 `set_var`）。
-///
-/// - `RSS_AUDIT_CHAIN_KEY_B64URL`：**必填**——审计链 HMAC key，base64url。缺失 fail-fast（生产审计链不可无 key）。
-///
-/// fail-fast：非 base64url → 错；解码后 <32B → 错（[`AuditChainHasher::new`] 返回 `None`，链 key 强度
-/// `docs/rules/audit-ledger.md`）。错误只含变量**名**，不含 key 值（无 secret 泄漏）。
-fn build_audit_hasher(
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<AuditChainHasher<RustCryptoMacVerifier>> {
-    let b64 = get("RSS_AUDIT_CHAIN_KEY_B64URL")
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_AUDIT_CHAIN_KEY_B64URL"))?;
-    let key_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(&b64)
-        .context("RSS_AUDIT_CHAIN_KEY_B64URL not valid base64url")?;
-    AuditChainHasher::new(RustCryptoMacVerifier, MacKey::from_bytes(key_bytes)).ok_or_else(|| {
-        anyhow::anyhow!("audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)")
-    })
-}
-
-/// 接线 audit 域：env 链 key（fail-fast）→ [`RustCryptoMacVerifier`] hasher → [`PgAuditRepo`] durable provider
-/// → erased `Arc<DynAuditRepo>` → [`AuditDomain`]（组合根注入路径，与 in-mem 同形）。
-///
-/// - `deps`：共享基础设施（[`SharedRuntimeDeps`]）——内部持 [`PgRuntimeDeps`] capability bundle；audit
-///   wiring 只拿 `PgDomainDeps<caps::Audit>`，拿不到 settings/identity repo 或裸 pool。
-///
-/// **bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B**：跨租户枚举（`SELECT DISTINCT tenant_id`）
-/// 在 FORCE RLS 下需专用 `rss_audit_admin` 角色限定 permissive RLS 池（非 BYPASSRLS，见 `docs/rules/tenancy.md`）
-/// ——与跨租户 admin 读同一基础设施，统一随 Part B 落地。本 PR 的读路径完整性硬保证是 `list` 内增量
-/// [`AuditChainHasher::verify_window`]（篡改 fail-closed → 500，不下发脏数据）；per-tenant [`PgAuditRepo`] 的
-/// `verify_tail` 已就绪（集成测试覆盖），供 Part B boot sweep + 运维巡检调用。
-pub fn wire_audit(deps: &SharedRuntimeDeps) -> anyhow::Result<AuditDomain<PgAuthAuditSink>> {
-    let hasher = build_audit_hasher(|name| std::env::var(name).ok()).context("audit chain key")?;
-    let audit_deps = deps.pg.for_domain::<caps::Audit>();
-    let repo = audit_deps.audit_repo(hasher);
-    let dyn_repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(repo));
-    let admin_repo = build_audit_hasher(|name| std::env::var(name).ok())
-        .context("audit admin chain key")
-        .map(|hasher| {
-            audit_deps
-                .audit_admin_repo(hasher)
-                .map(|repo| Arc::from(audit::ports::DynAuditAdminRepo::new_box(repo)))
-        })?;
-    Ok(AuditDomain::new(
-        dyn_repo,
-        admin_repo,
-        audit_deps.auth_audit_sink(),
-        Arc::new(SystemClock),
-    ))
-}
-
-const DEFAULT_IDENTITY_SESSION_TTL_SECS: u64 = 3_600;
-const MAX_IDENTITY_SESSION_TTL_SECS: u64 = 90 * 24 * 60 * 60;
-const IDENTITY_SESSION_TTL_ENV: &str = "RSS_IDENTITY_SESSION_TTL_SECS";
-
-fn identity_session_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<u64> {
-    match env(IDENTITY_SESSION_TTL_ENV) {
-        Some(raw) => {
-            let ttl = raw.parse::<u64>().with_context(|| {
-                format!("{IDENTITY_SESSION_TTL_ENV} must be an integer seconds value")
-            })?;
-            anyhow::ensure!(ttl > 0, "{IDENTITY_SESSION_TTL_ENV} must be > 0");
-            anyhow::ensure!(
-                ttl <= MAX_IDENTITY_SESSION_TTL_SECS,
-                "{IDENTITY_SESSION_TTL_ENV} must be <= {MAX_IDENTITY_SESSION_TTL_SECS}"
-            );
-            Ok(ttl)
-        }
-        None => Ok(DEFAULT_IDENTITY_SESSION_TTL_SECS),
-    }
-}
-
-/// JWT access-token 签发 env（ES256，组合根注入 vault `Signer`，#1252）。
-const JWT_ISSUER_ENV: &str = "RSS_JWT_ISSUER";
-const JWT_AUDIENCE_ENV: &str = "RSS_JWT_AUDIENCE";
-/// vault Transit sign key 名 = JOSE `kid`（验签侧据 kid 选 oidc ES256 公钥；二者须由运维一致接线，OIDC-ALG-KEYPATH-01）。
-const JWT_KEY_ID_ENV: &str = "RSS_JWT_ES256_KEY_ID";
-const JWT_ACCESS_TTL_ENV: &str = "RSS_JWT_ACCESS_TTL_SECS";
-/// refresh token 有效期 env（缺省 30 天）。
-const REFRESH_TTL_ENV: &str = "RSS_REFRESH_TTL_SECS";
-const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
-const MAX_REFRESH_TTL_SECS: u64 = 365 * 24 * 60 * 60; // 1 year（refresh 长于 session）
-/// access JWT 签名用途（vault Transit purpose 归因，固定字面量）。
-const JWT_SIGNING_PURPOSE: &str = "auth.jwt.access";
-
-fn refresh_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<u64> {
-    match env(REFRESH_TTL_ENV) {
-        Some(raw) => {
-            let ttl = raw
-                .parse::<u64>()
-                .with_context(|| format!("{REFRESH_TTL_ENV} must be an integer seconds value"))?;
-            anyhow::ensure!(ttl > 0, "{REFRESH_TTL_ENV} must be > 0");
-            anyhow::ensure!(
-                ttl <= MAX_REFRESH_TTL_SECS,
-                "{REFRESH_TTL_ENV} must be <= {MAX_REFRESH_TTL_SECS}"
-            );
-            Ok(ttl)
-        }
-        None => Ok(DEFAULT_REFRESH_TTL_SECS),
-    }
-}
-
-/// 从 env 构造 access JWT 签发配置（ES256；issuer/audience/key-id/ttl 必填 fail-fast，对称
-/// `JwtIssuer::new` 构造期校验）。`key` = vault Transit sign key 名 = JOSE `kid`（验签侧据此选公钥）。
-fn build_jwt_issuer_config(
-    get: impl Fn(&str) -> Option<String>,
-) -> anyhow::Result<authn::JwtIssuerConfig> {
-    let issuer = get(JWT_ISSUER_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_ISSUER_ENV}"))?;
-    let audience = get(JWT_AUDIENCE_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_AUDIENCE_ENV}"))?;
-    let key_id = get(JWT_KEY_ID_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_KEY_ID_ENV}"))?;
-    let ttl_secs = get(JWT_ACCESS_TTL_ENV)
-        .ok_or_else(|| anyhow::anyhow!("missing required env var: {JWT_ACCESS_TTL_ENV}"))?
-        .parse::<u64>()
-        .with_context(|| format!("{JWT_ACCESS_TTL_ENV} must be an integer seconds value"))?;
-    anyhow::ensure!(ttl_secs > 0, "{JWT_ACCESS_TTL_ENV} must be > 0");
-    Ok(authn::JwtIssuerConfig {
-        key: diport::KeyId::new(key_id),
-        alg: authn::JwtAlg::Es256,
-        purpose: diport::SigningPurpose::new(JWT_SIGNING_PURPOSE),
-        issuer,
-        audience,
-        ttl: Duration::from_secs(ttl_secs),
-    })
-}
-
-/// 接线 identity 域（生产路径）：薄壳，委托 [`wire_identity_with`]（读 `std::env`，HTTPS-only signer）。
-pub fn wire_identity(deps: &SharedRuntimeDeps) -> anyhow::Result<IdentityDomain<VaultSigner>> {
-    wire_identity_with(deps, |n| std::env::var(n).ok(), false)
-}
-
-/// 接线 identity 域（可注入配置读取器 + http 允许标志，供集成测试注入 hermetic mock vault）：
-/// postgres credential/session/refresh store + vault `Signer`（经 [`build_vault_signer_with`]）
-/// 经 [`authn::JwtIssuer`] 签 access JWT + SystemClock + session/refresh TTL（#1252）。
-///
-/// - `get`：配置读取器（生产 = `|n| std::env::var(n).ok()`；测试 = 注入 mock vault URL + JWT 配置）。
-///   消费 `RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`、`RSS_JWT_ISSUER`、
-///   `RSS_JWT_AUDIENCE`、`RSS_JWT_ES256_KEY_ID`、`RSS_JWT_ACCESS_TTL_SECS`、
-///   `RSS_IDENTITY_SESSION_TTL_SECS`（可选）、`RSS_REFRESH_TTL_SECS`（可选）。
-/// - `vault_allow_http`：`true` 接受 http URL（wiremock hermetic 测试）；`false` HTTPS-only（生产）。
-///
-/// 生产行为与 [`wire_identity`] 完全等价。单态化 `S = vault::VaultSigner`。
-pub fn wire_identity_with(
-    deps: &SharedRuntimeDeps,
-    get: impl Fn(&str) -> Option<String>,
-    vault_allow_http: bool,
-) -> anyhow::Result<IdentityDomain<VaultSigner>> {
-    let identity_pg = deps.pg.for_domain::<caps::Identity>();
-    // get 借用（非 Copy）⇒ |n| get(n) 重借传给各 build helper（每次创建新引用闭包，get 始终可用）。
-    let ttl = Duration::from_secs(identity_session_ttl_secs(|n| get(n))?);
-    let refresh_ttl = Duration::from_secs(refresh_ttl_secs(|n| get(n))?);
-
-    let credentials = Arc::from(DynCredentialRepo::new_box(identity_pg.credential_repo()));
-    let lifecycle = Arc::from(DynSessionLifecycle::new_box(
-        identity_pg.session_lifecycle(Box::new(SystemClock)),
-    ));
-    let roles_for_admin = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
-    let roles_for_list = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
-    let policies = Arc::from(DynPolicyRepo::new_box(identity_pg.policy_repo()));
-    let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
-        identity_pg.resource_attribute_repo(),
-    ));
-    let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
-        identity_pg.policy_lifecycle(Box::new(SystemClock)),
-    ));
-    let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
-        identity_pg.role_binding_lifecycle(Box::new(SystemClock)),
-    ));
-
-    // vault `Signer` + JWT issuer（#1252）：access JWT 经 vault Transit ES256 签。signer shutdown 是 no-op
-    // （reqwest pool drop 即释放），同 Pdp `provider` 不入 ShutdownStack——无需独立句柄注册。
-    let signer = Arc::new(build_vault_signer_with(|n| get(n), vault_allow_http)?);
-    let issuer = Arc::new(
-        authn::JwtIssuer::new(
-            signer,
-            Box::new(SystemClock),
-            build_jwt_issuer_config(|n| get(n))?,
-        )
-        .map_err(|e| anyhow::anyhow!("jwt issuer config error: {e}"))?,
-    );
-
-    let refresh = Arc::new(RefreshService::new(
-        DynRefreshTokenStore::new_box(identity_pg.refresh_token_store()),
-        issuer,
-        Box::new(SystemClock),
-        refresh_ttl,
-    ));
-    let login = Arc::new(LoginService::new(
-        credentials,
-        lifecycle,
-        Arc::clone(&refresh),
-        Box::new(SystemClock),
-        ttl,
-    ));
-    let rbac_admin = Arc::new(RbacAdminService::new(
-        roles_for_admin,
-        Arc::clone(&bindings),
-        Box::new(SystemClock),
-    ));
-    let policy_manage = Arc::new(PolicyManageService::new(
-        Arc::clone(&policies),
-        policy_lifecycle,
-        Box::new(SystemClock),
-    ));
-    Ok(IdentityDomain::new(IdentityDomainDeps {
-        login,
-        refresh,
-        rbac_admin,
-        policy_manage,
-        roles: roles_for_list,
-        bindings,
-        policies,
-        resource_attrs,
-        clock: Arc::new(SystemClock),
-    }))
 }
 
 /// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
@@ -7704,31 +7317,6 @@ mod tests {
         Ok(())
     }
 
-    /// settings 域产物：`configs_ready` + `keyprovider_ready` 两条探针、resources / workers 空。
-    ///
-    /// 直测 [`settings_module_result`]（脱离 vault env / 真实 pg），覆盖 `wire_settings` 的探针 emission
-    /// 契约——该路径在 integration Ok 分支（需 vault+pg）外不可达，故抽出后单测以满足新增覆盖。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn settings_module_result_emits_single_configs_ready_probe() {
-        let readiness = Arc::new(PgDbReadiness::new());
-        let keyprovider_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let result = settings_module_result(readiness, keyprovider_ready)
-            .expect("settings_module_result ok");
-        assert_eq!(
-            result.probes.len(),
-            2,
-            "settings 暴露 configs_ready + keyprovider_ready"
-        );
-        assert_eq!(result.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
-        assert_eq!(result.probes[1].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
-        assert!(result.resources.is_empty(), "settings 今无 detached 资源");
-        assert!(
-            result.workers.is_empty(),
-            "纯 module result helper 不创建后台 worker"
-        );
-    }
-
     #[test]
     #[allow(clippy::expect_used)]
     fn session_sweeper_interval_defaults_and_parses_env() {
@@ -8000,113 +7588,6 @@ mod tests {
         assert!(SystemClock.now() > SystemTime::UNIX_EPOCH);
     }
 
-    // ── audit chain key wiring（#1230）─────────────────────────────────────────
-
-    #[test]
-    fn build_audit_hasher_missing_key_fails_fast() {
-        // 缺 RSS_AUDIT_CHAIN_KEY_B64URL → fail-fast（生产审计链不可无 key）；错误含变量名、不含值。
-        let result = build_audit_hasher(|_| None);
-        assert!(
-            matches!(&result, Err(e) if e.to_string().contains("RSS_AUDIT_CHAIN_KEY_B64URL")),
-            "缺 key env 须 fail-fast 且错误含变量名"
-        );
-    }
-
-    #[test]
-    fn build_audit_hasher_invalid_base64_fails_fast() {
-        let get = |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| "!!not-b64!!".to_string());
-        assert!(
-            build_audit_hasher(get).is_err(),
-            "非 base64url key 须 fail-fast"
-        );
-    }
-
-    #[test]
-    fn build_audit_hasher_weak_key_fails_fast() {
-        // 解码后 <32B → AuditChainHasher::new 返回 None → fail-fast（链 key 强度，audit-ledger.md）。
-        let short = B64.encode([0x5au8; 16]);
-        let get = move |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| short.clone());
-        assert!(
-            matches!(&build_audit_hasher(get), Err(e) if e.to_string().contains("at least 32 bytes")),
-            "弱 key（<32B）须 fail-fast"
-        );
-    }
-
-    #[test]
-    fn build_audit_hasher_valid_32b_key_ok() {
-        // 32B key（base64url）→ 构造成功（生产 RustCrypto hasher 装配路径）。
-        let key = B64.encode([0x42u8; 32]);
-        let get = move |k: &str| (k == "RSS_AUDIT_CHAIN_KEY_B64URL").then(|| key.clone());
-        assert!(build_audit_hasher(get).is_ok(), "有效 32B key 须构造成功");
-    }
-
-    // ── ConfigsReadyProbe / readiness_to_health 测试 ─────────────────────────────────────
-
-    /// `PoolReadiness::Ready` → `(Healthy, "ready")`。
-    #[test]
-    fn configs_ready_maps_ready_to_healthy() {
-        let (status, detail) = readiness_to_health(PoolReadiness::Ready);
-        assert_eq!(status, HealthStatus::Healthy);
-        assert_eq!(detail, "ready");
-    }
-
-    /// `PoolReadiness::Saturated` → `(Degraded, "saturated")`（池饱和降级，HTTP 200 不摘流）。
-    #[test]
-    fn configs_ready_maps_saturated_to_degraded() {
-        let (status, detail) = readiness_to_health(PoolReadiness::Saturated);
-        assert_eq!(status, HealthStatus::Degraded);
-        assert_eq!(detail, "saturated");
-    }
-
-    /// `PoolReadiness::Down` → `(Unhealthy, "down")`。
-    #[test]
-    fn configs_ready_maps_down_to_unhealthy() {
-        let (status, detail) = readiness_to_health(PoolReadiness::Down);
-        assert_eq!(status, HealthStatus::Unhealthy);
-        assert_eq!(detail, "down");
-    }
-
-    /// detail 是 `&'static str`（编译期类型约束；类型已由 HealthCheck::detail() -> &'static str 守）。
-    #[test]
-    fn configs_ready_detail_is_static() {
-        // `readiness_to_health` 返回 `(HealthStatus, &'static str)`——类型级 Hard 约束。
-        // 赋值为 `&'static str` 类型绑定即证明（如果改返 String，此处编译失败）。
-        let (_status, detail): (HealthStatus, &'static str) =
-            readiness_to_health(PoolReadiness::Ready);
-        let _ = detail;
-    }
-
-    /// `CONFIGS_READY_PROBE_NAME` 是合法 `ProbeName`（`ProbeName::parse` 校验 kebab-case 字符集）。
-    /// registry.probe 接受注册 + 重复注册返 Err（probe 名唯一性守）。
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn configs_ready_registers_and_is_unique() {
-        // reason: CONFIGS_READY_PROBE_NAME 是 const literal，parse 只可能在字符非法时失败。
-        let probe_name_a =
-            primitives::ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
-        let probe_name_b =
-            primitives::ProbeName::parse(CONFIGS_READY_PROBE_NAME).expect("valid probe name const");
-        let mut registry = bootstrap::compose(&[]).expect("empty compose");
-
-        // 注册一个实现了 HealthProbe 的占位 probe（不需要 PgStore，不连 DB）。
-        struct NullProbe;
-        impl bootstrap::HealthProbe for NullProbe {
-            fn check(&self) -> HealthCheck {
-                let name = primitives::ProbeName::parse("configs_ready").expect("valid");
-                HealthCheck::new(name, HealthStatus::Healthy, "null")
-            }
-        }
-
-        // 第一次注册成功。
-        registry
-            .probe(probe_name_a, Box::new(NullProbe))
-            .expect("first register ok");
-
-        // 重复注册同名 probe → Err（bootstrap registry 守唯一性）。
-        let result = registry.probe(probe_name_b, Box::new(NullProbe));
-        assert!(result.is_err(), "duplicate probe name should be rejected");
-    }
-
     /// `RLS_READY_PROBE_NAME` 是合法 `ProbeName`；真实 `RlsReadyProbe` 可注册 + 重名拒绝（与 configs_ready 对称）。
     #[test]
     #[allow(clippy::expect_used)]
@@ -8127,64 +7608,6 @@ mod tests {
         assert!(
             result.is_err(),
             "duplicate rls_ready probe name should be rejected"
-        );
-    }
-
-    // ── identity_session_ttl_secs 测试 ────────────────────────────────────────────────
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn identity_session_ttl_defaults_when_missing() {
-        let ttl = identity_session_ttl_secs(|_| None).expect("default ttl");
-        assert_eq!(ttl, DEFAULT_IDENTITY_SESSION_TTL_SECS);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn identity_session_ttl_accepts_valid_value() {
-        let ttl = identity_session_ttl_secs(|n| {
-            (n == IDENTITY_SESSION_TTL_ENV).then(|| "7200".to_string())
-        })
-        .expect("valid ttl");
-        assert_eq!(ttl, 7_200);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn identity_session_ttl_rejects_non_integer() {
-        let err = identity_session_ttl_secs(|n| {
-            (n == IDENTITY_SESSION_TTL_ENV).then(|| "not-a-number".to_string())
-        })
-        .expect_err("non-integer ttl must fail");
-        assert!(
-            err.to_string().contains("integer seconds value"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn identity_session_ttl_rejects_zero() {
-        let err =
-            identity_session_ttl_secs(|n| (n == IDENTITY_SESSION_TTL_ENV).then(|| "0".to_string()))
-                .expect_err("zero ttl must fail");
-        assert!(
-            err.to_string().contains("must be > 0"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn identity_session_ttl_rejects_above_max() {
-        let err = identity_session_ttl_secs(|n| {
-            (n == IDENTITY_SESSION_TTL_ENV).then(|| (MAX_IDENTITY_SESSION_TTL_SECS + 1).to_string())
-        })
-        .expect_err("above max ttl must fail");
-        assert!(
-            err.to_string()
-                .contains(&format!("must be <= {MAX_IDENTITY_SESSION_TTL_SECS}")),
-            "unexpected error: {err:#}"
         );
     }
 
@@ -8248,143 +7671,5 @@ mod tests {
             err.to_string().contains(OTEL_ENDPOINT_ENV),
             "err 应含 env 变量名: {err}"
         );
-    }
-
-    // ── refresh_ttl_secs 测试 ────────────────────────────────────────────────────────────────
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn refresh_ttl_secs_rejects_zero() {
-        let err = refresh_ttl_secs(|n| (n == REFRESH_TTL_ENV).then(|| "0".to_string()))
-            .expect_err("zero refresh ttl must fail");
-        assert!(
-            err.to_string().contains("must be > 0"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn refresh_ttl_secs_rejects_above_max() {
-        let err = refresh_ttl_secs(|n| {
-            (n == REFRESH_TTL_ENV).then(|| (MAX_REFRESH_TTL_SECS + 1).to_string())
-        })
-        .expect_err("above max refresh ttl must fail");
-        assert!(
-            err.to_string()
-                .contains(&format!("must be <= {MAX_REFRESH_TTL_SECS}")),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn refresh_ttl_secs_defaults_to_30_days() {
-        let ttl = refresh_ttl_secs(|_| None).expect("default refresh ttl");
-        assert_eq!(ttl, DEFAULT_REFRESH_TTL_SECS, "缺省 → 30 天");
-    }
-
-    // ── build_jwt_issuer_config fail-fast 测试 ───────────────────────────────────────────────
-
-    #[test]
-    fn build_jwt_issuer_config_missing_issuer_fails_fast() {
-        // 所有其它 env 在，缺 issuer → fail-fast（错误含 env 名）。
-        let get = |k: &str| {
-            if k == JWT_AUDIENCE_ENV {
-                Some("rss".to_string())
-            } else if k == JWT_KEY_ID_ENV {
-                Some("my-key".to_string())
-            } else if k == JWT_ACCESS_TTL_ENV {
-                Some("3600".to_string())
-            } else {
-                None
-            }
-        };
-        assert!(
-            matches!(&build_jwt_issuer_config(get), Err(e) if format!("{e:#}").contains(JWT_ISSUER_ENV)),
-            "缺 JWT issuer 须 fail-fast 且错误含变量名"
-        );
-    }
-
-    #[test]
-    fn build_jwt_issuer_config_missing_audience_fails_fast() {
-        // issuer 在，缺 audience → fail-fast。
-        let get = |k: &str| {
-            if k == JWT_ISSUER_ENV {
-                Some("https://issuer.test".to_string())
-            } else if k == JWT_KEY_ID_ENV {
-                Some("my-key".to_string())
-            } else if k == JWT_ACCESS_TTL_ENV {
-                Some("3600".to_string())
-            } else {
-                None
-            }
-        };
-        assert!(
-            matches!(&build_jwt_issuer_config(get), Err(e) if format!("{e:#}").contains(JWT_AUDIENCE_ENV)),
-            "缺 JWT audience 须 fail-fast 且错误含变量名"
-        );
-    }
-
-    #[test]
-    fn build_jwt_issuer_config_missing_key_fails_fast() {
-        // issuer + audience 在，缺 key_id → fail-fast。
-        let get = |k: &str| {
-            if k == JWT_ISSUER_ENV {
-                Some("https://issuer.test".to_string())
-            } else if k == JWT_AUDIENCE_ENV {
-                Some("rss".to_string())
-            } else if k == JWT_ACCESS_TTL_ENV {
-                Some("3600".to_string())
-            } else {
-                None
-            }
-        };
-        assert!(
-            matches!(&build_jwt_issuer_config(get), Err(e) if format!("{e:#}").contains(JWT_KEY_ID_ENV)),
-            "缺 JWT key_id 须 fail-fast 且错误含变量名"
-        );
-    }
-
-    #[test]
-    fn build_jwt_issuer_config_zero_access_ttl_fails_fast() {
-        // 全必填在，ttl_secs = 0 → ensure!(ttl > 0) fail-fast。
-        let get = |k: &str| {
-            if k == JWT_ISSUER_ENV {
-                Some("https://issuer.test".to_string())
-            } else if k == JWT_AUDIENCE_ENV {
-                Some("rss".to_string())
-            } else if k == JWT_KEY_ID_ENV {
-                Some("my-key".to_string())
-            } else if k == JWT_ACCESS_TTL_ENV {
-                Some("0".to_string())
-            } else {
-                None
-            }
-        };
-        assert!(
-            matches!(&build_jwt_issuer_config(get), Err(e) if e.to_string().contains("must be > 0")),
-            "access ttl = 0 须 fail-fast"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn build_jwt_issuer_config_happy() {
-        // 全必填 env 均有 → 构造成功。
-        let get = |k: &str| {
-            if k == JWT_ISSUER_ENV {
-                Some("https://issuer.test".to_string())
-            } else if k == JWT_AUDIENCE_ENV {
-                Some("rss".to_string())
-            } else if k == JWT_KEY_ID_ENV {
-                Some("my-es256-key".to_string())
-            } else if k == JWT_ACCESS_TTL_ENV {
-                Some("3600".to_string())
-            } else {
-                None
-            }
-        };
-        build_jwt_issuer_config(get).expect("all JWT issuer vars present → Ok");
     }
 }

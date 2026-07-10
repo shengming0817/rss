@@ -58,6 +58,8 @@ use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 use diport::{Clock, DynCasStore, DynPublisher, ManagedResource};
 use eventexec::TenantAuthority;
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
+#[cfg(feature = "test-support")]
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
 use crate::consumer_tx::PgAuditConsumerTx;
@@ -355,6 +357,34 @@ impl PgRuntimeDeps {
             Arc::clone(&self.readiness),
         ));
         PgReadinessSampler::adopt(handle, Arc::clone(&self.readiness), token)
+    }
+
+    /// Construct a hermetic capability bundle backed by a lazy pool.
+    ///
+    /// This test-only funnel never opens a database connection and preserves the production
+    /// capability boundary: callers can obtain only typed [`PgDomainDeps`] handles, never the
+    /// pool or store. It exists so composition-root factory tests can execute real wiring without
+    /// provisioning postgres.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_module_test() -> Self {
+        let options = PgConnectOptions::new()
+            .host("127.0.0.1")
+            .port(5999)
+            .database("rss_module_test")
+            .username("rss_module_test")
+            .password("not-a-secret");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options);
+        Self {
+            store: Arc::new(PgStore { pool }),
+            audit_admin_store: None,
+            projection_registry: ProjectionWriteRegistry::empty(),
+            readiness: Arc::new(PgDbReadiness::new()),
+            rls_ready: Arc::new(AtomicBool::new(true)),
+        }
     }
 
     /// 测试构造：从已建 `Arc<PgStore>`（lazy pool）旁路 `setup`（免真连 DB）。

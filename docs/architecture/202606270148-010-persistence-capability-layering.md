@@ -34,8 +34,8 @@ postgres adapter 已有 `PgConfigRepo`/`PgSecretRepo`/`ConfigUnitOfWork`、`asse
 
 ### 2.2 DomainBinding + DomainModuleResult — 单一所有权装配出口
 
-Phase 4 的域 `module()` 目标返回 `DomainBinding::new(name, Box<dyn Domain>, DomainModuleResult)`；统一 module funnel
-当前尚未接入 live runtime。`DomainBinding` 把已构造的域实例与其生命周期输出绑定在同一 owner 下且字段私有；
+Phase 4 的 settings/identity/audit `module()` 已返回 `DomainBinding::new(name, Box<dyn Domain>, DomainModuleResult)`；
+统一 module funnel 尚未接入 live runtime（#1672）。`DomainBinding` 把已构造的域实例与其生命周期输出绑定在同一 owner 下且字段私有；
 组合根把 bindings 交给 `compose_bindings`，它先按顺序临时借出 `Vec<&dyn Domain>` 执行 fail-fast compose，只有成功后
 才排空 bindings 并返回聚合 output。compose 失败时 bindings 与 outputs 原样保留。
 
@@ -43,7 +43,7 @@ Phase 4 的域 `module()` 目标返回 `DomainBinding::new(name, Box<dyn Domain>
 
 - `merge` 与 `Extend<DomainModuleResult>` 逐字段直接 `Vec::extend`，严格保留 binding 输入顺序与域内顺序；空输出为 identity，重复项原样保留。
 - `name` / `domain` 只属于 `DomainBinding` 且不提供 output getter；domain service / routes 不进入 result 或其它 generic service bag。service 留在 typed domain 内，由 `Domain::init` 捕获并注册 typed route。
-- 必填依赖（pool / clock / publisher …）由现有具体 domain 的 **typed 构造器必填位置参**注入（ADR-005 C5），缺失即编译错误（Hard）；统一 `module() -> DomainBinding` funnel 是 runtime assembly Phase 4 目标，当前尚不存在。
+- 必填依赖（pool / clock / publisher …）由现有具体 domain 的 **typed 构造器必填位置参**注入（ADR-005 C5），缺失即编译错误（Hard）；settings/identity/audit 的 `module() -> DomainBinding` funnel 已存在，live generated handoff 仍由 #1672 完成。
 - `Domain: Send + Sync`；binding 与 output 可跨线程转移（`Send`），但包含单 owner resource / `FnOnce` worker 的完整 output 不承诺 `Sync`、`Clone` 或重复消费。
 - 对标：omicron 组合根（`bins`/`nexus`）手工注入具体 impl + 聚合（见 §对标证据）。
 
@@ -159,7 +159,7 @@ impl PgRuntimeDeps {
 | defer / follow-up 结构化完整性（governed scope） | **Medium（xtask + CI 门）** | `cargo xtask defer-gate`（DEFER-GATE-01）；synthetic red + anti-vacuity green，`xtask/src/defergate.rs` |
 | `DomainBinding` 形状 / domain ownership | **Hard（类型 + 所有权）** | 私有字段 + `DomainBinding::new` 必填位置参 + `Box<dyn Domain>` + owned `DomainModuleResult`；`Domain: Send + Sync + 'static` supertrait；错误 domain 类型或重复 move 均编译失败 |
 | compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
-| 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | 由各具体 domain 构造器的必填位置参承载；当前不存在统一 `module()` 参数 funnel，`DomainBinding` 本身不声称验证这些依赖 |
+| 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |
 | result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
@@ -174,7 +174,7 @@ impl PgRuntimeDeps {
 
 ## 8. Follow-up（落地同步点 + 后续 issue）
 
-- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）。各域 `module()`、live runtime bindings 与生成列表按 runtime assembly Phase 4 后续切换。
+- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）；settings/identity/audit `module()`：**已落**（#1670）。live runtime bindings、typed-handle handoff 与生成列表由 #1672 继续切换。
 - settings durable 第一条闭环（routes / probes / resources / journey）：**#1421**。
 - defer gate ratchet 扩域（自由词散文 + 代码注释 `crates/*`、`xtask/*` + 历史约 6700 baseline 冻结轨道）：登记为 #1447（不阻塞本 PR）。
 - 各域 repo/UoW conformance（CAS / rollback / tenant / co-tx）：W 阶段逐域。

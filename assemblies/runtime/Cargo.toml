@@ -101,6 +101,8 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
+# 默认单测仅启用 lazy typed capability bundle；不连接 postgres。
+postgres = { path = "../../adapters/postgres", features = ["test-support"] }
 # runtime 单元/e2e 测试需要显式构造 domain-local TenantRepoScope；生产依赖不启用 test-support。
 authn = { path = "../../crates/authn", features = ["test-support"] }
 audit = { path = "../../crates/audit", features = ["test-support"] }

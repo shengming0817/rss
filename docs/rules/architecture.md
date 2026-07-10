@@ -197,8 +197,10 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
 
 - **组合根 / `module()`**:当前 `bootstrap` 已落私有字段 `DomainBinding` + `DomainBinding::new` +
   `compose_bindings(&mut Vec<DomainBinding>)`;该受控出口只在 compose 成功后返回聚合 `DomainModuleResult`,失败保持
-  bindings/outputs 原样。各域 `pub fn module() -> DomainBinding` 与 live generated list 是 runtime assembly Phase 4 后续目标;
-  当前 live 仍由 `wire_X` 手工接线。adapter↔域绑定在 `bins/server` / assembly 用构造器注入完成(无独立组合层)。
+  bindings/outputs 原样。runtime 的 settings/identity/audit 已有统一 async `module(&impl XModuleSource) ->
+  Future<Result<DomainBinding>>`；各 source trait sealed，生产实现仅 `SharedRuntimeDeps`，测试实现仅注入同域 provider。
+  generated list 与 live `compose_bindings` 切换由 #1672 继续完成，当前 live 仍由 typed `wire_X` 手工接线。
+  adapter↔域绑定在 `bins/server` / assembly 用构造器注入完成(无独立组合层)。
   topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。
 - **持久化能力分层**:`DomainBinding`(域实例+生命周期输出的单一 owner) / `DomainModuleResult`(仅聚合
@@ -210,8 +212,9 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   `bootstrap::DomainModuleResult`(probes/resources/workers 可聚合产物流出,组合根 `merge` 聚合后排空到 `Registry::probe`
   / `ShutdownStack`,**归属 ADR-010 §2.2 = `bootstrap`**) + `assemblies/runtime` 的 `SharedRuntimeDeps`(infra 流入,持
   `Arc<PgStore>` 故必留组合根层);`wire_settings` 首用。**INVARIANT WIRING-DEPS-NO-HANDOFF-01(Hard)**:
-  `wire_X(deps: &SharedRuntimeDeps) -> Result<DomainModuleResult>` 签名无参数可塞别域 result ⇒ 跨 module value handoff
-  编译期不可表达。`DomainModuleResult` 固定为 `DomainBinding.output` 的生命周期三出口；`name/domain` 属 binding，
+  async `module(source: &impl XModuleSource) -> Result<DomainBinding>` 的 per-domain source trait sealed，且 typed
+  `wire_X` 入口均无参数可塞别域 result ⇒ 跨
+  module value handoff 编译期不可表达。`DomainModuleResult` 固定为 `DomainBinding.output` 的生命周期三出口；`name/domain` 属 binding，
   domain service 留在 typed domain 内经 route 闭包捕获、不出向。live `wire_X` 切换 binding 属 runtime assembly Phase 4，
   不改变当前运行时顺序。
   **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source = "code" }**:

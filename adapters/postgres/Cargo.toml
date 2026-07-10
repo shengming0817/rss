@@ -69,6 +69,8 @@ anyhow = { workspace = true, optional = true }
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
 # testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。
 integration = ["testkit/containers"]
+# 组合根默认单测专用：只开放 lazy pool 的 capability bundle，不连接数据库、不暴露 pool/store。
+test-support = []
 # N-028 fault matrix typed harness。仅专用 journey crate 启用；不暴露 PgPool/raw SQL。
 fault-matrix-test-support = ["dep:anyhow"]
 
