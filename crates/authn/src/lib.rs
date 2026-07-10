@@ -321,18 +321,21 @@ pub fn app_ctx(principal: std::sync::Arc<Principal>) -> Option<runctx::AppCtx> {
 // 跨租户 All-scope 审计漏斗（同址强制审计，INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）
 // ---------------------------------------------------------------------------
 
-pub use crosstenant::{CrossTenantAuditContext, CrossTenantAuditError, CrossTenantError};
+pub use crosstenant::{
+    AuditedCrossTenantVisibility, CrossTenantAuditContext, CrossTenantAuditError, CrossTenantError,
+};
 
 /// 跨租户 All-scope 派生与持久审计「同址」漏斗。
 ///
 /// # 类型层强制（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
 ///
-/// All-scope `RowVisibility` 只能由本模块 `AuditedCrossTenant` receipt 经 `into_all_scope` 产出；receipt 的
-/// `seal` / `into_all_scope` 均**模块私有**，唯一 mint 点是 [`Principal::audited_cross_tenant_visibility`]
-/// ——它在 `sink.record(..).await?` 成功**之后**才 `seal`（`?`-链先审计后签发，同 verify→mint bridge 范式）。
-/// 故「无审计产 All-scope」在 authn 内**类型层不可表达**（模块封装 + 必填 receipt + 控制流顺序三重 Hard）。
-/// vocab 跨租户三步（issue→authorize→new_cross_tenant）的唯一 callsite 收敛到 `into_all_scope`（仍在 authn
-/// crate，dylint `rss_crosstenant_callsite` allowlist=authn 不变）。
+/// All-scope `RowVisibility` 只能由本模块 [`AuditedCrossTenantVisibility`] receipt 持有；receipt 的
+/// `seal` 为**模块私有**，唯一 mint 点是 [`Principal::audited_cross_tenant_visibility`]——它在
+/// `sink.record(..).await?` 成功**之后**才 `seal`（`?`-链先审计后签发，同 verify→mint bridge 范式）。
+/// receipt 同时绑定审计目标租户，故「无审计产 All-scope」或「审计 A 后读取 B」在 authn 外均不可表达
+/// （模块封装 + target-bound receipt + 控制流顺序三重 Hard）。
+/// vocab 跨租户三步（issue→authorize→new_cross_tenant）的唯一 callsite 收敛到 receipt 的私有 `seal`
+/// （仍在 authn crate，dylint `rss_crosstenant_callsite` allowlist=authn 不变）。
 mod crosstenant {
     use super::Principal;
     use vocab::PrincipalKind;
@@ -430,28 +433,37 @@ mod crosstenant {
         }
     }
 
-    /// authn-owned receipt：持有它 == 已对本次跨租户派生写入持久 audit（fail-closed 后才 mint）。
+    /// authn-owned target-bound receipt：持有它 == 已对该目标租户的跨租户派生写入持久 audit。
     ///
-    /// 私有 struct + **模块私有** `seal` / `into_all_scope`：外部 crate / authn 模块外均不可 mint，唯一
-    /// mint 点是本模块 [`Principal::audited_cross_tenant_visibility`]（record 成功后）。不 derive `Clone`
-    /// （一次性证据）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private receipt type and sealed mint funnel" }
-    struct AuditedCrossTenant {
+    /// public opaque struct + **模块私有** `seal`：外部 crate / authn 模块外均不可 mint，唯一 mint 点是
+    /// 本模块 [`Principal::audited_cross_tenant_visibility`]（对应 target 的 record 成功后）。不 derive
+    /// `Clone`（一次性证据）；私有字段保证 target 与 visibility 不能被拆开后重组。
+    /// INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private target-bound receipt and sealed mint funnel" }
+    pub struct AuditedCrossTenantVisibility {
+        visibility: RowVisibility,
+        target: vocab::TenantId,
         _seal: (),
     }
 
-    impl AuditedCrossTenant {
-        /// 唯一 mint（模块私有）：仅本模块 audited funnel 在 audit `record` 成功后调用。
-        fn seal() -> Self {
-            Self { _seal: () }
+    impl AuditedCrossTenantVisibility {
+        /// 唯一 mint（模块私有）：仅本模块 audited funnel 在该 target 的 audit `record` 成功后调用。
+        fn seal(target: vocab::TenantId) -> Self {
+            let cap = CrossTenantCapability::issue_for_verified_super_admin();
+            Self {
+                visibility: RowVisibility::new_cross_tenant(CrossTenantVisibility::authorize(cap)),
+                target,
+                _seal: (),
+            }
         }
 
-        /// 消费 receipt 产 All-scope（消费 `self` ⇒ 一审计→一 All-scope）。
-        ///
-        /// 这是 authn 内对 vocab 跨租户三步（issue→authorize→new_cross_tenant）的**唯一** callsite；
-        /// dylint `rss_crosstenant_callsite` 命中点从 `row_visibility` 收敛到此（crate=authn allowlist 不变）。
-        fn into_all_scope(self) -> RowVisibility {
-            let cap = CrossTenantCapability::issue_for_verified_super_admin();
-            RowVisibility::new_cross_tenant(CrossTenantVisibility::authorize(cap))
+        /// 该持久审计证明绑定的目标租户。
+        pub fn target(&self) -> vocab::TenantId {
+            self.target
+        }
+
+        /// 审计成功后签发的 All-scope 可见性证明。
+        pub fn visibility(&self) -> &RowVisibility {
+            &self.visibility
         }
     }
 
@@ -482,7 +494,7 @@ mod crosstenant {
             sink: &S,
             clock: &dyn diport::Clock,
             audit: &CrossTenantAuditContext,
-        ) -> Result<RowVisibility, CrossTenantError>
+        ) -> Result<AuditedCrossTenantVisibility, CrossTenantError>
         where
             S: diport::AuditSink + Send + Sync + 'static,
         {
@@ -505,8 +517,8 @@ mod crosstenant {
                 correlation_id: Some(audit.correlation_id.clone()),
             };
             sink.record(event).await.map_err(CrossTenantError::Audit)?;
-            // record 成功 → seal receipt → 经 receipt 签发 All-scope（唯一 mint 点）。
-            Ok(AuditedCrossTenant::seal().into_all_scope())
+            // record 成功 → 把同一 ctx target 与 All-scope 封入不可重组 receipt（唯一 mint 点）。
+            Ok(AuditedCrossTenantVisibility::seal(*ctx.tenant()))
         }
     }
 }
@@ -1125,12 +1137,14 @@ mod audited_cross_tenant_tests {
         let principal = Principal::for_test(PrincipalKind::SuperAdmin, "root-subject", None);
         let ctx = runctx::test_support::app_ctx(tid, "root-subject");
 
-        let vis = principal
+        let audited = principal
             .audited_cross_tenant_visibility(&ctx, &sink, &clock, &audit_ctx())
             .await
             .expect("super-admin audited 派生应成功");
 
-        // 签发 All-scope（跨租户无租户约束）。
+        // receipt 绑定审计目标，同时携带 All-scope（跨租户无租户约束）。
+        assert_eq!(audited.target(), tid);
+        let vis = audited.visibility();
         assert_eq!(vis.scope(), RowScope::All);
         assert_eq!(vis.tenant(), None);
 

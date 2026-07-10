@@ -26,7 +26,14 @@ UUID。service / auth 边界使用 typed tenant 参数，不传裸 `String`；te
 `tenant::CrossTenantVisibility` 位置参，不能接收普通 `RowVisibility` 或裸 scope。
 `RowScope::All` 只能从 `authn` 的 super-admin 派生路径进入业务；派生必须与强制审计同址：跨租户 super-admin 访问**必须写持久 audit ledger**（字段至少含 tenant / principal / resource / action / request / correlation），tracing span 仅作关联信号、不替代持久审计。「同址」由 `authn` audited 派生 funnel 类型层强制——先写审计成功才签发 All-scope，audit 写失败 fail-closed（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01，封闭符号见 `crates/authn/src/lib.rs`）；裸同步 `Principal::row_visibility` 的 super-admin 分支不再签发 All-scope（无 `AuditSink` 无法同址，返回 deny）。runtime JWT verify bridge 在认证成功后把具体 `Arc<authn::Principal>` 写入 request extension；跨租户 audit read handler 使用该 principal 做 SuperAdmin 判定和 durable audit。
 
-audit read 不传 `tenantId` 时只读 ambient `runctx` 租户。传 `tenantId` 时是**指定租户**读取：只允许已验证 SuperAdmin，普通 admin/user/device/service 即使目标是同租户也拒绝；不提供全租户全局列表。读取前必须先 durable append `action="audit:list-cross-tenant"`、`resource_kind="audit_entries"`、`resource_id=<targetTenant>`，append 失败不读取。cross-tenant cursor 必须绑定 target tenant，cursor 与请求 `tenantId` 不一致返回 400。行/租户可见性通过后仍必须应用 `ResourceProjection`：SuperAdmin 只扩大 row scope，不自动获得字段明文。
+`GET /api/v1/audit/entries` 只读 ambient `runctx` 租户，query 仅允许 `limit`/`cursor`；旧
+`?tenantId=` 输入返回 400。指定租户读取只走
+`GET /api/v1/audit/tenants/{tenantId}/entries`：仅 verified SuperAdmin 可用，普通
+admin/user/device/service 即使目标是同租户也拒绝；不提供全租户列表。读取前必须先 durable append
+`action="audit:list-cross-tenant"`、`resource_kind="audit_entries"`、`resource_id=<targetTenant>`，append
+失败不读取。audited `RowVisibility` 被消费并封装为不可 Clone、字段私有的 `CrossTenantReadScope`，admin
+repo 的 list 入口不接受裸 `TenantId`。cross-tenant cursor 必须绑定 path tenant，不一致返回 400；通过行
+可见性后仍应用 `ResourceProjection`，SuperAdmin 不自动获得字段明文。
 
 audit read 的 serving 池对 `RowScope::All` 始终 fail-closed。指定租户的 super-admin audit read 只能走专用
 `rss_audit_admin` admin 读取池；该池直连固定 LOGIN 角色 `rss_audit_admin`，角色必须非 superuser、
@@ -56,9 +63,8 @@ authenticity；service-token 路径必须使用 `service-token-tenant-bound`，r
 是未认证维度。契约 schema/codegen/validate 在不可绕的 request 路径拒绝 ambient `tenantId` 来源：
 upstream schema→DTO 拒绝是 **Hard**（codegen funnel + golden drift），downstream 单一 sanctioned
 call-site 是 **behavior-locked Medium**（reject 用例驱动真实入口，删调用即测试失败；单 site 无需独立
-call-site 强制）。唯一例外是 `audit.list-entries` GET 顶层 query `tenantId`，它表示 target tenant for
-audited SuperAdmin read，不是 ambient tenant source；例外由 contract validate 和 codegen 共用窄 helper 锁定
-到 contract id / method / path。符号 / 评级 / 盲区见契约 codegen 的 tenant-in-body guard 模块 rustdoc。
+call-site 强制）。所有 HTTP request schema 一律禁止 `tenantId`；指定租户只通过已声明的 path 参数进入
+`audit.list-tenant-entries`，contract validate/codegen 不保留例外 helper。
 
 ## Broker tenant authority
 

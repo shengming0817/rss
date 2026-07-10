@@ -26,8 +26,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use audit::ports::{
     AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditLedgerVerifyReport,
-    AuditListResult, AuditOutcome, AuditPage, AuditRecord, AuditRepo, EntryHash, ResourceRef,
-    TenantId, TenantRepoScope, actor_kind_from_db, actor_kind_to_db,
+    AuditListResult, AuditOutcome, AuditPage, AuditRecord, AuditRepo, CrossTenantReadScope,
+    EntryHash, ResourceRef, TenantId, TenantRepoScope, actor_kind_from_db, actor_kind_to_db,
 };
 use base64::Engine as _;
 use primitives::MacVerifier;
@@ -587,9 +587,10 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
     /// 按目标租户分页列出审计条目；tenant scope 由专用 admin pool 上的 `SET LOCAL` 注入。
     async fn list_tenant(
         &self,
-        tenant: TenantId,
+        scope: CrossTenantReadScope,
         page: AuditPage,
     ) -> Result<AuditListResult, AuditError> {
+        let tenant = scope.target();
         let tenant_uuid = tenant_str(tenant);
         let start_seq = match page.cursor.as_ref() {
             Some(c) => decode_cursor(c)?,

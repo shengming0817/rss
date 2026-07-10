@@ -4,7 +4,7 @@
 //! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + repo-scope-guard + tenancy-closeout
+//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + local-only-effects + repo-scope-guard + tenancy-closeout
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
@@ -43,8 +43,9 @@
 use crate::diagnostic::run_check;
 use crate::workspace_root;
 use crate::{
-    archrules, assembly, codegen, consistency_fixtures, contract, doc_contracts, layerdeps,
-    reconcile_outbox_command_guard, repo_scope_guard, runtime_baseline, runtime_deps_guard, wsdeps,
+    archrules, assembly, codegen, consistency_effects, consistency_fixtures, contract,
+    doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard, runtime_baseline,
+    runtime_deps_guard, wsdeps,
 };
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -106,6 +107,8 @@ enum InternalCheck {
     /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
     ArchRules,
     CodegenCheck,
+    /// active LocalOnly HTTP contracts effect profile allowlist（LOCAL-ONLY-EFFECTS-01）。
+    LocalOnlyEffects,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
     PdpAllowGuard,
     /// 生产代码禁止裸调用 `ContractBinding::from_static`，只能使用 generated `CONTRACT`。
@@ -156,6 +159,7 @@ impl InternalCheck {
             Self::RuntimeDepsGuard => "xtask/src/runtime_deps_guard.rs",
             Self::ArchRules => "xtask/src/archrules.rs",
             Self::CodegenCheck => "xtask/src/codegen.rs",
+            Self::LocalOnlyEffects => "xtask/src/consistency_effects.rs",
             Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
             Self::ContractBindingGuard => "xtask/src/contract_binding_guard.rs",
             Self::SchemaRlsGuard => "xtask/src/schema_rls.rs",
@@ -360,6 +364,15 @@ fn step_codegen_check() -> Step {
         label: "codegen-check",
         args: &[],
         kind: StepKind::Internal(InternalCheck::CodegenCheck),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_local_only_effects() -> Step {
+    Step {
+        label: "local-only-effects",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::LocalOnlyEffects),
         env: &[],
         needs_compile: false,
     }
@@ -898,6 +911,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_runtime_deps_guard(),
         step_archrules(),
         step_codegen_check(),
+        step_local_only_effects(),
         step_pdp_allow_guard(),
         step_contract_binding_guard(),
         step_schema_rls_guard(),
@@ -940,6 +954,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_runtime_deps_guard(),
         step_archrules(),
         step_codegen_check(),
+        step_local_only_effects(),
         step_pdp_allow_guard(),
         step_contract_binding_guard(),
         step_schema_rls_guard(),
@@ -1242,6 +1257,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
+        InternalCheck::LocalOnlyEffects => run_check(&consistency_effects::LocalOnlyEffects),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::ContractBindingGuard => {
             run_check(&crate::contract_binding_guard::ContractBindingGuard)
@@ -1354,6 +1370,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "local-only-effects",
                 "pdp-allow-guard",
                 "contract-binding-guard",
                 "schema-rls",
@@ -1403,6 +1420,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "local-only-effects",
                 "pdp-allow-guard",
                 "contract-binding-guard",
                 "schema-rls",
@@ -1452,6 +1470,7 @@ mod tests {
                     "runtime-deps-guard",
                     "archrules",
                     "codegen-check",
+                    "local-only-effects",
                     "pdp-allow-guard",
                     "contract-binding-guard",
                     "schema-rls",
@@ -1480,6 +1499,36 @@ mod tests {
             assert!(matches!(
                 step.kind,
                 StepKind::Internal(InternalCheck::ArchRules)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_only_effects_is_no_compile_internal_gate_after_codegen_in_all_lanes()
+    -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("full", full_plan()),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci", ci_plan()),
+        ] {
+            let labels = labels(&plan);
+            let codegen = labels
+                .iter()
+                .position(|label| *label == "codegen-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 codegen-check"))?;
+            let effects = labels
+                .iter()
+                .position(|label| *label == "local-only-effects")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 local-only-effects"))?;
+            assert_eq!(effects, codegen + 1, "{name} lane order drift");
+            assert!(
+                !plan[effects].needs_compile,
+                "{name} gate must be no-compile"
+            );
+            assert!(matches!(
+                plan[effects].kind,
+                StepKind::Internal(InternalCheck::LocalOnlyEffects)
             ));
         }
         Ok(())
@@ -1643,6 +1692,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "local-only-effects",
                 "pdp-allow-guard",
                 "contract-binding-guard",
                 "schema-rls",
@@ -1744,6 +1794,7 @@ mod tests {
             "runtime-deps-guard",
             "archrules",
             "codegen-check",
+            "local-only-effects",
             "pdp-allow-guard",
             "contract-binding-guard",
             "schema-rls",

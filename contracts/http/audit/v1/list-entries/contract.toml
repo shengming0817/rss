@@ -1,17 +1,11 @@
-# audit admin 读 HTTP 契约（#1014 RW-W-audit）。
-# 格式冻结见 contracts/README.md；单一事实源 docs/rules/architecture.md §核心载体。
-# 不传 tenantId：本租户审计条目分页；传 tenantId：仅 verified SuperAdmin 读取指定租户；最终 audit:read 授权
-# 通过后先 durable append cross-tenant audit event，再读取目标租户审计链；缺 admin pool 返回 501 ERR_CORE_NOT_IMPLEMENTED。
+# Tenant-scoped audit entry read. This route never accepts a target tenant and performs no write.
 id = "audit.list-entries"
 kind = "http"
 domain = "audit"
 version = "v1"
 owner = "audit"
-# 过渡保留旧 LocalOnly bucket；真实风险以 effectProfile 为准（write + cross-tenant-audit），非 strict L0。
-# 拆分或重分级留给 #1692。
 consistencyLevel = "LocalOnly"
 lifecycle = "active"
-# per-kind http 字段（#1035）：挂 Admin listener 的 operator 审计读取。
 path = "/api/v1/audit/entries"
 method = "GET"
 
@@ -31,4 +25,4 @@ request = "request.schema.json"
 response = "response.schema.json"
 
 [effectProfile]
-effects = ["auth", "read", "projection", "write", "cross-tenant-audit"]
+effects = ["auth", "read", "projection"]

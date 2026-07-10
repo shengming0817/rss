@@ -3,14 +3,14 @@
 //! 消费 identity 域 `identity.session-created` event（跨域只经 contract）→ 构造域 [`AuditRecord`] →
 //! 经注入的 [`InMemAuditRepo`] **原子封链** append（domain hash chain，#1014 RW-W 写实，取代 G1 的 flat
 //! `diport::AuditSink` 路径）。admin 读 handler（`GET /api/v1/audit/entries`，Admin listener）按已认证
-//! 租户分页列出审计条目；指定 `tenantId` 时只允许已验证 SuperAdmin 在 durable cross-tenant audit append
-//! 成功后读取目标租户审计链。
+//! 租户分页列出审计条目；独立 target-tenant 路由只允许已验证 SuperAdmin 在 durable cross-tenant audit
+//! append 成功后读取目标租户审计链。
 //!
 //! # 鉴权作用域
 //!
 //! `AppCtx.principal` 是 `Arc<dyn runctx::PrincipalFacet>`（authn 的 `Principal` 经擦除注入；`runctx → authn`
 //! 是禁止的依赖环，故 runctx 不按具体类型持有 principal，#1105）。本 handler 对普通 scoped read 只读 ctx
-//! **tenant**；对 `tenantId` cross-tenant read 则使用 runtime bridge 写入的具体 `Arc<authn::Principal>`
+//! **tenant**；对 target-tenant cross-tenant read 则使用 runtime bridge 写入的具体 `Arc<authn::Principal>`
 //! 做 SuperAdmin 判定，再经 `Principal::audited_cross_tenant_visibility` 先写持久审计。未配置专用
 //! `rss_audit_admin` repo 时 privileged read 返回 501 fail-closed。Admin listener auth 限定可达者。
 //!
@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use axum::Json;
-use axum::extract::rejection::QueryRejection;
-use axum::extract::{Extension, Query};
+use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::{Extension, Path, Query};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHandlerError};
@@ -48,7 +48,14 @@ use generated::event::identity_v1::{
     },
 };
 use generated::http::audit_v1::{
-    AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse, SPEC as AUDIT_LIST_HTTP_SPEC,
+    list_entries::{
+        AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
+        SPEC as AUDIT_LIST_HTTP_SPEC,
+    },
+    list_tenant_entries::{
+        AuditListTenantEntriesRequest, AuditListTenantEntriesResponse, AuditTenantEntryView,
+        SPEC as AUDIT_LIST_TENANT_HTTP_SPEC,
+    },
 };
 use httpserve::{Admin, ResourceProjection, Route, RouteAuthorizer};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
@@ -57,8 +64,8 @@ use primitives::ListenerKind;
 
 use crate::domain::{AuditEntry, AuditError, AuditOutcome, ResourceRef};
 use crate::ports::{
-    AuditAdminRepo, AuditListResult, AuditPage, AuditRecord, AuditRepo, DynAuditAdminRepo,
-    DynAuditRepo, TenantRepoScope,
+    AuditAdminRepo, AuditListResult, AuditPage, AuditRecord, AuditRepo, CrossTenantReadScope,
+    DynAuditAdminRepo, DynAuditRepo, TenantRepoScope,
 };
 
 /// 本域 DomainId（在 generated `SUBSCRIPTIONS` 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
@@ -78,13 +85,9 @@ const ACTION_POLICY_DEACTIVATE: &str = "identity:policy_deactivate";
 
 /// admin 读路由组 nest 前缀（Admin listener；与 contracts/http/audit/v1 单源对齐）。
 const AUDIT_ROUTE_PREFIX: &str = "/api/v1/audit";
-/// admin 读路由在路由组内的**相对**路径——route group 经 `finalize_routes` nest 到 [`AUDIT_ROUTE_PREFIX`]
-/// 下，组内 route 须用相对路径（axum `Router::nest` 语义）；用完整路径会被前缀再 nest 一次 ⇒ 真实挂载
-/// 路径漂移成 `prefix‖full`（F1）。finalize 后真实路径 = `AUDIT_ROUTE_PREFIX` ‖ `AUDIT_ENTRIES_SUBPATH`
-/// （= `/api/v1/audit/entries`，contract.toml / generated `HttpSpec` 声明值）。
-const AUDIT_ENTRIES_SUBPATH: &str = "/entries";
 const RESOURCE_KIND_AUDIT_ENTRIES: &str = "audit_entries";
 const ACTION_AUDIT_LIST_CROSS_TENANT: &str = "audit:list-cross-tenant";
+const AUDIT_FORBIDDEN_REASON: &str = "forbidden";
 
 /// Audit consumer event variants that can be converted into [`AuditRecord`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,10 +130,6 @@ pub fn audit_record_from_event_message(
     }
 }
 
-/// 分页上限（上限 500 由 [`vocab::Limit`] 类型 funnel 兜底；下限 ≥1 由 wire 类型 `NonZeroU32` 反序列化层
-/// 保证；默认值 50 由 schema default 经 serde 派生）。
-const MAX_LIMIT: u32 = 500;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetCursorError {
     Invalid,
@@ -138,9 +137,11 @@ enum TargetCursorError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PageRequestError {
-    Validation,
-    Internal,
+struct PageRequestError;
+
+enum TargetPageRequestError {
+    Page(PageRequestError),
+    Cursor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,23 +149,57 @@ enum AuditReadAuthError {
     Forbidden,
 }
 
-struct AuditReadDeps<S>
+struct TargetAuditReadDeps<S>
 where
     S: diport::AuditSink + Send + Sync + 'static,
 {
-    repo: Arc<DynAuditRepo<'static>>,
     admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
     audit_sink: Arc<S>,
     audit_clock: Arc<dyn diport::Clock>,
 }
 
-impl<S> Clone for AuditReadDeps<S>
+struct TargetReadRequest {
+    target_raw: String,
+    page: AuditListTenantEntriesRequest,
+    request_id: String,
+    correlation_id: String,
+}
+
+struct AdminRouteBinding {
+    route: Route,
+    filter: axum::routing::MethodFilter,
+}
+
+/// 从 generated [`generated::http::HttpSpec`] 同时派生 route metadata 与实际 method filter。
+///
+/// path 必须严格位于本 Admin group 下且是非根相对路径；method 必须同时可解析为 HTTP method 并受
+/// axum `MethodFilter` 支持。任一 contract/codegen 漂移均在 bootstrap finalize 时 fail-fast。
+fn admin_route_binding(spec: &generated::http::HttpSpec) -> Result<AdminRouteBinding, KernelError> {
+    let path = spec
+        .path
+        .strip_prefix(AUDIT_ROUTE_PREFIX)
+        .filter(|path| path.starts_with('/') && path.len() > 1)
+        .ok_or(KernelError::RouteGroup)?;
+    let method = axum::http::Method::from_bytes(spec.method.as_bytes())
+        .map_err(|_| KernelError::RouteGroup)?;
+    let filter = axum::routing::MethodFilter::try_from(method.clone())
+        .map_err(|_| KernelError::RouteGroup)?;
+    Ok(AdminRouteBinding {
+        route: Route {
+            method,
+            path,
+            contract_id: spec.contract_id,
+        },
+        filter,
+    })
+}
+
+impl<S> Clone for TargetAuditReadDeps<S>
 where
     S: diport::AuditSink + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
-            repo: self.repo.clone(),
             admin_repo: self.admin_repo.clone(),
             audit_sink: self.audit_sink.clone(),
             audit_clock: self.audit_clock.clone(),
@@ -301,9 +336,23 @@ fn encode_hash(bytes: &[u8; 32]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// 域条目 → wire view（域→wire 转换收口在 handler 层；domain entity 不直接序列化）。
-fn to_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditEntryView {
-    AuditEntryView {
+/// scoped / target-tenant wire view 共用的单源投影结果。
+struct ProjectedAuditEntry {
+    seq: i64,
+    tenant_id: String,
+    actor: String,
+    actor_kind: String,
+    action: String,
+    resource_kind: String,
+    resource_id: String,
+    outcome: String,
+    recorded_at: i64,
+    entry_hash: String,
+}
+
+/// 域条目 → wire 投影中间值（domain entity 不直接序列化）。
+fn project_audit_entry(entry: &AuditEntry, projection: ResourceProjection) -> ProjectedAuditEntry {
+    ProjectedAuditEntry {
         seq: i64::try_from(entry.seq()).unwrap_or(i64::MAX),
         tenant_id: projection.render(
             vocab::ProjectionField::AuditTenantId,
@@ -326,6 +375,35 @@ fn to_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditEntryView
     }
 }
 
+macro_rules! impl_projected_audit_entry_view {
+    ($view:ty) => {
+        impl From<ProjectedAuditEntry> for $view {
+            fn from(projected: ProjectedAuditEntry) -> Self {
+                Self {
+                    seq: projected.seq,
+                    tenant_id: projected.tenant_id,
+                    actor: projected.actor,
+                    actor_kind: projected.actor_kind,
+                    action: projected.action,
+                    resource_kind: projected.resource_kind,
+                    resource_id: projected.resource_id,
+                    outcome: projected.outcome,
+                    recorded_at: projected.recorded_at,
+                    entry_hash: projected.entry_hash,
+                }
+            }
+        }
+    };
+}
+
+impl_projected_audit_entry_view!(AuditEntryView);
+impl_projected_audit_entry_view!(AuditTenantEntryView);
+
+/// 域条目 → scoped wire view。
+fn to_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditEntryView {
+    project_audit_entry(entry, projection).into()
+}
+
 /// 仓储分页结果 → wire 响应信封（`data` / `nextCursor` / `hasMore`）。
 fn to_response(
     result: AuditListResult,
@@ -346,20 +424,24 @@ fn to_target_response(
     tenant: vocab::TenantId,
     result: AuditListResult,
     projection: ResourceProjection,
-) -> Result<AuditListEntriesResponse, TargetCursorError> {
+) -> Result<AuditListTenantEntriesResponse, TargetCursorError> {
     let next_cursor = match result.next_cursor {
         Some(cursor) => Some(encode_target_cursor(tenant, &cursor)?),
         None => None,
     };
-    Ok(AuditListEntriesResponse {
+    Ok(AuditListTenantEntriesResponse {
         data: result
             .entries
             .iter()
-            .map(|entry| to_view(entry, projection))
+            .map(|entry| to_target_view(entry, projection))
             .collect(),
         next_cursor: next_cursor.map(|c| c.as_str().to_string()),
         has_more: result.has_more,
     })
+}
+
+fn to_target_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditTenantEntryView {
+    project_audit_entry(entry, projection).into()
 }
 
 fn encode_target_cursor(
@@ -416,52 +498,34 @@ fn request_correlation(headers: &axum::http::HeaderMap, request_id: &str) -> Str
         .unwrap_or_else(|| request_id.to_string())
 }
 
-fn page_from_request(request: &AuditListEntriesRequest) -> Result<AuditPage, PageRequestError> {
-    let limit_value = request.limit.get().min(MAX_LIMIT);
-    let limit = vocab::Limit::new(limit_value as u16).map_err(|_| PageRequestError::Internal)?;
-    let cursor = match request.cursor.as_deref() {
+fn page_from_parts(
+    limit: std::num::NonZeroU32,
+    cursor: Option<&str>,
+) -> Result<AuditPage, PageRequestError> {
+    let limit = u16::try_from(limit.get()).map_err(|_| PageRequestError)?;
+    let limit = vocab::Limit::new(limit).map_err(|_| PageRequestError)?;
+    let cursor = match cursor {
         None => None,
-        Some(raw) => Some(vocab::Cursor::parse(raw).map_err(|_| PageRequestError::Validation)?),
+        Some(raw) => Some(vocab::Cursor::parse(raw).map_err(|_| PageRequestError)?),
     };
     Ok(AuditPage { limit, cursor })
 }
 
-fn validation_or_internal(kind: PageRequestError, request_id: &str) -> Response {
-    match kind {
-        PageRequestError::Validation => httpserve::error::validation_bad_request(request_id),
-        PageRequestError::Internal => httpserve::error::internal_error(request_id),
+fn target_page_from_request(
+    request: &AuditListTenantEntriesRequest,
+    target: vocab::TenantId,
+) -> Result<AuditPage, TargetPageRequestError> {
+    let mut page = page_from_parts(request.limit, request.cursor.as_deref())
+        .map_err(TargetPageRequestError::Page)?;
+    if let Some(cursor) = page.cursor.as_ref() {
+        page.cursor =
+            Some(decode_target_cursor(target, cursor).map_err(|_| TargetPageRequestError::Cursor)?);
     }
+    Ok(page)
 }
 
-/// admin 读 handler：无 `tenantId` 走已认证 ctx 租户；带 `tenantId` 走 audited SuperAdmin 指定租户读。
-async fn list_entries<S>(
-    deps: AuditReadDeps<S>,
-    principal: Option<Arc<authn::Principal>>,
-    authenticated: Option<httpserve::Authenticated>,
-    authorizer: Option<Arc<dyn RouteAuthorizer>>,
-    request: AuditListEntriesRequest,
-    request_id: String,
-    correlation_id: String,
-) -> Response
-where
-    S: diport::AuditSink + Send + Sync + 'static,
-{
-    if request.tenant_id.is_some() {
-        return list_entries_target_tenant(
-            deps,
-            principal,
-            authenticated,
-            authorizer,
-            request,
-            request_id,
-            correlation_id,
-        )
-        .await;
-    }
-    list_entries_scoped(deps.repo, authenticated, authorizer, request, request_id).await
-}
-
-async fn list_entries_scoped(
+/// Tenant-scoped admin read. Target tenant input is not part of this wire shape.
+async fn list_entries(
     repo: Arc<DynAuditRepo<'static>>,
     authenticated: Option<httpserve::Authenticated>,
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
@@ -472,17 +536,23 @@ async fn list_entries_scoped(
     let Ok(tenant) = runctx::try_with(|ctx| *ctx.tenant()) else {
         return httpserve::error::internal_error(&request_id);
     };
-    let projection =
-        match authorize_read_projection(authorizer, authenticated.as_ref(), tenant).await {
-            Ok(projection) => projection,
-            Err(AuditReadAuthError::Forbidden) => return httpserve::error::forbidden(&request_id),
-        };
+    let projection = match authorize_read_projection(
+        authorizer,
+        authenticated.as_ref(),
+        tenant,
+        &AUDIT_LIST_HTTP_SPEC,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(AuditReadAuthError::Forbidden) => return httpserve::error::forbidden(&request_id),
+    };
     // 下限 ≥1 由 wire 类型 `NonZeroU32` 在反序列化层 type-enforced（F5）：limit=0 / 负值反序列化即失败
-    // → QueryRejection → 统一 400（见路由闭包）。此处仅做上限 500 截断（contract 语义）；截断后 ∈[1,500]，
-    // Limit::new 必 Ok（Err 分支 fail-closed 防御，不可达）。
-    let page = match page_from_request(&request) {
+    // → QueryRejection → 统一 400（见路由闭包）。上限由 `vocab::Limit::new` 与 schema maximum=500
+    // 收口；超限不截断，直接返回 400。
+    let page = match page_from_parts(request.limit, request.cursor.as_deref()) {
         Ok(page) => page,
-        Err(kind) => return validation_or_internal(kind, &request_id),
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     let scope = TenantRepoScope::from_authenticated_tenant(tenant);
     match repo.list(scope, page).await {
@@ -491,71 +561,100 @@ async fn list_entries_scoped(
         Err(AuditError::InvalidCursor) => httpserve::error::validation_bad_request(&request_id),
         // 链完整性等其它失败不可静默：记录后 500（无 wire 泄漏）。
         Err(error) => {
-            tracing::error!(tenant = %tenant, error = %error, "audit handler: list failed");
+            tracing::error!(
+                domain = AUDIT_DOMAIN,
+                tenant = %tenant,
+                error_chain = %secure::redact_error(&error),
+                "audit handler: list failed"
+            );
             httpserve::error::internal_error(&request_id)
         }
     }
 }
 
-async fn list_entries_target_tenant<S>(
-    deps: AuditReadDeps<S>,
-    principal: Option<Arc<authn::Principal>>,
-    authenticated: Option<httpserve::Authenticated>,
-    authorizer: Option<Arc<dyn RouteAuthorizer>>,
-    request: AuditListEntriesRequest,
-    request_id: String,
-    correlation_id: String,
+fn log_cross_tenant_audit_append_failure(
+    target: vocab::TenantId,
+    request: &TargetReadRequest,
+    error: &dyn std::error::Error,
+) {
+    tracing::error!(
+        domain = AUDIT_DOMAIN,
+        contract_id = AUDIT_LIST_TENANT_HTTP_SPEC.contract_id,
+        operation = "audit_list_cross_tenant",
+        tenant = %target,
+        request_id = request.request_id.as_str(),
+        correlation_id = request.correlation_id.as_str(),
+        error_chain = %secure::redact_error(error),
+        retry = false,
+        "audit handler: durable cross-tenant audit append failed"
+    );
+}
+
+async fn record_cross_tenant_denial<S>(
+    deps: &TargetAuditReadDeps<S>,
+    authenticated: &httpserve::Authenticated,
+    target: vocab::TenantId,
+    request: &TargetReadRequest,
+) -> Result<(), diport::AuditSinkError>
+where
+    S: diport::AuditSink + Send + Sync + 'static,
+{
+    deps.audit_sink
+        .record(
+            authenticated.audit_event(httpserve::AuthenticatedAuditEvent {
+                occurred_at: deps.audit_clock.now(),
+                tenant_id: Some(target),
+                resource_kind: RESOURCE_KIND_AUDIT_ENTRIES,
+                resource_id: target.to_string(),
+                action: ACTION_AUDIT_LIST_CROSS_TENANT,
+                outcome: diport::AuditOutcome::Failure {
+                    reason: AUDIT_FORBIDDEN_REASON,
+                },
+                request_id: Some(request.request_id.clone()),
+                correlation_id: Some(request.correlation_id.clone()),
+            }),
+        )
+        .await
+}
+
+async fn audited_forbidden_response<S>(
+    deps: &TargetAuditReadDeps<S>,
+    authenticated: Option<&httpserve::Authenticated>,
+    target: vocab::TenantId,
+    request: &TargetReadRequest,
 ) -> Response
 where
     S: diport::AuditSink + Send + Sync + 'static,
 {
-    let Some(target_raw) = request.tenant_id.as_deref() else {
-        return httpserve::error::validation_bad_request(&request_id);
+    let Some(authenticated) = authenticated else {
+        return httpserve::error::internal_error(&request.request_id);
     };
-    let target = match vocab::TenantId::parse(target_raw) {
-        Ok(tenant) => tenant,
-        Err(_) => return httpserve::error::validation_bad_request(&request_id),
-    };
-    let Some(principal) = principal else {
-        return httpserve::error::forbidden(&request_id);
-    };
-    if principal.kind() != vocab::PrincipalKind::SuperAdmin {
-        return httpserve::error::forbidden(&request_id);
+    if let Err(error) = record_cross_tenant_denial(deps, authenticated, target, request).await {
+        log_cross_tenant_audit_append_failure(target, request, &error);
+        return httpserve::error::internal_error(&request.request_id);
     }
-    let projection =
-        match authorize_read_projection(authorizer, authenticated.as_ref(), target).await {
-            Ok(projection) => projection,
-            Err(AuditReadAuthError::Forbidden) => return httpserve::error::forbidden(&request_id),
-        };
-    let Some(admin_repo) = deps.admin_repo else {
-        return httpserve::error::not_implemented(&request_id);
-    };
+    httpserve::error::forbidden(&request.request_id)
+}
 
-    let mut page = match page_from_request(&request) {
-        Ok(page) => page,
-        Err(kind) => return validation_or_internal(kind, &request_id),
-    };
-    if let Some(cursor) = page.cursor.as_ref() {
-        page.cursor = match decode_target_cursor(target, cursor) {
-            Ok(inner) => Some(inner),
-            Err(TargetCursorError::Invalid | TargetCursorError::TenantMismatch) => {
-                return httpserve::error::validation_bad_request(&request_id);
-            }
-        };
-    }
-
+async fn audited_cross_tenant_scope<S>(
+    deps: &TargetAuditReadDeps<S>,
+    principal: &Arc<authn::Principal>,
+    target: vocab::TenantId,
+    request: &TargetReadRequest,
+) -> Result<CrossTenantReadScope, Response>
+where
+    S: diport::AuditSink + Send + Sync + 'static,
+{
     let facet: Arc<dyn runctx::PrincipalFacet> = principal.clone();
     let ctx = runctx::RequestCtx::new(target, facet);
-    let audit = match authn::CrossTenantAuditContext::new(
+    let audit = authn::CrossTenantAuditContext::new(
         RESOURCE_KIND_AUDIT_ENTRIES,
         target.to_string(),
         ACTION_AUDIT_LIST_CROSS_TENANT,
-        request_id.clone(),
-        correlation_id,
-    ) {
-        Ok(audit) => audit,
-        Err(_) => return httpserve::error::internal_error(&request_id),
-    };
+        request.request_id.as_str(),
+        request.correlation_id.as_str(),
+    )
+    .map_err(|_| httpserve::error::internal_error(&request.request_id))?;
     match principal
         .audited_cross_tenant_visibility(
             &ctx,
@@ -565,43 +664,117 @@ where
         )
         .await
     {
-        Ok(_) => {}
+        Ok(audited_visibility) => Ok(CrossTenantReadScope::from_audited_visibility(
+            audited_visibility,
+        )),
+        // Caller has already checked SuperAdmin and audited both final deny branches. Reaching a
+        // different authn verdict here is an internal invariant failure, never an unaudited 403.
         Err(authn::CrossTenantError::NotSuperAdmin) => {
-            return httpserve::error::forbidden(&request_id);
+            Err(httpserve::error::internal_error(&request.request_id))
         }
-        Err(authn::CrossTenantError::Audit(_)) => {
-            return httpserve::error::internal_error(&request_id);
+        Err(error @ authn::CrossTenantError::Audit(_)) => {
+            log_cross_tenant_audit_append_failure(target, request, &error);
+            Err(httpserve::error::internal_error(&request.request_id))
         }
-        Err(_) => {
-            return httpserve::error::internal_error(&request_id);
-        }
+        Err(_) => Err(httpserve::error::internal_error(&request.request_id)),
     }
+}
 
-    match admin_repo.list_tenant(target, page).await {
+async fn list_target_page(
+    admin_repo: Arc<DynAuditAdminRepo<'static>>,
+    scope: CrossTenantReadScope,
+    page: AuditPage,
+    target: vocab::TenantId,
+    projection: ResourceProjection,
+    request_id: &str,
+) -> Response {
+    match admin_repo.list_tenant(scope, page).await {
         Ok(result) => match to_target_response(target, result, projection) {
             Ok(response) => Json(response).into_response(),
-            Err(_) => httpserve::error::internal_error(&request_id),
+            Err(_) => httpserve::error::internal_error(request_id),
         },
-        Err(AuditError::InvalidCursor) => httpserve::error::validation_bad_request(&request_id),
+        Err(AuditError::InvalidCursor) => httpserve::error::validation_bad_request(request_id),
         Err(error) => {
-            tracing::error!(tenant = %target, error = %error, "audit handler: target-tenant list failed");
-            httpserve::error::internal_error(&request_id)
+            tracing::error!(
+                domain = AUDIT_DOMAIN,
+                tenant = %target,
+                error_chain = %secure::redact_error(&error),
+                "audit handler: target-tenant list failed"
+            );
+            httpserve::error::internal_error(request_id)
         }
     }
+}
+
+async fn list_entries_target_tenant<S>(
+    deps: TargetAuditReadDeps<S>,
+    principal: Option<Arc<authn::Principal>>,
+    authenticated: Option<httpserve::Authenticated>,
+    authorizer: Option<Arc<dyn RouteAuthorizer>>,
+    request: TargetReadRequest,
+) -> Response
+where
+    S: diport::AuditSink + Send + Sync + 'static,
+{
+    let target = match vocab::TenantId::parse(&request.target_raw) {
+        Ok(tenant) => tenant,
+        Err(_) => return httpserve::error::validation_bad_request(&request.request_id),
+    };
+    let Some(principal) = principal else {
+        return httpserve::error::forbidden(&request.request_id);
+    };
+    if principal.kind() != vocab::PrincipalKind::SuperAdmin {
+        return audited_forbidden_response(&deps, authenticated.as_ref(), target, &request).await;
+    }
+    let projection = match authorize_read_projection(
+        authorizer,
+        authenticated.as_ref(),
+        target,
+        &AUDIT_LIST_TENANT_HTTP_SPEC,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(AuditReadAuthError::Forbidden) => {
+            return audited_forbidden_response(&deps, authenticated.as_ref(), target, &request)
+                .await;
+        }
+    };
+    let Ok(page) = target_page_from_request(&request.page, target) else {
+        return httpserve::error::validation_bad_request(&request.request_id);
+    };
+    let Some(admin_repo) = deps.admin_repo.clone() else {
+        return httpserve::error::not_implemented(&request.request_id);
+    };
+
+    let scope = match audited_cross_tenant_scope(&deps, &principal, target, &request).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    list_target_page(
+        admin_repo,
+        scope,
+        page,
+        target,
+        projection,
+        &request.request_id,
+    )
+    .await
 }
 
 async fn authorize_read_projection(
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
     authenticated: Option<&httpserve::Authenticated>,
     tenant: vocab::TenantId,
+    spec: &'static generated::http::HttpSpec,
 ) -> Result<ResourceProjection, AuditReadAuthError> {
-    let Some(permission) = AUDIT_LIST_HTTP_SPEC.auth.permission else {
+    let Some(permission) = spec.auth.permission else {
         return Err(AuditReadAuthError::Forbidden);
     };
     httpserve::authorize_subject_for_permission(
         authorizer,
         authenticated,
-        AUDIT_LIST_HTTP_SPEC.contract_id,
+        spec.contract_id,
         permission,
         tenant,
         None,
@@ -638,8 +811,9 @@ impl SubscriberHandler for SessionCreatedAuditHandler {
             let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
             repo.append(scope, record).await.map_err(|e| {
                 tracing::error!(
+                    domain = AUDIT_DOMAIN,
                     message_id = msg_id.as_str(),
-                    error = %e,
+                    error_chain = %secure::redact_error(&e),
                     "audit handler: chain append failed"
                 );
                 // 瞬态：append/存储失败可恢复，走 ConsumerBase 有界重试预算，不首投即 DLX（F2/C2）。
@@ -656,9 +830,10 @@ fn reject_audit_event_record_error(
     error: AuditEventRecordError,
 ) -> SubscriberHandlerError {
     tracing::error!(
+        domain = AUDIT_DOMAIN,
         message_id,
         event_name,
-        error = %error,
+        error_chain = %secure::redact_error(&error),
         "audit handler: event payload rejected"
     );
     SubscriberHandlerError::permanent(error)
@@ -727,9 +902,10 @@ async fn append_audit_record(
     let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
     repo.append(scope, record).await.map_err(|e| {
         tracing::error!(
+            domain = AUDIT_DOMAIN,
             message_id,
             event_name,
-            error = %e,
+            error_chain = %secure::redact_error(&e),
             "audit handler: chain append failed"
         );
         SubscriberHandlerError::transient(e)
@@ -844,8 +1020,8 @@ where
 {
     /// 注入 erased 审计仓储 provider 构造。
     ///
-    /// `admin_repo=None` 表示未配置 `rss_audit_admin` pool；普通 scoped read 不受影响，带 `tenantId` 的
-    /// privileged read fail-closed 为 501。
+    /// `admin_repo=None` 表示未配置 `rss_audit_admin` pool；普通 scoped read 不受影响，独立
+    /// `/tenants/{tenantId}/entries` privileged route fail-closed 为 501。
     pub fn new(
         repo: Arc<DynAuditRepo<'static>>,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
@@ -890,54 +1066,80 @@ where
         )?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
-        let read_deps = AuditReadDeps {
-            repo: self.repo.clone(),
+        let scoped_repo = self.repo.clone();
+        let target_deps = TargetAuditReadDeps {
             admin_repo: self.admin_repo.clone(),
             audit_sink: self.audit_sink.clone(),
             audit_clock: self.audit_clock.clone(),
         };
         reg.route_group::<Admin>(AUDIT_ROUTE_PREFIX, move |rb| {
-            let read_deps = read_deps.clone();
-            let handler = axum::routing::get(
-                move |principal: Option<Extension<Arc<authn::Principal>>>,
-                      authenticated: Option<Extension<httpserve::Authenticated>>,
+            let scoped_repo = scoped_repo.clone();
+            let binding = admin_route_binding(&AUDIT_LIST_HTTP_SPEC)?;
+            let scoped_route = binding.route;
+            let scoped_handler = axum::routing::on(
+                binding.filter,
+                move |authenticated: Option<Extension<httpserve::Authenticated>>,
                       authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
                       query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
                       request: axum::extract::Request| {
-                    let read_deps = read_deps.clone();
+                    let repo = scoped_repo.clone();
+                    let authenticated = authenticated.map(|Extension(authenticated)| authenticated);
+                    let authorizer = authorizer.map(|Extension(authorizer)| authorizer);
+                    let request_id = request_id_from_parts(request.headers(), request.extensions());
+                    async move {
+                        // Query 解析失败（含旧 tenantId query）统一映射到 validation envelope。
+                        let Ok(query) = query else {
+                            return httpserve::error::validation_bad_request(&request_id);
+                        };
+                        list_entries(repo, authenticated, authorizer, query.0, request_id).await
+                    }
+                },
+            );
+            let target_deps = target_deps.clone();
+            let binding = admin_route_binding(&AUDIT_LIST_TENANT_HTTP_SPEC)?;
+            let target_route = binding.route;
+            let target_handler = axum::routing::on(
+                binding.filter,
+                move |principal: Option<Extension<Arc<authn::Principal>>>,
+                      authenticated: Option<Extension<httpserve::Authenticated>>,
+                      authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
+                      target: Result<Path<String>, PathRejection>,
+                      query: Result<Query<AuditListTenantEntriesRequest>, QueryRejection>,
+                      request: axum::extract::Request| {
+                    let deps = target_deps.clone();
                     let principal = principal.map(|Extension(principal)| principal);
                     let authenticated = authenticated.map(|Extension(authenticated)| authenticated);
                     let authorizer = authorizer.map(|Extension(authorizer)| authorizer);
                     let request_id = request_id_from_parts(request.headers(), request.extensions());
                     let correlation_id = request_correlation(request.headers(), &request_id);
                     async move {
-                        // F6：Query 解析失败（非法 limit / 未知字段）不返回 axum 裸 400——统一 envelope。
+                        let Ok(Path(target)) = target else {
+                            return httpserve::error::validation_bad_request(&request_id);
+                        };
                         let Ok(query) = query else {
                             return httpserve::error::validation_bad_request(&request_id);
                         };
-                        list_entries(
-                            read_deps,
+                        list_entries_target_tenant(
+                            deps,
                             principal,
                             authenticated,
                             authorizer,
-                            query.0,
-                            request_id,
-                            correlation_id,
+                            TargetReadRequest {
+                                target_raw: target,
+                                page: query.0,
+                                request_id,
+                                correlation_id,
+                            },
                         )
                         .await
                     }
                 },
             );
-            // route group 内用相对 SUBPATH；nest 到 AUDIT_ROUTE_PREFIX 下真实路径 = AUDIT_ENTRIES_PATH（F1）。
+            // Both Route metadata and actual MethodRouter filters come from generated specs.
             // Admin listener typed builder：`mount`（非-Primary，无 opt-out；Admin 不可携 opt-out）。
-            Ok(rb.mount(
-                Route {
-                    method: axum::http::Method::GET,
-                    path: AUDIT_ENTRIES_SUBPATH,
-                    contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
-                },
-                handler,
-            ))
+            Ok(rb
+                .mount(scoped_route, scoped_handler)
+                .mount(target_route, target_handler))
         })?;
         Ok(())
     }
@@ -966,6 +1168,7 @@ mod tests {
     /// contract.toml 声明的完整路径（= `AUDIT_ROUTE_PREFIX` ‖ `AUDIT_ENTRIES_SUBPATH`）；测试据此断言
     /// finalize 后真实挂载路径 + 直挂 handler-logic 测试路径。
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
+    const AUDIT_TENANT_ENTRIES_PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";
 
     /// erased in-mem 审计仓储（订阅 + 路由共享形：`Arc<DynAuditRepo>`，同生产装配路径）。
     fn repo() -> Arc<DynAuditRepo<'static>> {
@@ -1020,9 +1223,10 @@ mod tests {
     impl crate::ports::AuditAdminRepo for DelegatingAdminRepo {
         async fn list_tenant(
             &self,
-            tenant: vocab::TenantId,
+            scope: CrossTenantReadScope,
             page: AuditPage,
         ) -> Result<AuditListResult, AuditError> {
+            let tenant = scope.target();
             self.repo
                 .list(TenantRepoScope::for_test(tenant), page)
                 .await
@@ -1087,7 +1291,7 @@ mod tests {
     impl crate::ports::AuditAdminRepo for CountingAdminRepo {
         async fn list_tenant(
             &self,
-            _tenant: vocab::TenantId,
+            _scope: CrossTenantReadScope,
             _page: AuditPage,
         ) -> Result<AuditListResult, AuditError> {
             self.list_calls
@@ -1171,7 +1375,11 @@ mod tests {
         {
             Box::pin(async move {
                 if self.allow
-                    && request.contract_id == AUDIT_LIST_HTTP_SPEC.contract_id
+                    && [
+                        AUDIT_LIST_HTTP_SPEC.contract_id,
+                        AUDIT_LIST_TENANT_HTTP_SPEC.contract_id,
+                    ]
+                    .contains(&request.contract_id)
                     && request.permission == vocab::AUDIT_READ_PERMISSION
                 {
                     if self.fields.is_empty() {
@@ -1202,6 +1410,51 @@ mod tests {
             fields: &[],
             allow: false,
         })
+    }
+
+    #[derive(Clone)]
+    struct StrictTargetAuthorizer {
+        expected_tenant: vocab::TenantId,
+        requests: Arc<std::sync::Mutex<Vec<httpserve::RouteAuthorizationRequest>>>,
+    }
+
+    impl StrictTargetAuthorizer {
+        fn new(expected_tenant: vocab::TenantId) -> Self {
+            Self {
+                expected_tenant,
+                requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests(&self) -> Vec<httpserve::RouteAuthorizationRequest> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    impl httpserve::RouteAuthorizer for StrictTargetAuthorizer {
+        fn authorize<'a>(
+            &'a self,
+            request: httpserve::RouteAuthorizationRequest,
+        ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let allow = request.contract_id == AUDIT_LIST_TENANT_HTTP_SPEC.contract_id
+                    && request.permission == vocab::AUDIT_READ_PERMISSION
+                    && request.tenant_id == Some(self.expected_tenant);
+                self.requests
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(request);
+                if allow {
+                    httpserve::RouteAuthorizationDecision::Allow
+                } else {
+                    httpserve::RouteAuthorizationDecision::Deny
+                }
+            })
+        }
     }
 
     #[allow(clippy::expect_used)]
@@ -1617,6 +1870,8 @@ mod tests {
             AUDIT_LIST_HTTP_SPEC.auth.permission,
             Some(vocab::AUDIT_READ_PERMISSION)
         );
+        assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.path, AUDIT_TENANT_ENTRIES_PATH);
+        assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.method, "GET");
         let subs = reg.drain_subscribers();
         let expected: Vec<_> = [
             SESSION_CREATED_SUBSCRIPTIONS,
@@ -1640,6 +1895,71 @@ mod tests {
                 spec.contract_id
             );
         }
+    }
+
+    #[test]
+    fn audit_http_routes_and_error_logs_use_single_source_funnels() {
+        let source = include_str!("application.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        let first_subpath = ["AUDIT_ENTRIES", "_SUBPATH"].concat();
+        let target_subpath = ["AUDIT_TENANT_ENTRIES", "_SUBPATH"].concat();
+        let raw_error = ["error = %", "error"].concat();
+        let raw_short_error = ["error = %", "e"].concat();
+
+        assert!(
+            !production.contains(&first_subpath) && !production.contains(&target_subpath),
+            "production route path metadata must be derived from generated HttpSpec"
+        );
+        assert!(
+            !production.contains(&raw_error) && !production.contains(&raw_short_error),
+            "production error logs must use secure::redact_error"
+        );
+        let error_logs = production.matches("tracing::error!(").count();
+        assert_eq!(
+            production.matches("secure::redact_error(").count(),
+            error_logs,
+            "every production error log must use the secure redaction funnel"
+        );
+        assert_eq!(
+            production.matches("domain = AUDIT_DOMAIN").count(),
+            error_logs,
+            "every production error log must carry the audit domain"
+        );
+        assert_eq!(
+            production.matches("axum::routing::on(").count(),
+            2,
+            "both actual MethodRouters must use generated method filters"
+        );
+        assert_eq!(
+            production.matches("binding.filter").count(),
+            2,
+            "both actual MethodRouters must consume generated method filters"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn audit_admin_route_binding_is_generated_and_fail_closed() {
+        let scoped = admin_route_binding(&AUDIT_LIST_HTTP_SPEC).expect("scoped binding");
+        assert_eq!(scoped.route.path, "/entries");
+        assert_eq!(scoped.route.method, axum::http::Method::GET);
+        assert_eq!(scoped.route.contract_id, AUDIT_LIST_HTTP_SPEC.contract_id);
+        assert_eq!(scoped.filter, axum::routing::MethodFilter::GET);
+
+        let unsupported_method = generated::http::HttpSpec {
+            method: "BREW",
+            ..AUDIT_LIST_HTTP_SPEC
+        };
+        assert!(admin_route_binding(&unsupported_method).is_err());
+
+        let outside_group = generated::http::HttpSpec {
+            path: "/api/v1/other/entries",
+            ..AUDIT_LIST_HTTP_SPEC
+        };
+        assert!(admin_route_binding(&outside_group).is_err());
     }
 
     /// 在注入 ctx tenant 的 Router 上 oneshot 一个 GET（参数绑定 + 状态码 + 响应体）。
@@ -1675,6 +1995,7 @@ mod tests {
             principal,
             audit_sink,
             Some(projection_authorizer(&[])),
+            None,
             query,
         )
         .await
@@ -1687,13 +2008,13 @@ mod tests {
         principal: Option<Arc<authn::Principal>>,
         audit_sink: S,
         authorizer: Option<Arc<dyn httpserve::RouteAuthorizer>>,
+        target: Option<&str>,
         query: &str,
     ) -> (StatusCode, Vec<u8>)
     where
         S: diport::AuditSink + Send + Sync + 'static,
     {
-        let read_deps = AuditReadDeps {
-            repo,
+        let target_deps = TargetAuditReadDeps {
             admin_repo,
             audit_sink: Arc::new(audit_sink),
             audit_clock: audit_clock(),
@@ -1706,49 +2027,76 @@ mod tests {
                 principal.tenant(),
             )
         });
-        let app = axum::Router::new().route(
-            AUDIT_ENTRIES_PATH,
-            axum::routing::get(
-                move |headers: axum::http::HeaderMap,
-                      principal_ext: Option<Extension<Arc<authn::Principal>>>,
-                      auth_ext: Option<Extension<httpserve::Authenticated>>,
-                      authorizer_ext: Option<Extension<Arc<dyn httpserve::RouteAuthorizer>>>,
-                      q: Result<Query<AuditListEntriesRequest>, QueryRejection>| {
-                    let read_deps = read_deps.clone();
-                    let principal = principal_ext
-                        .map(|Extension(principal)| principal)
-                        .or_else(|| principal.clone());
-                    let authenticated = auth_ext
-                        .map(|Extension(authenticated)| authenticated)
-                        .or_else(|| authenticated.clone());
-                    let authorizer = authorizer_ext
-                        .map(|Extension(authorizer)| authorizer)
-                        .or_else(|| authorizer.clone());
-                    let request_id = headers
-                        .get("x-request-id")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("rid-test")
-                        .to_string();
-                    let correlation_id = request_correlation(&headers, &request_id);
-                    async move {
-                        let Ok(q) = q else {
-                            return httpserve::error::validation_bad_request(&request_id);
-                        };
-                        list_entries(
-                            read_deps,
-                            principal,
-                            authenticated,
-                            authorizer,
-                            q.0,
-                            request_id,
-                            correlation_id,
-                        )
-                        .await
-                    }
-                },
-            ),
+        let scoped_authenticated = authenticated.clone();
+        let scoped_authorizer = authorizer.clone();
+        let target_authenticated = authenticated;
+        let target_authorizer = authorizer;
+        let target_principal = principal;
+        let app = axum::Router::new()
+            .route(
+                AUDIT_ENTRIES_PATH,
+                axum::routing::get(
+                    move |headers: axum::http::HeaderMap,
+                          q: Result<Query<AuditListEntriesRequest>, QueryRejection>| {
+                        let repo = repo.clone();
+                        let authenticated = scoped_authenticated.clone();
+                        let authorizer = scoped_authorizer.clone();
+                        let request_id = headers
+                            .get("x-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("rid-test")
+                            .to_string();
+                        async move {
+                            let Ok(q) = q else {
+                                return httpserve::error::validation_bad_request(&request_id);
+                            };
+                            list_entries(repo, authenticated, authorizer, q.0, request_id).await
+                        }
+                    },
+                ),
+            )
+            .route(
+                AUDIT_TENANT_ENTRIES_PATH,
+                axum::routing::get(
+                    move |headers: axum::http::HeaderMap,
+                          Path(target): Path<String>,
+                          q: Result<Query<AuditListTenantEntriesRequest>, QueryRejection>| {
+                        let deps = target_deps.clone();
+                        let principal = target_principal.clone();
+                        let authenticated = target_authenticated.clone();
+                        let authorizer = target_authorizer.clone();
+                        let request_id = headers
+                            .get("x-request-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("rid-test")
+                            .to_string();
+                        let correlation_id = request_correlation(&headers, &request_id);
+                        async move {
+                            let Ok(q) = q else {
+                                return httpserve::error::validation_bad_request(&request_id);
+                            };
+                            list_entries_target_tenant(
+                                deps,
+                                principal,
+                                authenticated,
+                                authorizer,
+                                TargetReadRequest {
+                                    target_raw: target,
+                                    page: q.0,
+                                    request_id,
+                                    correlation_id,
+                                },
+                            )
+                            .await
+                        }
+                    },
+                ),
+            );
+        let path = target.map_or_else(
+            || AUDIT_ENTRIES_PATH.to_string(),
+            |tenant| AUDIT_TENANT_ENTRIES_PATH.replace("{tenantId}", tenant),
         );
-        let uri = format!("{AUDIT_ENTRIES_PATH}{query}");
+        let uri = format!("{path}{query}");
         let request = axum::http::Request::builder()
             .uri(uri)
             .body(axum::body::Body::empty())
@@ -1765,6 +2113,63 @@ mod tests {
             .await
             .expect("body");
         (status, body.to_vec())
+    }
+
+    async fn get_target_entries_with(
+        repo: Arc<DynAuditRepo<'static>>,
+        admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
+        principal: Option<Arc<authn::Principal>>,
+        target: &str,
+        query: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        get_target_entries_with_sink(repo, admin_repo, principal, audit_sink(), target, query).await
+    }
+
+    async fn get_target_entries_with_sink<S>(
+        repo: Arc<DynAuditRepo<'static>>,
+        admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
+        principal: Option<Arc<authn::Principal>>,
+        audit_sink: S,
+        target: &str,
+        query: &str,
+    ) -> (StatusCode, Vec<u8>)
+    where
+        S: diport::AuditSink + Send + Sync + 'static,
+    {
+        get_target_entries_with_sink_and_authorizer(
+            repo,
+            admin_repo,
+            principal,
+            audit_sink,
+            Some(projection_authorizer(&[])),
+            target,
+            query,
+        )
+        .await
+    }
+
+    async fn get_target_entries_with_sink_and_authorizer<S>(
+        repo: Arc<DynAuditRepo<'static>>,
+        admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
+        principal: Option<Arc<authn::Principal>>,
+        audit_sink: S,
+        authorizer: Option<Arc<dyn httpserve::RouteAuthorizer>>,
+        target: &str,
+        query: &str,
+    ) -> (StatusCode, Vec<u8>)
+    where
+        S: diport::AuditSink + Send + Sync + 'static,
+    {
+        get_entries_with_sink_and_authorizer(
+            repo,
+            admin_repo,
+            principal,
+            audit_sink,
+            authorizer,
+            Some(target),
+            query,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1865,6 +2270,7 @@ mod tests {
             Some(admin),
             audit_sink(),
             Some(projection_authorizer(FIELDS)),
+            None,
             "",
         )
         .await;
@@ -1937,6 +2343,7 @@ mod tests {
                 Some(default_admin_principal()),
                 audit_sink(),
                 authorizer,
+                None,
                 "",
             )
             .await;
@@ -1967,17 +2374,18 @@ mod tests {
         let sink = RecordingAuditSink::ok();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
 
-        let (status, body) = get_entries_with_sink(
+        let (status, body) = get_target_entries_with_sink(
             repo.clone(),
             Some(admin_repo(repo)),
             Some(principal),
             sink.clone(),
-            &format!("?tenantId={CANON_TENANT}"),
+            CANON_TENANT,
+            "",
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
-        let page: AuditListEntriesResponse = serde_json::from_slice(&body).expect("decode");
+        let page: AuditListTenantEntriesResponse = serde_json::from_slice(&body).expect("decode");
         assert_eq!(page.data.len(), 1);
         assert_eq!(page.data[0].tenant_id, "<redacted>");
         assert_eq!(page.data[0].actor, "<redacted>");
@@ -2052,11 +2460,11 @@ mod tests {
         ))
         .into_router_for_test();
         let request = axum::http::Request::builder()
-            .uri(format!("{AUDIT_ENTRIES_PATH}?tenantId={CANON_TENANT}"))
+            .uri(AUDIT_TENANT_ENTRIES_PATH.replace("{tenantId}", CANON_TENANT))
             .body(axum::body::Body::empty())
             .expect("request");
 
-        let response = router.oneshot(request).await.expect("oneshot");
+        let response = router.clone().oneshot(request).await.expect("oneshot");
 
         assert_eq!(response.status(), StatusCode::OK);
         let response_request_id = response
@@ -2082,7 +2490,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        let page: AuditListEntriesResponse = serde_json::from_slice(&body).expect("decode");
+        let page: AuditListTenantEntriesResponse = serde_json::from_slice(&body).expect("decode");
         assert_eq!(page.data.len(), 1);
         let events = sink.events();
         assert_eq!(events.len(), 1, "target read must write audit event");
@@ -2094,6 +2502,18 @@ mod tests {
             events[0].correlation_id.as_deref(),
             Some(response_correlation_id.as_str())
         );
+
+        let invalid_path = axum::http::Request::builder()
+            .uri("/api/v1/audit/tenants/%FF/entries")
+            .body(axum::body::Body::empty())
+            .expect("invalid UTF-8 path URI");
+        let response = router.oneshot(invalid_path).await.expect("oneshot");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("validation envelope");
+        assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION");
     }
 
     #[tokio::test]
@@ -2112,11 +2532,12 @@ mod tests {
             let list_calls = admin.list_calls();
             let principal = principal(kind, principal_tenant);
 
-            let (status, body) = get_entries_with(
+            let (status, body) = get_target_entries_with(
                 repo,
                 Some(admin.boxed()),
                 Some(principal),
-                &format!("?tenantId={CANON_TENANT}"),
+                CANON_TENANT,
+                "",
             )
             .await;
 
@@ -2138,13 +2559,8 @@ mod tests {
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let admin = principal(vocab::PrincipalKind::Admin, Some(tenant));
 
-        let (status, body) = get_entries_with(
-            repo,
-            None,
-            Some(admin),
-            &format!("?tenantId={CANON_TENANT}"),
-        )
-        .await;
+        let (status, body) =
+            get_target_entries_with(repo, None, Some(admin), CANON_TENANT, "").await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -2157,13 +2573,14 @@ mod tests {
         let repo = repo();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
 
-        let (status, body) = get_entries_with_sink_and_authorizer(
+        let (status, body) = get_target_entries_with_sink_and_authorizer(
             repo,
             None,
             Some(principal),
             audit_sink(),
             None,
-            &format!("?tenantId={CANON_TENANT}"),
+            CANON_TENANT,
+            "",
         )
         .await;
 
@@ -2174,17 +2591,43 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn target_tenant_read_authorizes_with_target_contract_permission_and_tenant() {
+        let repo = repo();
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let authorizer = Arc::new(StrictTargetAuthorizer::new(tenant));
+        let dyn_authorizer: Arc<dyn httpserve::RouteAuthorizer> = authorizer.clone();
+
+        let (status, _) = get_target_entries_with_sink_and_authorizer(
+            repo.clone(),
+            Some(admin_repo(repo)),
+            Some(principal),
+            audit_sink(),
+            Some(dyn_authorizer),
+            CANON_TENANT,
+            "",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let requests = authorizer.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].contract_id,
+            AUDIT_LIST_TENANT_HTTP_SPEC.contract_id
+        );
+        assert_eq!(requests[0].permission, vocab::AUDIT_READ_PERMISSION);
+        assert_eq!(requests[0].tenant_id, Some(tenant));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn target_tenant_read_without_admin_repo_is_501() {
         let repo = repo();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
 
-        let (status, body) = get_entries_with(
-            repo,
-            None,
-            Some(principal),
-            &format!("?tenantId={CANON_TENANT}"),
-        )
-        .await;
+        let (status, body) =
+            get_target_entries_with(repo, None, Some(principal), CANON_TENANT, "").await;
 
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -2198,23 +2641,111 @@ mod tests {
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
         let sink = RecordingAuditSink::ok();
 
-        let (status, body) = get_entries_with_sink_and_authorizer(
+        let (status, body) = get_target_entries_with_sink_and_authorizer(
             repo.clone(),
             Some(admin_repo(repo)),
             Some(principal),
             sink.clone(),
             Some(denying_authorizer()),
-            &format!("?tenantId={CANON_TENANT}"),
+            CANON_TENANT,
+            "",
         )
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(
-            sink.events().is_empty(),
-            "denied final read must not write success cross-tenant audit"
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "final denial must be durably audited");
+        let event = &events[0];
+        assert_eq!(event.principal_id, CANON_SUBJECT);
+        assert_eq!(event.principal_kind, vocab::PrincipalKind::SuperAdmin);
+        assert_eq!(
+            event.tenant_id,
+            Some(vocab::TenantId::parse(CANON_TENANT).expect("tenant"))
+        );
+        assert_eq!(event.resource_id, CANON_TENANT);
+        assert_eq!(event.request_id.as_deref(), Some("rid-test"));
+        assert_eq!(event.correlation_id.as_deref(), Some("rid-test"));
+        assert_eq!(
+            event.outcome,
+            diport::AuditOutcome::Failure {
+                reason: "forbidden"
+            }
         );
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn target_tenant_non_super_admin_denial_is_durably_audited() {
+        let repo = repo();
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let principal = principal(vocab::PrincipalKind::Admin, Some(tenant));
+        let sink = RecordingAuditSink::ok();
+        let admin = CountingAdminRepo::default();
+        let list_calls = admin.list_calls();
+
+        let (status, _) = get_target_entries_with_sink(
+            repo,
+            Some(admin.boxed()),
+            Some(principal),
+            sink.clone(),
+            CANON_TENANT,
+            "",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(list_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "non-SuperAdmin denial must be audited");
+        assert_eq!(events[0].principal_id, CANON_SUBJECT);
+        assert_eq!(events[0].principal_kind, vocab::PrincipalKind::Admin);
+        assert_eq!(events[0].tenant_id, Some(tenant));
+        assert_eq!(
+            events[0].outcome,
+            diport::AuditOutcome::Failure {
+                reason: "forbidden"
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn target_tenant_denial_audit_failure_returns_500_without_admin_read() {
+        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        for (label, principal, authorizer) in [
+            (
+                "kind denial",
+                principal(vocab::PrincipalKind::Admin, Some(tenant)),
+                Some(projection_authorizer(&[])),
+            ),
+            (
+                "permission denial",
+                principal(vocab::PrincipalKind::SuperAdmin, None),
+                Some(denying_authorizer()),
+            ),
+        ] {
+            let admin = CountingAdminRepo::default();
+            let list_calls = admin.list_calls();
+            let (status, _) = get_target_entries_with_sink_and_authorizer(
+                repo(),
+                Some(admin.boxed()),
+                Some(principal),
+                RecordingAuditSink::failing(),
+                authorizer,
+                CANON_TENANT,
+                "",
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{label}");
+            assert_eq!(
+                list_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{label} must stop before admin read"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2225,12 +2756,13 @@ mod tests {
         let admin = CountingAdminRepo::default();
         let list_calls = admin.list_calls();
 
-        let (status, body) = get_entries_with_sink(
+        let (status, body) = get_target_entries_with_sink(
             repo,
             Some(admin.boxed()),
             Some(principal),
             RecordingAuditSink::failing(),
-            &format!("?tenantId={CANON_TENANT}"),
+            CANON_TENANT,
+            "",
         )
         .await;
 
@@ -2259,29 +2791,80 @@ mod tests {
                 .expect("append");
         }
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
-        let (status, body) = get_entries_with(
+        let (status, body) = get_target_entries_with(
             repo.clone(),
             Some(admin_repo(repo.clone())),
             Some(principal.clone()),
-            &format!("?tenantId={CANON_TENANT}&limit=1"),
+            CANON_TENANT,
+            "?limit=1",
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let page: AuditListEntriesResponse = serde_json::from_slice(&body).expect("decode");
+        let page: AuditListTenantEntriesResponse = serde_json::from_slice(&body).expect("decode");
         let cursor = page.next_cursor.expect("next cursor");
 
+        let (status, body) = get_target_entries_with(
+            repo.clone(),
+            Some(admin_repo(repo.clone())),
+            Some(principal.clone()),
+            CANON_TENANT,
+            &format!("?limit=1&cursor={cursor}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let continuation: AuditListTenantEntriesResponse =
+            serde_json::from_slice(&body).expect("decode continuation");
+        assert_eq!(continuation.data.len(), 1);
+        assert!(!continuation.has_more);
+        assert!(continuation.next_cursor.is_none());
+
         let other_tenant = "00000000-0000-4000-8000-000000000abc";
-        let (status, body) = get_entries_with(
+        let (status, body) = get_target_entries_with(
             repo.clone(),
             Some(admin_repo(repo)),
             Some(principal),
-            &format!("?tenantId={other_tenant}&limit=1&cursor={cursor}"),
+            other_tenant,
+            &format!("?limit=1&cursor={cursor}"),
         )
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn target_tenant_read_rejects_invalid_path_query_and_cursor_with_validation_envelope() {
+        let malformed_cursor =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"missing-tenant-separator");
+        let cases = [
+            ("invalid tenant", "not-a-tenant", String::new()),
+            ("zero limit", CANON_TENANT, "?limit=0".to_string()),
+            ("unknown query", CANON_TENANT, "?bogus=1".to_string()),
+            (
+                "malformed cursor",
+                CANON_TENANT,
+                format!("?cursor={malformed_cursor}"),
+            ),
+        ];
+
+        for (label, target, query) in cases {
+            let repo = repo();
+            let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+            let (status, body) = get_target_entries_with(
+                repo.clone(),
+                Some(admin_repo(repo)),
+                Some(principal),
+                target,
+                &query,
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION", "{label}");
+        }
     }
 
     #[tokio::test]
@@ -2317,11 +2900,79 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn audit_read_limit_matches_schema_maximum_on_both_routes() {
+        let (status, _) = get_entries(repo(), "?limit=500").await;
+        assert_eq!(status, StatusCode::OK, "scoped limit=500 must be accepted");
+
+        let target_repo = repo();
+        let (status, _) = get_target_entries_with(
+            target_repo.clone(),
+            Some(admin_repo(target_repo)),
+            Some(principal(vocab::PrincipalKind::SuperAdmin, None)),
+            CANON_TENANT,
+            "?limit=500",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "target limit=500 must be accepted");
+
+        for query in ["?limit=501", "?limit=4294967295"] {
+            let (status, body) = get_entries(repo(), query).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "scoped {query}");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION", "{query}");
+
+            let (status, _) = get_target_entries_with(
+                repo(),
+                None,
+                Some(principal(vocab::PrincipalKind::SuperAdmin, None)),
+                CANON_TENANT,
+                query,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "target validation must precede admin-repo availability for {query}"
+            );
+
+            let sink = RecordingAuditSink::ok();
+            let admin = CountingAdminRepo::default();
+            let list_calls = admin.list_calls();
+            let (status, body) = get_target_entries_with_sink(
+                repo(),
+                Some(admin.boxed()),
+                Some(principal(vocab::PrincipalKind::SuperAdmin, None)),
+                sink.clone(),
+                CANON_TENANT,
+                query,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "target {query}");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION", "{query}");
+            assert!(
+                sink.events().is_empty(),
+                "invalid target page must not emit an audit event"
+            );
+            assert_eq!(
+                list_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "invalid target page must not call admin repo"
+            );
+        }
+    }
+
     /// F6：Query 解析失败（非整数 limit / 未知字段）→ 统一 400 信封（不漏 axum 裸 400 文本）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn admin_read_query_rejection_maps_to_envelope() {
-        for q in ["?limit=abc", "?bogus=1"] {
+        for q in [
+            "?limit=abc",
+            "?bogus=1",
+            &format!("?tenantId={CANON_TENANT}"),
+        ] {
             let (status, body) = get_entries(repo(), q).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{q} 须 400");
             let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -2366,6 +3017,13 @@ mod tests {
             hit,
             StatusCode::NOT_FOUND,
             "contract 路径 {AUDIT_ENTRIES_PATH} 须命中已挂载 route（实际 {hit}）"
+        );
+        let target_path = AUDIT_TENANT_ENTRIES_PATH.replace("{tenantId}", CANON_TENANT);
+        let target_hit = route_status(&admin, &target_path).await;
+        assert_ne!(
+            target_hit,
+            StatusCode::NOT_FOUND,
+            "target contract path {target_path} must be mounted"
         );
         // 旧 bug（组内用完整路径）会把 route 挂到 doubled 前缀下；该路径不应存在（F1 回归守卫）。
         let doubled = route_status(&admin, "/api/v1/audit/api/v1/audit/entries").await;
@@ -2420,22 +3078,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn admin_read_without_ctx_fails_closed() {
         let response = list_entries(
-            AuditReadDeps {
-                repo: repo(),
-                admin_repo: None,
-                audit_sink: Arc::new(audit_sink()),
-                audit_clock: audit_clock(),
-            },
-            None,
+            repo(),
             None,
             None,
             AuditListEntriesRequest {
                 limit: std::num::NonZeroU32::new(10).expect("nonzero"),
                 cursor: None,
-                tenant_id: None,
             },
             String::new(),
-            "corr-test".to_string(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);

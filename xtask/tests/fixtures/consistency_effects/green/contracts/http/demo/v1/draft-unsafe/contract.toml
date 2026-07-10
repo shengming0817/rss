@@ -1,0 +1,10 @@
+id = "demo.draft-unsafe"
+kind = "http"
+domain = "demo"
+version = "v1"
+owner = "demo"
+consistencyLevel = "LocalOnly"
+lifecycle = "draft"
+
+[effectProfile]
+effects = ["write"]

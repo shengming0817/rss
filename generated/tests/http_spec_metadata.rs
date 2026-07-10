@@ -11,6 +11,7 @@ use generated::http::{
 
 const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("audit.list-entries", HttpConsistencyLevel::LocalOnly),
+    ("audit.list-tenant-entries", HttpConsistencyLevel::LocalTx),
     ("identity.login", HttpConsistencyLevel::OutboxFact),
     ("identity.logout", HttpConsistencyLevel::LocalTx),
     ("identity.password-change", HttpConsistencyLevel::LocalTx),
@@ -32,6 +33,7 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
 ];
 
 const EXPECTED_LOCAL_TX_SPECS: &[&str] = &[
+    "audit.list-tenant-entries",
     "identity.logout",
     "identity.password-change",
     "identity.refresh",
@@ -90,22 +92,27 @@ fn active_http_specs_expose_non_empty_effect_profiles() {
 }
 
 #[test]
-fn audit_list_entries_exposes_mixed_effect_profile() {
-    let effects: &[EffectKind] =
+fn audit_reads_expose_split_effect_profiles() {
+    let scoped: &[EffectKind] =
         active_spec("audit.list-entries").map_or(&[], |spec| spec.effect_profile.effects);
-    for expected in [
-        EffectKind::Auth,
-        EffectKind::Read,
-        EffectKind::Projection,
-        EffectKind::Write,
-        EffectKind::CrossTenantAudit,
-    ] {
-        assert!(
-            effects.contains(&expected),
-            "audit.list-entries effect profile missing {expected:?}: {:?}",
-            effects
-        );
-    }
+    assert_eq!(
+        scoped,
+        &[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]
+    );
+
+    let target: &[EffectKind] =
+        active_spec("audit.list-tenant-entries").map_or(&[], |spec| spec.effect_profile.effects);
+    assert_eq!(
+        target,
+        &[
+            EffectKind::Auth,
+            EffectKind::Read,
+            EffectKind::Projection,
+            EffectKind::Write,
+            EffectKind::Transaction,
+            EffectKind::CrossTenantAudit,
+        ]
+    );
 }
 
 #[test]
@@ -189,7 +196,7 @@ fn active_http_registry_keeps_current_consistency_distribution() {
         registry_distribution(),
         [
             (HttpConsistencyLevel::LocalOnly, 5),
-            (HttpConsistencyLevel::LocalTx, 4),
+            (HttpConsistencyLevel::LocalTx, 5),
             (HttpConsistencyLevel::OutboxFact, 7),
             (HttpConsistencyLevel::WorkflowEventual, 0),
             (HttpConsistencyLevel::DeviceLatent, 0),

@@ -303,13 +303,19 @@ const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
         rule: Rule::DocAnchor,
         path: TENANCY_CONSUMER_GUIDE_PATH,
         needle: "audit.list-entries",
-        detail: "consumer guide must document audit admin read semantics",
+        detail: "consumer guide must document tenant-scoped audit read semantics",
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
         path: TENANCY_CONSUMER_GUIDE_PATH,
-        needle: "request body `tenantId`",
-        detail: "consumer guide must reject request-body tenant source",
+        needle: "audit.list-tenant-entries",
+        detail: "consumer guide must document audited target-tenant read semantics",
+    },
+    RequiredAnchor {
+        rule: Rule::DocAnchor,
+        path: TENANCY_CONSUMER_GUIDE_PATH,
+        needle: "request body/query schema 中的 `tenantId`",
+        detail: "consumer guide must reject request-schema tenant sources",
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
@@ -385,14 +391,26 @@ const IDENTITY_PROFILE_PROJECTION_FIELDS: &[HttpProjectionFieldName] = &[
 
 const PROJECTION_ENDPOINTS: &[ProjectionEndpoint] = &[
     ProjectionEndpoint {
-        chain_name: "audit",
-        contract_path: "contracts/http/audit/v1/contract.toml",
+        chain_name: "audit scoped read",
+        contract_path: "contracts/http/audit/v1/list-entries/contract.toml",
         generated_path: "generated/src/http/audit_v1.rs",
-        generated_start: "",
-        generated_end: "",
+        generated_start: "pub mod list_entries {",
+        generated_end: "pub mod list_tenant_entries {",
         rendering_path: "crates/audit/src/application.rs",
-        rendering_start: "fn to_view(",
+        rendering_start: "fn project_audit_entry(",
         rendering_end: "fn to_response",
+        render_callee: "projection",
+        fields: AUDIT_PROJECTION_FIELDS,
+    },
+    ProjectionEndpoint {
+        chain_name: "audit target-tenant read",
+        contract_path: "contracts/http/audit/v1/list-tenant-entries/contract.toml",
+        generated_path: "generated/src/http/audit_v1.rs",
+        generated_start: "pub mod list_tenant_entries {",
+        generated_end: "pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {",
+        rendering_path: "crates/audit/src/application.rs",
+        rendering_start: "fn project_audit_entry(",
+        rendering_end: "fn to_view(",
         render_callee: "projection",
         fields: AUDIT_PROJECTION_FIELDS,
     },
@@ -401,7 +419,7 @@ const PROJECTION_ENDPOINTS: &[ProjectionEndpoint] = &[
         contract_path: "contracts/http/identity/v1/profile/contract.toml",
         generated_path: "generated/src/http/identity_v1.rs",
         generated_start: "pub mod profile {",
-        generated_end: "pub mod password_change {",
+        generated_end: "pub mod refresh {",
         rendering_path: "crates/identity/src/application/mod.rs",
         rendering_start: "async fn profile_handler",
         rendering_end: "async fn password_change_handler",
@@ -1294,9 +1312,7 @@ fn slice_from_marker_until<'a>(
 ) -> Option<&'a str> {
     let start = content.find(marker)?;
     let rest = &content[start..];
-    let end = rest
-        .find(terminator)
-        .map_or(rest.len(), |idx| idx + terminator.len());
+    let end = rest.find(terminator)? + terminator.len();
     Some(&rest[..end])
 }
 
@@ -1479,9 +1495,9 @@ fn main() {
     #[test]
     fn audit_rendering_projection_comment_only_is_reported() {
         let content = r#"
-fn to_view() -> AuditEntryView {
+fn project_audit_entry() -> ProjectedAuditEntry {
     // actor: projection.render(vocab::ProjectionField::AuditActor, raw)
-    AuditEntryView {
+    ProjectedAuditEntry {
         actor: entry.actor().as_uuid().to_string(),
         resource_id: entry.resource().id().to_string(),
     }
@@ -1510,7 +1526,7 @@ async fn profile_handler(req: Request<Body>) -> Response {
 }
 async fn password_change_handler() {}
 "#;
-        let findings = scan_rendering_projection(&PROJECTION_ENDPOINTS[1], content);
+        let findings = scan_rendering_projection(&PROJECTION_ENDPOINTS[2], content);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::ProjectionAnchor
@@ -1523,7 +1539,8 @@ async fn password_change_handler() {}
     #[test]
     fn projection_contract_without_closeout_endpoint_is_reported() {
         let findings = scan_projection_endpoint_coverage(vec![
-            "contracts/http/audit/v1/contract.toml".to_string(),
+            "contracts/http/audit/v1/list-entries/contract.toml".to_string(),
+            "contracts/http/audit/v1/list-tenant-entries/contract.toml".to_string(),
             "contracts/http/identity/v1/profile/contract.toml".to_string(),
             "contracts/http/example/v1/contract.toml".to_string(),
         ]);
@@ -1601,6 +1618,56 @@ pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[
             findings.iter().any(|finding| {
                 finding.rule == Rule::ProjectionAnchor && finding.subject.contains("AuditActor")
             }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn generated_projection_missing_end_marker_does_not_scan_later_module() {
+        let endpoint = ProjectionEndpoint {
+            chain_name: "synthetic target",
+            contract_path: "contracts/http/synthetic/v1/contract.toml",
+            generated_path: "generated/src/http/synthetic_v1.rs",
+            generated_start: "pub mod target {",
+            generated_end: "pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {",
+            rendering_path: "crates/synthetic/src/application.rs",
+            rendering_start: "fn target_handler(",
+            rendering_end: "fn unrelated_handler(",
+            render_callee: "projection",
+            fields: AUDIT_PROJECTION_FIELDS,
+        };
+        let content = r#"
+pub mod target {
+}
+
+pub mod unrelated {
+    pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[
+        super::super::HttpProjectionFieldSpec {
+            field: ::vocab::ProjectionField::AuditTenantId,
+            permission: ::vocab::RoutePermissionId::AuditFieldTenantId,
+            obligation_key: "audit.tenant_id",
+            response_path: "data[].tenantId",
+        },
+        super::super::HttpProjectionFieldSpec {
+            field: ::vocab::ProjectionField::AuditActor,
+            permission: ::vocab::RoutePermissionId::AuditFieldActor,
+            obligation_key: "audit.actor",
+            response_path: "data[].actor",
+        },
+        super::super::HttpProjectionFieldSpec {
+            field: ::vocab::ProjectionField::AuditResourceId,
+            permission: ::vocab::RoutePermissionId::AuditFieldResourceId,
+            obligation_key: "audit.resource_id",
+            response_path: "data[].resourceId",
+        },
+    ];
+}
+"#;
+
+        let findings = scan_generated_projection_fields(&endpoint, content);
+        assert_eq!(
+            findings.len(),
+            AUDIT_PROJECTION_FIELDS.len(),
             "{findings:?}"
         );
     }

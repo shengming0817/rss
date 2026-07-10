@@ -761,7 +761,7 @@ mod tests {
                         httpserve::Route {
                             method: Method::GET,
                             path: "/probe",
-                            contract_id: generated::http::audit_v1::SPEC.contract_id,
+                            contract_id: generated::http::audit_v1::list_entries::SPEC.contract_id,
                         },
                         axum::routing::get(
                             |Extension(authorizer): Extension<
@@ -769,7 +769,8 @@ mod tests {
                             >| async move {
                                 match authorizer
                                     .authorize(httpserve::RouteAuthorizationRequest {
-                                        contract_id: generated::http::audit_v1::SPEC.contract_id,
+                                        contract_id: generated::http::audit_v1::list_entries::SPEC
+                                            .contract_id,
                                         permission: vocab::AUDIT_READ_PERMISSION,
                                         tenant_id: Some(
                                             vocab::TenantId::parse(

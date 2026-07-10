@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/audit_admin_repo_bare_tenant_fail.rs:8:30
+  |
+8 |     let _ = repo.list_tenant(tenant, page).await;
+  |                  ----------- ^^^^^^ expected `CrossTenantReadScope`, found `TenantId`
+  |                  |
+  |                  arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/ports.rs
+  |
+  |     async fn list_tenant(
+  |              ^^^^^^^^^^^

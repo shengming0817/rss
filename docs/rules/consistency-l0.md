@@ -50,15 +50,15 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
 - `worker`
 - `cross-tenant-audit`
 
-当前 #1688 已把统一声明面生成进 active HTTP `HttpSpec::effect_profile`，并由 generated tests 锁住非空
-effect 与 `audit.list-entries` 的混合 profile。上面的 strict-L0 行为证明仍未落到 runner、lint、route
-binding 或 metrics；这些可执行门由 #1689/#1690/#1691/#1693 等后续分支实现。
+统一声明面生成进 active HTTP `HttpSpec::effect_profile`，并由
+`cargo xtask consistency local-only-effects` 扫描全部 active HTTP LocalOnly 契约。该门只允许
+`auth`/`read`/`projection`，其余 effect 均阻断，并接入 `verify --fast`、`verify` 与 `ci`。
 
-## Known mixed route
+## Audit route split
 
-`audit.list-entries` 现阶段显式声明 `auth`/`read`/`projection`/`write`/`cross-tenant-audit`。这不是把混合语义
-认定为严格 L0，而是把真实行为暴露到 manifest carrier，避免文档声称与 contract 事实不一致。拆分或重分级留给
-#1692。
+`audit.list-entries` 只服务 ambient tenant scoped read，声明 `auth`/`read`/`projection`，不接受
+`tenantId` query。跨租户行为由独立 LocalTx `audit.list-tenant-entries` 承载，避免把 durable audit write
+藏在 L0 声明下。
 
 ## Follow-up boundary
 
@@ -74,4 +74,4 @@ binding 或 metrics；这些可执行门由 #1689/#1690/#1691/#1693 等后续分
 - 每个 active HTTP `SPEC` 必填 `effect_profile`，缺 carrier 时 codegen fail-closed。
 - 不做 route binding、lint、runner、metrics 或 journey。
 
-#1689/#1690/#1691/#1693 等在 generated metadata 基础上补实际 L0 可执行证明。
+#1690/#1691/#1693 等在声明面 lint 基础上补 handler/port 与运行时的进一步可执行证明。

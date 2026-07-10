@@ -1239,199 +1239,392 @@ pub type generated::http::_seed_v1::SeedEchoResponse::Output = T
 pub const generated::http::_seed_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::_seed_v1::CONTRACT_ID: &str
 pub mod generated::http::audit_v1
-pub mod generated::http::audit_v1::defaults
-pub mod generated::http::audit_v1::error
-pub struct generated::http::audit_v1::error::ConversionError(_)
-impl core::convert::From<&'static str> for generated::http::audit_v1::error::ConversionError
-pub fn generated::http::audit_v1::error::ConversionError::from(&'static str) -> Self
-impl core::convert::From<alloc::string::String> for generated::http::audit_v1::error::ConversionError
-pub fn generated::http::audit_v1::error::ConversionError::from(alloc::string::String) -> Self
-impl core::error::Error for generated::http::audit_v1::error::ConversionError
-impl core::fmt::Debug for generated::http::audit_v1::error::ConversionError
-pub fn generated::http::audit_v1::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
-impl core::fmt::Display for generated::http::audit_v1::error::ConversionError
-pub fn generated::http::audit_v1::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
-impl core::marker::Freeze for generated::http::audit_v1::error::ConversionError
-impl core::marker::Send for generated::http::audit_v1::error::ConversionError
-impl core::marker::Sync for generated::http::audit_v1::error::ConversionError
-impl core::marker::Unpin for generated::http::audit_v1::error::ConversionError
-impl core::marker::UnsafeUnpin for generated::http::audit_v1::error::ConversionError
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::error::ConversionError
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::error::ConversionError
-impl<T, U> core::convert::Into<U> for generated::http::audit_v1::error::ConversionError where U: core::convert::From<T>
-pub fn generated::http::audit_v1::error::ConversionError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::error::ConversionError where U: core::convert::Into<T>
-pub type generated::http::audit_v1::error::ConversionError::Error = core::convert::Infallible
-pub fn generated::http::audit_v1::error::ConversionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::error::ConversionError where U: core::convert::TryFrom<T>
-pub type generated::http::audit_v1::error::ConversionError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn generated::http::audit_v1::error::ConversionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for generated::http::audit_v1::error::ConversionError where T: core::fmt::Display + ?core::marker::Sized
-pub fn generated::http::audit_v1::error::ConversionError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for generated::http::audit_v1::error::ConversionError where T: 'static + ?core::marker::Sized
-pub fn generated::http::audit_v1::error::ConversionError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::error::ConversionError where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::error::ConversionError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::error::ConversionError where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::error::ConversionError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for generated::http::audit_v1::error::ConversionError
-pub fn generated::http::audit_v1::error::ConversionError::from(T) -> T
-impl<T> typenum::type_operators::Same for generated::http::audit_v1::error::ConversionError
-pub type generated::http::audit_v1::error::ConversionError::Output = T
-pub struct generated::http::audit_v1::AuditEntryView
-pub generated::http::audit_v1::AuditEntryView::action: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::actor: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::actor_kind: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::entry_hash: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::outcome: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::recorded_at: i64
-pub generated::http::audit_v1::AuditEntryView::resource_id: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::resource_kind: alloc::string::String
-pub generated::http::audit_v1::AuditEntryView::seq: i64
-pub generated::http::audit_v1::AuditEntryView::tenant_id: alloc::string::String
-impl core::clone::Clone for generated::http::audit_v1::AuditEntryView
-pub fn generated::http::audit_v1::AuditEntryView::clone(&self) -> generated::http::audit_v1::AuditEntryView
-impl core::fmt::Debug for generated::http::audit_v1::AuditEntryView
-pub fn generated::http::audit_v1::AuditEntryView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::audit_v1::AuditEntryView
-pub fn generated::http::audit_v1::AuditEntryView::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::audit_v1::AuditEntryView
-pub fn generated::http::audit_v1::AuditEntryView::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::AuditEntryView
-pub fn generated::http::audit_v1::AuditEntryView::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::audit_v1::AuditEntryView
-impl core::marker::Send for generated::http::audit_v1::AuditEntryView
-impl core::marker::Sync for generated::http::audit_v1::AuditEntryView
-impl core::marker::Unpin for generated::http::audit_v1::AuditEntryView
-impl core::marker::UnsafeUnpin for generated::http::audit_v1::AuditEntryView
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::AuditEntryView
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::AuditEntryView
-impl<T, U> core::convert::Into<U> for generated::http::audit_v1::AuditEntryView where U: core::convert::From<T>
-pub fn generated::http::audit_v1::AuditEntryView::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::AuditEntryView where U: core::convert::Into<T>
-pub type generated::http::audit_v1::AuditEntryView::Error = core::convert::Infallible
-pub fn generated::http::audit_v1::AuditEntryView::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::AuditEntryView where U: core::convert::TryFrom<T>
-pub type generated::http::audit_v1::AuditEntryView::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn generated::http::audit_v1::AuditEntryView::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::AuditEntryView where T: core::clone::Clone
-pub type generated::http::audit_v1::AuditEntryView::Owned = T
-pub fn generated::http::audit_v1::AuditEntryView::clone_into(&self, &mut T)
-pub fn generated::http::audit_v1::AuditEntryView::to_owned(&self) -> T
-impl<T> core::any::Any for generated::http::audit_v1::AuditEntryView where T: 'static + ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditEntryView::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::AuditEntryView where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditEntryView::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::AuditEntryView where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditEntryView::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for generated::http::audit_v1::AuditEntryView where T: core::clone::Clone
-pub unsafe fn generated::http::audit_v1::AuditEntryView::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for generated::http::audit_v1::AuditEntryView
-pub fn generated::http::audit_v1::AuditEntryView::from(T) -> T
-impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::AuditEntryView where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> typenum::type_operators::Same for generated::http::audit_v1::AuditEntryView
-pub type generated::http::audit_v1::AuditEntryView::Output = T
-pub struct generated::http::audit_v1::AuditListEntriesRequest
-pub generated::http::audit_v1::AuditListEntriesRequest::cursor: core::option::Option<alloc::string::String>
-pub generated::http::audit_v1::AuditListEntriesRequest::limit: core::num::nonzero::NonZeroU32
-pub generated::http::audit_v1::AuditListEntriesRequest::tenant_id: core::option::Option<alloc::string::String>
-impl core::clone::Clone for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::clone(&self) -> generated::http::audit_v1::AuditListEntriesRequest
-impl core::default::Default for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::default() -> Self
-impl core::fmt::Debug for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::audit_v1::AuditListEntriesRequest
-impl core::marker::Send for generated::http::audit_v1::AuditListEntriesRequest
-impl core::marker::Sync for generated::http::audit_v1::AuditListEntriesRequest
-impl core::marker::Unpin for generated::http::audit_v1::AuditListEntriesRequest
-impl core::marker::UnsafeUnpin for generated::http::audit_v1::AuditListEntriesRequest
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::AuditListEntriesRequest
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::AuditListEntriesRequest
-impl<T, U> core::convert::Into<U> for generated::http::audit_v1::AuditListEntriesRequest where U: core::convert::From<T>
-pub fn generated::http::audit_v1::AuditListEntriesRequest::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::AuditListEntriesRequest where U: core::convert::Into<T>
-pub type generated::http::audit_v1::AuditListEntriesRequest::Error = core::convert::Infallible
-pub fn generated::http::audit_v1::AuditListEntriesRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::AuditListEntriesRequest where U: core::convert::TryFrom<T>
-pub type generated::http::audit_v1::AuditListEntriesRequest::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn generated::http::audit_v1::AuditListEntriesRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::AuditListEntriesRequest where T: core::clone::Clone
-pub type generated::http::audit_v1::AuditListEntriesRequest::Owned = T
-pub fn generated::http::audit_v1::AuditListEntriesRequest::clone_into(&self, &mut T)
-pub fn generated::http::audit_v1::AuditListEntriesRequest::to_owned(&self) -> T
-impl<T> core::any::Any for generated::http::audit_v1::AuditListEntriesRequest where T: 'static + ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditListEntriesRequest::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::AuditListEntriesRequest where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditListEntriesRequest::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::AuditListEntriesRequest where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditListEntriesRequest::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for generated::http::audit_v1::AuditListEntriesRequest where T: core::clone::Clone
-pub unsafe fn generated::http::audit_v1::AuditListEntriesRequest::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for generated::http::audit_v1::AuditListEntriesRequest
-pub fn generated::http::audit_v1::AuditListEntriesRequest::from(T) -> T
-impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::AuditListEntriesRequest where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> typenum::type_operators::Same for generated::http::audit_v1::AuditListEntriesRequest
-pub type generated::http::audit_v1::AuditListEntriesRequest::Output = T
-pub struct generated::http::audit_v1::AuditListEntriesResponse
-pub generated::http::audit_v1::AuditListEntriesResponse::data: alloc::vec::Vec<generated::http::audit_v1::AuditEntryView>
-pub generated::http::audit_v1::AuditListEntriesResponse::has_more: bool
-pub generated::http::audit_v1::AuditListEntriesResponse::next_cursor: core::option::Option<alloc::string::String>
-impl core::clone::Clone for generated::http::audit_v1::AuditListEntriesResponse
-pub fn generated::http::audit_v1::AuditListEntriesResponse::clone(&self) -> generated::http::audit_v1::AuditListEntriesResponse
-impl core::fmt::Debug for generated::http::audit_v1::AuditListEntriesResponse
-pub fn generated::http::audit_v1::AuditListEntriesResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::audit_v1::AuditListEntriesResponse
-pub fn generated::http::audit_v1::AuditListEntriesResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::audit_v1::AuditListEntriesResponse
-pub fn generated::http::audit_v1::AuditListEntriesResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::AuditListEntriesResponse
-pub fn generated::http::audit_v1::AuditListEntriesResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::audit_v1::AuditListEntriesResponse
-impl core::marker::Send for generated::http::audit_v1::AuditListEntriesResponse
-impl core::marker::Sync for generated::http::audit_v1::AuditListEntriesResponse
-impl core::marker::Unpin for generated::http::audit_v1::AuditListEntriesResponse
-impl core::marker::UnsafeUnpin for generated::http::audit_v1::AuditListEntriesResponse
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::AuditListEntriesResponse
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::AuditListEntriesResponse
-impl<T, U> core::convert::Into<U> for generated::http::audit_v1::AuditListEntriesResponse where U: core::convert::From<T>
-pub fn generated::http::audit_v1::AuditListEntriesResponse::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::AuditListEntriesResponse where U: core::convert::Into<T>
-pub type generated::http::audit_v1::AuditListEntriesResponse::Error = core::convert::Infallible
-pub fn generated::http::audit_v1::AuditListEntriesResponse::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::AuditListEntriesResponse where U: core::convert::TryFrom<T>
-pub type generated::http::audit_v1::AuditListEntriesResponse::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn generated::http::audit_v1::AuditListEntriesResponse::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::AuditListEntriesResponse where T: core::clone::Clone
-pub type generated::http::audit_v1::AuditListEntriesResponse::Owned = T
-pub fn generated::http::audit_v1::AuditListEntriesResponse::clone_into(&self, &mut T)
-pub fn generated::http::audit_v1::AuditListEntriesResponse::to_owned(&self) -> T
-impl<T> core::any::Any for generated::http::audit_v1::AuditListEntriesResponse where T: 'static + ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditListEntriesResponse::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::AuditListEntriesResponse where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditListEntriesResponse::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::AuditListEntriesResponse where T: ?core::marker::Sized
-pub fn generated::http::audit_v1::AuditListEntriesResponse::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for generated::http::audit_v1::AuditListEntriesResponse where T: core::clone::Clone
-pub unsafe fn generated::http::audit_v1::AuditListEntriesResponse::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for generated::http::audit_v1::AuditListEntriesResponse
-pub fn generated::http::audit_v1::AuditListEntriesResponse::from(T) -> T
-impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::AuditListEntriesResponse where T: for<'de> serde_core::de::Deserialize<'de>
-impl<T> typenum::type_operators::Same for generated::http::audit_v1::AuditListEntriesResponse
-pub type generated::http::audit_v1::AuditListEntriesResponse::Output = T
-pub const generated::http::audit_v1::CONTRACT: vocab::contract::binding::ContractBinding
-pub const generated::http::audit_v1::CONTRACT_ID: &str
-pub const generated::http::audit_v1::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::audit_v1::EFFECT_PROFILE: generated::http::EffectProfile
-pub const generated::http::audit_v1::PATH: &str
-pub const generated::http::audit_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::audit_v1::SPEC: generated::http::HttpSpec
+pub mod generated::http::audit_v1::list_entries
+pub mod generated::http::audit_v1::list_entries::defaults
+pub mod generated::http::audit_v1::list_entries::error
+pub struct generated::http::audit_v1::list_entries::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::marker::Send for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::marker::Sync for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_entries::error::ConversionError where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_entries::error::ConversionError where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_entries::error::ConversionError::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_entries::error::ConversionError where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_entries::error::ConversionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for generated::http::audit_v1::list_entries::error::ConversionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::http::audit_v1::list_entries::error::ConversionError where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_entries::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_entries::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::error::ConversionError::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_entries::error::ConversionError
+pub type generated::http::audit_v1::list_entries::error::ConversionError::Output = T
+pub struct generated::http::audit_v1::list_entries::AuditEntryView
+pub generated::http::audit_v1::list_entries::AuditEntryView::action: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::actor: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::actor_kind: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::entry_hash: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::outcome: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::recorded_at: i64
+pub generated::http::audit_v1::list_entries::AuditEntryView::resource_id: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::resource_kind: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditEntryView::seq: i64
+pub generated::http::audit_v1::list_entries::AuditEntryView::tenant_id: alloc::string::String
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditEntryView
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::clone(&self) -> generated::http::audit_v1::list_entries::AuditEntryView
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditEntryView
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditEntryView
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditEntryView
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditEntryView
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditEntryView
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditEntryView
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditEntryView
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditEntryView
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditEntryView
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditEntryView
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditEntryView
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_entries::AuditEntryView where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_entries::AuditEntryView where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_entries::AuditEntryView::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_entries::AuditEntryView where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_entries::AuditEntryView::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::list_entries::AuditEntryView where T: core::clone::Clone
+pub type generated::http::audit_v1::list_entries::AuditEntryView::Owned = T
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::clone_into(&self, &mut T)
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v1::list_entries::AuditEntryView where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_entries::AuditEntryView where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_entries::AuditEntryView where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v1::list_entries::AuditEntryView where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v1::list_entries::AuditEntryView::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_entries::AuditEntryView
+pub fn generated::http::audit_v1::list_entries::AuditEntryView::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::list_entries::AuditEntryView where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_entries::AuditEntryView
+pub type generated::http::audit_v1::list_entries::AuditEntryView::Output = T
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub generated::http::audit_v1::list_entries::AuditListEntriesRequest::cursor: core::option::Option<alloc::string::String>
+pub generated::http::audit_v1::list_entries::AuditListEntriesRequest::limit: core::num::nonzero::NonZeroU32
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::default::Default for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::default() -> Self
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_entries::AuditListEntriesRequest where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_entries::AuditListEntriesRequest where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_entries::AuditListEntriesRequest::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_entries::AuditListEntriesRequest where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_entries::AuditListEntriesRequest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::list_entries::AuditListEntriesRequest where T: core::clone::Clone
+pub type generated::http::audit_v1::list_entries::AuditListEntriesRequest::Owned = T
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::clone_into(&self, &mut T)
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v1::list_entries::AuditListEntriesRequest where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_entries::AuditListEntriesRequest where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_entries::AuditListEntriesRequest where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v1::list_entries::AuditListEntriesRequest where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesRequest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::list_entries::AuditListEntriesRequest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_entries::AuditListEntriesRequest
+pub type generated::http::audit_v1::list_entries::AuditListEntriesRequest::Output = T
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub generated::http::audit_v1::list_entries::AuditListEntriesResponse::data: alloc::vec::Vec<generated::http::audit_v1::list_entries::AuditEntryView>
+pub generated::http::audit_v1::list_entries::AuditListEntriesResponse::has_more: bool
+pub generated::http::audit_v1::list_entries::AuditListEntriesResponse::next_cursor: core::option::Option<alloc::string::String>
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_entries::AuditListEntriesResponse where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_entries::AuditListEntriesResponse where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_entries::AuditListEntriesResponse::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_entries::AuditListEntriesResponse where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_entries::AuditListEntriesResponse::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::list_entries::AuditListEntriesResponse where T: core::clone::Clone
+pub type generated::http::audit_v1::list_entries::AuditListEntriesResponse::Owned = T
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::clone_into(&self, &mut T)
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v1::list_entries::AuditListEntriesResponse where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_entries::AuditListEntriesResponse where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_entries::AuditListEntriesResponse where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v1::list_entries::AuditListEntriesResponse where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::list_entries::AuditListEntriesResponse where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub type generated::http::audit_v1::list_entries::AuditListEntriesResponse::Output = T
+pub const generated::http::audit_v1::list_entries::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::CONTRACT_ID: &str
+pub const generated::http::audit_v1::list_entries::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::audit_v1::list_entries::PATH: &str
+pub const generated::http::audit_v1::list_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::list_entries::SPEC: generated::http::HttpSpec
+pub mod generated::http::audit_v1::list_tenant_entries
+pub mod generated::http::audit_v1::list_tenant_entries::defaults
+pub mod generated::http::audit_v1::list_tenant_entries::error
+pub struct generated::http::audit_v1::list_tenant_entries::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::fmt::Debug for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::marker::Send for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::marker::Sync for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::marker::Unpin for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_tenant_entries::error::ConversionError where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_tenant_entries::error::ConversionError where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_tenant_entries::error::ConversionError::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_tenant_entries::error::ConversionError where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_tenant_entries::error::ConversionError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for generated::http::audit_v1::list_tenant_entries::error::ConversionError where T: core::fmt::Display + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for generated::http::audit_v1::list_tenant_entries::error::ConversionError where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_tenant_entries::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_tenant_entries::error::ConversionError where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_tenant_entries::error::ConversionError::from(T) -> T
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub type generated::http::audit_v1::list_tenant_entries::error::ConversionError::Output = T
+pub struct generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::cursor: core::option::Option<alloc::string::String>
+pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::limit: core::num::nonzero::NonZeroU32
+impl core::clone::Clone for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::clone(&self) -> generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::default::Default for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::default() -> Self
+impl core::fmt::Debug for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::marker::Send for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::marker::Sync for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::marker::Unpin for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where T: core::clone::Clone
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::Owned = T
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::clone_into(&self, &mut T)
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::Output = T
+pub struct generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::data: alloc::vec::Vec<generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView>
+pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::has_more: bool
+pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::next_cursor: core::option::Option<alloc::string::String>
+impl core::clone::Clone for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::clone(&self) -> generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::fmt::Debug for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::marker::Send for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::marker::Sync for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::marker::Unpin for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where T: core::clone::Clone
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::Owned = T
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::clone_into(&self, &mut T)
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub fn generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse
+pub type generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesResponse::Output = T
+pub struct generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::action: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::actor: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::actor_kind: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::entry_hash: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::outcome: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::recorded_at: i64
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::resource_id: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::resource_kind: alloc::string::String
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::seq: i64
+pub generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::tenant_id: alloc::string::String
+impl core::clone::Clone for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::clone(&self) -> generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::fmt::Debug for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::marker::Send for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::marker::Sync for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::marker::Unpin for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+impl<T, U> core::convert::Into<U> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where U: core::convert::From<T>
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where U: core::convert::Into<T>
+pub type generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::Error = core::convert::Infallible
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where U: core::convert::TryFrom<T>
+pub type generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where T: core::clone::Clone
+pub type generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::Owned = T
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::clone_into(&self, &mut T)
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::to_owned(&self) -> T
+impl<T> core::any::Any for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where T: 'static + ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where T: ?core::marker::Sized
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where T: core::clone::Clone
+pub unsafe fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub fn generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> typenum::type_operators::Same for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
+pub type generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView::Output = T
+pub const generated::http::audit_v1::list_tenant_entries::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_tenant_entries::CONTRACT_ID: &str
+pub const generated::http::audit_v1::list_tenant_entries::EFFECTS: &[generated::http::EffectKind]
+pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::audit_v1::list_tenant_entries::PATH: &str
+pub const generated::http::audit_v1::list_tenant_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::list_tenant_entries::SPEC: generated::http::HttpSpec
 pub mod generated::http::audit_v2
 pub mod generated::http::audit_v2::error
 pub struct generated::http::audit_v2::error::ConversionError(_)

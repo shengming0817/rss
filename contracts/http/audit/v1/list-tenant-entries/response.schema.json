@@ -1,26 +1,15 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "AuditListEntriesResponse",
+  "title": "AuditListTenantEntriesResponse",
   "type": "object",
   "required": ["data", "hasMore"],
   "properties": {
     "data": {
       "type": "array",
       "items": {
-        "title": "AuditEntryView",
+        "title": "AuditTenantEntryView",
         "type": "object",
-        "required": [
-          "seq",
-          "tenantId",
-          "actor",
-          "actorKind",
-          "action",
-          "resourceKind",
-          "resourceId",
-          "outcome",
-          "recordedAt",
-          "entryHash"
-        ],
+        "required": ["seq", "tenantId", "actor", "actorKind", "action", "resourceKind", "resourceId", "outcome", "recordedAt", "entryHash"],
         "properties": {
           "seq": { "type": "integer", "format": "int64" },
           "tenantId": { "type": "string" },

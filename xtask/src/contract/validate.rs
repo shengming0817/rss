@@ -28,9 +28,8 @@
 //! 须显式 `x-protection`、加密字段不得 nullable、blindIndex 只允许非 nullable scalar，均 fail-closed。
 //! 与 R16 observe redaction **正交不混用**（ADR-011 D1）。
 //! INVARIANT: CONTRACT-HTTP-SERVING-01 { level = "Medium", exec = "verify", source = "code" }— active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
-//! HTTP request schema 不得声明 ambient tenant `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only
-//! header 或 service-token MAC 绑定 header（R19）；#1583 audit.list-entries GET 顶层 query `tenantId`
-//! 是 target tenant，非 ambient tenant source，按窄例外放行。
+//! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only header
+//! 或 service-token MAC 绑定 header（R19）；target tenant 必须来自显式 path 参数，不保留 request schema 例外。
 //! INVARIANT: CONTRACT-HTTP-PROJECTION-COVERAGE-01 { level = "Medium", exec = "verify", source = "code" }— active GET response
 //! 中的 `x-pii` 字段与 `tenantId` 字段必须经 `[endpoints.http.projection]` 的 `responsePath` 精确 enrollment（R23）；
 //! contract metadata/codegen 是唯一 carrier，handler 不维护人工矩阵。
@@ -73,9 +72,7 @@ use super::manifest::{
 };
 use super::protection;
 use super::redaction;
-use super::{
-    DiscoveredContract, discover, http_request_tenant_id_allowed, schema_declares_property,
-};
+use super::{DiscoveredContract, discover, schema_declares_property};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
 
@@ -175,9 +172,8 @@ pub(crate) enum Rule {
     /// non-empty reason 且禁止 permission。当前最小 header 面只接受 `X-Tenant-ID` 的闭值模式，
     /// identity.login public serving 必须声明该 header。
     HttpAuth,
-    /// R19：HTTP request schema 不得声明 ambient tenantId；tenant scope 必须来自认证上下文、声明式
-    /// populate-only header 或 service-token MAC 绑定 header。#1583 audit.list-entries GET 顶层 query
-    /// `tenantId` 表示 target tenant，按窄例外放行。
+    /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文、声明式
+    /// populate-only header 或 service-token MAC 绑定 header，target tenant 则来自显式 path 参数。
     HttpTenantSource,
     /// R23：active GET response 中的 `x-pii` 字段与 `tenantId` 字段必须由 projection responsePath 精确覆盖。
     HttpProjectionCoverage,
@@ -1704,9 +1700,7 @@ fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<F
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return Vec::new();
     };
-    if schema_declares_property(&value, "tenantId")
-        && !http_request_tenant_id_allowed(&c.manifest, &value)
-    {
+    if schema_declares_property(&value, "tenantId") {
         return vec![finding(
             Rule::HttpTenantSource,
             label,
@@ -3925,7 +3919,7 @@ mod tests {
     }
 
     #[test]
-    fn r19_audit_list_target_tenant_query_is_allowed() -> anyhow::Result<()> {
+    fn r19_audit_list_target_tenant_query_is_rejected() -> anyhow::Result<()> {
         let (mut c, dir) = http_contract_with_schemas(
             r#"{"title":"AuditListEntriesRequest","type":"object","properties":{"tenantId":{"type":"string"}}}"#,
             r#"{"title":"AuditListEntriesResponse"}"#,
@@ -3937,12 +3931,15 @@ mod tests {
         c.manifest.path = Some("/api/v1/audit/entries".to_string());
         let findings = rule_http_request_tenant_source(&c, "x");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(findings.is_empty(), "{findings:?}");
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::HttpTenantSource),
+            "{findings:?}"
+        );
         Ok(())
     }
 
     #[test]
-    fn r19_audit_list_nested_tenant_id_is_still_rejected() -> anyhow::Result<()> {
+    fn r19_audit_list_nested_tenant_id_is_rejected() -> anyhow::Result<()> {
         let (mut c, dir) = http_contract_with_schemas(
             r#"{"title":"AuditListEntriesRequest","type":"object","properties":{"filter":{"type":"object","properties":{"tenantId":{"type":"string"}}}}}"#,
             r#"{"title":"AuditListEntriesResponse"}"#,

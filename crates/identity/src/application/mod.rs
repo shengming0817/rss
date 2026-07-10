@@ -33,7 +33,7 @@ use generated::event::identity_v1::session_created::{
     CONTRACT, IdentitySessionCreatedPayload, TOPIC,
 };
 #[cfg(test)]
-use generated::http::audit_v1::SPEC as AUDIT_LIST_HTTP_SPEC;
+use generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
 use generated::http::identity_v1::{
     login::{
         IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, SPEC as LOGIN_HTTP_SPEC,

@@ -32,6 +32,10 @@ Medium 条件门：只有 L1 允许 localTx block，且 L1 必须声明上述完
 LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写。它不表示跨域事务，不表示 outbox 发布已兑现，
 也不表示 saga/reconcile/workflow 已接线。
 
+`audit.list-tenant-entries` 的 LocalTx UoW 只覆盖持久 `auth_audit_events` append。append 成功提交后才签发
+`CrossTenantReadScope` 并执行专用 admin pool read；append 与 read 不在同一事务，系统也不自动重试整条
+append+read 序列。
+
 `commitUnknown = "not-retryable"` 的含义是：当提交结果未知时，不允许按普通 transient path 自动重放整个副作用序列。
 后续 runtime/status/metrics 可以把该状态细分，但默认治理语义必须 fail-closed。
 

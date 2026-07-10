@@ -1,0 +1,10 @@
+error[E0624]: associated function `from_audited_visibility` is private
+ --> tests/ui/audit_cross_tenant_scope_private_ctor_fail.rs:4:40
+  |
+4 |     let _scope = CrossTenantReadScope::from_audited_visibility(audited);
+  |                                        ^^^^^^^^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/ports.rs
+  |
+  |     pub(crate) fn from_audited_visibility(audited: authn::AuditedCrossTenantVisibility) -> Self {
+  |     ------------------------------------------------------------------------------------------- private associated function defined here

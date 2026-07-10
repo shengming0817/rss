@@ -1,0 +1,10 @@
+id = "demo.local-tx"
+kind = "http"
+domain = "demo"
+version = "v1"
+owner = "demo"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+
+[effectProfile]
+effects = ["write", "transaction"]

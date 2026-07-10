@@ -4735,10 +4735,12 @@ mod tests {
     impl audit::ports::AuditAdminRepo for DelegatingAuditAdminRepo {
         async fn list_tenant(
             &self,
-            tenant: vocab::TenantId,
+            scope: audit::ports::CrossTenantReadScope,
             page: audit::ports::AuditPage,
         ) -> Result<audit::ports::AuditListResult, audit::ports::AuditError> {
             use audit::ports::AuditRepo as _;
+
+            let tenant = scope.target();
 
             self.repo
                 .list(AuditTenantRepoScope::for_test(tenant), page)
@@ -4993,7 +4995,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::GET)
-                    .uri(generated::http::audit_v1::SPEC.path)
+                    .uri(generated::http::audit_v1::list_entries::SPEC.path)
                     .header(
                         axum::http::header::AUTHORIZATION,
                         format!("Bearer {}", runtime_test_jwt("admin", Some(tenant))),
@@ -5011,10 +5013,11 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::GET)
-                    .uri(format!(
-                        "{}?tenantId={tenant}",
-                        generated::http::audit_v1::SPEC.path
-                    ))
+                    .uri(
+                        generated::http::audit_v1::list_tenant_entries::SPEC
+                            .path
+                            .replace("{tenantId}", &tenant.to_string()),
+                    )
                     .header(
                         axum::http::header::AUTHORIZATION,
                         format!("Bearer {}", runtime_test_jwt("superAdmin", None)),

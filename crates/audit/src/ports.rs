@@ -90,6 +90,33 @@ impl RowRepoScope {
     }
 }
 
+/// Audited cross-tenant read capability for the admin repository.
+///
+/// The crate-private constructor consumes the non-cloneable, target-bound
+/// [`authn::AuditedCrossTenantVisibility`] returned only after
+/// `Principal::audited_cross_tenant_visibility` durably records access to that same tenant. A bare
+/// tenant or an independently obtained row visibility is insufficient for invoking the read port.
+pub struct CrossTenantReadScope {
+    audited: authn::AuditedCrossTenantVisibility,
+    _seal: (),
+}
+
+impl CrossTenantReadScope {
+    pub(crate) fn from_audited_visibility(audited: authn::AuditedCrossTenantVisibility) -> Self {
+        Self { audited, _seal: () }
+    }
+
+    /// Explicit target tenant authorized by this audited capability.
+    pub fn target(&self) -> TenantId {
+        self.audited.target()
+    }
+
+    /// Audited row visibility proof retained by this capability.
+    pub fn visibility(&self) -> &vocab::RowVisibility {
+        self.audited.visibility()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 仓储 I/O 类型（跨 in-mem / postgres provider 共用；字段已 typed 自校验 ⇒ pub 字段无需二次 funnel）
 // ---------------------------------------------------------------------------
@@ -203,7 +230,7 @@ pub trait AuditAdminRepoLocal: Send + Sync {
     /// 按目标租户分页列出审计条目；provider 负责在读取窗口上做链完整性校验，失败即 Err。
     async fn list_tenant(
         &self,
-        tenant: TenantId,
+        scope: CrossTenantReadScope,
         page: AuditPage,
     ) -> Result<AuditListResult, AuditError>;
 
@@ -223,7 +250,8 @@ mod smoke {
 
     use super::{
         AuditAdminRepo, AuditError, AuditLedgerVerifyReport, AuditListResult, AuditPage,
-        AuditRecord, AuditRepo, DynAuditAdminRepo, DynAuditRepo, TenantId, TenantRepoScope,
+        AuditRecord, AuditRepo, CrossTenantReadScope, DynAuditAdminRepo, DynAuditRepo, TenantId,
+        TenantRepoScope,
     };
 
     struct NoopAuditRepo;
@@ -255,7 +283,7 @@ mod smoke {
     impl AuditAdminRepo for NoopAuditAdminRepo {
         async fn list_tenant(
             &self,
-            _tenant: TenantId,
+            _scope: CrossTenantReadScope,
             _page: AuditPage,
         ) -> Result<AuditListResult, AuditError> {
             todo!()

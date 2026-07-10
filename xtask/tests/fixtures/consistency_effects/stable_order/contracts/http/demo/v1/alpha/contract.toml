@@ -1,0 +1,12 @@
+id = "demo.alpha"
+kind = "http"
+domain = "demo"
+version = "v1"
+owner = "demo"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/demo/alpha"
+method = "DELETE"
+
+[effectProfile]
+effects = ["transaction"]

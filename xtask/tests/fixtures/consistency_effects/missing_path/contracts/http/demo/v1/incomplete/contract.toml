@@ -1,0 +1,11 @@
+id = "demo.incomplete"
+kind = "http"
+domain = "demo"
+version = "v1"
+owner = "demo"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+method = "GET"
+
+[effectProfile]
+effects = ["read"]

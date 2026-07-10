@@ -8,7 +8,7 @@ pub(crate) mod validate;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use manifest::{ContractKind, ContractManifest, HttpMethod};
+use manifest::ContractManifest;
 
 pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str =
     "认证上下文、声明式 populate-only header 或 service-token MAC 绑定 header";
@@ -154,68 +154,6 @@ pub(crate) fn schema_declares_property(value: &serde_json::Value, property: &str
         }
     }
     false
-}
-
-/// JSON Schema 根 object 的 `properties` 是否直接声明指定字段。
-pub(crate) fn schema_declares_top_level_property(
-    value: &serde_json::Value,
-    property: &str,
-) -> bool {
-    let serde_json::Value::Object(map) = value else {
-        return false;
-    };
-    map.get("properties")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|props| props.contains_key(property))
-}
-
-/// JSON Schema 是否在根 object 之下的子 schema 中声明指定字段。
-fn schema_declares_property_below_root(value: &serde_json::Value, property: &str) -> bool {
-    let serde_json::Value::Object(map) = value else {
-        return false;
-    };
-    for key in ["$defs", "definitions", "properties"] {
-        if let Some(serde_json::Value::Object(children)) = map.get(key)
-            && children
-                .values()
-                .any(|child| schema_declares_property(child, property))
-        {
-            return true;
-        }
-    }
-    for key in ["items", "additionalProperties"] {
-        if let Some(child) = map.get(key)
-            && schema_declares_property(child, property)
-        {
-            return true;
-        }
-    }
-    for key in ["allOf", "anyOf", "oneOf"] {
-        if let Some(serde_json::Value::Array(children)) = map.get(key)
-            && children
-                .iter()
-                .any(|child| schema_declares_property(child, property))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// `tenantId` request schema 例外：#1583 audit list 的 GET query 用它表示 target tenant，
-/// 不是 ambient tenant source。只放行该契约的顶层 query property；其它 request body / 嵌套声明仍拒。
-pub(crate) fn http_request_tenant_id_allowed(
-    manifest: &ContractManifest,
-    schema: &serde_json::Value,
-) -> bool {
-    manifest.kind == ContractKind::Http
-        && manifest.id == "audit.list-entries"
-        && manifest.domain == "audit"
-        && manifest.version == "v1"
-        && manifest.method == Some(HttpMethod::Get)
-        && manifest.path.as_deref() == Some("/api/v1/audit/entries")
-        && schema_declares_top_level_property(schema, "tenantId")
-        && !schema_declares_property_below_root(schema, "tenantId")
 }
 
 #[cfg(test)]

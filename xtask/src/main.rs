@@ -16,6 +16,8 @@
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
 //!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
+//!   `cargo xtask consistency local-only-effects`
+//!                                      active LocalOnly HTTP effect profile 治理门（#1689，CI 门）
 //!   `cargo xtask consistency-fault-matrix [--allow-missing-tools]`
 //!                                      N-028 consistency fault crash matrix 真后端 opt-in runner（Postgres+RabbitMQ）。
 //!   `cargo xtask runtime-baseline list|verify`
@@ -58,6 +60,7 @@ mod cdc_config;
 mod cmd;
 mod codegen;
 mod command_symmetry;
+mod consistency_effects;
 mod consistency_fixtures;
 mod contract;
 mod contract_binding_guard;
@@ -120,6 +123,7 @@ enum Command {
     WsDepsDrift,
     DocContracts,
     ConsistencyFixtures,
+    ConsistencyLocalOnlyEffects,
     Verify {
         fast: bool,
         allow_missing_tools: bool,
@@ -177,6 +181,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["doc-contracts"] => Ok(Command::DocContracts),
         ["consistency-fixtures"] => Ok(Command::ConsistencyFixtures),
+        ["consistency", rest @ ..] => parse_consistency(rest),
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
@@ -194,9 +199,19 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
+    }
+}
+
+/// 解析 `consistency <sub>`（fail-closed：只接受 `local-only-effects`，无 alias/尾参）。
+fn parse_consistency(args: &[&str]) -> Result<Command> {
+    match args {
+        ["local-only-effects"] => Ok(Command::ConsistencyLocalOnlyEffects),
+        other => bail!(
+            "未知 consistency 子命令: {other:?}；用法: cargo xtask consistency local-only-effects"
+        ),
     }
 }
 
@@ -427,6 +442,9 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::DocContracts => diagnostic::run_check(&doc_contracts::DocContracts),
         Command::ConsistencyFixtures => {
             diagnostic::run_check(&consistency_fixtures::ConsistencyFixtures)
+        }
+        Command::ConsistencyLocalOnlyEffects => {
+            diagnostic::run_check(&consistency_effects::LocalOnlyEffects)
         }
         Command::Verify {
             fast,
@@ -696,6 +714,26 @@ mod tests {
     fn parse_command_consistency_fixtures_rejects_trailing_args() {
         assert!(parse_command(&s(&["consistency-fixtures", "--bogus"])).is_err());
         assert!(parse_command(&s(&["consistency-fixtures", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_consistency_local_only_effects_is_exact() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["consistency", "local-only-effects"]))?,
+            Command::ConsistencyLocalOnlyEffects
+        );
+        for bad in [
+            s(&["consistency"]),
+            s(&["consistency", "effects"]),
+            s(&["consistency", "local-only-effects", "extra"]),
+            s(&["consistency", "local-only-effects", "--bogus"]),
+        ] {
+            assert!(
+                parse_command(&bad).is_err(),
+                "unexpectedly accepted {bad:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

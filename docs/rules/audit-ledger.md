@@ -61,9 +61,13 @@ entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
 生产持久化由 `adapters/postgres` provider 承载：每租户 genesis、advisory-lock 串行 append、FORCE RLS、
 `(tenant_id, seq)` 唯一，读路径复用同一 keyed HMAC 链验证语义。
 
-**跨租户 admin 读**只支持“指定租户”读取（`GET /api/v1/audit/entries?tenantId=<uuid>`），不提供全租户全局列表。
+**跨租户 admin 读**只支持“指定租户”读取
+（`GET /api/v1/audit/tenants/{tenantId}/entries`），不提供全租户全局列表。旧
+`GET /api/v1/audit/entries?tenantId=...` 不兼容并返回 400。
 handler 必须先 durable append cross-tenant audit event，append 成功后才调用 admin repo 读取；append 失败
-fail-closed 不读取。Postgres admin repo 使用可选专用 `rss_audit_admin` 只读池：直连角色必须为
+fail-closed 不读取。append 是该 LocalTx 的唯一写 UoW；read 在提交成功后执行，不与 append 构成同一事务。
+handler 将 audited `RowVisibility` 消费成 sealed `CrossTenantReadScope`，`AuditAdminRepo::list_tenant` 不接受裸
+tenant。Postgres admin repo 使用可选专用 `rss_audit_admin` 只读池：直连角色必须为
 `rss_audit_admin` LOGIN 角色、非 superuser、`NOBYPASSRLS`，且仅有 `audit_entries` SELECT 权限。读取时在
 只读事务中 `SET LOCAL rss.tenant_id = targetTenant`，复用现有 tenant-isolation RLS policy；不得授写权限、
 其它 public relation 权限，也不得新增 allow-all RLS policy。admin 池未配置时 privileged audit read 返回

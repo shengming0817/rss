@@ -9,13 +9,9 @@
       "minimum": 1,
       "maximum": 500,
       "default": 50,
-      "description": "Page size; minimum 1, clamped to 500, default 50. Values < 1 are rejected (400)."
+      "description": "Page size; minimum 1, maximum 500, default 50. Values outside 1..=500 are rejected (400)."
     },
-    "cursor": { "type": "string" },
-    "tenantId": {
-      "type": "string",
-      "description": "Optional target tenant for audited SuperAdmin cross-tenant reads. Omit for scoped tenant reads."
-    }
+    "cursor": { "type": "string" }
   },
   "additionalProperties": false
 }

@@ -1122,6 +1122,7 @@ fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
         | "xtask/src/assembly.rs"
         | "xtask/src/codegen.rs"
         | "xtask/src/command_symmetry.rs"
+        | "xtask/src/consistency_effects.rs"
         | "xtask/src/contract_binding_guard.rs"
         | "xtask/src/consistency_fixtures.rs"
         | "xtask/src/defergate.rs"
@@ -1833,6 +1834,15 @@ members = ["rss_demo", "rss_orphan"]
         let root = Path::new("/repo");
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/assembly.rs")),
+            Some("verify,ci")
+        );
+    }
+
+    #[test]
+    fn local_only_effects_carrier_has_verify_ci_gate() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            xtask_gate(root, &root.join("xtask/src/consistency_effects.rs")),
             Some("verify,ci")
         );
     }

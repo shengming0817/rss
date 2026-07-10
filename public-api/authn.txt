@@ -401,6 +401,43 @@ impl<T> tracing::instrument::Instrument for authn::AccessToken
 impl<T> tracing::instrument::WithSubscriber for authn::AccessToken
 impl<T> typenum::type_operators::Same for authn::AccessToken
 pub type authn::AccessToken::Output = T
+pub struct authn::AuditedCrossTenantVisibility
+impl authn::AuditedCrossTenantVisibility
+pub fn authn::AuditedCrossTenantVisibility::target(&self) -> vocab::tenant::TenantId
+pub fn authn::AuditedCrossTenantVisibility::visibility(&self) -> &vocab::tenant::RowVisibility
+impl core::marker::Freeze for authn::AuditedCrossTenantVisibility
+impl core::marker::Send for authn::AuditedCrossTenantVisibility
+impl core::marker::Sync for authn::AuditedCrossTenantVisibility
+impl core::marker::Unpin for authn::AuditedCrossTenantVisibility
+impl core::marker::UnsafeUnpin for authn::AuditedCrossTenantVisibility
+impl core::panic::unwind_safe::RefUnwindSafe for authn::AuditedCrossTenantVisibility
+impl core::panic::unwind_safe::UnwindSafe for authn::AuditedCrossTenantVisibility
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::AuditedCrossTenantVisibility where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::AuditedCrossTenantVisibility where T: 'a
+impl<L> tonic::service::layered::LayerExt<L> for authn::AuditedCrossTenantVisibility
+pub fn authn::AuditedCrossTenantVisibility::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
+impl<T, U> core::convert::Into<U> for authn::AuditedCrossTenantVisibility where U: core::convert::From<T>
+pub fn authn::AuditedCrossTenantVisibility::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for authn::AuditedCrossTenantVisibility where U: core::convert::Into<T>
+pub type authn::AuditedCrossTenantVisibility::Error = core::convert::Infallible
+pub fn authn::AuditedCrossTenantVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for authn::AuditedCrossTenantVisibility where U: core::convert::TryFrom<T>
+pub type authn::AuditedCrossTenantVisibility::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn authn::AuditedCrossTenantVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for authn::AuditedCrossTenantVisibility where T: 'static + ?core::marker::Sized
+pub fn authn::AuditedCrossTenantVisibility::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for authn::AuditedCrossTenantVisibility where T: ?core::marker::Sized
+pub fn authn::AuditedCrossTenantVisibility::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for authn::AuditedCrossTenantVisibility where T: ?core::marker::Sized
+pub fn authn::AuditedCrossTenantVisibility::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for authn::AuditedCrossTenantVisibility
+pub fn authn::AuditedCrossTenantVisibility::from(T) -> T
+impl<T> tonic::request::IntoRequest<T> for authn::AuditedCrossTenantVisibility
+pub fn authn::AuditedCrossTenantVisibility::into_request(self) -> tonic::request::Request<T>
+impl<T> tracing::instrument::Instrument for authn::AuditedCrossTenantVisibility
+impl<T> tracing::instrument::WithSubscriber for authn::AuditedCrossTenantVisibility
+impl<T> typenum::type_operators::Same for authn::AuditedCrossTenantVisibility
+pub type authn::AuditedCrossTenantVisibility::Output = T
 pub struct authn::CrossTenantAuditContext
 impl authn::CrossTenantAuditContext
 pub fn authn::CrossTenantAuditContext::new(&'static str, impl core::convert::Into<alloc::string::String>, &'static str, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::CrossTenantAuditError>
@@ -823,7 +860,7 @@ pub fn authn::Principal::matches_subject(&self, &str) -> bool
 pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
 pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
 impl authn::Principal
-pub async fn authn::Principal::audited_cross_tenant_visibility<S>(&self, &runctx::ctx::AppCtx, &S, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<vocab::tenant::RowVisibility, authn::CrossTenantError> where S: diport::audit_sink::AuditSink + core::marker::Send + core::marker::Sync + 'static
+pub async fn authn::Principal::audited_cross_tenant_visibility<S>(&self, &runctx::ctx::AppCtx, &S, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<authn::AuditedCrossTenantVisibility, authn::CrossTenantError> where S: diport::audit_sink::AuditSink + core::marker::Send + core::marker::Sync + 'static
 impl runctx::ctx::PrincipalFacet for authn::Principal
 pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool

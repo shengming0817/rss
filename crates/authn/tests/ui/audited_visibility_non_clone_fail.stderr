@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `AuditedCrossTenantVisibility` in the current scope
+ --> tests/ui/audited_visibility_non_clone_fail.rs:2:30
+  |
+2 |     let _duplicate = receipt.clone();
+  |                              ^^^^^ method not found in `AuditedCrossTenantVisibility`

@@ -1,0 +1,12 @@
+id = "demo.unsafe"
+kind = "http"
+domain = "demo"
+version = "v1"
+owner = "demo"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/demo/unsafe"
+method = "GET"
+
+[effectProfile]
+effects = ["write", "transaction", "outbox", "publish", "workflow", "saga", "reconcile", "worker", "cross-tenant-audit", "write"]

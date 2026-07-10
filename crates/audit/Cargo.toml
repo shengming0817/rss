@@ -16,6 +16,7 @@ vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 runctx = { path = "../runctx" }
 diagctx = { path = "../diagctx" }
+secure = { path = "../secure" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }

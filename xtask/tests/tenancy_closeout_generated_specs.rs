@@ -35,7 +35,7 @@ fn tenancy_closeout_generated_http_specs_match_consumer_contract() -> Result<()>
         "profile subject must be an enrolled projection field"
     );
 
-    let audit = generated::http::audit_v1::SPEC;
+    let audit = generated::http::audit_v1::list_entries::SPEC;
     ensure!(audit.contract_id == "audit.list-entries");
     ensure!(audit.auth.permission == Some(RoutePermissionId::AuditRead));
     ensure!(
@@ -47,6 +47,10 @@ fn tenancy_closeout_generated_http_specs_match_consumer_contract() -> Result<()>
         }),
         "audit actor must be an enrolled projection field"
     );
+
+    let target = generated::http::audit_v1::list_tenant_entries::SPEC;
+    ensure!(target.contract_id == "audit.list-tenant-entries");
+    ensure!(target.auth.permission == Some(RoutePermissionId::AuditRead));
 
     Ok(())
 }

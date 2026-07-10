@@ -27,8 +27,7 @@ use crate::contract::manifest::{
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
 use crate::contract::{
-    DiscoveredContract, TENANT_SCOPE_SOURCE_RULE, discover, http_request_tenant_id_allowed,
-    schema_declares_property,
+    DiscoveredContract, TENANT_SCOPE_SOURCE_RULE, discover, schema_declares_property,
 };
 use crate::pathsafe;
 
@@ -297,7 +296,6 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
         if c.manifest.kind == ContractKind::Http
             && c.manifest.schemas.request.as_deref() == Some(schema_file)
             && schema_declares_property(&value, "tenantId")
-            && !http_request_tenant_id_allowed(&c.manifest, &value)
         {
             bail!(
                 "HTTP request schema {} 声明 tenantId；tenant scope 必须来自{}，不得来自 body",

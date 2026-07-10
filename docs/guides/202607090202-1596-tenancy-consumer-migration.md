@@ -60,9 +60,8 @@ tenant scope 只能来自已声明且已认证入口：
 mTLS/SPIFFE service identity is not a tenant source；SPIFFE-ID / `VerifiedMtlsPeer` 只证明 service
 principal，必须再通过 exact SPIFFE allow-set / `RouteAuthorizer`，不会建立 request tenant scope。
 
-request body `tenantId` 不是 tenant source。body 不在 service-token tenant header MAC 绑定输入内，因此
-HTTP request schema 不得声明 `tenantId`。唯一当前例外是 `audit.list-entries` 的 GET query `tenantId`，
-它表示 audited SuperAdmin 读取的 target tenant，不是 ambient tenant。
+request body/query schema 中的 `tenantId` 不是 tenant source。HTTP request schema 不得声明 `tenantId`，
+无例外。指定租户的 audit read 使用 `/api/v1/audit/tenants/{tenantId}/entries` path 参数。
 
 ## HTTP examples
 
@@ -81,8 +80,14 @@ HTTP request schema 不得声明 `tenantId`。唯一当前例外是 `audit.list-
 `audit.list-entries`:
 
 - `mode = "permission"`，permission 为 `audit:read`。
-- `audit.list-entries` 的 query `tenantId` 只用于 audited SuperAdmin target tenant。
+- query 仅 `limit`/`cursor`，只读 ambient tenant；旧 `tenantId` query 返回 400。
 - response 中 `data[].tenantId`、`data[].actor`、`data[].resourceId` 通过 `ResourceProjection` 默认 mask。
+
+`audit.list-tenant-entries`:
+
+- path 为 `/api/v1/audit/tenants/{tenantId}/entries`，仅 verified SuperAdmin。
+- durable audit append 提交成功后，audited visibility 被消费为 `CrossTenantReadScope`，再执行 admin read。
+- append 是 LocalTx 唯一写 UoW；read 不与 append 处于同一事务。
 
 role assign/revoke:
 

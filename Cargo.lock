@@ -374,6 +374,7 @@ dependencies = [
  "primitives",
  "rstest",
  "runctx",
+ "secure",
  "serde_json",
  "thiserror",
  "tokio",

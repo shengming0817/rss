@@ -367,6 +367,23 @@ pub struct Authenticated {
     tenant_id: Option<TenantId>,
 }
 
+/// Caller-supplied fields for an audit event whose principal identity must come from verified
+/// [`Authenticated`] evidence.
+///
+/// The type deliberately has no principal id/kind fields: a domain can describe the audited
+/// operation, but cannot substitute a different identity. [`Authenticated::audit_event`] is the
+/// only conversion to [`diport::AuditEvent`].
+pub struct AuthenticatedAuditEvent {
+    pub occurred_at: std::time::SystemTime,
+    pub tenant_id: Option<TenantId>,
+    pub resource_kind: &'static str,
+    pub resource_id: String,
+    pub action: &'static str,
+    pub outcome: AuditOutcome,
+    pub request_id: Option<String>,
+    pub correlation_id: Option<String>,
+}
+
 impl Authenticated {
     /// 构造认证证据（验签桥在凭据校验通过后调用）。`scheme` = 验签桥**实际验证的**凭据方案（enforce 按路由
     /// `Require(required)` exact-match 比对，scheme 不匹配 fail-closed 401，杜绝 scheme 混淆）；`principal_kind`
@@ -395,12 +412,6 @@ impl Authenticated {
         self.principal_kind
     }
 
-    /// 已认证主体 subject（PII）：仅供本 crate 审计事件构造。
-    /// 不得写入 tracing / Debug / metrics label。
-    pub(crate) fn principal_id(&self) -> &str {
-        &self.principal_id
-    }
-
     /// 已认证主体 subject（PII）：只暴露给租户作用域 handler 作 self-scoped 身份锚点。
     /// 调用方不得写入 tracing / Debug / metrics label。
     pub fn self_scoped_principal_id(&self) -> &str {
@@ -410,6 +421,23 @@ impl Authenticated {
     /// 已认证主体租户；跨租户主体（service / super-admin）可能为 `None`。
     pub fn tenant_id(&self) -> Option<TenantId> {
         self.tenant_id
+    }
+
+    /// Bind verified principal identity to caller-supplied operation fields without exposing that
+    /// identity for handler-local authorization decisions.
+    pub fn audit_event(&self, event: AuthenticatedAuditEvent) -> AuditEvent {
+        AuditEvent {
+            occurred_at: event.occurred_at,
+            principal_id: self.principal_id.clone(),
+            principal_kind: self.principal_kind,
+            tenant_id: event.tenant_id,
+            resource_kind: event.resource_kind,
+            resource_id: event.resource_id,
+            action: event.action,
+            outcome: event.outcome,
+            request_id: event.request_id,
+            correlation_id: event.correlation_id,
+        }
     }
 }
 
@@ -676,10 +704,8 @@ fn auth_audit_event(
     rid: &str,
     evidence: &Authenticated,
 ) -> AuditEvent {
-    AuditEvent {
+    evidence.audit_event(AuthenticatedAuditEvent {
         occurred_at: audit.clock.now(),
-        principal_id: evidence.principal_id().to_string(),
-        principal_kind: evidence.principal_kind(),
         tenant_id: evidence.tenant_id(),
         resource_kind: "http_route",
         resource_id: contract_id.to_string(),
@@ -687,7 +713,7 @@ fn auth_audit_event(
         outcome: decision.audit_outcome(),
         request_id: (!rid.is_empty()).then(|| rid.to_string()),
         correlation_id: diagctx::correlation().map(|c| c.as_str().to_string()),
-    }
+    })
 }
 
 async fn record_auth_audit(
