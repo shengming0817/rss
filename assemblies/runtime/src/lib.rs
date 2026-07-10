@@ -5079,7 +5079,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::GET)
-                    .uri(generated::http::audit_v1::list_entries::SPEC.path)
+                    .uri(generated::http::audit_v1::list_entries::SPEC.route.path())
                     .header(
                         axum::http::header::AUTHORIZATION,
                         format!("Bearer {}", runtime_test_jwt("admin", Some(tenant))),
@@ -5099,7 +5099,8 @@ mod tests {
                     .method(Method::GET)
                     .uri(
                         generated::http::audit_v1::list_tenant_entries::SPEC
-                            .path
+                            .route
+                            .path()
                             .replace("{tenantId}", &tenant.to_string()),
                     )
                     .header(

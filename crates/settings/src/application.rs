@@ -8,8 +8,8 @@
 //! [`crate::internal::ports::FlagStore`] 取快照 + `domain::evaluate_flag`（L0 纯计算）。
 //!
 //! HTTP 接缝（#1430 PERSIST-009 settings 首条 durable module 闭环）：[`SettingsDomain`] 持 config + secret
-//! 应用服务，`init` 经 typed `route_group::<Primary>` + `mount_primary`（`ListenerRouter<Primary>` 方法，
-//! #1113/#1103 typed route funnel）从 generated SPEC 挂 config publish/get/delete/rollback 与 secret-publish
+//! 应用服务，`init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint`（#1690
+//! atomic evidence/handler funnel）从 generated SPEC 挂 config publish/get/delete/rollback 与 secret-publish
 //! 五条认证路由（鉴权 = permission，租户来自 route gate 注入的 [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
 //! 域错误经 generic `vocab::CoreErrorKind` 映射状态码（4xx 客户端 / 5xx 内部，不铸 `ERR_SETTINGS_` 命名空间）。
 //!
@@ -24,9 +24,10 @@ use std::time::SystemTime;
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+#[cfg(test)]
+use axum::routing::{get, post};
 use bootstrap::{Domain, KernelError, Registry};
 use consistency::{
     ConsumerGroup, EngineError, EngineErrorKind, EventEntry, EventTopic, HandleResult, IdemKey,
@@ -36,25 +37,28 @@ use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, Outb
 use generated::event::settings_v1::{
     SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
-use generated::http::HttpAuthMode;
 use generated::http::settings_v1::{
-    SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData, SettingsConfigPublishRequest,
-    SettingsConfigPublishResponse,
+    ROUTE as CONFIG_HTTP_ROUTE, SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData,
+    SettingsConfigPublishRequest, SettingsConfigPublishResponse,
 };
+use generated::http::settings_v2::ROUTE as SECRET_HTTP_ROUTE;
+#[cfg(test)]
 use generated::http::settings_v2::SPEC as SECRET_HTTP_SPEC;
 use generated::http::settings_v4::{
-    SPEC as CONFIG_GET_HTTP_SPEC, SettingsConfigGetData, SettingsConfigGetResponse,
+    ROUTE as CONFIG_GET_HTTP_ROUTE, SPEC as CONFIG_GET_HTTP_SPEC, SettingsConfigGetData,
+    SettingsConfigGetResponse,
 };
-use generated::http::settings_v5::SPEC as CONFIG_DELETE_HTTP_SPEC;
+use generated::http::settings_v5::{
+    ROUTE as CONFIG_DELETE_HTTP_ROUTE, SPEC as CONFIG_DELETE_HTTP_SPEC,
+};
 use generated::http::settings_v6::{
-    SPEC as CONFIG_ROLLBACK_HTTP_SPEC, SettingsConfigRollbackData, SettingsConfigRollbackRequest,
-    SettingsConfigRollbackResponse,
+    ROUTE as CONFIG_ROLLBACK_HTTP_ROUTE, SPEC as CONFIG_ROLLBACK_HTTP_SPEC,
+    SettingsConfigRollbackData, SettingsConfigRollbackRequest, SettingsConfigRollbackResponse,
 };
-use httpserve::{AuthorizedSubject, Primary, PrimaryRoute, RoutePermission, RouteResourceScope};
+use httpserve::{AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
-use primitives::RouteAuthOptOut;
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
 use crate::secret_application::secret_publish_handler;
@@ -705,7 +709,7 @@ fn authenticated_actor(
             error = %err,
             tenant_id = %tenant,
             principal_kind = ?auth.principal_kind(),
-            contract_id = spec.contract_id,
+            contract_id = spec.route.contract_id(),
             "settings authorized subject cannot be represented as outbox actor id"
         );
         AuthReject::InvalidActor
@@ -721,46 +725,10 @@ fn authenticated_actor(
     ))
 }
 
-/// 从 generated SPEC 派生 [`PrimaryRoute`]（method / 相对 path / contract_id / opt_out 单源，杜绝手写漂移）。
-/// 相对 path = SPEC 绝对 path 剥 [`SETTINGS_ROUTE_PREFIX`]（对标 identity `login_relative_path`）。
-fn primary_route_from_spec(spec: &generated::http::HttpSpec) -> Result<PrimaryRoute, KernelError> {
-    let rel = spec
-        .path
-        .strip_prefix(SETTINGS_ROUTE_PREFIX)
-        .filter(|rel| rel.starts_with('/') && rel.len() > 1)
-        .ok_or(KernelError::RouteGroup)?;
-    let method = Method::from_bytes(spec.method.as_bytes()).map_err(|_| KernelError::RouteGroup)?;
-    match spec.auth.mode {
-        HttpAuthMode::Permission => {
-            let permission = spec.auth.permission.ok_or(KernelError::RouteGroup)?;
-            let scope = match (spec.resource, spec.self_scoped) {
-                (Some(resource), false) => RouteResourceScope::PathParam(resource),
-                (None, true) => RouteResourceScope::SelfSubject,
-                (None, false) => RouteResourceScope::None,
-                (Some(_), true) => return Err(KernelError::RouteGroup),
-            };
-            Ok(PrimaryRoute::permission(
-                method,
-                rel,
-                spec.contract_id,
-                RoutePermission { permission, scope },
-            ))
-        }
-        HttpAuthMode::Public => Ok(PrimaryRoute::opt_out(
-            method,
-            rel,
-            spec.contract_id,
-            RouteAuthOptOut::Public,
-        )),
-        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
-            Err(KernelError::RouteGroup)
-        }
-    }
-}
-
 /// `settings.config-publish` handler（Primary listener，JWT 认证）：route gate 授权证据取租户 → parse body →
 /// `publish_config`（CAS 写 + outbox co-tx，L2）→ 201。租户来自 `AuthorizedSubject`，非 pre-auth header。
 async fn config_publish_handler(
+    _: ContractMarker<generated::http::settings_v1::RouteMarker>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
 ) -> Response {
@@ -804,6 +772,7 @@ pub(crate) async fn config_publish_handler_bytes(
 /// `settings.config-get` handler：租户只来自 route gate 的 [`AuthorizedSubject`]；读取先验证权威
 /// revision，事件未送达也不会返回 stale cache。
 async fn config_get_handler(
+    _: ContractMarker<generated::http::settings_v4::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -844,6 +813,7 @@ async fn config_get_handler(
 
 /// `settings.config-delete` handler：首次删除提交 tombstone + Deleted fact，已删除/不存在为 204 no-op。
 async fn config_delete_handler(
+    _: ContractMarker<generated::http::settings_v5::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -867,6 +837,7 @@ async fn config_delete_handler(
 
 /// `settings.config-rollback` handler：历史版本值作为新 active version 原子写入并发出 RolledBack fact。
 async fn config_rollback_handler(
+    _: ContractMarker<generated::http::settings_v6::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -935,7 +906,7 @@ fn config_error_response(
             error = %err,
             request_id,
             tenant_id = %tenant,
-            contract_id = spec.contract_id,
+            contract_id = spec.route.contract_id(),
             operation,
             "settings config operation failed"
         );
@@ -946,7 +917,7 @@ fn config_error_response(
 /// settings 域 bootstrap 生命周期：挂载 config publish/get/delete/rollback 与 secret-publish 业务路由。
 ///
 /// 持有 config 应用服务 + secret 仓储端口（构造器必填位置参注入，缺失即编译错误，rust-standards §工程护栏）；
-/// `init` 经 typed `route_group::<Primary>` + `mount_primary` 从 generated SPEC 单源挂五条认证路由
+/// `init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint` 从 generated SPEC 单源挂五条认证路由
 /// （对标 identity `IdentityDomain`）。
 ///
 /// secret 路由 State 持 `Arc<DynSecretRepo>`（而非 `SecretService`）：`SecretService` 含 `Box<DynSecretResolver>`
@@ -993,26 +964,26 @@ impl Domain for SettingsDomain {
         let config = Arc::clone(&self.config);
         let secret_repo = Arc::clone(&self.secret_repo);
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&CONFIG_HTTP_SPEC)?,
-                post(config_publish_handler).with_state(Arc::clone(&config)),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&CONFIG_GET_HTTP_SPEC)?,
-                get(config_get_handler).with_state(Arc::clone(&config)),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&CONFIG_DELETE_HTTP_SPEC)?,
-                delete(config_delete_handler).with_state(Arc::clone(&config)),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&CONFIG_ROLLBACK_HTTP_SPEC)?,
-                post(config_rollback_handler).with_state(config),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&SECRET_HTTP_SPEC)?,
-                post(secret_publish_handler).with_state(secret_repo),
-            );
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)?
+                    .with_state(Arc::clone(&config)),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)?
+                    .with_state(Arc::clone(&config)),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)?
+                    .with_state(Arc::clone(&config)),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(CONFIG_ROLLBACK_HTTP_ROUTE, config_rollback_handler)?
+                    .with_state(config),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)?
+                    .with_state(secret_repo),
+            )?;
             Ok(rb)
         })?;
         Ok(())
@@ -1559,71 +1530,138 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn primary_routes_derive_active_settings_specs_without_optout() {
+    fn settings_routes_carry_complete_generated_evidence() {
         let cases = [
             (
-                CONFIG_HTTP_SPEC,
-                "/configs",
-                Method::POST,
+                CONFIG_HTTP_SPEC.route,
+                "/api/v1/settings/configs",
+                "POST",
                 "settings.config-publish",
+                vocab::RoutePermissionId::SettingsConfigPublish,
+                vocab::HttpConsistencyLevel::OutboxFact,
+                &[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Write,
+                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::Outbox,
+                    vocab::HttpEffectKind::Publish,
+                ][..],
             ),
             (
-                CONFIG_GET_HTTP_SPEC,
-                "/configs/{key}",
-                Method::GET,
+                SECRET_HTTP_SPEC.route,
+                "/api/v1/settings/secrets",
+                "POST",
+                "settings.secret-publish",
+                vocab::RoutePermissionId::SettingsSecretPublish,
+                vocab::HttpConsistencyLevel::LocalTx,
+                &[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Write,
+                    vocab::HttpEffectKind::Transaction,
+                ][..],
+            ),
+            (
+                CONFIG_GET_HTTP_SPEC.route,
+                "/api/v1/settings/configs/{key}",
+                "GET",
                 "settings.config-get",
+                vocab::RoutePermissionId::SettingsConfigGet,
+                vocab::HttpConsistencyLevel::LocalOnly,
+                &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read][..],
             ),
             (
-                CONFIG_DELETE_HTTP_SPEC,
-                "/configs/{key}",
-                Method::DELETE,
+                CONFIG_DELETE_HTTP_SPEC.route,
+                "/api/v1/settings/configs/{key}",
+                "DELETE",
                 "settings.config-delete",
+                vocab::RoutePermissionId::SettingsConfigDelete,
+                vocab::HttpConsistencyLevel::OutboxFact,
+                &[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Write,
+                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::Outbox,
+                    vocab::HttpEffectKind::Publish,
+                ][..],
             ),
             (
-                CONFIG_ROLLBACK_HTTP_SPEC,
-                "/configs/{key}/rollbacks",
-                Method::POST,
+                CONFIG_ROLLBACK_HTTP_SPEC.route,
+                "/api/v1/settings/configs/{key}/rollbacks",
+                "POST",
                 "settings.config-rollback",
+                vocab::RoutePermissionId::SettingsConfigRollback,
+                vocab::HttpConsistencyLevel::OutboxFact,
+                &[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Write,
+                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::Outbox,
+                    vocab::HttpEffectKind::Publish,
+                ][..],
             ),
         ];
-        for (spec, path, method, contract_id) in cases {
-            let route = primary_route_from_spec(&spec).expect("route");
-            assert_eq!(route.path(), path, "SPEC absolute path strips prefix");
-            assert_eq!(*route.method(), method);
-            assert_eq!(route.contract_id(), contract_id);
-            assert!(route.opt_out_kind().is_none());
-            assert!(route.route_permission().is_some());
+        for (evidence, path, method, contract_id, permission, consistency, effects) in cases {
+            assert_eq!(evidence.path(), path);
+            assert_eq!(evidence.method(), method);
+            assert_eq!(evidence.contract_id(), contract_id);
+            assert_eq!(
+                evidence.auth(),
+                vocab::HttpRouteAuth::Permission(permission)
+            );
+            assert_eq!(evidence.resource(), None);
+            assert!(!evidence.self_scoped());
+            assert_eq!(evidence.consistency_level(), consistency);
+            assert_eq!(evidence.effect_profile().effects(), effects);
         }
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn primary_route_from_spec_preserves_resource_scope() {
-        let spec = generated::http::HttpSpec {
-            resource: Some("configId"),
-            ..CONFIG_HTTP_SPEC
-        };
-        let route = primary_route_from_spec(&spec).expect("route");
-        assert_eq!(
-            route.route_permission().map(|p| p.scope),
-            Some(RouteResourceScope::PathParam("configId")),
-            "generated resource path-param must flow into route gate"
-        );
+    fn generated_primary_endpoints_preserve_all_five_route_proofs() {
+        let config_publish =
+            GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)
+                .expect("config publish endpoint");
+        assert_eq!(config_publish.evidence(), &CONFIG_HTTP_SPEC.route);
+
+        let secret_publish =
+            GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)
+                .expect("secret publish endpoint");
+        assert_eq!(secret_publish.evidence(), &SECRET_HTTP_SPEC.route);
+
+        let config_get = GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)
+            .expect("config get endpoint");
+        assert_eq!(config_get.evidence(), &CONFIG_GET_HTTP_SPEC.route);
+
+        let config_delete =
+            GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)
+                .expect("config delete endpoint");
+        assert_eq!(config_delete.evidence(), &CONFIG_DELETE_HTTP_SPEC.route);
+
+        let config_rollback =
+            GeneratedPrimaryEndpoint::new(CONFIG_ROLLBACK_HTTP_ROUTE, config_rollback_handler)
+                .expect("config rollback endpoint");
+        assert_eq!(config_rollback.evidence(), &CONFIG_ROLLBACK_HTTP_SPEC.route);
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn primary_route_from_spec_preserves_self_scope() {
-        let spec = generated::http::HttpSpec {
-            self_scoped: true,
-            ..CONFIG_HTTP_SPEC
-        };
-        let route = primary_route_from_spec(&spec).expect("route");
+    fn settings_production_uses_atomic_generated_endpoint_funnel() {
+        let source = include_str!("application.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+
         assert_eq!(
-            route.route_permission().map(|p| p.scope),
-            Some(RouteResourceScope::SelfSubject),
-            "generated selfScoped must flow into route gate"
+            production.matches("GeneratedPrimaryEndpoint::new(").count(),
+            5
         );
+        assert_eq!(production.matches("rb.mount(").count(), 5);
+        assert!(!production.contains("mount_primary("));
+        assert!(!production.contains("PrimaryRoute"));
+        assert!(!production.contains("RoutePermission"));
+        assert!(!production.contains("RouteResourceScope"));
+        assert!(!production.contains("HttpAuthMode"));
+        assert!(!production.contains("axum::routing::on("));
     }
 
     #[tokio::test]

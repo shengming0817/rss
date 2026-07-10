@@ -52,7 +52,7 @@ impl ReadyzDto {
 }
 
 /// liveness 端点：恒 200 `{"status":"ok"}`（存活即活）。
-pub fn healthz() -> axum::routing::MethodRouter {
+fn healthz() -> axum::routing::MethodRouter {
     axum::routing::get(|| async { (StatusCode::OK, axum::Json(LivenessDto { status: "ok" })) })
 }
 
@@ -62,7 +62,7 @@ pub fn healthz() -> axum::routing::MethodRouter {
 ///
 /// Degraded→200（运行但降级）：HTTP 状态仅区分 serving(200)/not-ready(503)，消费方解析
 /// body.overall 判精确态（k8s readiness probe 据 2xx 判健康，Degraded 实例仍接流量是有意设计）。
-pub fn readyz<F>(report: F) -> axum::routing::MethodRouter
+fn readyz<F>(report: F) -> axum::routing::MethodRouter
 where
     F: Fn() -> HealthReport + Clone + Send + Sync + 'static,
 {
@@ -116,11 +116,11 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 /// [`readyz`] 范式）。渲染源（组合根注入的 `Arc<dyn diport::MetricsExporter>` 等）由调用方决定，handler 层只渲染 +
 /// 设 content-type，**不耦合** `diport`（保持 httpserve 对导出 provider 无知）。
 ///
-/// 挂在 `Health` listener（health/ready/metrics 内部网络面）；非-`Primary` listener 不可声明 `Public` opt-out
-/// （`Route` 类型层无 opt-out 字段，AUTH-OPTOUT-PRIMARYONLY-01），故 `/metrics` 与 healthz/readyz 同走 listener auth plan。
+/// 挂在 `Health` listener（health/ready/metrics 内部网络面）；固定 builder 不接受 route-level auth
+/// metadata，故 `/metrics` 与 healthz/readyz 只服从 Health listener auth plan。
 ///
 /// ref: tokio-rs/axum examples/health-check.rs@main（健康/探针端点 MethodRouter 范式）
-pub fn metrics<F>(render: F) -> axum::routing::MethodRouter
+fn metrics<F>(render: F) -> axum::routing::MethodRouter
 where
     F: Fn() -> String + Clone + Send + Sync + 'static,
 {
@@ -134,6 +134,29 @@ where
             )
         }
     })
+}
+
+/// Build the fixed framework-owned health listener routes.
+///
+/// This is the only production API for mounting health, readiness, and metrics endpoints. Their
+/// paths and methods are fixed inside `httpserve`; callers can only supply the dynamic report and
+/// metrics render functions.
+pub fn routes<R, M>(report: R, render: M) -> crate::UnfinalizedRoutes
+where
+    R: Fn() -> HealthReport + Clone + Send + Sync + 'static,
+    M: Fn() -> String + Clone + Send + Sync + 'static,
+{
+    let result = crate::UnfinalizedRoutes::empty()
+        .nest_group::<crate::Health, core::convert::Infallible>("/health/v1", move |router| {
+            Ok(router
+                .mount_framework("/healthz", healthz())
+                .mount_framework("/readyz", readyz(report))
+                .mount_framework("/metrics", metrics(render)))
+        });
+    match result {
+        Ok(routes) => routes,
+        Err(never) => match never {},
+    }
 }
 
 #[cfg(test)]

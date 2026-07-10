@@ -1,12 +1,13 @@
 //! routes — typed route lifecycle: listener-typed registration (#1103) + auth-finalize-before-bind funnel (#1113).
 //!
-//! 两条正交的类型层不变式收口在本模块（对标 axum `Router<S>` 用状态类型表达「缺状态不可 serve」的阶段约束。
-//! ref: tokio-rs/axum axum/src/routing/mod.rs@main）：
+//! 两条正交的类型层不变式收口在本模块（对标 axum `Router<S>` 用状态类型表达「缺状态不可 serve」的阶段约束）：
+//! ref: tokio-rs/axum axum/src/routing/method_routing.rs@8762520da82cd99b78b35869069b36cfa305d4b9
+//! ref: oxidecomputer/dropshot dropshot/src/api_description.rs@d802068f6dee979746d4000ec735e915df038259
 //!
 //! - **#1103 listener segregation（Medium→Hard）**：路由经 listener-typed [`ListenerRouter<L>`] 挂载，
-//!   register 闭包绑定到具体 [`Listener`] marker；`mount`（无 opt-out）仅 [`NonPrimaryListener`] 可用，
-//!   `mount_primary`（唯一 opt-out 入口）仅 `ListenerRouter<Primary>` 可用 ⇒ Internal/Admin/Health 路由
-//!   类型层不可能落进 Primary（对外）Router，跨 listener 泄漏不可表达（typed function choice，Hard）。
+//!   register 闭包绑定到具体 [`Listener`] marker；`mount` 按 listener 只接受
+//!   [`GeneratedEndpoint`] 或 [`GeneratedPrimaryEndpoint`]，Health 只走固定 builder ⇒ 跨 listener 泄漏
+//!   不可表达（typed function choice，Hard）。
 //! - **#1113 auth-finalize-before-bind funnel（Hard）**：finalizer 函数是 [`AuthenticatedRoutes`] 的
 //!   **唯一**生产者（构造 `pub(crate)`），[`AuthenticatedRoutes::into_make_service`] 是**唯一** bindable
 //!   出口；[`UnfinalizedRoutes`] 无 public bindable 出口 ⇒ 未跑 auth 装配的 router 无法 bind。
@@ -16,15 +17,319 @@
 //! [`finalize_auth`] 或 [`finalize_primary_auth`] 产 [`AuthenticatedRoutes`]。
 
 use crate::auth::{AuditSinkHandle, AuthAudit, RouteAuthorizer, enforce_layer};
-use crate::{PrimaryRoute, Route, RouteGroupError};
+use crate::{PrimaryRouteAuthz, RouteGroupError, RoutePermission, RouteResourceScope};
+use axum::extract::FromRequestParts;
+use axum::handler::Handler;
 use core::marker::PhantomData;
 use primitives::{AuthPlan, ListenerKind};
+use std::convert::Infallible;
 use std::sync::Arc;
+use vocab::{HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence};
+
+/// Zero-cost extractor carrying one generated HTTP contract identity into a handler signature.
+///
+/// A handler can only bind to [`HttpRouteBinding<M>`] when its first extractor is
+/// `ContractMarker<M>`. Extraction is infallible and stores no request data.
+pub struct ContractMarker<M>(PhantomData<fn() -> M>);
+
+impl<M, S> FromRequestParts<S> for ContractMarker<M>
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        _parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(PhantomData))
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl<M> ContractMarker<M> {
+    /// Construct a marker for direct handler unit tests.
+    #[must_use]
+    pub const fn for_test() -> Self {
+        Self(PhantomData)
+    }
+}
+
+/// Sealed proof that an Axum handler argument tuple starts with the matching contract marker.
+#[doc(hidden)]
+pub trait ContractHandlerArgs<M>: sealed::ContractHandlerArgs<M> {}
+
+macro_rules! impl_contract_handler_args {
+    ($($ty:ident),*) => {
+        impl<Mode, M, $($ty),*> sealed::ContractHandlerArgs<M>
+            for (Mode, ContractMarker<M>, $($ty,)*)
+        {
+        }
+
+        impl<Mode, M, $($ty),*> ContractHandlerArgs<M>
+            for (Mode, ContractMarker<M>, $($ty,)*)
+        {
+        }
+    };
+}
+
+impl_contract_handler_args!();
+impl_contract_handler_args!(T1);
+impl_contract_handler_args!(T1, T2);
+impl_contract_handler_args!(T1, T2, T3);
+impl_contract_handler_args!(T1, T2, T3, T4);
+impl_contract_handler_args!(T1, T2, T3, T4, T5);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
+impl_contract_handler_args!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14);
+impl_contract_handler_args!(
+    T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15
+);
+
+struct Endpoint<S> {
+    evidence: HttpRouteEvidence,
+    method: axum::http::Method,
+    handler: axum::routing::MethodRouter<S>,
+}
+
+/// INVARIANT: ROUTE-ENDPOINT-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "public endpoint constructors require a non-optional HttpRouteBinding<M> plus a handler whose argument tuple starts with ContractMarker<M>; trybuild omits each and rejects cross-contract markers" }
+/// INVARIANT: ROUTE-ENDPOINT-ATOMIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "private Endpoint owns evidence, parsed method, and MethodRouter as one move-only mount value" }
+impl<S> Endpoint<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    fn new<H, T>(evidence: HttpRouteEvidence, handler: H) -> Result<Self, RouteGroupError>
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        let method = axum::http::Method::from_bytes(evidence.method().as_bytes())
+            .map_err(|_| invalid_method(evidence))?;
+        let filter = axum::routing::MethodFilter::try_from(method.clone())
+            .map_err(|_| invalid_method(evidence))?;
+        Ok(Self {
+            evidence,
+            method,
+            handler: axum::routing::on(filter, handler),
+        })
+    }
+
+    fn with_state(self, state: S) -> Endpoint<()> {
+        Endpoint {
+            evidence: self.evidence,
+            method: self.method,
+            handler: self.handler.with_state(state),
+        }
+    }
+}
+
+/// A generated endpoint for a non-Primary listener.
+///
+/// Construction atomically binds one generated [`HttpRouteBinding`] to a handler carrying the same
+/// contract marker. The method router is private and derives its filter from the enclosed evidence; stateful handlers must call
+/// [`with_state`](Self::with_state) before the endpoint can be mounted.
+pub struct GeneratedEndpoint<S>(Endpoint<S>);
+
+impl<S> GeneratedEndpoint<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    /// Bind a contract-specific generated route to its matching handler and derive the method filter.
+    pub fn new<M, H, T>(binding: HttpRouteBinding<M>, handler: H) -> Result<Self, RouteGroupError>
+    where
+        H: Handler<T, S>,
+        T: ContractHandlerArgs<M> + 'static,
+    {
+        Endpoint::new(binding.evidence(), handler).map(Self)
+    }
+
+    /// Supply the handler state, producing the only endpoint state accepted by mounting.
+    #[must_use]
+    pub fn with_state(self, state: S) -> GeneratedEndpoint<()> {
+        GeneratedEndpoint(self.0.with_state(state))
+    }
+
+    /// Borrow the atomic route proof.
+    #[must_use]
+    pub const fn evidence(&self) -> &HttpRouteEvidence {
+        &self.0.evidence
+    }
+}
+
+/// A generated endpoint for the Primary listener.
+///
+/// In addition to method and path, Primary authorization and resource scope are derived directly
+/// from the same evidence when the endpoint is mounted.
+pub struct GeneratedPrimaryEndpoint<S>(Endpoint<S>);
+
+impl<S> GeneratedPrimaryEndpoint<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    /// Bind a contract-specific generated route to its matching handler and derive the method filter.
+    pub fn new<M, H, T>(binding: HttpRouteBinding<M>, handler: H) -> Result<Self, RouteGroupError>
+    where
+        H: Handler<T, S>,
+        T: ContractHandlerArgs<M> + 'static,
+    {
+        Endpoint::new(binding.evidence(), handler).map(Self)
+    }
+
+    /// Supply the handler state, producing the only endpoint state accepted by mounting.
+    #[must_use]
+    pub fn with_state(self, state: S) -> GeneratedPrimaryEndpoint<()> {
+        GeneratedPrimaryEndpoint(self.0.with_state(state))
+    }
+
+    /// Borrow the atomic route proof.
+    #[must_use]
+    pub const fn evidence(&self) -> &HttpRouteEvidence {
+        &self.0.evidence
+    }
+}
+
+/// Test-only raw route metadata. Production builds do not contain this type.
+#[cfg(any(test, feature = "test-util"))]
+pub struct TestRoute {
+    pub method: axum::http::Method,
+    pub path: &'static str,
+    pub contract_id: &'static str,
+}
+
+/// Test-only permission metadata for raw router tests.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Clone, Copy)]
+pub struct TestRoutePermission {
+    pub permission: vocab::RoutePermissionId,
+    pub scope: TestRouteResourceScope,
+}
+
+/// Test-only resource scope for raw router tests.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Clone, Copy)]
+pub enum TestRouteResourceScope {
+    None,
+    PathParam(&'static str),
+    SelfSubject,
+}
+
+/// Test-only Primary route metadata. Production builds do not contain this type.
+#[cfg(any(test, feature = "test-util"))]
+pub struct TestPrimaryRoute {
+    evidence: HttpRouteEvidence,
+    authz: PrimaryRouteAuthz,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl TestPrimaryRoute {
+    pub fn permission(
+        method: axum::http::Method,
+        path: &'static str,
+        contract_id: &'static str,
+        permission: TestRoutePermission,
+    ) -> Result<Self, RouteGroupError> {
+        let scope = match permission.scope {
+            TestRouteResourceScope::None => RouteResourceScope::None,
+            TestRouteResourceScope::PathParam(name) => RouteResourceScope::PathParam(name),
+            TestRouteResourceScope::SelfSubject => RouteResourceScope::SelfSubject,
+        };
+        let (resource, self_scoped) = match permission.scope {
+            TestRouteResourceScope::None => (None, false),
+            TestRouteResourceScope::PathParam(name) => (Some(name), false),
+            TestRouteResourceScope::SelfSubject => (None, true),
+        };
+        Ok(Self {
+            evidence: test_route_evidence(
+                method,
+                path,
+                contract_id,
+                HttpRouteAuth::Permission(permission.permission),
+                resource,
+                self_scoped,
+            )?,
+            authz: PrimaryRouteAuthz::Permission(RoutePermission {
+                permission: permission.permission,
+                scope,
+            }),
+        })
+    }
+
+    pub fn opt_out(
+        method: axum::http::Method,
+        path: &'static str,
+        contract_id: &'static str,
+        opt_out: primitives::RouteAuthOptOut,
+    ) -> Result<Self, RouteGroupError> {
+        Ok(Self {
+            evidence: test_route_evidence(
+                method,
+                path,
+                contract_id,
+                HttpRouteAuth::Public,
+                None,
+                false,
+            )?,
+            authz: PrimaryRouteAuthz::OptOut(opt_out),
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+fn test_route_evidence(
+    method: axum::http::Method,
+    path: &'static str,
+    contract_id: &'static str,
+    auth: HttpRouteAuth,
+    resource: Option<&'static str>,
+    self_scoped: bool,
+) -> Result<HttpRouteEvidence, RouteGroupError> {
+    let method = match method {
+        axum::http::Method::CONNECT => "CONNECT",
+        axum::http::Method::DELETE => "DELETE",
+        axum::http::Method::GET => "GET",
+        axum::http::Method::HEAD => "HEAD",
+        axum::http::Method::OPTIONS => "OPTIONS",
+        axum::http::Method::PATCH => "PATCH",
+        axum::http::Method::POST => "POST",
+        axum::http::Method::PUT => "PUT",
+        axum::http::Method::TRACE => "TRACE",
+        _ => {
+            return Err(RouteGroupError::InvalidMethod {
+                contract_id,
+                method: method.as_str().to_owned(),
+                path,
+            });
+        }
+    };
+    const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
+    Ok(HttpRouteEvidence::from_static(
+        vocab::ContractBinding::from_static(
+            "test",
+            contract_id,
+            "v1",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+        path,
+        method,
+        auth,
+        resource,
+        self_scoped,
+        vocab::HttpConsistencyLevel::LocalOnly,
+        vocab::HttpEffectProfile::new(EFFECTS),
+    ))
+}
 
 /// 封闭 [`Listener`] / [`NonPrimaryListener`] 实现面：外部 crate 无法命名 [`sealed::Sealed`] ⇒ 无法新增
 /// listener marker（type-layer Hard seal，对齐 `vocab::contract::owner` 私有内层封闭先例）。
 mod sealed {
     pub trait Sealed {}
+    pub trait ContractHandlerArgs<M> {}
 }
 
 /// listener 类型层 marker（sealed）。`KIND` 把 marker 落到运行期 [`ListenerKind`] 值（fold 分组键）。
@@ -65,28 +370,30 @@ impl Listener for Health {
 
 impl NonPrimaryListener for Internal {}
 impl NonPrimaryListener for Admin {}
-impl NonPrimaryListener for Health {}
 
 /// register 闭包内构建本组路由的 listener-typed builder（`route_group::<L>` 注入）。
 ///
 /// INVARIANT: ROUTE-LISTENER-TYPED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 路由经本 builder 挂载、随组 fold 进 `L::KIND` listener 的
-/// Router；Internal/Admin/Health 路由类型层不可能进 Primary Router（取代 SEGREGATION-01 Medium runtime
-/// 守，#1103 Medium→Hard）。`mount_primary`（opt-out）仅 `L = Primary`、`mount`（无 opt-out）仅
-/// `L: NonPrimaryListener` —— 与 AUTH-OPTOUT-PRIMARYONLY-01 在 listener 维度对齐。
+/// Router；Internal/Admin generated endpoint 类型层不可能进 Primary Router（取代 SEGREGATION-01 Medium
+/// runtime 守，#1103 Medium→Hard）。`mount` 按 listener 类型只接受对应 endpoint；Health 无业务 mount。
 #[must_use = "ListenerRouter 须返回给 route_group register 闭包（否则路由未挂载）"]
 pub struct ListenerRouter<L: Listener> {
     inner: axum::Router,
+    prefix: &'static str,
     _l: PhantomData<fn() -> L>,
 }
 
+/// INVARIANT: ROUTE-MOUNT-NOBYPASS-01 { level = "Hard", exec = "native-compile", source = "code", native = "the isolated default production feature graph exports only closed generated endpoint mounts; default_feature_surface cargo-check proves all raw helpers absent" }
+/// INVARIANT: ROUTE-MOUNT-TESTUTIL-RESIDUAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `test-util` 显式开启后仍有 raw test helpers；它们只产/消费测试 router，不属于 production feature graph。
 impl<L: Listener> ListenerRouter<L> {
     /// 在 fresh `axum::Router` 上起一个 listener-typed builder。**`pub(crate)`**：外部 crate 无法构造——
-    /// 域 crate 只在 `route_group` register 闭包里**收到** builder，仅能 `mount`/`mount_primary`（无
+    /// 域 crate 只在 `route_group` register 闭包里**收到** builder，仅能 mount typed endpoint（无
     /// raw-bypass）。构造与裸 Router erase 只发生在 httpserve 内（[`UnfinalizedRoutes::nest_group`]），
     /// 故无任何 public API 交出可 bind 的裸 `axum::Router`（#1103/#1113 Hard 闭环）。
-    pub(crate) fn new(router: axum::Router) -> Self {
+    pub(crate) fn new(router: axum::Router, prefix: &'static str) -> Self {
         Self {
             inner: router,
+            prefix,
             _l: PhantomData,
         }
     }
@@ -95,34 +402,185 @@ impl<L: Listener> ListenerRouter<L> {
     pub(crate) fn into_inner(self) -> axum::Router {
         self.inner
     }
+
+    /// Test-only raw framework router mount. Production builds do not contain this API.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn mount_raw_for_test(
+        self,
+        route: TestRoute,
+        handler: axum::routing::MethodRouter,
+    ) -> Result<Self, RouteGroupError> {
+        let evidence = test_route_evidence(
+            route.method,
+            route.path,
+            route.contract_id,
+            HttpRouteAuth::ServiceOwned,
+            None,
+            false,
+        )?;
+        let method = axum::http::Method::from_bytes(evidence.method().as_bytes())
+            .map_err(|_| invalid_method(evidence))?;
+        let path = relative_path(evidence, self.prefix, L::KIND)?;
+        let authz = if L::KIND == ListenerKind::Primary {
+            Some(primary_authz(evidence)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            inner: self
+                .inner
+                .route(path, handler.layer(enforce_layer(authz, method, evidence))),
+            prefix: self.prefix,
+            _l: PhantomData,
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl ListenerRouter<Primary> {
+    pub fn mount_primary_raw_for_test(
+        self,
+        route: Result<TestPrimaryRoute, RouteGroupError>,
+        handler: axum::routing::MethodRouter,
+    ) -> Result<Self, RouteGroupError> {
+        let route = route?;
+        let method = axum::http::Method::from_bytes(route.evidence.method().as_bytes())
+            .map_err(|_| invalid_method(route.evidence))?;
+        let path = relative_path(route.evidence, self.prefix, ListenerKind::Primary)?;
+        Ok(Self {
+            inner: self.inner.route(
+                path,
+                handler.layer(enforce_layer(Some(route.authz), method, route.evidence)),
+            ),
+            prefix: self.prefix,
+            _l: PhantomData,
+        })
+    }
 }
 
 impl<L: NonPrimaryListener> ListenerRouter<L> {
-    /// 挂载非-`Primary` [`Route`]（无 opt-out；`resolve_requirement` 恒收 `None`）。对标 axum `Router::route`。
-    pub fn mount(self, route: Route, handler: axum::routing::MethodRouter) -> Self {
-        Self {
+    /// Mount one complete generated endpoint. Raw paths, method routers, and metadata are not
+    /// accepted by the production API.
+    pub fn mount(self, endpoint: GeneratedEndpoint<()>) -> Result<Self, RouteGroupError> {
+        let Endpoint {
+            evidence,
+            method,
+            handler,
+        } = endpoint.0;
+        nonprimary_auth(evidence, L::KIND)?;
+        let path = relative_path(evidence, self.prefix, L::KIND)?;
+        Ok(Self {
+            inner: self
+                .inner
+                .route(path, handler.layer(enforce_layer(None, method, evidence))),
+            prefix: self.prefix,
+            _l: PhantomData,
+        })
+    }
+}
+
+impl ListenerRouter<Primary> {
+    /// Mount one complete generated Primary endpoint.
+    pub fn mount(self, endpoint: GeneratedPrimaryEndpoint<()>) -> Result<Self, RouteGroupError> {
+        let Endpoint {
+            evidence,
+            method,
+            handler,
+        } = endpoint.0;
+        let path = relative_path(evidence, self.prefix, ListenerKind::Primary)?;
+        let authz = primary_authz(evidence)?;
+        Ok(Self {
             inner: self.inner.route(
-                route.path,
-                handler.layer(enforce_layer(None, route.method, route.contract_id)),
+                path,
+                handler.layer(enforce_layer(Some(authz), method, evidence)),
             ),
+            prefix: self.prefix,
+            _l: PhantomData,
+        })
+    }
+}
+
+impl ListenerRouter<Health> {
+    pub(crate) fn mount_framework(
+        self,
+        path: &'static str,
+        handler: axum::routing::MethodRouter,
+    ) -> Self {
+        Self {
+            inner: self.inner.route(path, handler),
+            prefix: self.prefix,
             _l: PhantomData,
         }
     }
 }
 
-impl ListenerRouter<Primary> {
-    /// 挂载 `Primary` [`PrimaryRoute`]——**唯一**接受 auth opt-out 的入口（AUTH-OPTOUT-PRIMARYONLY-01）。
-    pub fn mount_primary(self, route: PrimaryRoute, handler: axum::routing::MethodRouter) -> Self {
-        Self {
-            inner: self.inner.route(
-                route.path,
-                handler.layer(enforce_layer(
-                    Some(route.authz.clone()),
-                    route.method,
-                    route.contract_id,
-                )),
-            ),
-            _l: PhantomData,
+fn relative_path(
+    evidence: HttpRouteEvidence,
+    prefix: &'static str,
+    listener: ListenerKind,
+) -> Result<&'static str, RouteGroupError> {
+    evidence
+        .path()
+        .strip_prefix(prefix)
+        .filter(|path| path.starts_with('/') && path.len() > 1)
+        .ok_or(RouteGroupError::PathOutsideGroup {
+            contract_id: evidence.contract_id(),
+            method: evidence.method(),
+            path: evidence.path(),
+            prefix,
+            listener,
+        })
+}
+
+fn invalid_method(evidence: HttpRouteEvidence) -> RouteGroupError {
+    RouteGroupError::InvalidMethod {
+        contract_id: evidence.contract_id(),
+        method: evidence.method().to_owned(),
+        path: evidence.path(),
+    }
+}
+
+fn invalid_auth(evidence: HttpRouteEvidence, listener: ListenerKind) -> RouteGroupError {
+    RouteGroupError::InvalidAuth {
+        contract_id: evidence.contract_id(),
+        method: evidence.method(),
+        path: evidence.path(),
+        listener,
+        auth: evidence.auth(),
+    }
+}
+
+fn nonprimary_auth(
+    evidence: HttpRouteEvidence,
+    listener: ListenerKind,
+) -> Result<(), RouteGroupError> {
+    if evidence.auth() == HttpRouteAuth::Public {
+        return Err(invalid_auth(evidence, listener));
+    }
+    Ok(())
+}
+
+fn primary_authz(evidence: HttpRouteEvidence) -> Result<PrimaryRouteAuthz, RouteGroupError> {
+    match evidence.auth() {
+        HttpRouteAuth::Permission(permission) => {
+            let scope = match (evidence.resource(), evidence.self_scoped()) {
+                (Some(resource), false) => RouteResourceScope::PathParam(resource),
+                (None, true) => RouteResourceScope::SelfSubject,
+                (None, false) => RouteResourceScope::None,
+                (Some(_), true) => {
+                    return Err(invalid_auth(evidence, ListenerKind::Primary));
+                }
+            };
+            Ok(PrimaryRouteAuthz::Permission(RoutePermission {
+                permission,
+                scope,
+            }))
+        }
+        HttpRouteAuth::Public => Ok(PrimaryRouteAuthz::OptOut(
+            primitives::RouteAuthOptOut::Public,
+        )),
+        HttpRouteAuth::Bootstrap | HttpRouteAuth::ClientsOnly | HttpRouteAuth::ServiceOwned => {
+            Err(invalid_auth(evidence, ListenerKind::Primary))
         }
     }
 }
@@ -138,6 +596,7 @@ impl ListenerRouter<Primary> {
 pub struct UnfinalizedRoutes {
     router: axum::Router,
     listener: Option<ListenerKind>,
+    conflicting_listener: Option<ListenerKind>,
 }
 
 impl UnfinalizedRoutes {
@@ -146,27 +605,34 @@ impl UnfinalizedRoutes {
         Self {
             router: axum::Router::new(),
             listener: None,
+            conflicting_listener: None,
         }
     }
 
     /// 跑 register 闭包构建本组路由（listener-typed [`ListenerRouter<L>`]），nest 到本累加器的 `prefix` 下。
     ///
     /// 裸 `axum::Router` 全程不出 httpserve（`ListenerRouter::{new, into_inner}` 均 `pub(crate)`）——域 crate
-    /// 只能经收到的 builder 的 typed `mount`/`mount_primary`，无法 raw-bypass（#1103 Medium→Hard）；产物仍是
+    /// 只能经收到的 builder mount typed endpoint，无法 raw-bypass（#1103 Medium→Hard）；产物仍是
     /// `UnfinalizedRoutes`（无 bindable 出口，#1113）。register 闭包 `Err` 原样冒泡（保留 bootstrap `KernelError` 变体）。
     pub fn nest_group<L, E>(
         self,
-        prefix: &str,
+        prefix: &'static str,
         register: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, E>,
     ) -> Result<Self, E>
     where
         L: Listener,
     {
-        let group = register(ListenerRouter::<L>::new(axum::Router::new()))?.into_inner();
+        let group = register(ListenerRouter::<L>::new(axum::Router::new(), prefix))?.into_inner();
         let listener = self.listener.or(Some(L::KIND));
+        let conflicting_listener = self.conflicting_listener.or_else(|| {
+            self.listener
+                .filter(|registered| *registered != L::KIND)
+                .map(|_| L::KIND)
+        });
         Ok(Self {
             router: self.router.nest(prefix, group),
             listener,
+            conflicting_listener,
         })
     }
 
@@ -337,13 +803,14 @@ impl TracePolicy {
 ///
 /// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
 /// `EnforceService`），其注入的 [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位；request_id
-/// 再外封一层（见上）。当前恒 `Ok`——`RouteGroupError` 变体留给扩展点（签名冻结保留）。
+/// 再外封一层（见上）。Health 固定 framework route 当前只支持 `NoAuth`；其它 scheme 在共享 finalizer
+/// 入口 fail-fast，避免返回一个声明已认证、实际未挂 auth enforcement 的 router。
 pub fn finalize_auth(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
     if plan.listener() == primitives::ListenerKind::Primary {
-        return Err(RouteGroupError::ListenerMismatch);
+        return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(routes, plan, None, None)
 }
@@ -359,7 +826,7 @@ pub fn finalize_auth_with_audit(
     clock: Arc<dyn diport::Clock>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
     if plan.listener() == primitives::ListenerKind::Primary {
-        return Err(RouteGroupError::ListenerMismatch);
+        return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(routes, plan, Some(AuthAudit::new(audit_sink, clock)), None)
 }
@@ -372,7 +839,7 @@ pub fn finalize_auth_with_audit_and_authorizer(
     authorizer: Arc<dyn RouteAuthorizer>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
     if plan.listener() == primitives::ListenerKind::Primary {
-        return Err(RouteGroupError::ListenerMismatch);
+        return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(
         routes,
@@ -388,7 +855,7 @@ pub fn finalize_primary_auth(
     authorizer: Arc<dyn RouteAuthorizer>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
     if plan.listener() != primitives::ListenerKind::Primary {
-        return Err(RouteGroupError::ListenerMismatch);
+        return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(routes, plan, None, Some(authorizer))
 }
@@ -401,7 +868,7 @@ pub fn finalize_primary_auth_with_audit(
     authorizer: Arc<dyn RouteAuthorizer>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
     if plan.listener() != primitives::ListenerKind::Primary {
-        return Err(RouteGroupError::ListenerMismatch);
+        return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(
         routes,
@@ -417,11 +884,18 @@ fn finalize_auth_inner(
     audit: Option<AuthAudit>,
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    if routes
-        .listener
-        .is_some_and(|listener| listener != plan.listener())
+    if plan.listener() == ListenerKind::Health && plan.scheme() != primitives::AuthScheme::NoAuth {
+        return Err(RouteGroupError::UnsupportedAuthPlan {
+            listener: plan.listener(),
+            scheme: plan.scheme(),
+        });
+    }
+    if routes.conflicting_listener.is_some()
+        || routes
+            .listener
+            .is_some_and(|listener| listener != plan.listener())
     {
-        return Err(RouteGroupError::ListenerMismatch);
+        return Err(listener_mismatch(&routes, plan.listener()));
     }
     let trace_policy = TracePolicy::from_plan(plan);
     let mut router = routes.router.layer(axum::Extension(plan));
@@ -439,6 +913,14 @@ fn finalize_auth_inner(
     Ok(AuthenticatedRoutes::new(router))
 }
 
+fn listener_mismatch(routes: &UnfinalizedRoutes, finalized: ListenerKind) -> RouteGroupError {
+    RouteGroupError::ListenerMismatch {
+        registered: routes.listener,
+        conflicting: routes.conflicting_listener,
+        finalized,
+    }
+}
+
 /// 测试专用：跑一个 listener-typed register 闭包，产出单组 [`UnfinalizedRoutes`]（直接挂载，**不** nest
 /// prefix——测试路径即完整路径）。供 httpserve **外**的 funnel e2e 测试（bins `auth_e2e`）构造 funnel 输入——
 /// 它们无法直接构造 `pub(crate)` 的 [`ListenerRouter`]。生产路径经 `bootstrap::Registry::route_group` +
@@ -449,12 +931,13 @@ fn finalize_auth_inner(
 /// 挂载（ROUTE-LISTENER-TYPED-01）。
 #[cfg(any(test, feature = "test-util"))]
 pub fn unfinalized_for_test<L: Listener>(
-    build: impl FnOnce(ListenerRouter<L>) -> ListenerRouter<L>,
-) -> UnfinalizedRoutes {
-    UnfinalizedRoutes {
-        router: build(ListenerRouter::<L>::new(axum::Router::new())).into_inner(),
+    build: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, RouteGroupError>,
+) -> Result<UnfinalizedRoutes, RouteGroupError> {
+    Ok(UnfinalizedRoutes {
+        router: build(ListenerRouter::<L>::new(axum::Router::new(), ""))?.into_inner(),
         listener: Some(L::KIND),
-    }
+        conflicting_listener: None,
+    })
 }
 
 #[cfg(test)]
@@ -482,12 +965,55 @@ mod tests {
         router.oneshot(req).await.expect("oneshot").status()
     }
 
-    fn admin_route() -> Route {
-        Route {
+    const TEST_EFFECTS: &[vocab::HttpEffectKind] =
+        &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read];
+
+    enum TestRouteMarker {}
+
+    fn test_binding(
+        path: &'static str,
+        contract_id: &'static str,
+        auth: vocab::HttpRouteAuth,
+    ) -> vocab::HttpRouteBinding<TestRouteMarker> {
+        test_binding_with_method(path, contract_id, "GET", auth)
+    }
+
+    fn test_binding_with_method(
+        path: &'static str,
+        contract_id: &'static str,
+        method: &'static str,
+        auth: vocab::HttpRouteAuth,
+    ) -> vocab::HttpRouteBinding<TestRouteMarker> {
+        vocab::HttpRouteBinding::from_static(
+            vocab::ContractBinding::from_static(
+                "test",
+                contract_id,
+                "v1",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            path,
+            method,
+            auth,
+            None,
+            false,
+            vocab::HttpConsistencyLevel::LocalOnly,
+            vocab::HttpEffectProfile::new(TEST_EFFECTS),
+        )
+    }
+
+    fn admin_route(path: &'static str) -> TestRoute {
+        TestRoute {
             method: Method::GET,
-            path: "/list",
+            path,
             contract_id: "test.admin.list",
         }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_routes<L: Listener>(
+        build: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, RouteGroupError>,
+    ) -> UnfinalizedRoutes {
+        unfinalized_for_test(build).expect("test route mount")
     }
 
     #[derive(Clone)]
@@ -619,6 +1145,164 @@ mod tests {
     }
 
     #[test]
+    fn generated_endpoint_rejects_unsupported_method_with_route_context() {
+        let result = GeneratedEndpoint::<()>::new(
+            test_binding_with_method(
+                "/api/v1/x",
+                "test.invalid-method",
+                "BREW",
+                vocab::HttpRouteAuth::ServiceOwned,
+            ),
+            |_: ContractMarker<TestRouteMarker>| async { "ok" },
+        );
+
+        assert!(matches!(
+            result,
+            Err(RouteGroupError::InvalidMethod {
+                contract_id: "test.invalid-method",
+                path: "/api/v1/x",
+                ref method,
+            }) if method == "BREW"
+        ));
+    }
+
+    #[test]
+    fn mount_rejects_path_outside_group_with_route_context() {
+        let result =
+            UnfinalizedRoutes::empty().nest_group::<Admin, RouteGroupError>("/admin/v1", |rb| {
+                let endpoint = GeneratedEndpoint::new(
+                    test_binding(
+                        "/internal/v1/x",
+                        "test.outside-group",
+                        vocab::HttpRouteAuth::ServiceOwned,
+                    ),
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                rb.mount(endpoint)
+            });
+
+        assert!(matches!(
+            result,
+            Err(RouteGroupError::PathOutsideGroup {
+                contract_id: "test.outside-group",
+                method: "GET",
+                path: "/internal/v1/x",
+                prefix: "/admin/v1",
+                listener: ListenerKind::Admin,
+            })
+        ));
+    }
+
+    #[test]
+    fn primary_mount_rejects_incompatible_auth_with_route_context() {
+        let result =
+            UnfinalizedRoutes::empty().nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                let endpoint = GeneratedPrimaryEndpoint::new(
+                    test_binding(
+                        "/api/v1/x",
+                        "test.invalid-primary-auth",
+                        vocab::HttpRouteAuth::Bootstrap,
+                    ),
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                rb.mount(endpoint)
+            });
+
+        assert!(matches!(
+            result,
+            Err(RouteGroupError::InvalidAuth {
+                contract_id: "test.invalid-primary-auth",
+                method: "GET",
+                path: "/api/v1/x",
+                listener: ListenerKind::Primary,
+                auth: vocab::HttpRouteAuth::Bootstrap,
+            })
+        ));
+    }
+
+    #[test]
+    fn nonprimary_mount_rejects_public_auth_with_route_context() {
+        fn assert_rejected<L: NonPrimaryListener>(prefix: &'static str, path: &'static str) {
+            let result =
+                UnfinalizedRoutes::empty().nest_group::<L, RouteGroupError>(prefix, |rb| {
+                    let endpoint = GeneratedEndpoint::new(
+                        test_binding(path, "test.public-nonprimary", vocab::HttpRouteAuth::Public),
+                        |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                    )?;
+                    rb.mount(endpoint)
+                });
+
+            assert!(matches!(
+                result,
+                Err(RouteGroupError::InvalidAuth {
+                    contract_id: "test.public-nonprimary",
+                    method: "GET",
+                    path: actual_path,
+                    listener,
+                    auth: vocab::HttpRouteAuth::Public,
+                }) if actual_path == path && listener == L::KIND
+            ));
+        }
+
+        assert_rejected::<Admin>("/admin/v1", "/admin/v1/x");
+        assert_rejected::<Internal>("/internal/v1", "/internal/v1/x");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn mixed_listener_groups_fail_before_finalize_bind() {
+        let routes = UnfinalizedRoutes::empty()
+            .nest_group::<Admin, RouteGroupError>("/admin/v1", Ok)
+            .expect("first group")
+            .nest_group::<Internal, RouteGroupError>("/internal/v1", Ok)
+            .expect("mixed group is recorded for finalization");
+        let plan = AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt).expect("plan");
+
+        let result = finalize_auth(routes, plan);
+
+        assert!(matches!(
+            result,
+            Err(RouteGroupError::ListenerMismatch {
+                registered: Some(ListenerKind::Admin),
+                conflicting: Some(ListenerKind::Internal),
+                finalized: ListenerKind::Admin,
+            })
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn health_routes_reject_appended_business_group_before_bind() {
+        let routes = crate::health::routes(
+            || primitives::HealthReport::aggregate(Vec::new()),
+            String::new,
+        )
+        .nest_group::<Admin, RouteGroupError>("/admin/v1", |rb| {
+            let endpoint = GeneratedEndpoint::new(
+                test_binding(
+                    "/admin/v1/x",
+                    "test.health-admin-leak",
+                    vocab::HttpRouteAuth::ServiceOwned,
+                ),
+                |_: ContractMarker<TestRouteMarker>| async { "must not bind" },
+            )?;
+            rb.mount(endpoint)
+        })
+        .expect("mixed group is recorded for finalization");
+        let plan = AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+            .expect("Health plan");
+
+        assert!(matches!(
+            finalize_auth(routes, plan),
+            Err(RouteGroupError::ListenerMismatch {
+                registered: Some(ListenerKind::Health),
+                conflicting: Some(ListenerKind::Admin),
+                finalized: ListenerKind::Health,
+            })
+        ));
+    }
+
+    #[test]
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     fn primary_listener_emits_http_request_span_fields() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -628,16 +1312,17 @@ mod tests {
         let (_, spans) = run_with_span_capture(|| {
             rt.block_on(async {
                 let routes = UnfinalizedRoutes::empty()
-                    .nest_group::<Primary, core::convert::Infallible>("/api/v1", |rb| {
-                        Ok(rb.mount_primary(
-                            PrimaryRoute::opt_out(
-                                Method::GET,
-                                "/x",
+                    .nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                        let endpoint = GeneratedPrimaryEndpoint::new(
+                            test_binding(
+                                "/api/v1/x",
                                 "test.primary.x",
-                                primitives::RouteAuthOptOut::Public,
+                                vocab::HttpRouteAuth::Public,
                             ),
-                            get(|| async { "ok" }),
-                        ))
+                            |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                        )
+                        .expect("endpoint");
+                        rb.mount(endpoint)
                     })
                     .expect("nest ok");
                 let plan =
@@ -685,43 +1370,16 @@ mod tests {
             .expect("runtime");
         let (_, spans) = run_with_span_capture(|| {
             rt.block_on(async {
-                let routes = UnfinalizedRoutes::empty()
-                    .nest_group::<Health, core::convert::Infallible>("/health/v1", |rb| {
-                        Ok(rb
-                            .mount(
-                                Route {
-                                    method: Method::GET,
-                                    path: "/healthz",
-                                    contract_id: "framework.healthz",
-                                },
-                                crate::health::healthz(),
-                            )
-                            .mount(
-                                Route {
-                                    method: Method::GET,
-                                    path: "/readyz",
-                                    contract_id: "framework.readyz",
-                                },
-                                crate::health::readyz(|| {
-                                    primitives::HealthReport::aggregate(vec![
-                                        primitives::HealthCheck::new(
-                                            primitives::ProbeName::parse("db").expect("probe"),
-                                            primitives::HealthStatus::Healthy,
-                                            "ok",
-                                        ),
-                                    ])
-                                }),
-                            )
-                            .mount(
-                                Route {
-                                    method: Method::GET,
-                                    path: "/metrics",
-                                    contract_id: "framework.metrics",
-                                },
-                                crate::health::metrics(|| String::from("# HELP test_metric\n")),
-                            ))
-                    })
-                    .expect("nest ok");
+                let routes = crate::health::routes(
+                    || {
+                        primitives::HealthReport::aggregate(vec![primitives::HealthCheck::new(
+                            primitives::ProbeName::parse("db").expect("probe"),
+                            primitives::HealthStatus::Healthy,
+                            "ok",
+                        )])
+                    },
+                    || String::from("# HELP test_metric\n"),
+                );
                 let plan =
                     primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
                         .expect("plan");
@@ -760,8 +1418,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn finalize_auth_round_trip_serves_mounted_route() {
-        let routes =
-            unfinalized_for_test::<Admin>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Admin>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
             .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
@@ -787,8 +1446,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn nest_group_mounts_under_prefix() {
         let routes = UnfinalizedRoutes::empty()
-            .nest_group::<Admin, core::convert::Infallible>("/api/v1/audit", |rb| {
-                Ok(rb.mount(admin_route(), get(|| async { "ok" })))
+            .nest_group::<Admin, RouteGroupError>("/api/v1/audit", |rb| {
+                rb.mount_raw_for_test(admin_route("/api/v1/audit/list"), get(|| async { "ok" }))
             })
             .expect("nest ok");
         let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
@@ -813,8 +1472,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn layer_preserves_authenticated_and_serves() {
-        let routes =
-            unfinalized_for_test::<Admin>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Admin>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
             .expect("plan");
         let authed: AuthenticatedRoutes = finalize_auth(routes, plan)
@@ -839,7 +1499,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn authenticated_routes_into_make_service_available() {
-        let routes = unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async {})));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async {}))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
@@ -862,8 +1524,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn request_id_sealed_at_bindable_exit() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let router = finalize_auth(routes, plan)
@@ -884,8 +1547,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn request_id_visible_to_outer_bridge_layer() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         // 探针层模拟验签桥（经 AuthenticatedRoutes::layer 叠在 finalize_auth 外、request_id 内）：
@@ -936,8 +1600,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn security_headers_present_in_successful_response() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let router = finalize_auth(routes, plan)
@@ -993,8 +1658,9 @@ mod tests {
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     // reason: test helper — NonZeroUsize::new(10) is known non-zero, unwrap is infallible.
     async fn body_limit_via_sealed_router_returns_413_on_oversized_cl() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let router = finalize_auth(routes, plan)
@@ -1034,8 +1700,9 @@ mod tests {
     #[allow(clippy::expect_used, clippy::unwrap_used)]
     // reason: test helper — NonZeroUsize::new(10) is known non-zero, unwrap is infallible.
     async fn security_headers_present_in_413_error_response() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let router = finalize_auth(routes, plan)
@@ -1087,8 +1754,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn request_id_still_present_after_edge_hardening_layers() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let router = finalize_auth(routes, plan)
@@ -1110,8 +1778,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn correlation_sealed_at_bindable_exit() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let router = finalize_auth(routes, plan)
@@ -1136,8 +1805,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn correlation_visible_to_outer_bridge_layer() {
-        let routes =
-            unfinalized_for_test::<Health>(|rb| rb.mount(admin_route(), get(|| async { "ok" })));
+        let routes = test_routes::<Health>(|rb| {
+            rb.mount_raw_for_test(admin_route("/list"), get(|| async { "ok" }))
+        });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         // 探针层叠在验签桥位（correlation 内侧，sealed_router 封 correlation + request_id 后成为外侧）。

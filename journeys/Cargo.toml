@@ -19,7 +19,7 @@ workspace = true
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 identity = { path = "../crates/identity", features = ["seed-login", "test-support"] }
 audit = { path = "../crates/audit", features = ["test-support"] }
-httpserve = { path = "../crates/httpserve" }
+httpserve = { path = "../crates/httpserve", features = ["test-util"] }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 settings = { path = "../crates/settings", features = ["seed-data", "test-support"] }
@@ -42,6 +42,8 @@ memory = { path = "../adapters/memory" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 # 组合根边界错误聚合（error-handling.md：应用边界可 anyhow）。
 anyhow = { workspace = true }
 # adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。

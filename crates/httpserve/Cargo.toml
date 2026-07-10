@@ -9,10 +9,10 @@ publish = false
 workspace = true
 
 [features]
-# test-util：门控 funnel 测试辅助（`UnfinalizedRoutes`/`AuthenticatedRoutes::into_router_for_test`、
-# `routes::unfinalized_for_test`）。生产构建（默认 = 无此 feature）里这些入口**编译期不存在**——Soft→Medium
-# 升级（ADR-009 §6 / 内置 review #7），生产代码无法取裸 Router 绕过 funnel。跨 crate 测试消费方经 dev-dependency
-# 显式启用（bootstrap/audit/bins，及 httpserve 自身集成测试经下方 self dev-dep）。
+# test-util：显式开启后的 raw 测试面是 residual Medium guard（`*_for_test`）；独立 default-feature
+# cargo-check 证明生产 feature graph 里这些入口编译期全部不存在，ROUTE-MOUNT-NOBYPASS-01 为 Hard。
+# 跨 crate 测试消费方经 dev-dependency 显式启用（bootstrap/audit/bins，及 httpserve 自身集成测试经下方
+# self dev-dep），不改变独立生产 graph。
 test-util = []
 
 [dependencies]
@@ -44,7 +44,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true, features = ["util"] } # ServiceExt::oneshot 驱动 mock 请求
 # typed route funnel 负向证据（#1113/#1103，ADR-009）：编译期 Hard 不变式的 compile-fail 回归锁
-# （未认证 router 不可 bind、AuthenticatedRoutes 外部不可 mint、Internal 不可 mount_primary）。
+# （未认证 router 不可 bind、AuthenticatedRoutes 外部不可 mint、non-Primary 不可 mount Primary endpoint）。
 trybuild = { workspace = true }
 # self dev-dep 启用 test-util：httpserve 的**集成测试**（tests/runtime.rs / funnel_ui.rs / ui）把 httpserve 当
 # 普通 dep 编译（非 lib `cfg(test)`），需此 feature 才见 `*_for_test`/`unfinalized_for_test`（标准 self dev-dep 模式）。

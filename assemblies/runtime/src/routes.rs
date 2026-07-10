@@ -425,7 +425,10 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
     use base64::Engine as _;
-    use httpserve::{PrimaryRoute, Route, RoutePermission, RouteResourceScope};
+    use httpserve::{
+        TestPrimaryRoute as PrimaryRoute, TestRoute as Route,
+        TestRoutePermission as RoutePermission, TestRouteResourceScope as RouteResourceScope,
+    };
     use tower::ServiceExt as _;
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -446,6 +449,40 @@ mod tests {
 
     fn allow_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
         Arc::new(AllowAuthorizer)
+    }
+
+    #[derive(Clone, Default)]
+    struct RouteMetaCapture(Arc<Mutex<Option<(vocab::HttpRouteEvidence, Method)>>>);
+
+    struct RouteMetaDomain {
+        capture: RouteMetaCapture,
+    }
+
+    impl bootstrap::Domain for RouteMetaDomain {
+        fn init(&self, registry: &mut bootstrap::Registry) -> Result<(), bootstrap::KernelError> {
+            let capture = self.capture.clone();
+            registry.route_group::<httpserve::Primary>("/api/v1/identity", move |router| {
+                let endpoint = httpserve::GeneratedPrimaryEndpoint::new(
+                    generated::http::identity_v1::login::ROUTE,
+                    route_meta_capture_handler,
+                )?
+                .with_state(capture);
+                Ok(router.mount(endpoint)?)
+            })?;
+            Ok(())
+        }
+    }
+
+    async fn route_meta_capture_handler(
+        _: httpserve::ContractMarker<generated::http::identity_v1::login::RouteMarker>,
+        axum::extract::State(capture): axum::extract::State<RouteMetaCapture>,
+        axum::extract::Extension(meta): axum::extract::Extension<httpserve::RouteMeta>,
+    ) -> StatusCode {
+        let Ok(mut slot) = capture.0.lock() else {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        };
+        *slot = Some((*meta.evidence(), meta.method().clone()));
+        StatusCode::NO_CONTENT
     }
 
     #[allow(clippy::expect_used)]
@@ -627,10 +664,10 @@ mod tests {
         let mut registry = bootstrap::Registry::new();
         registry
             .route_group::<httpserve::Primary>("/api/v1/p", |rb| {
-                Ok(rb.mount_primary(
+                Ok(rb.mount_primary_raw_for_test(
                     PrimaryRoute::permission(
                         Method::GET,
-                        "/private",
+                        "/api/v1/p/private",
                         "runtime.smoke.primary",
                         RoutePermission {
                             permission: vocab::RoutePermissionId::AuditRead,
@@ -638,31 +675,31 @@ mod tests {
                         },
                     ),
                     get(|| async { "primary" }),
-                ))
+                )?)
             })
             .expect("primary route group");
         registry
             .route_group::<httpserve::Admin>("/admin", |rb| {
-                Ok(rb.mount(
+                Ok(rb.mount_raw_for_test(
                     Route {
                         method: Method::GET,
-                        path: "/probe",
+                        path: "/admin/probe",
                         contract_id: "runtime.smoke.admin",
                     },
                     get(|| async { "admin" }),
-                ))
+                )?)
             })
             .expect("admin route group");
         registry
             .route_group::<httpserve::Internal>("/internal", |rb| {
-                Ok(rb.mount(
+                Ok(rb.mount_raw_for_test(
                     Route {
                         method: Method::GET,
-                        path: "/probe",
+                        path: "/internal/probe",
                         contract_id: "runtime.smoke.internal",
                     },
                     get(|| async { "internal" }),
-                ))
+                )?)
             })
             .expect("internal route group");
 
@@ -750,6 +787,58 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn compose_finalize_auth_propagates_exact_generated_route_evidence_to_handler() {
+        let capture = RouteMetaCapture::default();
+        let domain = RouteMetaDomain {
+            capture: capture.clone(),
+        };
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose evidence domain");
+        let mut listeners = registry
+            .finalize_routes()
+            .expect("finalize registry routes");
+        assert_eq!(listeners.len(), 1, "one Primary listener must be finalized");
+        let (listener, routes) = listeners.pop().expect("Primary routes");
+        assert_eq!(listener, ListenerKind::Primary);
+
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt).expect("Primary JWT plan");
+        let authed = finalize_listener_auth(
+            listener,
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+            Arc::new(SystemClock),
+            allow_authorizer(),
+        )
+        .expect("finalize runtime auth");
+        let response = authed
+            .into_router_for_test()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(generated::http::identity_v1::login::SPEC.route.path())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let observed = capture
+            .0
+            .lock()
+            .expect("route meta capture lock")
+            .clone()
+            .expect("handler observed RouteMeta");
+        assert_eq!(
+            observed.0,
+            generated::http::identity_v1::login::SPEC.route,
+            "handler must receive the exact generated evidence value"
+        );
+        assert_eq!(observed.1, Method::POST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn finalize_listener_routes_injects_primary_authorizer_into_admin_listener() {
         use axum::extract::Extension;
         use axum::response::IntoResponse as _;
@@ -757,11 +846,13 @@ mod tests {
         let admin =
             httpserve::UnfinalizedRoutes::empty()
                 .nest_group::<httpserve::Admin, anyhow::Error>("/admin", |rb| {
-                    Ok(rb.mount(
-                        httpserve::Route {
+                    Ok(rb.mount_raw_for_test(
+                        Route {
                             method: Method::GET,
-                            path: "/probe",
-                            contract_id: generated::http::audit_v1::list_entries::SPEC.contract_id,
+                            path: "/admin/probe",
+                            contract_id: generated::http::audit_v1::list_entries::SPEC
+                                .route
+                                .contract_id(),
                         },
                         axum::routing::get(
                             |Extension(authorizer): Extension<
@@ -770,7 +861,8 @@ mod tests {
                                 match authorizer
                                     .authorize(httpserve::RouteAuthorizationRequest {
                                         contract_id: generated::http::audit_v1::list_entries::SPEC
-                                            .contract_id,
+                                            .route
+                                            .contract_id(),
                                         permission: vocab::AUDIT_READ_PERMISSION,
                                         tenant_id: Some(
                                             vocab::TenantId::parse(
@@ -794,7 +886,7 @@ mod tests {
                                 }
                             },
                         ),
-                    ))
+                    )?)
                 })
                 .expect("admin route");
         let plan = AuthPlan::new(ListenerKind::Admin, AuthScheme::Jwt).expect("admin jwt plan");

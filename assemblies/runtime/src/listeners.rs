@@ -7,21 +7,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
-use axum::http::Method;
 use primitives::{AuthPlan, AuthScheme, ListenerKind};
 use secure::PlaintextEndpointPolicy;
 
 // ── Health listener（框架/组合根归属：healthz + readyz）─────────────────────────────────────────
-
-/// Health listener 路由组前缀（liveness/readiness 在专用 listener 上；operator 配 k8s probe 路径指向此前缀下）。
-const HEALTH_ROUTE_PREFIX: &str = "/health/v1";
-/// liveness 端点契约 ID（框架归属基础设施探针，非域 wire 契约）。
-const HEALTHZ_CONTRACT_ID: &str = "framework.healthz";
-/// readiness 端点契约 ID（框架归属）。
-const READYZ_CONTRACT_ID: &str = "framework.readyz";
-/// `/metrics` scrape 端点契约 ID（框架归属基础设施导出，非域 wire 契约——同 healthz/readyz 为 inline 常量，
-/// 无 `contracts/` 条目 / `frameworkContracts` 声明）。
-const METRICS_CONTRACT_ID: &str = "framework.metrics";
 
 /// 构造 Health listener 的已认证路由（`/health/v1/healthz` liveness + `/health/v1/readyz` readiness）。
 ///
@@ -45,39 +34,7 @@ pub fn health_listener(
     reporter: Arc<bootstrap::HealthReporter>,
     metrics: Arc<dyn diport::MetricsExporter>,
 ) -> anyhow::Result<(ListenerKind, httpserve::AuthenticatedRoutes)> {
-    let routes = httpserve::UnfinalizedRoutes::empty()
-        .nest_group::<httpserve::Health, core::convert::Infallible>(
-            HEALTH_ROUTE_PREFIX,
-            move |rb| {
-                Ok(rb
-                    .mount(
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/healthz",
-                            contract_id: HEALTHZ_CONTRACT_ID,
-                        },
-                        httpserve::health::healthz(),
-                    )
-                    .mount(
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/readyz",
-                            contract_id: READYZ_CONTRACT_ID,
-                        },
-                        httpserve::health::readyz(move || reporter.report()),
-                    )
-                    .mount(
-                        // `/metrics` 在 Health listener（内部网络面）；非-Primary `Route` 无 opt-out 字段 ⇒ 不可降级 Public。
-                        httpserve::Route {
-                            method: Method::GET,
-                            path: "/metrics",
-                            contract_id: METRICS_CONTRACT_ID,
-                        },
-                        httpserve::health::metrics(move || metrics.render()),
-                    ))
-            },
-        )
-        .context("nest health route group")?;
+    let routes = httpserve::health::routes(move || reporter.report(), move || metrics.render());
     let plan =
         AuthPlan::new(ListenerKind::Health, AuthScheme::NoAuth).context("health auth plan")?;
     let authed = httpserve::finalize_auth(routes, plan).context("finalize_auth health")?;

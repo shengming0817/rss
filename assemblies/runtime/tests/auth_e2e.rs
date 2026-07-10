@@ -23,8 +23,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use diport::{AuditEvent, AuditSink, AuditSinkError};
 use futures::FutureExt as _;
 use httpserve::{
-    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer, RoutePermission,
-    RouteResourceScope,
+    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    TestPrimaryRoute as PrimaryRoute, TestRoute as Route, TestRoutePermission as RoutePermission,
+    TestRouteResourceScope as RouteResourceScope,
 };
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
@@ -41,6 +42,15 @@ const ISS: &str = "https://issuer.test";
 const AUD: &str = "rss-test";
 const NOW: i64 = 1_700_000_000;
 const HS_KID: &str = "cell-a.svc-a";
+
+#[allow(clippy::expect_used)]
+fn test_routes<L: httpserve::Listener>(
+    build: impl FnOnce(
+        httpserve::ListenerRouter<L>,
+    ) -> Result<httpserve::ListenerRouter<L>, httpserve::RouteGroupError>,
+) -> httpserve::UnfinalizedRoutes {
+    httpserve::routes::unfinalized_for_test(build).expect("test routes")
+}
 
 // ── 注入时钟替身（确定性 exp 边界，非系统时钟） ───────────────────────────────────
 struct FixedClock(i64);
@@ -282,9 +292,9 @@ fn hs256_provider() -> (OidcProvider, Vec<u8>) {
 #[allow(clippy::expect_used)]
 fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes {
     // typed Primary builder（`ListenerRouter::new` 是 pub(crate)，外部测试经 `unfinalized_for_test` 构造 funnel 输入）。
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
-        rb.mount_primary(
-            httpserve::PrimaryRoute::permission(
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        let rb = rb.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
                 Method::GET,
                 "/protected",
                 "test.protected",
@@ -294,9 +304,9 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
                 },
             ),
             get(|| async { "ok" }),
-        )
-        .mount_primary(
-            httpserve::PrimaryRoute::opt_out(
+        )?;
+        rb.mount_primary_raw_for_test(
+            PrimaryRoute::opt_out(
                 Method::GET,
                 "/public",
                 "test.public",
@@ -316,9 +326,9 @@ fn jwt_router(bridge: Option<RequiredScheme>) -> httpserve::AuthenticatedRoutes 
 
 #[allow(clippy::expect_used)]
 fn mtls_authed_routes() -> httpserve::AuthenticatedRoutes {
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
-        rb.mount_primary(
-            httpserve::PrimaryRoute::permission(
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        rb.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
                 Method::GET,
                 "/protected",
                 "test.protected",
@@ -341,9 +351,9 @@ fn mtls_router() -> httpserve::AuthenticatedRoutes {
 
 #[allow(clippy::expect_used)]
 fn internal_mtls_routes() -> httpserve::UnfinalizedRoutes {
-    httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-        rb.mount(
-            httpserve::Route {
+    test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.internal.mtls",
@@ -380,9 +390,9 @@ fn internal_mtls_router_with_authorizer(
 fn internal_mtls_scope_router_with_authorizer(
     authorizer: Arc<dyn RouteAuthorizer>,
 ) -> httpserve::AuthenticatedRoutes {
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-        rb.mount(
-            httpserve::Route {
+    let routes = test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
                 method: Method::GET,
                 path: "/scope",
                 contract_id: "test.internal.mtls.scope",
@@ -412,9 +422,9 @@ fn verified_mtls_peer() -> authn::VerifiedMtlsPeer {
 
 #[allow(clippy::expect_used)]
 fn jwt_router_with_audit(sink: RecordingAuditSink) -> httpserve::AuthenticatedRoutes {
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
-        rb.mount_primary(
-            httpserve::PrimaryRoute::permission(
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        rb.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
                 Method::GET,
                 "/protected",
                 "test.protected",
@@ -684,9 +694,9 @@ async fn scope_probe() -> String {
 /// scope 探针 router：`/scope`（Require）+ `/scope-public`（Public opt-out），均挂 [`scope_probe`]，叠 es256 桥。
 #[allow(clippy::expect_used)]
 fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
-        rb.mount_primary(
-            httpserve::PrimaryRoute::permission(
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        let rb = rb.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
                 Method::GET,
                 "/scope",
                 "test.scope",
@@ -696,9 +706,9 @@ fn jwt_router_with_scope_probe() -> httpserve::AuthenticatedRoutes {
                 },
             ),
             get(scope_probe),
-        )
-        .mount_primary(
-            httpserve::PrimaryRoute::opt_out(
+        )?;
+        rb.mount_primary_raw_for_test(
+            PrimaryRoute::opt_out(
                 Method::GET,
                 "/scope-public",
                 "test.scope.public",
@@ -1156,9 +1166,9 @@ async fn service_token_hs256_is_200() {
         ),
         TENANT,
     );
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-        rb.mount(
-            httpserve::Route {
+    let routes = test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.svc",
@@ -1189,9 +1199,9 @@ async fn service_token_missing_or_wrong_tenant_header_is_401() {
         TENANT,
     );
     let make_authed = || {
-        let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-            rb.mount(
-                httpserve::Route {
+        let routes = test_routes::<httpserve::Internal>(|rb| {
+            rb.mount_raw_for_test(
+                Route {
                     method: Method::GET,
                     path: "/svc",
                     contract_id: "test.svc",
@@ -1243,9 +1253,9 @@ async fn service_token_duplicate_tenant_header_is_401() {
         ),
         TENANT,
     );
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-        rb.mount(
-            httpserve::Route {
+    let routes = test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.svc",
@@ -1282,9 +1292,9 @@ async fn service_token_establishes_scope_from_mac_bound_tenant() {
         ),
         TENANT,
     );
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-        rb.mount(
-            httpserve::Route {
+    let routes = test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
                 method: Method::GET,
                 path: "/scope",
                 contract_id: "test.svc.scope",
@@ -1517,9 +1527,9 @@ fn tracing_service_token_binding_error_has_distinct_reason_no_pii() {
         ),
         TENANT,
     );
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Internal>(|rb| {
-        rb.mount(
-            httpserve::Route {
+    let routes = test_routes::<httpserve::Internal>(|rb| {
+        rb.mount_raw_for_test(
+            Route {
                 method: Method::GET,
                 path: "/svc",
                 contract_id: "test.svc",

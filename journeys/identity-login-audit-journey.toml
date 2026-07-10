@@ -41,7 +41,7 @@ rejected_login_audits = 0       # 负路径：登录失败不产生审计事件
 
 # 显式留 W（不在本闭环范围）。
 [out_of_scope]
-http_axum = "httpserve mount_primary/finalize_auth 逐字节 HTTP journey（topology 仅经 route_group 声明参与，未跑 axum）"
+http_axum = "httpserve generated endpoint mount/finalize_auth 逐字节 HTTP journey（topology 仅经 route_group 声明参与，未跑 axum）"
 jwt = "真实 JWT 签发/校验、密码哈希、authn::Session/Principal 聚合（authn 仅 SessionId::generate 入链）"
 audit_chain = "audit domain 哈希链（link_hash/verify_chain/AuditEntry）+ 域内持久化"
 correlation = "outbox envelope trace/correlation/occurred_at reserved-key 受控注入（funnel 现 fail-closed 拒 reserved、无 sealed setter）；payload→AuditEvent correlation 透传需 payload schema 升版，留 W"

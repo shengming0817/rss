@@ -152,12 +152,12 @@ impl Registry {
     ///
     /// `L` 是 httpserve listener marker（[`httpserve::Primary`] / `Internal` / `Admin` / `Health`），
     /// `L::KIND` 给出运行期 listener 值（fold 分组键）。`register` 是同步闭包：接受 listener-typed
-    /// [`ListenerRouter<L>`]，经 `mount`(非-Primary) / `mount_primary`(Primary) 追加本组 routes 后返回；
+    /// [`ListenerRouter<L>`]，经 `mount` 追加与 listener 类型匹配的 generated endpoint 后返回；
     /// 失败时返回 `Err` 冒泡为 [`KernelError`]。
     ///
     /// INVARIANT: ROUTE-LISTENER-TYPED-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 域 crate 误声明（把 Internal 路由挂 Primary）类型层不可表达：
     /// 路由经 `ListenerRouter<L>` 挂载、随组 fold 进 `L::KIND` listener 的 Router，且非-Primary listener 拿不到
-    /// `mount_primary`（opt-out）。取代旧 `route_group(listener: ListenerKind, ..)` 的运行期值传参 + SEGREGATION-01
+    /// Primary endpoint 只能交给 Primary builder。取代旧 `route_group(listener: ListenerKind, ..)` 的运行期值传参 + SEGREGATION-01
     /// runtime 守（Medium→Hard）。listener marker `L` 经 [`UnfinalizedRoutes::nest_group`] 擦除进 box。
     ///
     /// 闭包延迟到 finalize 阶段由 bootstrap 统一执行（[`finalize_routes`](Self::finalize_routes)），不在 `init` 中立即调用。
@@ -519,7 +519,7 @@ mod finalize {
     //! （ROUTE-LISTENER-TYPED-01 类型层，#1103 Medium→Hard）+ ROUTE-AUTH-FUNNEL-01（无 bindable 出口）。
     use super::{HealthProbe, HealthReporter, Registry};
     use crate::domain::KernelError;
-    use httpserve::{Health, Internal, Primary};
+    use httpserve::{Internal, Primary};
     use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
     use std::sync::{Arc, Mutex};
 
@@ -836,11 +836,13 @@ mod finalize {
     fn finalize_routes_bubbles_closure_error() {
         let mut reg = Registry::new();
         #[allow(clippy::expect_used)]
-        reg.route_group::<Primary>("/api/v1/bad", |_r| Err(KernelError::RouteGroup))
-            .expect("route group declared");
+        reg.route_group::<Primary>("/api/v1/bad", |_r| {
+            Err(httpserve::RouteGroupError::RegistrationFailed.into())
+        })
+        .expect("route group declared");
 
         let result = reg.finalize_routes();
-        assert!(matches!(result, Err(KernelError::RouteGroup)));
+        assert!(matches!(result, Err(KernelError::RouteGroup(_))));
     }
 
     /// 同一 listener 有两个路由组时，第一个成功（记录 tag）、第二个失败——
@@ -858,19 +860,22 @@ mod finalize {
         })
         .expect("first route group declared");
 
-        reg.route_group::<Primary>("/api/v1/bad", |_r| Err(KernelError::RouteGroup))
-            .expect("second route group declared");
+        reg.route_group::<Primary>("/api/v1/bad", |_r| {
+            Err(httpserve::RouteGroupError::RegistrationFailed.into())
+        })
+        .expect("second route group declared");
 
         let result = reg.finalize_routes();
-        assert!(matches!(result, Err(KernelError::RouteGroup)));
+        assert!(matches!(result, Err(KernelError::RouteGroup(_))));
         // 第一个闭包已执行（finalize 按注册顺序折叠，首先跑 ok 组再遇 err 组）。
         assert_eq!(calls(&log), vec!["first-ran"]);
     }
 
     /// ROUTE-LISTENER-TYPED-01 的**行为**补充测试（类型层已守误声明，本测试守 fold/nest 运行期机制）：
-    /// 经 typed `route_group::<L>` + `mount`/`mount_primary` 声明的路由，finalize 后必须只出现在 `L::KIND`
+    /// 经 typed `route_group::<L>` + generated endpoint `mount` 声明的路由，finalize 后必须只出现在 `L::KIND`
     /// listener 的 Router 上，不串台。用 sanctioned 的 tower::ServiceExt::oneshot 实发请求断言
-    /// （rust-standards.md §覆盖率）。N-way（Primary/Internal/Health）隔离 + 裸路径 404 守 prefix 参与挂载。
+    /// （rust-standards.md §覆盖率）。Primary/Internal 隔离 + 裸路径 404 守 prefix 参与挂载；Health
+    /// 路由只由 `httpserve::health::routes` 固定构造，不进入 domain registry。
     ///
     /// 裸 Router 经 `UnfinalizedRoutes::into_router_for_test`（`#[doc(hidden)]` 测试入口）取回做 oneshot——
     /// 生产路径无此 bindable 出口（ROUTE-AUTH-FUNNEL-01）。
@@ -880,62 +885,49 @@ mod finalize {
         use axum::body::Body;
         use axum::http::{Method, Request, StatusCode};
         use axum::routing::get;
-        use httpserve::{PrimaryRoute, Route, RoutePermission, RouteResourceScope};
+        use httpserve::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};
         use tower::ServiceExt;
 
         let mut reg = Registry::new();
-        // register 闭包经 typed builder 在 fresh Router 上 mount 相对 prefix 的路由；finalize nest 到声明 prefix 下。
+        // generated evidence carries an absolute path; mount validates and strips the declared prefix.
         reg.route_group::<Primary>("/api/v1/p", |rb| {
-            Ok(rb.mount_primary(
-                PrimaryRoute::permission(
+            Ok(rb.mount_primary_raw_for_test(
+                TestPrimaryRoute::permission(
                     Method::GET,
-                    "/primary-only",
+                    "/api/v1/p/primary-only",
                     "test.primary",
-                    RoutePermission {
+                    TestRoutePermission {
                         permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                        scope: RouteResourceScope::None,
+                        scope: TestRouteResourceScope::None,
                     },
                 ),
                 get(|| async { "p" }),
-            ))
+            )?)
         })
         .expect("primary declared");
         reg.route_group::<Internal>("/internal/v1/i", |rb| {
-            Ok(rb.mount(
-                Route {
+            Ok(rb.mount_raw_for_test(
+                TestRoute {
                     method: Method::GET,
-                    path: "/internal-only",
+                    path: "/internal/v1/i/internal-only",
                     contract_id: "test.internal",
                 },
                 get(|| async { "i" }),
-            ))
+            )?)
         })
         .expect("internal declared");
-        reg.route_group::<Health>("/health/v1/h", |rb| {
-            Ok(rb.mount(
-                Route {
-                    method: Method::GET,
-                    path: "/health-only",
-                    contract_id: "test.health",
-                },
-                get(|| async { "h" }),
-            ))
-        })
-        .expect("health declared");
 
         // 取回各 listener 的裸 Router（测试专用入口）做 oneshot 断言。
-        let (mut primary, mut internal, mut health) = (None, None, None);
+        let (mut primary, mut internal) = (None, None);
         for (listener, routes) in reg.finalize_routes().expect("finalize ok") {
             match listener {
                 ListenerKind::Primary => primary = Some(routes.into_router_for_test()),
                 ListenerKind::Internal => internal = Some(routes.into_router_for_test()),
-                ListenerKind::Health => health = Some(routes.into_router_for_test()),
                 _ => {}
             }
         }
         let primary = primary.expect("primary router present");
         let internal = internal.expect("internal router present");
-        let health = health.expect("health router present");
 
         let req = |uri: &str| {
             Request::builder()
@@ -992,32 +984,5 @@ mod finalize {
             .await
             .expect("oneshot ok");
         assert_eq!(leaked.status(), StatusCode::NOT_FOUND);
-
-        // health-only 只在 health Router（完整路径）；primary 和 internal 均缺失（N-way 隔离）。matched ⇒ 403（见上）。
-        let hit = health
-            .clone()
-            .oneshot(req("/health/v1/h/health-only"))
-            .await
-            .expect("oneshot ok");
-        assert_eq!(hit.status(), StatusCode::FORBIDDEN);
-
-        // F2 回归守卫：裸路径在 health listener 上 404。
-        let bare = health
-            .clone()
-            .oneshot(req("/health-only"))
-            .await
-            .expect("oneshot ok");
-        assert_eq!(bare.status(), StatusCode::NOT_FOUND);
-
-        let leaked_primary = primary
-            .oneshot(req("/health/v1/h/health-only"))
-            .await
-            .expect("oneshot ok");
-        assert_eq!(leaked_primary.status(), StatusCode::NOT_FOUND);
-        let leaked_internal = internal
-            .oneshot(req("/health/v1/h/health-only"))
-            .await
-            .expect("oneshot ok");
-        assert_eq!(leaked_internal.status(), StatusCode::NOT_FOUND);
     }
 }

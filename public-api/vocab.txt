@@ -448,6 +448,142 @@ impl core::marker::Unpin for vocab::error::CoreError
 impl core::marker::UnsafeUnpin for vocab::error::CoreError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreError
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreError
+pub mod vocab::http
+pub enum vocab::http::HttpConsistencyLevel
+pub vocab::http::HttpConsistencyLevel::DeviceLatent
+pub vocab::http::HttpConsistencyLevel::LocalOnly
+pub vocab::http::HttpConsistencyLevel::LocalTx
+pub vocab::http::HttpConsistencyLevel::OutboxFact
+pub vocab::http::HttpConsistencyLevel::WorkflowEventual
+impl core::clone::Clone for vocab::http::HttpConsistencyLevel
+pub fn vocab::http::HttpConsistencyLevel::clone(&self) -> vocab::http::HttpConsistencyLevel
+impl core::cmp::Eq for vocab::http::HttpConsistencyLevel
+impl core::cmp::PartialEq for vocab::http::HttpConsistencyLevel
+pub fn vocab::http::HttpConsistencyLevel::eq(&self, &vocab::http::HttpConsistencyLevel) -> bool
+impl core::fmt::Debug for vocab::http::HttpConsistencyLevel
+pub fn vocab::http::HttpConsistencyLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpConsistencyLevel
+impl core::marker::StructuralPartialEq for vocab::http::HttpConsistencyLevel
+impl core::marker::Freeze for vocab::http::HttpConsistencyLevel
+impl core::marker::Send for vocab::http::HttpConsistencyLevel
+impl core::marker::Sync for vocab::http::HttpConsistencyLevel
+impl core::marker::Unpin for vocab::http::HttpConsistencyLevel
+impl core::marker::UnsafeUnpin for vocab::http::HttpConsistencyLevel
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpConsistencyLevel
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpConsistencyLevel
+#[repr(u8)] pub enum vocab::http::HttpEffectKind
+pub vocab::http::HttpEffectKind::Auth
+pub vocab::http::HttpEffectKind::CrossTenantAudit
+pub vocab::http::HttpEffectKind::Outbox
+pub vocab::http::HttpEffectKind::Projection
+pub vocab::http::HttpEffectKind::Publish
+pub vocab::http::HttpEffectKind::Read
+pub vocab::http::HttpEffectKind::Reconcile
+pub vocab::http::HttpEffectKind::Saga
+pub vocab::http::HttpEffectKind::Transaction
+pub vocab::http::HttpEffectKind::Worker
+pub vocab::http::HttpEffectKind::Workflow
+pub vocab::http::HttpEffectKind::Write
+impl core::clone::Clone for vocab::http::HttpEffectKind
+pub fn vocab::http::HttpEffectKind::clone(&self) -> vocab::http::HttpEffectKind
+impl core::cmp::Eq for vocab::http::HttpEffectKind
+impl core::cmp::PartialEq for vocab::http::HttpEffectKind
+pub fn vocab::http::HttpEffectKind::eq(&self, &vocab::http::HttpEffectKind) -> bool
+impl core::fmt::Debug for vocab::http::HttpEffectKind
+pub fn vocab::http::HttpEffectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpEffectKind
+impl core::marker::StructuralPartialEq for vocab::http::HttpEffectKind
+impl core::marker::Freeze for vocab::http::HttpEffectKind
+impl core::marker::Send for vocab::http::HttpEffectKind
+impl core::marker::Sync for vocab::http::HttpEffectKind
+impl core::marker::Unpin for vocab::http::HttpEffectKind
+impl core::marker::UnsafeUnpin for vocab::http::HttpEffectKind
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpEffectKind
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectKind
+pub enum vocab::http::HttpRouteAuth
+pub vocab::http::HttpRouteAuth::Bootstrap
+pub vocab::http::HttpRouteAuth::ClientsOnly
+pub vocab::http::HttpRouteAuth::Permission(vocab::authz::RoutePermissionId)
+pub vocab::http::HttpRouteAuth::Public
+pub vocab::http::HttpRouteAuth::ServiceOwned
+impl core::clone::Clone for vocab::http::HttpRouteAuth
+pub fn vocab::http::HttpRouteAuth::clone(&self) -> vocab::http::HttpRouteAuth
+impl core::cmp::Eq for vocab::http::HttpRouteAuth
+impl core::cmp::PartialEq for vocab::http::HttpRouteAuth
+pub fn vocab::http::HttpRouteAuth::eq(&self, &vocab::http::HttpRouteAuth) -> bool
+impl core::fmt::Debug for vocab::http::HttpRouteAuth
+pub fn vocab::http::HttpRouteAuth::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpRouteAuth
+impl core::marker::StructuralPartialEq for vocab::http::HttpRouteAuth
+impl core::marker::Freeze for vocab::http::HttpRouteAuth
+impl core::marker::Send for vocab::http::HttpRouteAuth
+impl core::marker::Sync for vocab::http::HttpRouteAuth
+impl core::marker::Unpin for vocab::http::HttpRouteAuth
+impl core::marker::UnsafeUnpin for vocab::http::HttpRouteAuth
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteAuth
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteAuth
+pub struct vocab::http::HttpEffectProfile
+impl vocab::http::HttpEffectProfile
+pub const fn vocab::http::HttpEffectProfile::effects(&self) -> &'static [vocab::http::HttpEffectKind]
+pub const fn vocab::http::HttpEffectProfile::new(&'static [vocab::http::HttpEffectKind]) -> Self
+impl core::clone::Clone for vocab::http::HttpEffectProfile
+pub fn vocab::http::HttpEffectProfile::clone(&self) -> vocab::http::HttpEffectProfile
+impl core::cmp::Eq for vocab::http::HttpEffectProfile
+impl core::cmp::PartialEq for vocab::http::HttpEffectProfile
+pub fn vocab::http::HttpEffectProfile::eq(&self, &vocab::http::HttpEffectProfile) -> bool
+impl core::fmt::Debug for vocab::http::HttpEffectProfile
+pub fn vocab::http::HttpEffectProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpEffectProfile
+impl core::marker::StructuralPartialEq for vocab::http::HttpEffectProfile
+impl core::marker::Freeze for vocab::http::HttpEffectProfile
+impl core::marker::Send for vocab::http::HttpEffectProfile
+impl core::marker::Sync for vocab::http::HttpEffectProfile
+impl core::marker::Unpin for vocab::http::HttpEffectProfile
+impl core::marker::UnsafeUnpin for vocab::http::HttpEffectProfile
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpEffectProfile
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectProfile
+pub struct vocab::http::HttpRouteBinding<M>
+impl<M> vocab::http::HttpRouteBinding<M>
+pub const fn vocab::http::HttpRouteBinding<M>::evidence(&self) -> vocab::http::HttpRouteEvidence
+pub const fn vocab::http::HttpRouteBinding<M>::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+impl<M> core::clone::Clone for vocab::http::HttpRouteBinding<M>
+pub fn vocab::http::HttpRouteBinding<M>::clone(&self) -> Self
+impl<M> core::marker::Copy for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Freeze for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Send for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Sync for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Unpin for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::UnsafeUnpin for vocab::http::HttpRouteBinding<M>
+impl<M> core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteBinding<M>
+impl<M> core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteBinding<M>
+pub struct vocab::http::HttpRouteEvidence
+impl vocab::http::HttpRouteEvidence
+pub const fn vocab::http::HttpRouteEvidence::auth(&self) -> vocab::http::HttpRouteAuth
+pub const fn vocab::http::HttpRouteEvidence::consistency_level(&self) -> vocab::http::HttpConsistencyLevel
+pub const fn vocab::http::HttpRouteEvidence::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::http::HttpRouteEvidence::contract_id(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::effect_profile(&self) -> vocab::http::HttpEffectProfile
+pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteEvidence::method(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::path(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::resource(&self) -> core::option::Option<&'static str>
+pub const fn vocab::http::HttpRouteEvidence::self_scoped(&self) -> bool
+impl core::clone::Clone for vocab::http::HttpRouteEvidence
+pub fn vocab::http::HttpRouteEvidence::clone(&self) -> vocab::http::HttpRouteEvidence
+impl core::cmp::Eq for vocab::http::HttpRouteEvidence
+impl core::cmp::PartialEq for vocab::http::HttpRouteEvidence
+pub fn vocab::http::HttpRouteEvidence::eq(&self, &vocab::http::HttpRouteEvidence) -> bool
+impl core::fmt::Debug for vocab::http::HttpRouteEvidence
+pub fn vocab::http::HttpRouteEvidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpRouteEvidence
+impl core::marker::StructuralPartialEq for vocab::http::HttpRouteEvidence
+impl core::marker::Freeze for vocab::http::HttpRouteEvidence
+impl core::marker::Send for vocab::http::HttpRouteEvidence
+impl core::marker::Sync for vocab::http::HttpRouteEvidence
+impl core::marker::Unpin for vocab::http::HttpRouteEvidence
+impl core::marker::UnsafeUnpin for vocab::http::HttpRouteEvidence
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteEvidence
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteEvidence
 pub mod vocab::principal
 #[non_exhaustive] pub enum vocab::principal::PrincipalKind
 pub vocab::principal::PrincipalKind::Admin
@@ -831,6 +967,79 @@ impl core::marker::Unpin for vocab::authz::GrantPermission
 impl core::marker::UnsafeUnpin for vocab::authz::GrantPermission
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::GrantPermission
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::GrantPermission
+pub enum vocab::HttpConsistencyLevel
+pub vocab::HttpConsistencyLevel::DeviceLatent
+pub vocab::HttpConsistencyLevel::LocalOnly
+pub vocab::HttpConsistencyLevel::LocalTx
+pub vocab::HttpConsistencyLevel::OutboxFact
+pub vocab::HttpConsistencyLevel::WorkflowEventual
+impl core::clone::Clone for vocab::http::HttpConsistencyLevel
+pub fn vocab::http::HttpConsistencyLevel::clone(&self) -> vocab::http::HttpConsistencyLevel
+impl core::cmp::Eq for vocab::http::HttpConsistencyLevel
+impl core::cmp::PartialEq for vocab::http::HttpConsistencyLevel
+pub fn vocab::http::HttpConsistencyLevel::eq(&self, &vocab::http::HttpConsistencyLevel) -> bool
+impl core::fmt::Debug for vocab::http::HttpConsistencyLevel
+pub fn vocab::http::HttpConsistencyLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpConsistencyLevel
+impl core::marker::StructuralPartialEq for vocab::http::HttpConsistencyLevel
+impl core::marker::Freeze for vocab::http::HttpConsistencyLevel
+impl core::marker::Send for vocab::http::HttpConsistencyLevel
+impl core::marker::Sync for vocab::http::HttpConsistencyLevel
+impl core::marker::Unpin for vocab::http::HttpConsistencyLevel
+impl core::marker::UnsafeUnpin for vocab::http::HttpConsistencyLevel
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpConsistencyLevel
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpConsistencyLevel
+#[repr(u8)] pub enum vocab::HttpEffectKind
+pub vocab::HttpEffectKind::Auth
+pub vocab::HttpEffectKind::CrossTenantAudit
+pub vocab::HttpEffectKind::Outbox
+pub vocab::HttpEffectKind::Projection
+pub vocab::HttpEffectKind::Publish
+pub vocab::HttpEffectKind::Read
+pub vocab::HttpEffectKind::Reconcile
+pub vocab::HttpEffectKind::Saga
+pub vocab::HttpEffectKind::Transaction
+pub vocab::HttpEffectKind::Worker
+pub vocab::HttpEffectKind::Workflow
+pub vocab::HttpEffectKind::Write
+impl core::clone::Clone for vocab::http::HttpEffectKind
+pub fn vocab::http::HttpEffectKind::clone(&self) -> vocab::http::HttpEffectKind
+impl core::cmp::Eq for vocab::http::HttpEffectKind
+impl core::cmp::PartialEq for vocab::http::HttpEffectKind
+pub fn vocab::http::HttpEffectKind::eq(&self, &vocab::http::HttpEffectKind) -> bool
+impl core::fmt::Debug for vocab::http::HttpEffectKind
+pub fn vocab::http::HttpEffectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpEffectKind
+impl core::marker::StructuralPartialEq for vocab::http::HttpEffectKind
+impl core::marker::Freeze for vocab::http::HttpEffectKind
+impl core::marker::Send for vocab::http::HttpEffectKind
+impl core::marker::Sync for vocab::http::HttpEffectKind
+impl core::marker::Unpin for vocab::http::HttpEffectKind
+impl core::marker::UnsafeUnpin for vocab::http::HttpEffectKind
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpEffectKind
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectKind
+pub enum vocab::HttpRouteAuth
+pub vocab::HttpRouteAuth::Bootstrap
+pub vocab::HttpRouteAuth::ClientsOnly
+pub vocab::HttpRouteAuth::Permission(vocab::authz::RoutePermissionId)
+pub vocab::HttpRouteAuth::Public
+pub vocab::HttpRouteAuth::ServiceOwned
+impl core::clone::Clone for vocab::http::HttpRouteAuth
+pub fn vocab::http::HttpRouteAuth::clone(&self) -> vocab::http::HttpRouteAuth
+impl core::cmp::Eq for vocab::http::HttpRouteAuth
+impl core::cmp::PartialEq for vocab::http::HttpRouteAuth
+pub fn vocab::http::HttpRouteAuth::eq(&self, &vocab::http::HttpRouteAuth) -> bool
+impl core::fmt::Debug for vocab::http::HttpRouteAuth
+pub fn vocab::http::HttpRouteAuth::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpRouteAuth
+impl core::marker::StructuralPartialEq for vocab::http::HttpRouteAuth
+impl core::marker::Freeze for vocab::http::HttpRouteAuth
+impl core::marker::Send for vocab::http::HttpRouteAuth
+impl core::marker::Sync for vocab::http::HttpRouteAuth
+impl core::marker::Unpin for vocab::http::HttpRouteAuth
+impl core::marker::UnsafeUnpin for vocab::http::HttpRouteAuth
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteAuth
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteAuth
 #[non_exhaustive] pub enum vocab::InternalAttr
 pub vocab::InternalAttr::Int(&'static str, i64)
 pub vocab::InternalAttr::Str(&'static str, alloc::string::String)
@@ -1225,6 +1434,68 @@ impl core::marker::Unpin for vocab::epoch::Epoch
 impl core::marker::UnsafeUnpin for vocab::epoch::Epoch
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::epoch::Epoch
 impl core::panic::unwind_safe::UnwindSafe for vocab::epoch::Epoch
+pub struct vocab::HttpEffectProfile
+impl vocab::http::HttpEffectProfile
+pub const fn vocab::http::HttpEffectProfile::effects(&self) -> &'static [vocab::http::HttpEffectKind]
+pub const fn vocab::http::HttpEffectProfile::new(&'static [vocab::http::HttpEffectKind]) -> Self
+impl core::clone::Clone for vocab::http::HttpEffectProfile
+pub fn vocab::http::HttpEffectProfile::clone(&self) -> vocab::http::HttpEffectProfile
+impl core::cmp::Eq for vocab::http::HttpEffectProfile
+impl core::cmp::PartialEq for vocab::http::HttpEffectProfile
+pub fn vocab::http::HttpEffectProfile::eq(&self, &vocab::http::HttpEffectProfile) -> bool
+impl core::fmt::Debug for vocab::http::HttpEffectProfile
+pub fn vocab::http::HttpEffectProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpEffectProfile
+impl core::marker::StructuralPartialEq for vocab::http::HttpEffectProfile
+impl core::marker::Freeze for vocab::http::HttpEffectProfile
+impl core::marker::Send for vocab::http::HttpEffectProfile
+impl core::marker::Sync for vocab::http::HttpEffectProfile
+impl core::marker::Unpin for vocab::http::HttpEffectProfile
+impl core::marker::UnsafeUnpin for vocab::http::HttpEffectProfile
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpEffectProfile
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectProfile
+pub struct vocab::HttpRouteBinding<M>
+impl<M> vocab::http::HttpRouteBinding<M>
+pub const fn vocab::http::HttpRouteBinding<M>::evidence(&self) -> vocab::http::HttpRouteEvidence
+pub const fn vocab::http::HttpRouteBinding<M>::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+impl<M> core::clone::Clone for vocab::http::HttpRouteBinding<M>
+pub fn vocab::http::HttpRouteBinding<M>::clone(&self) -> Self
+impl<M> core::marker::Copy for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Freeze for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Send for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Sync for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::Unpin for vocab::http::HttpRouteBinding<M>
+impl<M> core::marker::UnsafeUnpin for vocab::http::HttpRouteBinding<M>
+impl<M> core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteBinding<M>
+impl<M> core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteBinding<M>
+pub struct vocab::HttpRouteEvidence
+impl vocab::http::HttpRouteEvidence
+pub const fn vocab::http::HttpRouteEvidence::auth(&self) -> vocab::http::HttpRouteAuth
+pub const fn vocab::http::HttpRouteEvidence::consistency_level(&self) -> vocab::http::HttpConsistencyLevel
+pub const fn vocab::http::HttpRouteEvidence::contract(&self) -> vocab::contract::binding::ContractBinding
+pub const fn vocab::http::HttpRouteEvidence::contract_id(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::effect_profile(&self) -> vocab::http::HttpEffectProfile
+pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteEvidence::method(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::path(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::resource(&self) -> core::option::Option<&'static str>
+pub const fn vocab::http::HttpRouteEvidence::self_scoped(&self) -> bool
+impl core::clone::Clone for vocab::http::HttpRouteEvidence
+pub fn vocab::http::HttpRouteEvidence::clone(&self) -> vocab::http::HttpRouteEvidence
+impl core::cmp::Eq for vocab::http::HttpRouteEvidence
+impl core::cmp::PartialEq for vocab::http::HttpRouteEvidence
+pub fn vocab::http::HttpRouteEvidence::eq(&self, &vocab::http::HttpRouteEvidence) -> bool
+impl core::fmt::Debug for vocab::http::HttpRouteEvidence
+pub fn vocab::http::HttpRouteEvidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpRouteEvidence
+impl core::marker::StructuralPartialEq for vocab::http::HttpRouteEvidence
+impl core::marker::Freeze for vocab::http::HttpRouteEvidence
+impl core::marker::Send for vocab::http::HttpRouteEvidence
+impl core::marker::Sync for vocab::http::HttpRouteEvidence
+impl core::marker::Unpin for vocab::http::HttpRouteEvidence
+impl core::marker::UnsafeUnpin for vocab::http::HttpRouteEvidence
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteEvidence
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteEvidence
 pub struct vocab::Limit(_)
 impl vocab::query::Limit
 pub fn vocab::query::Limit::get(&self) -> u16

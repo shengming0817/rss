@@ -3,49 +3,11 @@
 /// HTTP serving metadata generated from `contract.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpSpec {
-    pub contract_id: &'static str,
-    pub contract: ::vocab::ContractBinding,
-    pub consistency_level: HttpConsistencyLevel,
-    pub effect_profile: EffectProfile,
+    pub route: ::vocab::HttpRouteEvidence,
     pub local_tx: Option<LocalTxSpec>,
-    pub path: &'static str,
-    pub method: &'static str,
-    pub auth: HttpAuthSpec,
-    pub resource: Option<&'static str>,
-    pub self_scoped: bool,
     pub resource_sharing: HttpResourceSharingSpec,
     pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpConsistencyLevel {
-    LocalOnly,
-    LocalTx,
-    OutboxFact,
-    WorkflowEventual,
-    DeviceLatent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EffectProfile {
-    pub effects: &'static [EffectKind],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectKind {
-    Read,
-    Auth,
-    Projection,
-    Write,
-    Transaction,
-    Outbox,
-    Publish,
-    Workflow,
-    Saga,
-    Reconcile,
-    Worker,
-    CrossTenantAudit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,22 +36,6 @@ pub enum LocalTxRetry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTxCommitUnknown {
     NotRetryable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HttpAuthSpec {
-    pub mode: HttpAuthMode,
-    pub reason: Option<&'static str>,
-    pub permission: Option<::vocab::RoutePermissionId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpAuthMode {
-    Permission,
-    Public,
-    Bootstrap,
-    ClientsOnly,
-    ServiceOwned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -62,7 +62,8 @@ domain 实体经 DTO 转换出 wire（`From`/`TryFrom` impl）。跨聚合通过
 
 ## 安全检查点
 
-- 新端点默认鉴权；public 降级仅 `Primary` listener，且只能经 `httpserve::PrimaryRoute { opt_out: Some(RouteAuthOptOut::Public), .. }` 显式声明（plain `Route` 类型层无 opt-out 字段，AUTH-OPTOUT-PRIMARYONLY-01）。
+- 新端点默认鉴权；public 降级仅 `Primary` listener，且只能由 generated
+  `HttpRouteEvidence::auth() == HttpRouteAuth::Public` 经 `GeneratedPrimaryEndpoint` 推导；禁止手写 opt-out。
 - `/internal/v1/` 必须声明 caller、鉴权和网络隔离。
 - 列表接口强制分页，`limit` 上限 500。
 - 生产配置禁止 localhost fallback 和 noop publisher。

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/primary_cannot_mount_nonprimary.rs:32:77
+   |
+32 |     let _primary = unfinalized_for_test::<httpserve::Primary>(|rb| rb.mount(endpoint()));
+   |                                                                       ----- ^^^^^^^^^^ expected `GeneratedPrimaryEndpoint<()>`, found `GeneratedEndpoint<()>`
+   |                                                                       |
+   |                                                                       arguments to this method are incorrect
+   |
+   = note: expected struct `GeneratedPrimaryEndpoint<()>`
+              found struct `GeneratedEndpoint<()>`
+note: method defined here
+  --> src/routes.rs
+   |
+   |     pub fn mount(self, endpoint: GeneratedPrimaryEndpoint<()>) -> Result<Self, RouteGroupError> {
+   |            ^^^^^

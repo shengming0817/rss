@@ -15,24 +15,35 @@ route group 类型位于 `httpserve`。
 route-group，ROUTE-LISTENER-TYPED-01）。register 闭包签名 `FnOnce(httpserve::ListenerRouter<L>) ->
 Result<httpserve::ListenerRouter<L>, KernelError>`，错误必须冒泡到 bootstrap；禁止 `expect` / `unwrap` 风格 panic。
 
-业务路由经传入的 listener-typed builder `rb: ListenerRouter<L>` 二选一挂载（**`mount`/`mount_primary` 是
-`ListenerRouter<L>` 的方法**，非自由函数；裸 `axum::Router` 不出 httpserve，ADR-009），均承载 method、path、contract ID：
+业务路由必须先把 generated evidence 与 handler 原子绑定成 endpoint，再交给 listener-typed builder：
 
-- 非-`Primary` listener（`Internal` / `Admin` / `Health`）：`rb.mount(httpserve::Route { method, path, contract_id }, handler)`——`Route` 类型层**无** opt-out 字段；`mount` 仅 `L: NonPrimaryListener` 可用。
-- `Primary` listener：`rb.mount_primary(httpserve::PrimaryRoute { .., opt_out }, handler)`——`PrimaryRoute` 是**唯一**可携 opt-out 的 route 类型；`mount_primary` 仅 `ListenerRouter<Primary>` 可用。
+- 非-`Primary` generated route（`Internal` / `Admin`）：`GeneratedEndpoint::new(ROUTE, handler)`。
+- `Primary` generated route：`GeneratedPrimaryEndpoint::new(ROUTE, handler)`；`ROUTE` 是 codegen 产出的
+  `HttpRouteBinding<RouteMarker>`，handler 首 extractor 必须是同一契约的 `ContractMarker<RouteMarker>`；
+  method/path/auth/resource scope 全由 binding 内的同一 `HttpRouteEvidence` 推导。`SPEC.route` 仅供元数据查询，
+  不再是 production endpoint 构造入口。
+- stateful handler 必须在 endpoint 上调用 `.with_state(state)`；`ListenerRouter::mount` 只接受 state 已闭合的
+  endpoint，不接受 raw `MethodRouter`、path、method 或 auth 字段。
+- `Health` 不接受业务 mount；组合根只能调用 `httpserve::health::routes(report, render)` 得到固定
+  `/health/v1/{healthz,readyz,metrics}`。
 
 示例（域 crate `Domain::init`）：
 ```rust
+async fn login_handler(
+    _: httpserve::ContractMarker<generated::http::identity_v1::login::RouteMarker>,
+    // 其余 Axum extractors ...
+) { /* ... */ }
+
 reg.route_group::<httpserve::Primary>("/api/v1/identity", |rb| {
-    Ok(rb.mount_primary(
-        httpserve::PrimaryRoute { method: Method::POST, path: "/login",
-            contract_id: "identity.login", opt_out: Some(RouteAuthOptOut::Public) },
-        post(login_handler),
-    ))
+    let endpoint = httpserve::GeneratedPrimaryEndpoint::new(LOGIN_HTTP_ROUTE, login_handler)?
+        .with_state(login_service);
+    Ok(rb.mount(endpoint)?)
 })?;
 ```
 
-Public 和 password-reset-exempt 只能经 `PrimaryRoute.opt_out`（`Some(RouteAuthOptOut::Public | PasswordResetExempt)`）在 `Primary` listener 上声明；plain `Route` 类型层无此字段，且非-Primary listener 拿不到 `mount_primary`（input-struct-field-exclusion + typed function choice，Hard，INVARIANT AUTH-OPTOUT-PRIMARYONLY-01 / ROUTE-LISTENER-TYPED-01）。
+Public 只能由 `ROUTE.evidence().auth() == HttpRouteAuth::Public` 经 `GeneratedPrimaryEndpoint` 推导；没有公开 opt-out
+拼装 API。非-Primary listener 无法接收 `GeneratedPrimaryEndpoint`（typed endpoint choice，Hard，INVARIANT
+AUTH-OPTOUT-PRIMARYONLY-01 / ROUTE-LISTENER-TYPED-01）。
 
 `finalize_routes` 产出 per-listener `httpserve::UnfinalizedRoutes`（**无 public bindable 出口**）；组合根经 `httpserve::finalize_auth` 换 `AuthenticatedRoutes` 后才可 `into_make_service` bind——未跑 auth 装配的 router 类型层不可 bind（#1113 funnel，ROUTE-AUTH-FUNNEL-01/02）。
 

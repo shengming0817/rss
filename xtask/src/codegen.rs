@@ -4,6 +4,7 @@
 //! 且无孤儿文件（删契约残留）。Medium（CI 门，`cargo xtask codegen --check`）。
 //! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
 //! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
+//! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
 //! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
@@ -561,18 +562,25 @@ pub const CONTRACT: ::vocab::ContractBinding =
             );
         }
     }
-    let mode = match auth.mode {
-        HttpAuthMode::Permission => "Permission",
-        HttpAuthMode::Public => "Public",
-        HttpAuthMode::Bootstrap => "Bootstrap",
-        HttpAuthMode::ClientsOnly => "ClientsOnly",
-        HttpAuthMode::ServiceOwned => "ServiceOwned",
+    let auth = match auth.mode {
+        HttpAuthMode::Permission => {
+            let permission = auth
+                .permission
+                .as_deref()
+                .context("active permission http 契约缺 permission（codegen fail-closed）")?;
+            format!(
+                "::vocab::HttpRouteAuth::Permission({})",
+                render_route_permission_expr(permission, "permission")?
+            )
+        }
+        HttpAuthMode::Public => "::vocab::HttpRouteAuth::Public".to_string(),
+        HttpAuthMode::Bootstrap => "::vocab::HttpRouteAuth::Bootstrap".to_string(),
+        HttpAuthMode::ClientsOnly => "::vocab::HttpRouteAuth::ClientsOnly".to_string(),
+        HttpAuthMode::ServiceOwned => "::vocab::HttpRouteAuth::ServiceOwned".to_string(),
     };
     let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
-    let effect_profile = render_http_effect_profile_consts(c, sup)?;
+    let effect_profile = render_http_effect_profile_consts(c)?;
     let local_tx = render_http_local_tx(c, sup)?;
-    let reason = render_option_str(auth.reason.as_deref(), "reason")?;
-    let permission = render_option_route_permission_expr(auth.permission.as_deref(), "permission")?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
     let resource_present = http
@@ -685,22 +693,25 @@ pub const PATH: &str = "{path}";
 pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fields_body}];
 {effect_profile}
 
+/// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+pub enum RouteMarker {{}}
+
+/// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> = ::vocab::HttpRouteBinding::from_static(
+    CONTRACT,
+    PATH,
+    "{method}",
+    {auth},
+    {resource},
+    {self_scoped},
+    ::vocab::HttpConsistencyLevel::{consistency_level},
+    EFFECT_PROFILE,
+);
+
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
-    contract_id: CONTRACT_ID,
-    contract: CONTRACT,
-    consistency_level: {sup}HttpConsistencyLevel::{consistency_level},
-    effect_profile: EFFECT_PROFILE,
+    route: ROUTE.evidence(),
     local_tx: {local_tx},
-    path: PATH,
-    method: "{method}",
-    auth: {sup}HttpAuthSpec {{
-        mode: {sup}HttpAuthMode::{mode},
-        reason: {reason},
-        permission: {permission},
-    }},
-    resource: {resource},
-    self_scoped: {self_scoped},
     resource_sharing: {sup}HttpResourceSharingSpec {{
         mode: {sup}HttpResourceSharingMode::{resource_sharing_mode},
         reason: {resource_sharing_reason},
@@ -724,7 +735,7 @@ fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
     }
 }
 
-fn render_http_effect_profile_consts(c: &DiscoveredContract, sup: &str) -> Result<String> {
+fn render_http_effect_profile_consts(c: &DiscoveredContract) -> Result<String> {
     let profile = c
         .manifest
         .effect_profile
@@ -741,7 +752,7 @@ fn render_http_effect_profile_consts(c: &DiscoveredContract, sup: &str) -> Resul
             bail!("active http 契约 [effectProfile].effects 含重复值（codegen fail-closed）");
         }
         effects.push(format!(
-            "    {sup}EffectKind::{}",
+            "    ::vocab::HttpEffectKind::{}",
             render_http_effect_kind(*effect)
         ));
     }
@@ -749,10 +760,11 @@ fn render_http_effect_profile_consts(c: &DiscoveredContract, sup: &str) -> Resul
     Ok(format!(
         r#"
 /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const EFFECTS: &[{sup}EffectKind] = &[{effects_body}];
+pub const EFFECTS: &[::vocab::HttpEffectKind] = &[{effects_body}];
 
 /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const EFFECT_PROFILE: {sup}EffectProfile = {sup}EffectProfile {{ effects: EFFECTS }};
+pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile =
+    ::vocab::HttpEffectProfile::new(EFFECTS);
 "#
     ))
 }
@@ -830,16 +842,6 @@ fn render_option_str(value: Option<&str>, field: &str) -> Result<String> {
             }
             Ok(format!("Some(\"{value}\")"))
         }
-        None => Ok("None".to_string()),
-    }
-}
-
-fn render_option_route_permission_expr(value: Option<&str>, field: &str) -> Result<String> {
-    match value {
-        Some(value) => Ok(format!(
-            "Some({})",
-            render_route_permission_expr(value, field)?
-        )),
         None => Ok("None".to_string()),
     }
 }
@@ -1523,49 +1525,11 @@ const HTTP_SPEC_DEF: &str = r#"
 /// HTTP serving metadata generated from `contract.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpSpec {
-    pub contract_id: &'static str,
-    pub contract: ::vocab::ContractBinding,
-    pub consistency_level: HttpConsistencyLevel,
-    pub effect_profile: EffectProfile,
+    pub route: ::vocab::HttpRouteEvidence,
     pub local_tx: Option<LocalTxSpec>,
-    pub path: &'static str,
-    pub method: &'static str,
-    pub auth: HttpAuthSpec,
-    pub resource: Option<&'static str>,
-    pub self_scoped: bool,
     pub resource_sharing: HttpResourceSharingSpec,
     pub projection_fields: &'static [HttpProjectionFieldSpec],
     pub headers: &'static [HttpHeaderSpec],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpConsistencyLevel {
-    LocalOnly,
-    LocalTx,
-    OutboxFact,
-    WorkflowEventual,
-    DeviceLatent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EffectProfile {
-    pub effects: &'static [EffectKind],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectKind {
-    Read,
-    Auth,
-    Projection,
-    Write,
-    Transaction,
-    Outbox,
-    Publish,
-    Workflow,
-    Saga,
-    Reconcile,
-    Worker,
-    CrossTenantAudit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1594,22 +1558,6 @@ pub enum LocalTxRetry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTxCommitUnknown {
     NotRetryable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HttpAuthSpec {
-    pub mode: HttpAuthMode,
-    pub reason: Option<&'static str>,
-    pub permission: Option<::vocab::RoutePermissionId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpAuthMode {
-    Permission,
-    Public,
-    Bootstrap,
-    ClientsOnly,
-    ServiceOwned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2970,7 +2918,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_emits_http_consistency_level_into_spec() -> anyhow::Result<()> {
+    fn codegen_emits_http_consistency_level_inside_route_evidence() -> anyhow::Result<()> {
         let root = unique_tmp("codegen");
         seed_http(&root)?;
         write_seed_active_http(
@@ -2987,15 +2935,45 @@ mod tests {
         let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
         let _ = std::fs::remove_dir_all(&root);
 
-        assert_generated_contains(
-            &root_mod,
-            "pub enum HttpConsistencyLevel",
-            "HTTP root module should expose closed consistency metadata enum",
+        assert!(
+            !root_mod.contains("pub enum HttpConsistencyLevel"),
+            "generated must not mirror the canonical vocab consistency enum"
         );
         assert_generated_contains(
             &rendered,
-            "consistency_level: super::HttpConsistencyLevel::LocalOnly",
-            "endpoint SPEC should carry manifest consistencyLevel",
+            "::vocab::HttpConsistencyLevel::LocalOnly",
+            "route evidence should carry manifest consistencyLevel through vocab",
+        );
+        assert_generated_contains(
+            &root_mod,
+            "pub route: ::vocab::HttpRouteEvidence",
+            "HttpSpec should expose one atomic route proof",
+        );
+        for removed in [
+            "pub contract_id:",
+            "pub contract:",
+            "pub consistency_level:",
+            "pub effect_profile:",
+            "pub path:",
+            "pub method:",
+            "pub auth:",
+            "pub resource:",
+            "pub self_scoped:",
+        ] {
+            assert!(
+                !root_mod.contains(removed),
+                "parallel HttpSpec field must be removed: {removed}"
+            );
+        }
+        assert_generated_contains(
+            &rendered,
+            "pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker>",
+            "endpoint should expose a contract-specific typed route binding",
+        );
+        assert_generated_contains(
+            &rendered,
+            "route: ROUTE.evidence()",
+            "HttpSpec should derive runtime evidence from the typed binding",
         );
         Ok(())
     }
@@ -3018,35 +2996,38 @@ mod tests {
         let root_mod = std::fs::read_to_string(gen_src.join("http/mod.rs"))?;
         let _ = std::fs::remove_dir_all(&root);
 
-        assert_generated_contains(
-            &root_mod,
-            "pub struct EffectProfile",
-            "HTTP root module should expose generated effect profile metadata",
+        assert!(
+            !root_mod.contains("pub struct EffectProfile"),
+            "generated must not mirror the canonical vocab effect profile"
         );
-        assert_generated_contains(
-            &root_mod,
-            "pub enum EffectKind",
-            "HTTP root module should expose closed effect kind enum",
-        );
-        assert_generated_contains(
-            &rendered,
-            "pub const EFFECTS: &[super::EffectKind]",
-            "endpoint module should emit effect kind slice",
+        assert!(
+            !root_mod.contains("pub enum EffectKind"),
+            "generated must not mirror the canonical vocab effect enum"
         );
         assert_generated_contains(
             &rendered,
-            "super::EffectKind::Auth",
+            "pub const EFFECTS: &[::vocab::HttpEffectKind]",
+            "endpoint module should emit canonical vocab effect kind slice",
+        );
+        assert_generated_contains(
+            &rendered,
+            "::vocab::HttpEffectKind::Auth",
             "endpoint effects should include auth",
         );
         assert_generated_contains(
             &rendered,
-            "super::EffectKind::Read",
+            "::vocab::HttpEffectKind::Read",
             "endpoint effects should include read",
         );
         assert_generated_contains(
             &rendered,
-            "effect_profile: EFFECT_PROFILE",
-            "endpoint SPEC should carry generated effect profile",
+            "pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);",
+            "endpoint module should construct the validated canonical profile",
+        );
+        assert_generated_contains(
+            &rendered,
+            "    EFFECT_PROFILE,",
+            "route evidence should carry the generated effect profile",
         );
         assert_generated_contains(
             &rendered,
@@ -3108,8 +3089,8 @@ mod tests {
         ] {
             assert_generated_contains(
                 &rendered,
-                &format!("super::EffectKind::{variant}"),
-                "all manifest effect values should render to closed generated variants",
+                &format!("::vocab::HttpEffectKind::{variant}"),
+                "all manifest effect values should render to canonical vocab variants",
             );
         }
         Ok(())

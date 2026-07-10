@@ -197,34 +197,37 @@ pub mod login {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
-        super::super::EffectKind::Outbox,
-        super::super::EffectKind::Publish,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::OutboxFact,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Public,
-            reason: Some("login is pre-auth; tenant scope is populated from X-Tenant-ID"),
-            permission: None,
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -375,37 +378,40 @@ pub mod logout {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentitySessionWrite),
+            None,
+            true,
+            ::vocab::HttpConsistencyLevel::LocalTx,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalTx,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: super::super::LocalTxBoundary::SingleDomain,
             tx_model: super::super::LocalTxModel::TenantScopedUow,
             retry: super::super::LocalTxRetry::BoundedTransient,
             commit_unknown: super::super::LocalTxCommitUnknown::NotRetryable,
         }),
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentitySessionWrite),
-        },
-        resource: None,
-        self_scoped: true,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -560,37 +566,40 @@ pub mod password_change {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileWrite),
+            None,
+            true,
+            ::vocab::HttpConsistencyLevel::LocalTx,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalTx,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: super::super::LocalTxBoundary::SingleDomain,
             tx_model: super::super::LocalTxModel::TenantScopedUow,
             retry: super::super::LocalTxRetry::BoundedTransient,
             commit_unknown: super::super::LocalTxCommitUnknown::NotRetryable,
         }),
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityProfileWrite),
-        },
-        resource: None,
-        self_scoped: true,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -2438,34 +2447,37 @@ pub mod policies_create {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
-        super::super::EffectKind::Outbox,
-        super::super::EffectKind::Publish,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyCreate),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::OutboxFact,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityPolicyCreate),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -2627,34 +2639,39 @@ pub mod policies_deactivate {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
-        super::super::EffectKind::Outbox,
-        super::super::EffectKind::Publish,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Permission(
+                ::vocab::RoutePermissionId::IdentityPolicyDeactivate,
+            ),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::OutboxFact,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityPolicyDeactivate),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -3546,31 +3563,32 @@ pub mod policies_get {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Read,
-    ];
+    pub const EFFECTS: &[::vocab::HttpEffectKind] =
+        &[::vocab::HttpEffectKind::Auth, ::vocab::HttpEffectKind::Read];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "GET",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "GET",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityPolicyRead),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -4517,31 +4535,32 @@ pub mod policies_list {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Read,
-    ];
+    pub const EFFECTS: &[::vocab::HttpEffectKind] =
+        &[::vocab::HttpEffectKind::Auth, ::vocab::HttpEffectKind::Read];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "GET",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "GET",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityPolicyRead),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -6391,34 +6410,37 @@ pub mod policies_update {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
-        super::super::EffectKind::Outbox,
-        super::super::EffectKind::Publish,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "PUT",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyUpdate),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::OutboxFact,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "PUT",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityPolicyUpdate),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -6702,32 +6724,35 @@ pub mod profile {
     ];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Read,
-        super::super::EffectKind::Projection,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Read,
+        ::vocab::HttpEffectKind::Projection,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "GET",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileRead),
+            None,
+            true,
+            ::vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "GET",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityProfileRead),
-        },
-        resource: None,
-        self_scoped: true,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -6903,39 +6928,40 @@ pub mod refresh {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::LocalTx,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalTx,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: super::super::LocalTxBoundary::SingleDomain,
             tx_model: super::super::LocalTxModel::TenantScopedUow,
             retry: super::super::LocalTxRetry::BoundedTransient,
             commit_unknown: super::super::LocalTxCommitUnknown::NotRetryable,
         }),
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Public,
-            reason: Some(
-                "refresh presents the refresh token as its own credential; access token may already be expired",
-            ),
-            permission: None,
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -7084,34 +7110,37 @@ pub mod roles_assign {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
-        super::super::EffectKind::Outbox,
-        super::super::EffectKind::Publish,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "POST",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleAssign),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::OutboxFact,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "POST",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityRoleAssign),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -7333,31 +7362,32 @@ pub mod roles_list {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Read,
-    ];
+    pub const EFFECTS: &[::vocab::HttpEffectKind] =
+        &[::vocab::HttpEffectKind::Auth, ::vocab::HttpEffectKind::Read];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "GET",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRead),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::LocalOnly,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "GET",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityRoleRead),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,
@@ -7497,34 +7527,37 @@ pub mod roles_revoke {
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
     /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECTS: &[super::super::EffectKind] = &[
-        super::super::EffectKind::Auth,
-        super::super::EffectKind::Write,
-        super::super::EffectKind::Transaction,
-        super::super::EffectKind::Outbox,
-        super::super::EffectKind::Publish,
+    pub const EFFECTS: &[::vocab::HttpEffectKind] = &[
+        ::vocab::HttpEffectKind::Auth,
+        ::vocab::HttpEffectKind::Write,
+        ::vocab::HttpEffectKind::Transaction,
+        ::vocab::HttpEffectKind::Outbox,
+        ::vocab::HttpEffectKind::Publish,
     ];
 
     /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const EFFECT_PROFILE: super::super::EffectProfile =
-        super::super::EffectProfile { effects: EFFECTS };
+    pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+    /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+    pub enum RouteMarker {}
+
+    /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+        ::vocab::HttpRouteBinding::from_static(
+            CONTRACT,
+            PATH,
+            "DELETE",
+            ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRevoke),
+            None,
+            false,
+            ::vocab::HttpConsistencyLevel::OutboxFact,
+            EFFECT_PROFILE,
+        );
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
-        contract_id: CONTRACT_ID,
-        contract: CONTRACT,
-        consistency_level: super::super::HttpConsistencyLevel::OutboxFact,
-        effect_profile: EFFECT_PROFILE,
+        route: ROUTE.evidence(),
         local_tx: None,
-        path: PATH,
-        method: "DELETE",
-        auth: super::super::HttpAuthSpec {
-            mode: super::super::HttpAuthMode::Permission,
-            reason: None,
-            permission: Some(::vocab::RoutePermissionId::IdentityRoleRevoke),
-        },
-        resource: None,
-        self_scoped: false,
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,

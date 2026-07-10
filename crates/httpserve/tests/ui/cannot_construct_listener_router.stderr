@@ -6,5 +6,21 @@ error[E0624]: associated function `new` is private
   |
  ::: src/routes.rs
   |
-  |     pub(crate) fn new(router: axum::Router) -> Self {
-  |     ----------------------------------------------- private associated function defined here
+  |     pub(crate) fn new(router: axum::Router, prefix: &'static str) -> Self {
+  |     --------------------------------------------------------------------- private associated function defined here
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+ --> tests/ui/cannot_construct_listener_router.rs:6:15
+  |
+6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new());
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------------- argument #2 of type `&'static str` is missing
+  |
+note: associated function defined here
+ --> src/routes.rs
+  |
+  |     pub(crate) fn new(router: axum::Router, prefix: &'static str) -> Self {
+  |                   ^^^
+help: provide the argument
+  |
+6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new(), /* &'static str */);
+  |                                                                                     ++++++++++++++++++++

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/raw_method_router_cannot_mount.rs:7:18
+  |
+7 |         rb.mount(axum::routing::get(|| async { "raw" }))
+  |            ----- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `GeneratedEndpoint<()>`, found `MethodRouter<_>`
+  |            |
+  |            arguments to this method are incorrect
+  |
+  = note: expected struct `GeneratedEndpoint<()>`
+             found struct `MethodRouter<_>`
+note: method defined here
+ --> src/routes.rs
+  |
+  |     pub fn mount(self, endpoint: GeneratedEndpoint<()>) -> Result<Self, RouteGroupError> {
+  |            ^^^^^

@@ -24,7 +24,7 @@ use generated::http::identity_v1::{
 use generated::http::{HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
-use vocab::TenantId;
+use vocab::{HttpRouteAuth, TenantId};
 
 use super::unix_secs;
 use crate::domain::{
@@ -493,8 +493,8 @@ fn reject_global_resource_policy(
 
 fn route_scope_is_global_resource_in(scope: &PolicyRouteScope, specs: &[HttpSpec]) -> bool {
     specs.iter().any(|spec| {
-        spec.contract_id == scope.contract_id()
-            && spec.auth.permission == Some(scope.permission())
+        spec.route.contract_id() == scope.contract_id()
+            && spec.route.auth() == HttpRouteAuth::Permission(scope.permission())
             && spec.resource_sharing.mode == HttpResourceSharingMode::Global
     })
 }
@@ -992,30 +992,25 @@ mod tests {
 
     fn synthetic_global_spec() -> HttpSpec {
         HttpSpec {
-            contract_id: "identity.global-resource",
-            contract: vocab::ContractBinding::from_static(
-                "identity",
-                "identity.global-resource",
-                "v1",
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            route: vocab::HttpRouteEvidence::from_static(
+                vocab::ContractBinding::from_static(
+                    "identity",
+                    "identity.global-resource",
+                    "v1",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+                "/api/v1/identity/global/{resourceId}",
+                "GET",
+                vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),
+                Some("resourceId"),
+                false,
+                vocab::HttpConsistencyLevel::LocalOnly,
+                vocab::HttpEffectProfile::new(&[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Read,
+                ]),
             ),
-            consistency_level: generated::http::HttpConsistencyLevel::LocalOnly,
-            effect_profile: generated::http::EffectProfile {
-                effects: &[
-                    generated::http::EffectKind::Auth,
-                    generated::http::EffectKind::Read,
-                ],
-            },
             local_tx: None,
-            path: "/api/v1/identity/global/{resourceId}",
-            method: "GET",
-            auth: generated::http::HttpAuthSpec {
-                mode: generated::http::HttpAuthMode::Permission,
-                reason: None,
-                permission: Some(vocab::RoutePermissionId::IdentityPolicyRead),
-            },
-            resource: Some("resourceId"),
-            self_scoped: false,
             resource_sharing: generated::http::HttpResourceSharingSpec {
                 mode: HttpResourceSharingMode::Global,
                 reason: Some("shared synthetic test route"),

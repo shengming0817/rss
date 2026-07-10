@@ -58,8 +58,8 @@ pub fn compose(domains: &[&dyn Domain]) -> Result<Registry, KernelError> {
 #[non_exhaustive]
 pub enum KernelError {
     /// 路由组注册失败（如 prefix 冲突、listener 不支持等）。
-    #[error("route group registration failed")]
-    RouteGroup,
+    #[error("route group registration failed: {0}")]
+    RouteGroup(#[from] httpserve::RouteGroupError),
     /// 事件订阅注册失败（如 topic 不存在、handler 已注册等）。
     #[error("subscriber registration failed")]
     Subscriber,
@@ -114,7 +114,7 @@ mod smoke {
         // 故 item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
         #[allow(unreachable_patterns)]
         match KernelError::Invariant {
-            KernelError::RouteGroup
+            KernelError::RouteGroup(_)
             | KernelError::Subscriber
             | KernelError::Probe
             | KernelError::MissingDependency

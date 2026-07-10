@@ -18,7 +18,7 @@
 
 - [x] FR-001..FR-015 均 MUST/MUST NOT、可机器或测试验证。
 - [x] SC-001..SC-006 可度量（覆盖率 / clippy / contract validate / 跨租 fail-closed / 密码零泄漏）。
-- [x] 安全不变式显式：跨租 fail-closed（IDENTITY-AUTHZ-TENANT-01）、密码不落明文、public 降级仅 PrimaryRoute。
+- [x] 安全不变式显式：跨租 fail-closed（IDENTITY-AUTHZ-TENANT-01）、密码不落明文、public 降级仅 generated Public evidence + GeneratedPrimaryEndpoint。
 
 ## AI-HARD / 治理对齐
 

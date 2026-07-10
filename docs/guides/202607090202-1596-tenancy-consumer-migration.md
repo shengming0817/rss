@@ -15,8 +15,8 @@ mode = "permission"
 permission = "identity:profile:read"
 ```
 
-`permission` mode 进入 `generated::http::*::SPEC.auth.permission`，route 装配用
-`httpserve::PrimaryRoute::permission` 和 `httpserve::RoutePermission`。运行时由
+`permission` mode 进入 `generated::http::*::SPEC.route.auth()`；route 装配只把 `SPEC.route` 与 handler
+传给 `httpserve::GeneratedPrimaryEndpoint::new`，permission/resource scope 由 endpoint 内部推导。运行时由
 `RouteAuthorizer` 做 coarse route/resource allow/deny，handler 只消费 gate 插入的
 `AuthorizedSubject`，不得回读 `Authenticated` 或手写 role literal。
 

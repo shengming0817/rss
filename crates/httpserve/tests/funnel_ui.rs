@@ -3,13 +3,17 @@
 //! 负向证据（trybuild compile_fail）——锁住「错误不可表达」：
 //! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_make_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
 //! - `cannot_mint_authenticated`：`AuthenticatedRoutes::new` 是 `pub(crate)`，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
-//! - `nonprimary_cannot_mount_primary`：`mount_primary` 仅 `ListenerRouter<Primary>`，Internal/Admin/Health 均不可（ROUTE-LISTENER-TYPED-01）。
+//! - `nonprimary_cannot_mount_primary`：Primary endpoint 不能挂到 Internal/Admin/Health（ROUTE-LISTENER-TYPED-01）。
+//! - `primary_cannot_mount_nonprimary`：普通 endpoint 不能挂到 Primary（ROUTE-LISTENER-TYPED-01）。
 //! - `cannot_construct_listener_router`：`ListenerRouter::new` 是 `pub(crate)`，外部无法直接构造（无 raw-bypass）。
 //! - `cannot_impl_listener_for_external`：外部 crate 无法实现 sealed `Listener`，不可新增 listener marker（ROUTE-LISTENER-TYPED-01 sealed 面）。
+//! - `old_route_api_is_removed`：旧 Route/PrimaryRoute/字段级 auth scope/mount_primary 均不可用。
+//! - `raw_method_router_cannot_mount`：production `mount` 签名不接受 MethodRouter；默认 feature graph
+//!   完全不含 raw test helpers 的独立 Hard 证明见 `default_feature_surface.rs`。
 //!
 //! 正向证据（compile pass）`funnel_pass`：funnel 正确用法编译通过（anti-vacuity——证明上述 fail 非「整个 API 不可用」）。
 //!
-//! INVARIANT: ROUTE-AUTH-FUNNEL-01 · ROUTE-AUTH-FUNNEL-02 · ROUTE-LISTENER-TYPED-01 { level = "Hard", exec = "verify", source = "trybuild" }
+//! INVARIANT: ROUTE-AUTH-FUNNEL-01 · ROUTE-AUTH-FUNNEL-02 · ROUTE-LISTENER-TYPED-01 · ROUTE-ENDPOINT-REQUIRED-01 · ROUTE-MOUNT-NOBYPASS-01 { level = "Hard", exec = "verify", source = "trybuild" }
 #[test]
 fn ui() {
     let t = trybuild::TestCases::new();
@@ -17,6 +21,11 @@ fn ui() {
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/nonprimary_cannot_mount_primary.rs");
+    t.compile_fail("tests/ui/primary_cannot_mount_nonprimary.rs");
     t.compile_fail("tests/ui/cannot_construct_listener_router.rs");
     t.compile_fail("tests/ui/cannot_impl_listener_for_external.rs");
+    t.compile_fail("tests/ui/generated_endpoint_requires_evidence.rs");
+    t.compile_fail("tests/ui/generated_endpoint_requires_handler.rs");
+    t.compile_fail("tests/ui/old_route_api_is_removed.rs");
+    t.compile_fail("tests/ui/raw_method_router_cannot_mount.rs");
 }

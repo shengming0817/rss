@@ -45,7 +45,7 @@ use crate::workspace_root;
 use crate::{
     archrules, assembly, codegen, consistency_effects, consistency_fixtures, contract,
     doc_contracts, layerdeps, reconcile_outbox_command_guard, repo_scope_guard, runtime_baseline,
-    runtime_deps_guard, wsdeps,
+    runtime_deps_guard, shipped_feature_guard, wsdeps,
 };
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -91,6 +91,8 @@ enum InternalCheck {
     /// env `RSS_WIRE_BREAKING=deny` 对 active 契约破坏升 deny（退出码 1）；against = origin/develop。
     ContractBreaking,
     LayerDeps,
+    /// server/rss 实际 Cargo feature graph 禁止通过 feature unification 启用 httpserve/test-util。
+    ShippedFeatureGuard,
     WsDepsDrift,
     /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
     DocContracts,
@@ -150,6 +152,7 @@ impl InternalCheck {
             Self::AssemblyValidate => "xtask/src/assembly.rs",
             Self::ContractBreaking => "xtask/src/contract/breaking.rs",
             Self::LayerDeps => "xtask/src/layerdeps.rs",
+            Self::ShippedFeatureGuard => "xtask/src/shipped_feature_guard.rs",
             Self::WsDepsDrift => "xtask/src/wsdeps.rs",
             Self::DocContracts => "xtask/src/doc_contracts.rs",
             Self::ConsistencyFixtures => "xtask/src/consistency_fixtures.rs",
@@ -283,6 +286,15 @@ fn step_layer_deps() -> Step {
         label: "layer-deps",
         args: &[],
         kind: StepKind::Internal(InternalCheck::LayerDeps),
+        env: &[],
+        needs_compile: false,
+    }
+}
+fn step_shipped_feature_guard() -> Step {
+    Step {
+        label: "shipped-feature-guard",
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::ShippedFeatureGuard),
         env: &[],
         needs_compile: false,
     }
@@ -908,6 +920,7 @@ pub(crate) fn full_plan() -> Vec<Step> {
         step_assembly_validate(),
         step_contract_breaking(),
         step_layer_deps(),
+        step_shipped_feature_guard(),
         step_wsdeps_drift(),
         step_doc_contracts(),
         step_consistency_fixtures(),
@@ -951,6 +964,7 @@ pub(crate) fn ci_plan() -> Vec<Step> {
         step_assembly_validate(),
         step_contract_breaking(),
         step_layer_deps(),
+        step_shipped_feature_guard(),
         step_wsdeps_drift(),
         step_doc_contracts(),
         step_consistency_fixtures(),
@@ -1250,6 +1264,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
             contract::breaking::EnforcementMode::from_env(),
         ),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
+        InternalCheck::ShippedFeatureGuard => {
+            run_check(&shipped_feature_guard::ShippedFeatureGuard)
+        }
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
         InternalCheck::ConsistencyFixtures => run_check(&consistency_fixtures::ConsistencyFixtures),
@@ -1367,6 +1384,7 @@ mod tests {
                 "assembly-validate",
                 "contract-breaking",
                 "layer-deps",
+                "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
                 "consistency-fixtures",
@@ -1405,6 +1423,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shipped_feature_guard_is_shared_by_verify_and_ci() {
+        for (lane, plan) in [("verify", full_plan()), ("ci", ci_plan())] {
+            assert!(
+                labels(&plan).contains(&"shipped-feature-guard"),
+                "{lane} must check the actual server/rss feature graph"
+            );
+        }
+    }
+
     /// `--fast` 只留无需编译的步：fmt + meta + deny；裁掉 build/clippy/nextest/dylint。
     #[test]
     fn fast_plan_keeps_fmt_meta_deny_drops_compile() {
@@ -1417,6 +1445,7 @@ mod tests {
                 "assembly-validate",
                 "contract-breaking",
                 "layer-deps",
+                "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
                 "consistency-fixtures",
@@ -1467,6 +1496,7 @@ mod tests {
                     "assembly-validate",
                     "contract-breaking",
                     "layer-deps",
+                    "shipped-feature-guard",
                     "wsdeps-drift",
                     "doc-contracts",
                     "consistency-fixtures",
@@ -1689,6 +1719,7 @@ mod tests {
                 "assembly-validate",
                 "contract-breaking",
                 "layer-deps",
+                "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
                 "consistency-fixtures",
@@ -1791,6 +1822,7 @@ mod tests {
             "assembly-validate",
             "contract-breaking",
             "layer-deps",
+            "shipped-feature-guard",
             "wsdeps-drift",
             "doc-contracts",
             "consistency-fixtures",

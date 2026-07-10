@@ -326,14 +326,14 @@ const REQUIRED_ANCHORS: &[RequiredAnchor] = &[
     RequiredAnchor {
         rule: Rule::DocAnchor,
         path: TENANCY_CONSUMER_EXAMPLE_PATH,
-        needle: "PrimaryRoute::permission",
-        detail: "consumer example must compile against PrimaryRoute permission wiring",
+        needle: "GeneratedPrimaryEndpoint::new",
+        detail: "consumer example must compile against generated Primary endpoint wiring",
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
         path: TENANCY_CONSUMER_EXAMPLE_PATH,
-        needle: "RouteResourceScope::SelfSubject",
-        detail: "consumer example must compile against self-scoped route declaration",
+        needle: "evidence.self_scoped()",
+        detail: "consumer example must read generated self-scoped route evidence",
     },
     RequiredAnchor {
         rule: Rule::DocAnchor,
@@ -1474,20 +1474,22 @@ members = [
         let anchor = RequiredAnchor {
             rule: Rule::DocAnchor,
             path: TENANCY_CONSUMER_EXAMPLE_PATH,
-            needle: "PrimaryRoute::permission",
+            needle: "GeneratedPrimaryEndpoint::new",
             detail: "must exist",
         };
         let findings = scan_required_anchor(
             &anchor,
             r#"
 fn main() {
-    // PrimaryRoute::permission
+    // GeneratedPrimaryEndpoint::new
 }
 "#,
         );
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(
-            findings[0].subject.contains("PrimaryRoute::permission"),
+            findings[0]
+                .subject
+                .contains("GeneratedPrimaryEndpoint::new"),
             "{findings:?}"
         );
     }

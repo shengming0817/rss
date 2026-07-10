@@ -1,7 +1,7 @@
 # L0 一致性规则
 
 本文件记录 L0/LocalOnly 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest、R22 校验与
-`generated::http::HttpSpec::effect_profile`；后续可执行证明见
+`generated::http::HttpSpec::route.effect_profile()`；后续可执行证明见
 `docs/spec/006-l0-l1-consistency-hardening/` 的 #1689+ 分解。
 
 ## Contract carrier
@@ -50,7 +50,7 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
 - `worker`
 - `cross-tenant-audit`
 
-统一声明面生成进 active HTTP `HttpSpec::effect_profile`，并由
+统一声明面生成进 active HTTP `HttpSpec::route: HttpRouteEvidence`，并由
 `cargo xtask consistency local-only-effects` 扫描全部 active HTTP LocalOnly 契约。该门只允许
 `auth`/`read`/`projection`，其余 effect 均阻断，并接入 `verify --fast`、`verify` 与 `ci`。
 
@@ -68,10 +68,11 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
 - 迁移真实 HTTP `contract.toml`。
 - R22 守住 HTTP 必填、非 HTTP 禁止、空/重复 effect、未知字段/枚举。
 
-#1688 的边界是 generated metadata：
+#1688 提供了 generated metadata 的初始字段；#1690 已将其破坏式收敛为单一 carrier：
 
-- `generated::http` 暴露 `EffectProfile` / `EffectKind` 闭 API。
-- 每个 active HTTP `SPEC` 必填 `effect_profile`，缺 carrier 时 codegen fail-closed。
-- 不做 route binding、lint、runner、metrics 或 journey。
+- 闭词汇迁入基础层 `vocab::{HttpConsistencyLevel,HttpEffectKind,HttpEffectProfile}`。
+- 每个 active HTTP `SPEC` 只用必填 `route: HttpRouteEvidence` 携带 contract/path/method/auth/scope/
+  consistency/effects；旧平行字段与 generated 镜像类型均已删除。
+- `GeneratedEndpoint` / `GeneratedPrimaryEndpoint` 把 evidence 与 handler 原子绑定，并原样传播到 `RouteMeta`。
 
-#1690/#1691/#1693 等在声明面 lint 基础上补 handler/port 与运行时的进一步可执行证明。
+#1691/#1693 等继续在该 route proof 基础上补 port 与运行时的进一步可执行证明。

@@ -469,7 +469,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(LOGIN_SPEC.path)
+                .uri(LOGIN_SPEC.route.path())
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("X-Tenant-ID", CANON_TENANT)
                 .body(Body::from(login_body))?,
@@ -513,7 +513,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(REFRESH_SPEC.path)
+                .uri(REFRESH_SPEC.route.path())
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("X-Tenant-ID", CANON_TENANT)
                 .body(Body::from(refresh_body.clone()))?,
@@ -540,7 +540,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(REFRESH_SPEC.path)
+                .uri(REFRESH_SPEC.route.path())
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("X-Tenant-ID", CANON_TENANT)
                 .body(Body::from(refresh_body))?,
@@ -700,7 +700,10 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let app = primary.ok_or("identity domain did not produce Primary router")?;
 
     // 4. POST /roles/{roleId}/bindings：operator JWT 无 role:assign 权限 → route gate 403，且 zero-write。
-    let assign_path = ROLES_ASSIGN_SPEC.path.replace("{roleId}", OPERATOR_ROLE);
+    let assign_path = ROLES_ASSIGN_SPEC
+        .route
+        .path()
+        .replace("{roleId}", OPERATOR_ROLE);
     let operator_bearer = format!("Bearer {}", operator_jwt());
     let denied_assign_resp = app
         .clone()
@@ -740,7 +743,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(SETTINGS_CONFIG_SPEC.path)
+                .uri(SETTINGS_CONFIG_SPEC.route.path())
                 .header(header::AUTHORIZATION, &operator_bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -775,7 +778,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(SETTINGS_CONFIG_SPEC.path)
+                .uri(SETTINGS_CONFIG_SPEC.route.path())
                 .header(header::AUTHORIZATION, &admin_bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -837,7 +840,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     );
 
     // 8. GET /roles：同一 admin JWT 通过 role:read 权限，真实 repo list 返回 seeded roles。
-    let list_uri = format!("{}?limit=20", ROLES_LIST_SPEC.path);
+    let list_uri = format!("{}?limit=20", ROLES_LIST_SPEC.route.path());
     let list_resp = app
         .clone()
         .oneshot(
@@ -858,7 +861,8 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
 
     // 9. DELETE /roles/{roleId}/bindings/{subject}：真实 auth + Pg lifecycle 删除 binding 并写 revoked outbox。
     let revoke_path = ROLES_REVOKE_SPEC
-        .path
+        .route
+        .path()
         .replace("{roleId}", OPERATOR_ROLE)
         .replace("{subject}", TARGET_SUBJECT);
     let revoke_resp = app

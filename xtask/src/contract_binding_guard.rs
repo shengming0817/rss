@@ -1,8 +1,10 @@
-//! `contract-binding-guard` —— 生产源中禁止裸 mint generated contract/projection/saga binding，并守
+//! `contract-binding-guard` —— 生产源中禁止裸 mint generated contract/HTTP route/projection/saga binding，并守
 //! projection DB fixed function callsite 收口。
 //!
-//! `ContractBinding` 的正确生产来源是 `generated::{http,event,command}::*::CONTRACT`。`from_static`
-//! 必须保持 `pub const fn`，否则 codegen 无法跨 crate 发射常量；因此跨 crate sealing 不能做到 Hard。
+//! `ContractBinding` 的正确生产来源是 `generated::{http,event,command}::*::CONTRACT`，HTTP route evidence
+//! 的正确来源是 `generated::http::*::SPEC.route`。`from_static`
+//! 必须保持 `pub const fn`，否则 codegen 无法跨 crate 发射常量；因此跨 crate provenance 以 AST guard
+//! 收口为 Medium，不与 manifest → generated 原子生成的 Hard golden 保证混为一谈。
 //! `ProjectionInputBinding` 的正确生产来源是 `generated::event::PROJECTION_INPUTS`；saga binding / policy /
 //! output marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 generated output DTO。本 guard 把残余面
 //! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 或手写
@@ -10,6 +12,7 @@
 //! 测试 fixture 与 generated/xtask 不在本扫描范围内。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }.
+//! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_examples_and_direct_journeys" }.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -19,15 +22,16 @@ use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprCall, ExprPath, ItemFn, ItemImpl, ItemMod, ItemType, ItemUse, Lit, Meta,
-    Token, Type, TypePath, UseTree,
+    Attribute, Expr, ExprPath, ItemFn, ItemImpl, ItemMod, ItemType, ItemUse, Lit, Meta, Token,
+    Type, TypePath, UseTree,
 };
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::src_scan::{member_dirs, rs_files};
 use crate::workspace_root;
 
-const SCAN_ROOTS: &[&str] = &["crates", "adapters", "bins", "assemblies"];
+const MEMBER_SCAN_ROOTS: &[&str] = &["crates", "adapters", "bins", "assemblies", "examples"];
+const DIRECT_SCAN_ROOTS: &[&str] = &["journeys", "journeys-fault-matrix"];
 const PROJECTION_EVENTS_WRAPPER: &str = "adapters/postgres/src/projection_events.rs";
 const SAGA_BINDING_TEST_SUPPORT_FILES: &[&str] =
     &["adapters/postgres/src/fault_matrix/saga_fixture.rs"];
@@ -36,7 +40,7 @@ const PROJECTION_DB_FUNCTIONS: &[&str] =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
-    /// 生产代码直接调用 generated binding constructor，绕过 generated 常量。
+    /// 生产代码引用 generated binding constructor，绕过 generated 常量。
     BareFromStatic,
     /// 生产代码手写 saga output DTO marker，绕过 generated output DTO。
     SagaStepOutputBindingImpl,
@@ -58,7 +62,7 @@ impl GovernanceCheck for ContractBindingGuard {
         let (scanned, findings) = scan_sources(&root)?;
         Ok((
             format!(
-                "扫描 {scanned} 个生产 Rust 源文件；contract/projection/saga binding 生产 mint 仅允许 generated 常量；projection DB functions 仅允许 sanctioned wrapper"
+                "扫描 {scanned} 个生产 Rust 源文件；contract/HTTP route/projection/saga binding 生产 mint 仅允许 generated 常量；projection DB functions 仅允许 sanctioned wrapper"
             ),
             findings,
         ))
@@ -68,21 +72,29 @@ impl GovernanceCheck for ContractBindingGuard {
 fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
     let mut findings = Vec::new();
     let mut scanned = 0usize;
-    for top in SCAN_ROOTS {
-        for member in member_dirs(&root.join(top))? {
-            for path in rs_files(&member.join("src"))? {
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("contract-binding-guard: read {}", path.display()))?;
-                let relative = root_relative(root, &path);
-                if is_test_file(&path) || is_binding_definition_file(&relative) {
-                    continue;
-                }
-                scanned += 1;
-                findings.extend(scan_file(&relative, &content)?);
+    for source_root in production_source_roots(root)? {
+        for path in rs_files(&source_root.join("src"))? {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("contract-binding-guard: read {}", path.display()))?;
+            let relative = root_relative(root, &path);
+            if is_test_file(&path) || is_binding_definition_file(&relative) {
+                continue;
             }
+            scanned += 1;
+            findings.extend(scan_file(&relative, &content)?);
         }
     }
     Ok((scanned, findings))
+}
+
+fn production_source_roots(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    for top in MEMBER_SCAN_ROOTS {
+        roots.extend(member_dirs(&root.join(top))?);
+    }
+    roots.extend(DIRECT_SCAN_ROOTS.iter().map(|direct| root.join(direct)));
+    roots.sort();
+    Ok(roots)
 }
 
 fn scan_file(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
@@ -105,14 +117,19 @@ fn root_relative(root: &Path, path: &Path) -> PathBuf {
 }
 
 fn is_test_file(path: &Path) -> bool {
-    path.file_name()
+    let name = path
+        .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|name| name.contains("test"))
+        .unwrap_or_default();
+    name == "tests.rs"
+        || name.ends_with("_test.rs")
+        || name.ends_with("_tests.rs")
         || path.components().any(|c| c.as_os_str() == "tests")
 }
 
 fn is_binding_definition_file(path: &Path) -> bool {
     path == Path::new("crates/vocab/src/contract/binding.rs")
+        || path == Path::new("crates/vocab/src/http.rs")
 }
 
 fn is_projection_events_wrapper(path: &Path) -> bool {
@@ -153,18 +170,18 @@ impl<'ast> Visit<'ast> for BindingVisitor<'_> {
         });
     }
 
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+    fn visit_expr_path(&mut self, node: &'ast ExprPath) {
         if self.in_test == 0
             && !is_saga_binding_test_support_file(self.path)
-            && is_binding_constructor_call(&node.func, &self.binding_aliases)
+            && is_binding_constructor_path(node, &self.binding_aliases)
         {
             self.findings.push(finding(
                 Rule::BareFromStatic,
                 self.path.display().to_string(),
-                "生产代码不得直接调用 generated binding constructor；请使用 generated `CONTRACT` / `PROJECTION_INPUTS` / saga `SPEC` / `STEPS` 常量",
+                "生产代码不得引用 generated binding constructor；请使用 generated `CONTRACT` / HTTP `ROUTE` / `PROJECTION_INPUTS` / saga `SPEC` / `STEPS` 常量",
             ));
         }
-        visit::visit_expr_call(self, node);
+        visit::visit_expr_path(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
@@ -248,6 +265,16 @@ fn collect_contract_binding_aliases(file: &syn::File) -> SourceAliases {
         &mut binding_constructors,
         "ContractBinding",
         "ContractBinding",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "HttpRouteEvidence",
+        "HttpRouteEvidence",
+    );
+    insert_binding_alias(
+        &mut binding_constructors,
+        "HttpRouteBinding",
+        "HttpRouteBinding",
     );
     insert_binding_alias(
         &mut binding_constructors,
@@ -336,29 +363,50 @@ fn insert_binding_alias(aliases: &mut BindingConstructorAliases, alias: &str, ty
 
 fn binding_constructor_methods(type_name: &str) -> Option<&'static [&'static str]> {
     match type_name {
-        "ContractBinding" | "ProjectionInputBinding" | "SagaStepBinding" => Some(&["from_static"]),
+        "ContractBinding"
+        | "HttpRouteEvidence"
+        | "HttpRouteBinding"
+        | "ProjectionInputBinding"
+        | "SagaStepBinding" => Some(&["from_static"]),
         "SagaRuntimePolicySpec" => Some(&["from_millis"]),
         "SagaContractBinding" => Some(&["from_parts"]),
         _ => None,
     }
 }
 
-fn is_binding_constructor_call(func: &Expr, aliases: &BindingConstructorAliases) -> bool {
-    let Expr::Path(ExprPath { path, .. }) = func else {
+fn is_binding_constructor_path(expr: &ExprPath, aliases: &BindingConstructorAliases) -> bool {
+    let Some(method) = expr.path.segments.last() else {
         return false;
     };
-    let mut segments = path.segments.iter().rev();
-    let Some(last) = segments.next() else {
+    let type_alias = if let Some(qself) = &expr.qself {
+        type_path_last_ident(&qself.ty)
+    } else {
+        expr.path
+            .segments
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|segment| segment.ident.to_string())
+    };
+    let Some(type_alias) = type_alias else {
         return false;
     };
-    let Some(prev) = segments.next() else {
-        return false;
-    };
-    let prev_ident = prev.ident.to_string();
-    let method = last.ident.to_string();
+    let method = method.ident.to_string();
     aliases
-        .get(prev_ident.as_str())
+        .get(type_alias.as_str())
         .is_some_and(|methods| methods.contains(method.as_str()))
+}
+
+fn type_path_last_ident(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(TypePath { path, .. }) => path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        Type::Group(group) => type_path_last_ident(&group.elem),
+        Type::Paren(paren) => type_path_last_ident(&paren.elem),
+        _ => None,
+    }
 }
 
 fn is_saga_step_output_binding_impl(node: &ItemImpl, aliases: &BTreeSet<String>) -> bool {
@@ -398,6 +446,13 @@ fn is_test_attr(attr: &Attribute) -> bool {
 fn cfg_meta_is_test_only(meta: &Meta) -> bool {
     match meta {
         Meta::Path(path) => path.is_ident("test"),
+        Meta::NameValue(value) if value.path.is_ident("feature") => {
+            matches!(
+                &value.value,
+                Expr::Lit(lit)
+                    if matches!(&lit.lit, Lit::Str(feature) if feature.value() == "test-util")
+            )
+        }
         Meta::List(list) if list.path.is_ident("not") => false,
         Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
             let Some(args) = parse_meta_args(&list.tokens) else {
@@ -427,6 +482,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scan_sources_covers_nested_examples_and_direct_journey_roots() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "rss-contract-binding-roots-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let source = r#"
+            fn mint() {
+                let _ = vocab::HttpRouteEvidence::from_static(
+                    generated::http::identity_v1::profile::CONTRACT,
+                    "/forged",
+                    "GET",
+                    vocab::HttpRouteAuth::Public,
+                    None,
+                    false,
+                    vocab::HttpConsistencyLevel::LocalOnly,
+                    generated::http::identity_v1::profile::EFFECT_PROFILE,
+                );
+            }
+        "#;
+        for relative in [
+            "examples/demo/src/lib.rs",
+            "journeys/src/lib.rs",
+            "journeys-fault-matrix/src/lib.rs",
+        ] {
+            let path = root.join(relative);
+            let Some(parent) = path.parent() else {
+                anyhow::bail!(
+                    "synthetic source path must have a parent: {}",
+                    path.display()
+                );
+            };
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, source)?;
+        }
+
+        let result = scan_sources(&root);
+        std::fs::remove_dir_all(&root)?;
+        let (scanned, findings) = result?;
+        assert_eq!(scanned, 3, "all production root shapes must be scanned");
+        assert_eq!(
+            findings.len(),
+            3,
+            "each synthetic root must trip the provenance guard: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_source_roots_cover_examples_and_direct_journeys() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let roots = production_source_roots(&root)?;
+        for relative in [
+            "examples/tenancy-consumer",
+            "examples/iotdevice",
+            "journeys",
+            "journeys-fault-matrix",
+        ] {
+            assert!(
+                roots.contains(&root.join(relative)),
+                "production provenance scan must include {relative}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn flags_prod_from_static_call() -> anyhow::Result<()> {
         let src = r#"
             fn mint() {
@@ -437,6 +559,117 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::BareFromStatic);
         Ok(())
+    }
+
+    #[test]
+    fn flags_prod_http_route_evidence_mint() -> anyhow::Result<()> {
+        let src = r#"
+            fn mint() {
+                let _ = vocab::HttpRouteEvidence::from_static(
+                    generated::http::identity_v1::profile::CONTRACT,
+                    "/forged",
+                    "GET",
+                    vocab::HttpRouteAuth::Public,
+                    None,
+                    false,
+                    vocab::HttpConsistencyLevel::LocalOnly,
+                    generated::http::identity_v1::profile::EFFECT_PROFILE,
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_contract_specific_http_route_binding_mint() -> anyhow::Result<()> {
+        let src = r#"
+            struct RouteMarker;
+
+            fn mint() {
+                let _ = vocab::HttpRouteBinding::<RouteMarker>::from_static(
+                    generated::http::identity_v1::profile::CONTRACT,
+                    "/forged",
+                    "GET",
+                    vocab::HttpRouteAuth::Public,
+                    None,
+                    false,
+                    vocab::HttpConsistencyLevel::LocalOnly,
+                    generated::http::identity_v1::profile::EFFECT_PROFILE,
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(findings.len(), 1, "typed binding mint must be generated");
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_http_route_evidence_function_item_alias() -> anyhow::Result<()> {
+        let src = r#"
+            fn mint() {
+                let mint = vocab::HttpRouteEvidence::from_static;
+                let _ = mint(
+                    generated::http::identity_v1::profile::CONTRACT,
+                    "/forged",
+                    "GET",
+                    vocab::HttpRouteAuth::Public,
+                    None,
+                    false,
+                    vocab::HttpConsistencyLevel::LocalOnly,
+                    generated::http::identity_v1::profile::EFFECT_PROFILE,
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "constructor function-item aliases must not bypass provenance: {findings:?}"
+        );
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn flags_prod_http_route_evidence_ufcs_constructor() -> anyhow::Result<()> {
+        let src = r#"
+            type Evidence = vocab::HttpRouteEvidence;
+
+            fn mint() {
+                let _ = <Evidence>::from_static(
+                    generated::http::identity_v1::profile::CONTRACT,
+                    "/forged",
+                    "GET",
+                    vocab::HttpRouteAuth::Public,
+                    None,
+                    false,
+                    vocab::HttpConsistencyLevel::LocalOnly,
+                    generated::http::identity_v1::profile::EFFECT_PROFILE,
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "UFCS constructors must not bypass provenance: {findings:?}"
+        );
+        assert_eq!(findings[0].rule, Rule::BareFromStatic);
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_filter_is_exact() {
+        assert!(!is_test_file(Path::new("crates/x/src/latest.rs")));
+        assert!(!is_test_file(Path::new("crates/x/src/contest.rs")));
+        assert!(is_test_file(Path::new("crates/x/src/route_test.rs")));
+        assert!(is_test_file(Path::new("crates/x/src/route_tests.rs")));
+        assert!(is_test_file(Path::new("crates/x/src/tests.rs")));
+        assert!(is_test_file(Path::new("crates/x/tests/route.rs")));
     }
 
     #[test]
@@ -663,6 +896,28 @@ mod tests {
             findings.is_empty(),
             "test fixtures must be allowed: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_explicit_test_util_feature_fixture() -> anyhow::Result<()> {
+        let src = r#"
+            #[cfg(any(test, feature = "test-util"))]
+            fn fixture() {
+                let _ = vocab::HttpRouteEvidence::from_static(
+                    generated::http::identity_v1::profile::CONTRACT,
+                    "/test",
+                    "GET",
+                    vocab::HttpRouteAuth::Public,
+                    None,
+                    false,
+                    vocab::HttpConsistencyLevel::LocalOnly,
+                    generated::http::identity_v1::profile::EFFECT_PROFILE,
+                );
+            }
+        "#;
+        let findings = scan_file(Path::new("crates/x/src/lib.rs"), src)?;
+        assert!(findings.is_empty(), "test-util fixture must be allowed");
         Ok(())
     }
 

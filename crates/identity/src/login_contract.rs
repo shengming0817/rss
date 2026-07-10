@@ -108,7 +108,7 @@ fn login_router() -> axum::Router {
 }
 
 fn request(password: &str) -> ContractRequest {
-    ContractRequest::post(SPEC.path)
+    ContractRequest::post(SPEC.route.path())
         .header("X-Tenant-ID", CANON_TENANT)
         .json(&IdentityLoginRequest {
             username: SEED_USER.to_string(),
@@ -149,7 +149,7 @@ async fn login_ok_returns_session_matching_generated_schema()
 async fn login_malformed_body_is_validation_error() -> Result<(), Box<dyn std::error::Error>> {
     let resp = testkit::call(
         login_router(),
-        ContractRequest::post(SPEC.path)
+        ContractRequest::post(SPEC.route.path())
             .header("X-Tenant-ID", CANON_TENANT)
             .raw_json("{ not json"),
     )
@@ -170,7 +170,7 @@ async fn login_missing_tenant_header_is_validation_error() -> Result<(), Box<dyn
 {
     let resp = testkit::call(
         login_router(),
-        ContractRequest::post(SPEC.path).json(&IdentityLoginRequest {
+        ContractRequest::post(SPEC.route.path()).json(&IdentityLoginRequest {
             username: SEED_USER.to_string(),
             password: SEED_PASSWORD.to_string(),
         }),
@@ -185,7 +185,7 @@ async fn login_invalid_tenant_header_is_validation_error() -> Result<(), Box<dyn
 {
     let resp = testkit::call(
         login_router(),
-        ContractRequest::post(SPEC.path)
+        ContractRequest::post(SPEC.route.path())
             .header("X-Tenant-ID", "not-a-tenant")
             .json(&IdentityLoginRequest {
                 username: SEED_USER.to_string(),

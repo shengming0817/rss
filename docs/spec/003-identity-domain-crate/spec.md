@@ -193,7 +193,8 @@
 - **FR-011**: 系统 MUST 保留 #997 冻结签名与 INVARIANT（IDENTITY-AUTHZ-TENANT-01 等），不弱化既有 sealed / newtype / `pub(crate)` 静态强制。
 - **FR-012**: 系统 MUST NOT 给 domain 类型 derive `Serialize`（`rss_domain_no_serialize` dylint）；wire 类型只经 contract / generated。
 - **FR-013**: 系统 MUST 经构造器必填位置参注入 `CredentialRepo` / `SessionRepo` / `Publisher` / `Clock`（缺失即编译错误），不用 `Option` 静默 noop。
-- **FR-014**: public 端点降级只经 `httpserve::PrimaryRoute { opt_out: Some(RouteAuthOptOut::Public), .. }`（login 端点），新增受保护端点默认鉴权（AUTH-OPTOUT-PRIMARYONLY-01）。
+- **FR-014**: public 端点降级只经 generated `HttpRouteEvidence::auth() == HttpRouteAuth::Public` +
+  `GeneratedPrimaryEndpoint`（login 端点），新增受保护端点默认鉴权（AUTH-OPTOUT-PRIMARYONLY-01）。
 - **FR-015**: 列表端点（如 roles 列表）MUST 分页，`limit` 上限 500（rust-standards.md §安全检查点）。
 - **FR-016**: login tenant 来源 MUST 为 `X-Tenant-ID` header（pre-auth 路径，tenancy.md Hard）；request body 禁止含 `tenantId` 字段。
 - **FR-017**: 每个 active + codegen HTTP 契约 MUST 声明恰一个 AuthZ mode（permission overlay 值 或 显式 opt-out + reason）；缺声明的端点被 codegen fail-closed 拒绝。

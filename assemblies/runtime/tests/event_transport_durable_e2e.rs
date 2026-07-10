@@ -624,9 +624,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
         latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
     assert_eq!(
         subscriber_settings_service
-            .get_value(tenant, settings_key)
+            .get_config(tenant, settings_key)
             .await?
-            .as_deref(),
+            .as_ref()
+            .map(|entry| entry.value()),
         Some("disabled"),
         "subscriber settings cache must start with the old value before the ConsumerTx refresh"
     );
@@ -805,9 +806,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await?;
     assert_eq!(
         subscriber_settings_service
-            .get_value(tenant, settings_key)
+            .get_config(tenant, settings_key)
             .await?
-            .as_deref(),
+            .as_ref()
+            .map(|entry| entry.value()),
         Some("enabled"),
         "settings ConsumerTx must refresh the subscriber service cache from the old value"
     );

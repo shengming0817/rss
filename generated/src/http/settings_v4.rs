@@ -153,27 +153,31 @@ pub const PATH: &str = "/api/v1/settings/configs/{key}";
 pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[];
 
 /// HTTP effect metadata（来自 `contract.toml` `[effectProfile]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const EFFECTS: &[super::EffectKind] = &[super::EffectKind::Auth, super::EffectKind::Read];
+pub const EFFECTS: &[::vocab::HttpEffectKind] =
+    &[::vocab::HttpEffectKind::Auth, ::vocab::HttpEffectKind::Read];
 
 /// HTTP effect profile（闭 effect vocabulary + required field）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const EFFECT_PROFILE: super::EffectProfile = super::EffectProfile { effects: EFFECTS };
+pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfile::new(EFFECTS);
+
+/// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
+pub enum RouteMarker {}
+
+/// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
+pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> = ::vocab::HttpRouteBinding::from_static(
+    CONTRACT,
+    PATH,
+    "GET",
+    ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::SettingsConfigGet),
+    None,
+    false,
+    ::vocab::HttpConsistencyLevel::LocalOnly,
+    EFFECT_PROFILE,
+);
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: super::HttpSpec = super::HttpSpec {
-    contract_id: CONTRACT_ID,
-    contract: CONTRACT,
-    consistency_level: super::HttpConsistencyLevel::LocalOnly,
-    effect_profile: EFFECT_PROFILE,
+    route: ROUTE.evidence(),
     local_tx: None,
-    path: PATH,
-    method: "GET",
-    auth: super::HttpAuthSpec {
-        mode: super::HttpAuthMode::Permission,
-        reason: None,
-        permission: Some(::vocab::RoutePermissionId::SettingsConfigGet),
-    },
-    resource: None,
-    self_scoped: false,
     resource_sharing: super::HttpResourceSharingSpec {
         mode: super::HttpResourceSharingMode::TenantScoped,
         reason: None,

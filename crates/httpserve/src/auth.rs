@@ -4,7 +4,7 @@
 //! 不满足 `MethodRouter::layer` 的 trait bound（`Next: FromRequest` 不成立）；
 //! 改用手写 `EnforceLayer`（`impl tower::Layer`）+ `EnforceService`（`impl tower::Service`），
 //! 通过 `tower = { workspace = true }` 引入 Layer/Service trait。
-//! `PrimaryRouteAuthz::{OptOut, Permission(RoutePermission)}` 存于 `EnforceLayer`，不经 extension 传递——
+//! endpoint evidence 派生的 `PrimaryRouteAuthz` 存于 `EnforceLayer`，不经 extension 传递——
 //! 这样 enforce 在 MethodRouter 层执行时可直接读捕获的 route authz metadata 和外层注入的 AuthPlan /
 //! RouteAuthorizer extension。
 //!
@@ -14,7 +14,7 @@
 //! INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Require(required)` 路由仅在请求携 [`Authenticated`] 证据、其
 //! `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行；缺证据 / `Anonymous` 证据 /
 //! 方案不匹配（如 Jwt 证据撞 `Require(Mtls)`）→ fail-closed 401（`Anonymous` = 「已知未认证」；匿名可达路由走
-//! `PrimaryRoute.opt_out(Public)`，非 Require）。证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入，
+//! generated Public evidence，非 Require）。认证证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入，
 //! httpserve 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 →
 //! 所有 Require 路由仍 401，零端点放开（Medium，单测 + tests/runtime.rs 集成测试守）。
 //!
@@ -80,11 +80,33 @@ fn short_circuit<E>(
     Box::pin(async move { Ok(resp) })
 }
 
-/// 路由身份元数据（声明性 method + contract_id 进运行时请求 extension，供下游审计/可观测消费）。
+/// Atomic generated route evidence plus the parsed method used for routing.
+///
+/// INVARIANT: ROUTE-META-PROPAGATE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private RouteMeta fields are constructed only by enforce_layer from the endpoint evidence value without mapping" }
 #[derive(Clone, Debug)]
 pub struct RouteMeta {
-    pub method: axum::http::Method,
-    pub contract_id: &'static str,
+    evidence: vocab::HttpRouteEvidence,
+    method: axum::http::Method,
+}
+
+impl RouteMeta {
+    /// Borrow the exact evidence supplied to the endpoint constructor.
+    #[must_use]
+    pub const fn evidence(&self) -> &vocab::HttpRouteEvidence {
+        &self.evidence
+    }
+
+    /// Borrow the parsed method used by Axum routing.
+    #[must_use]
+    pub const fn method(&self) -> &axum::http::Method {
+        &self.method
+    }
+
+    /// Stable generated contract identifier.
+    #[must_use]
+    pub const fn contract_id(&self) -> &'static str {
+        self.evidence.contract_id()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -552,14 +574,11 @@ pub(crate) struct EnforceLayer {
 pub(crate) fn enforce_layer(
     authz: Option<PrimaryRouteAuthz>,
     method: axum::http::Method,
-    contract_id: &'static str,
+    evidence: vocab::HttpRouteEvidence,
 ) -> EnforceLayer {
     EnforceLayer {
         authz,
-        meta: RouteMeta {
-            method,
-            contract_id,
-        },
+        meta: RouteMeta { evidence, method },
     }
 }
 
@@ -797,7 +816,7 @@ async fn authorize_route_permission(
     let tenant_id = evidence.tenant_id();
     let decision = authorizer?
         .authorize(RouteAuthorizationRequest {
-            contract_id: meta.contract_id,
+            contract_id: meta.contract_id(),
             permission: permission.permission,
             tenant_id,
             principal_kind,
@@ -828,7 +847,7 @@ async fn authorize_mtls_route(
     };
     let principal_id = evidence.self_scoped_principal_id().to_string();
     let request = RouteAuthorizationRequest {
-        contract_id: meta.contract_id,
+        contract_id: meta.contract_id(),
         permission: MTLS_ROUTE_PERMISSION,
         tenant_id: evidence.tenant_id(),
         principal_kind: evidence.principal_kind(),
@@ -864,7 +883,7 @@ where
         let audit = req.extensions().get::<AuthAudit>().cloned();
         // 验签桥（组合根外层 layer）校验通过后注入的认证证据；enforce 据其**已验证方案**放行 Require 路由。
         // fail-closed 防御纵深：`Anonymous` 证据视同无证据（→ None）——绝不过 Require（即便验签桥误注入；
-        // 匿名可达路由经 PrimaryRoute.opt_out(Public) 而非 Require）。方案 exact-match 由 reject_if_needed 比对，
+        // 匿名可达路由经 generated Public evidence 而非 Require）。方案 exact-match 由 reject_if_needed 比对，
         // 杜绝 scheme 混淆（如 Jwt 证据撞 Require(Mtls)）。AUTH-EVIDENCE-REQUIRE-01。
         let evidence = req.extensions().get::<Authenticated>().cloned();
         let evidence_scheme = req
@@ -883,7 +902,7 @@ where
             tracing::warn!(
                 declared = %meta.method,
                 actual = %req.method(),
-                contract_id = meta.contract_id,
+                contract_id = meta.contract_id(),
                 "route method drift"
             );
         }
@@ -903,15 +922,15 @@ where
             matches!(requirement, AuthRequirement::Require(RequiredScheme::Mtls));
 
         let decision = decide_auth(requirement, evidence_scheme);
-        log_auth_decision(decision, meta.contract_id, evidence.as_ref());
+        log_auth_decision(decision, meta.contract_id(), evidence.as_ref());
 
         if decision != AuthDecision::Allow {
             let audit_fut =
-                record_auth_audit(audit, decision, meta.contract_id, rid.clone(), evidence);
+                record_auth_audit(audit, decision, meta.contract_id(), rid.clone(), evidence);
             return Box::pin(async move {
                 if let Err(error) = audit_fut.await {
                     tracing::error!(
-                        contract_id = meta.contract_id,
+                        contract_id = meta.contract_id(),
                         authz.decision = decision.as_label(),
                         error = %error,
                         "auth audit record failed before reject"
@@ -940,14 +959,14 @@ where
                     if let Err(error) = record_auth_audit(
                         audit,
                         AuthDecision::Deny,
-                        meta.contract_id,
+                        meta.contract_id(),
                         rid.clone(),
                         evidence.clone(),
                     )
                     .await
                     {
                         tracing::error!(
-                            contract_id = meta.contract_id,
+                            contract_id = meta.contract_id(),
                             authz.decision = AuthDecision::Deny.as_label(),
                             error = %error,
                             "auth audit record failed before route authz reject"
@@ -967,14 +986,14 @@ where
                     if let Err(error) = record_auth_audit(
                         audit,
                         AuthDecision::Deny,
-                        meta.contract_id,
+                        meta.contract_id(),
                         rid.clone(),
                         evidence.clone(),
                     )
                     .await
                     {
                         tracing::error!(
-                            contract_id = meta.contract_id,
+                            contract_id = meta.contract_id(),
                             authz.decision = AuthDecision::Deny.as_label(),
                             error = %error,
                             "auth audit record failed before mtls route authz reject"
@@ -992,10 +1011,10 @@ where
                 None
             };
             if let Err(error) =
-                record_auth_audit(audit, decision, meta.contract_id, rid.clone(), evidence).await
+                record_auth_audit(audit, decision, meta.contract_id(), rid.clone(), evidence).await
             {
                 tracing::error!(
-                    contract_id = meta.contract_id,
+                    contract_id = meta.contract_id(),
                     authz.decision = decision.as_label(),
                     error = %error,
                     "auth audit record failed before allow"
@@ -1065,6 +1084,23 @@ mod tests {
     use super::*;
 
     const TEST_CONTRACT: &str = "test.contract";
+    const TEST_BINDING: vocab::ContractBinding = vocab::ContractBinding::from_static(
+        "test",
+        TEST_CONTRACT,
+        "v1",
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    const TEST_EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
+    const TEST_EVIDENCE: vocab::HttpRouteEvidence = vocab::HttpRouteEvidence::from_static(
+        TEST_BINDING,
+        "/test",
+        "GET",
+        vocab::HttpRouteAuth::Public,
+        None,
+        false,
+        vocab::HttpConsistencyLevel::LocalOnly,
+        vocab::HttpEffectProfile::new(TEST_EFFECTS),
+    );
     const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
     #[allow(clippy::unwrap_used)]
@@ -1229,7 +1265,7 @@ mod tests {
             get(|| async { "ok" }).layer(enforce_layer(
                 opt_out.map(PrimaryRouteAuthz::OptOut),
                 Method::GET,
-                TEST_CONTRACT,
+                TEST_EVIDENCE,
             )),
         );
         if let Some(p) = plan {

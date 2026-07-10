@@ -84,6 +84,7 @@ mod runtime_baseline;
 mod runtime_deps_guard;
 mod schema_rls;
 mod setlocal_funnel;
+mod shipped_feature_guard;
 mod src_scan;
 mod tenancy_closeout;
 #[cfg(test)]

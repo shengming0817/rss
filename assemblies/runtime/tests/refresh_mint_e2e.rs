@@ -22,8 +22,9 @@ use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL};
 use httpserve::{
-    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer, RoutePermission,
-    RouteResourceScope,
+    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+    TestPrimaryRoute as PrimaryRoute, TestRoutePermission as RoutePermission,
+    TestRouteResourceScope as RouteResourceScope,
 };
 use oidc::OidcProvider;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
@@ -43,6 +44,18 @@ const NOW: i64 = 1_700_000_000;
 const TTL_SECS: u64 = 900;
 /// JOSE `kid` = vault Transit sign key 名（mock 不校验 key 名，仅证 issuer 把 kid 注入 header）。
 const KEY_ID: &str = "rss-jwt-es256";
+
+#[allow(clippy::expect_used)]
+fn test_routes(
+    build: impl FnOnce(
+        httpserve::ListenerRouter<httpserve::Primary>,
+    ) -> Result<
+        httpserve::ListenerRouter<httpserve::Primary>,
+        httpserve::RouteGroupError,
+    >,
+) -> httpserve::UnfinalizedRoutes {
+    httpserve::routes::unfinalized_for_test(build).expect("test routes")
+}
 
 #[derive(Clone)]
 struct AllowAuthorizer;
@@ -155,9 +168,9 @@ fn oidc_provider(trusted_kinds: &str) -> OidcProvider {
 /// 经生产 `apply_verify_bridge` 验 `token`：返回 `/protected`（Require Jwt）的状态码。
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 async fn verify_status(token: &str, trusted_kinds: &str) -> StatusCode {
-    let routes = httpserve::routes::unfinalized_for_test::<httpserve::Primary>(|rb| {
-        rb.mount_primary(
-            httpserve::PrimaryRoute::permission(
+    let routes = test_routes(|rb| {
+        rb.mount_primary_raw_for_test(
+            PrimaryRoute::permission(
                 Method::GET,
                 "/protected",
                 "test.protected",

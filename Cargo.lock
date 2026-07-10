@@ -3067,6 +3067,7 @@ dependencies = [
  "amqp",
  "anyhow",
  "audit",
+ "axum",
  "bootstrap",
  "consistency",
  "deviceloop",
@@ -3090,6 +3091,7 @@ dependencies = [
  "testkit",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "uuid",
  "vocab",
@@ -6616,6 +6618,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "thiserror",
+ "trybuild",
  "uuid",
 ]
 

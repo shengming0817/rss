@@ -52,6 +52,8 @@ append+read 序列。
 - `generated::http` 暴露 `LocalTxSpec` 与 LocalTx 闭枚举。
 - LocalTx active HTTP `SPEC` 必填 `local_tx: Some(...)`，非 LocalTx 为 `None`。
 - `LOCAL_TX_SPECS` active-only 派生当前 L1 HTTP contract 子集。
+- consistency/effect/auth/path/method 已由 #1690 收进 `SPEC.route: HttpRouteEvidence` 并随 endpoint/RouteMeta
+  原样传播；`local_tx` 继续只表达 L1 专属 transaction capability，不复制 route proof。
 - 不做 LocalTx runner、coverage gate、metrics label 或 domain proof。
 
 #1697 建 LocalTx coverage gate；#1698 收口 LocalTx vocabulary/closed labels；#1699 以后才接 Postgres runner 与真实

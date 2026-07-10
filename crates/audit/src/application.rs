@@ -46,14 +46,14 @@ use generated::event::identity_v1::{
 use generated::http::audit_v1::{
     list_entries::{
         AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
-        SPEC as AUDIT_LIST_HTTP_SPEC,
+        ROUTE as AUDIT_LIST_HTTP_ROUTE, SPEC as AUDIT_LIST_HTTP_SPEC,
     },
     list_tenant_entries::{
         AuditListTenantEntriesRequest, AuditListTenantEntriesResponse, AuditTenantEntryView,
-        SPEC as AUDIT_LIST_TENANT_HTTP_SPEC,
+        ROUTE as AUDIT_LIST_TENANT_HTTP_ROUTE, SPEC as AUDIT_LIST_TENANT_HTTP_SPEC,
     },
 };
-use httpserve::{Admin, ResourceProjection, Route, RouteAuthorizer};
+use httpserve::{Admin, ContractMarker, GeneratedEndpoint, ResourceProjection, RouteAuthorizer};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -159,35 +159,6 @@ struct TargetReadRequest {
     page: AuditListTenantEntriesRequest,
     request_id: String,
     correlation_id: String,
-}
-
-struct AdminRouteBinding {
-    route: Route,
-    filter: axum::routing::MethodFilter,
-}
-
-/// 从 generated [`generated::http::HttpSpec`] 同时派生 route metadata 与实际 method filter。
-///
-/// path 必须严格位于本 Admin group 下且是非根相对路径；method 必须同时可解析为 HTTP method 并受
-/// axum `MethodFilter` 支持。任一 contract/codegen 漂移均在 bootstrap finalize 时 fail-fast。
-fn admin_route_binding(spec: &generated::http::HttpSpec) -> Result<AdminRouteBinding, KernelError> {
-    let path = spec
-        .path
-        .strip_prefix(AUDIT_ROUTE_PREFIX)
-        .filter(|path| path.starts_with('/') && path.len() > 1)
-        .ok_or(KernelError::RouteGroup)?;
-    let method = axum::http::Method::from_bytes(spec.method.as_bytes())
-        .map_err(|_| KernelError::RouteGroup)?;
-    let filter = axum::routing::MethodFilter::try_from(method.clone())
-        .map_err(|_| KernelError::RouteGroup)?;
-    Ok(AdminRouteBinding {
-        route: Route {
-            method,
-            path,
-            contract_id: spec.contract_id,
-        },
-        filter,
-    })
 }
 
 impl<S> Clone for TargetAuditReadDeps<S>
@@ -575,7 +546,7 @@ fn log_cross_tenant_audit_append_failure(
 ) {
     tracing::error!(
         domain = AUDIT_DOMAIN,
-        contract_id = AUDIT_LIST_TENANT_HTTP_SPEC.contract_id,
+        contract_id = AUDIT_LIST_TENANT_HTTP_SPEC.route.contract_id(),
         operation = "audit_list_cross_tenant",
         tenant = %target,
         request_id = request.request_id.as_str(),
@@ -764,13 +735,13 @@ async fn authorize_read_projection(
     tenant: vocab::TenantId,
     spec: &'static generated::http::HttpSpec,
 ) -> Result<ResourceProjection, AuditReadAuthError> {
-    let Some(permission) = spec.auth.permission else {
+    let vocab::HttpRouteAuth::Permission(permission) = spec.route.auth() else {
         return Err(AuditReadAuthError::Forbidden);
     };
     httpserve::authorize_subject_for_permission(
         authorizer,
         authenticated,
-        spec.contract_id,
+        spec.route.contract_id(),
         permission,
         tenant,
         None,
@@ -905,11 +876,10 @@ where
         };
         reg.route_group::<Admin>(AUDIT_ROUTE_PREFIX, move |rb| {
             let scoped_repo = scoped_repo.clone();
-            let binding = admin_route_binding(&AUDIT_LIST_HTTP_SPEC)?;
-            let scoped_route = binding.route;
-            let scoped_handler = axum::routing::on(
-                binding.filter,
-                move |authenticated: Option<Extension<httpserve::Authenticated>>,
+            let scoped_endpoint = GeneratedEndpoint::new(
+                AUDIT_LIST_HTTP_ROUTE,
+                move |_: ContractMarker<generated::http::audit_v1::list_entries::RouteMarker>,
+                      authenticated: Option<Extension<httpserve::Authenticated>>,
                       authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
                       query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
                       request: axum::extract::Request| {
@@ -925,13 +895,15 @@ where
                         list_entries(repo, authenticated, authorizer, query.0, request_id).await
                     }
                 },
-            );
+            )?;
+            let rb = rb.mount(scoped_endpoint)?;
             let target_deps = target_deps.clone();
-            let binding = admin_route_binding(&AUDIT_LIST_TENANT_HTTP_SPEC)?;
-            let target_route = binding.route;
-            let target_handler = axum::routing::on(
-                binding.filter,
-                move |principal: Option<Extension<Arc<authn::Principal>>>,
+            let target_endpoint = GeneratedEndpoint::new(
+                AUDIT_LIST_TENANT_HTTP_ROUTE,
+                move |_: ContractMarker<
+                    generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                >,
+                      principal: Option<Extension<Arc<authn::Principal>>>,
                       authenticated: Option<Extension<httpserve::Authenticated>>,
                       authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
                       target: Result<Path<String>, PathRejection>,
@@ -965,12 +937,8 @@ where
                         .await
                     }
                 },
-            );
-            // Both Route metadata and actual MethodRouter filters come from generated specs.
-            // Admin listener typed builder：`mount`（非-Primary，无 opt-out；Admin 不可携 opt-out）。
-            Ok(rb
-                .mount(scoped_route, scoped_handler)
-                .mount(target_route, target_handler))
+            )?;
+            Ok(rb.mount(target_endpoint)?)
         })?;
         Ok(())
     }
@@ -1217,8 +1185,8 @@ mod tests {
             Box::pin(async move {
                 if self.allow
                     && [
-                        AUDIT_LIST_HTTP_SPEC.contract_id,
-                        AUDIT_LIST_TENANT_HTTP_SPEC.contract_id,
+                        AUDIT_LIST_HTTP_SPEC.route.contract_id(),
+                        AUDIT_LIST_TENANT_HTTP_SPEC.route.contract_id(),
                     ]
                     .contains(&request.contract_id)
                     && request.permission == vocab::AUDIT_READ_PERMISSION
@@ -1282,7 +1250,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
         {
             Box::pin(async move {
-                let allow = request.contract_id == AUDIT_LIST_TENANT_HTTP_SPEC.contract_id
+                let allow = request.contract_id == AUDIT_LIST_TENANT_HTTP_SPEC.route.contract_id()
                     && request.permission == vocab::AUDIT_READ_PERMISSION
                     && request.tenant_id == Some(self.expected_tenant);
                 self.requests
@@ -1720,14 +1688,17 @@ mod tests {
                     && *prefix == AUDIT_ROUTE_PREFIX),
             "admin 读路由组须声明在 Admin listener: {groups:?}"
         );
-        assert_eq!(AUDIT_LIST_HTTP_SPEC.path, AUDIT_ENTRIES_PATH);
-        assert_eq!(AUDIT_LIST_HTTP_SPEC.method, "GET");
+        assert_eq!(AUDIT_LIST_HTTP_SPEC.route.path(), AUDIT_ENTRIES_PATH);
+        assert_eq!(AUDIT_LIST_HTTP_SPEC.route.method(), "GET");
         assert_eq!(
-            AUDIT_LIST_HTTP_SPEC.auth.permission,
-            Some(vocab::AUDIT_READ_PERMISSION)
+            AUDIT_LIST_HTTP_SPEC.route.auth(),
+            vocab::HttpRouteAuth::Permission(vocab::AUDIT_READ_PERMISSION)
         );
-        assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.path, AUDIT_TENANT_ENTRIES_PATH);
-        assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.method, "GET");
+        assert_eq!(
+            AUDIT_LIST_TENANT_HTTP_SPEC.route.path(),
+            AUDIT_TENANT_ENTRIES_PATH
+        );
+        assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.route.method(), "GET");
         let subs = reg.drain_subscribers();
         let expected: Vec<_> = [
             SESSION_CREATED_SPEC,
@@ -1790,38 +1761,49 @@ mod tests {
             error_logs,
             "every production error log must carry the audit domain"
         );
-        assert_eq!(
-            production.matches("axum::routing::on(").count(),
-            2,
-            "both actual MethodRouters must use generated method filters"
-        );
-        assert_eq!(
-            production.matches("binding.filter").count(),
-            2,
-            "both actual MethodRouters must consume generated method filters"
-        );
+        assert_eq!(production.matches("GeneratedEndpoint::new(").count(), 2);
+        assert_eq!(production.matches(".mount(").count(), 2);
+        assert!(!production.contains("axum::routing::on("));
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn audit_admin_route_binding_is_generated_and_fail_closed() {
-        let scoped = admin_route_binding(&AUDIT_LIST_HTTP_SPEC).expect("scoped binding");
-        assert_eq!(scoped.route.path, "/entries");
-        assert_eq!(scoped.route.method, axum::http::Method::GET);
-        assert_eq!(scoped.route.contract_id, AUDIT_LIST_HTTP_SPEC.contract_id);
-        assert_eq!(scoped.filter, axum::routing::MethodFilter::GET);
+    fn audit_routes_carry_complete_generated_evidence() {
+        let cases = [
+            (
+                AUDIT_LIST_HTTP_SPEC.route,
+                AUDIT_ENTRIES_PATH,
+                vocab::HttpConsistencyLevel::LocalOnly,
+                &[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Read,
+                    vocab::HttpEffectKind::Projection,
+                ][..],
+            ),
+            (
+                AUDIT_LIST_TENANT_HTTP_SPEC.route,
+                AUDIT_TENANT_ENTRIES_PATH,
+                vocab::HttpConsistencyLevel::LocalTx,
+                &[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Read,
+                    vocab::HttpEffectKind::Projection,
+                    vocab::HttpEffectKind::Write,
+                    vocab::HttpEffectKind::Transaction,
+                    vocab::HttpEffectKind::CrossTenantAudit,
+                ][..],
+            ),
+        ];
 
-        let unsupported_method = generated::http::HttpSpec {
-            method: "BREW",
-            ..AUDIT_LIST_HTTP_SPEC
-        };
-        assert!(admin_route_binding(&unsupported_method).is_err());
-
-        let outside_group = generated::http::HttpSpec {
-            path: "/api/v1/other/entries",
-            ..AUDIT_LIST_HTTP_SPEC
-        };
-        assert!(admin_route_binding(&outside_group).is_err());
+        for (route, path, consistency, effects) in cases {
+            assert_eq!(route.path(), path);
+            assert_eq!(route.method(), "GET");
+            assert_eq!(
+                route.auth(),
+                vocab::HttpRouteAuth::Permission(vocab::AUDIT_READ_PERMISSION)
+            );
+            assert_eq!(route.consistency_level(), consistency);
+            assert_eq!(route.effect_profile().effects(), effects);
+        }
     }
 
     /// 在注入 ctx tenant 的 Router 上 oneshot 一个 GET（参数绑定 + 状态码 + 响应体）。
@@ -2474,7 +2456,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].contract_id,
-            AUDIT_LIST_TENANT_HTTP_SPEC.contract_id
+            AUDIT_LIST_TENANT_HTTP_SPEC.route.contract_id()
         );
         assert_eq!(requests[0].permission, vocab::AUDIT_READ_PERMISSION);
         assert_eq!(requests[0].tenant_id, Some(tenant));

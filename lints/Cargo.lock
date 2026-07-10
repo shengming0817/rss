@@ -700,6 +700,7 @@ dependencies = [
  "generated",
  "metrics",
  "primitives",
+ "secure",
  "serde",
  "serde_json",
  "sha2",

@@ -40,7 +40,7 @@
 | domain 不 derive `Serialize`（`rss_domain_no_serialize`） | ✅ wire 类型只经 contract/generated；domain newtype 字段 `pub(crate)` + funnel |
 | 一致性等级在 contract.toml | ✅ session-created/role-* event 的 consistencyLevel 在 `contract.toml`，非 manifest |
 | 必填依赖构造器位置参（非 Option）+ Clock 位参 | ✅ `CredentialRepo`/`SessionRepo`/`Publisher`/`Clock` 均位置参 |
-| public 降级仅 PrimaryRoute.opt_out（AUTH-OPTOUT-PRIMARYONLY-01） | ✅ 仅 login opt-out Public；其余端点默认鉴权 |
+| public 降级仅 generated Public evidence + GeneratedPrimaryEndpoint（AUTH-OPTOUT-PRIMARYONLY-01） | ✅ 仅 login/refresh 为 Public；其余端点默认鉴权 |
 | 契约扇出闭环（contract-fanout.md） | ✅ 新角色事件走 schema→generated→metadata→test→docs |
 | AI-robust 新机制 ≥ Medium | ✅ 不新增 Soft；保留既有 Hard/Medium 守卫，新增覆盖率/契约 governance 为 Medium |
 
@@ -117,7 +117,7 @@ generated/src/{event,http}/identity_v1.rs   # 扇出派生 [PR5]
 
 ## AI-HARD 约束（每个子 PR 验收硬核查项）
 
-填 `todo!()` 体时**不得弱化既有静态强制**：domain 类型字段保持 `pub(crate)` + funnel 构造器（不放成 `pub`）；**不给 domain 类型加 `#[derive(Serialize)]`**（`rss_domain_no_serialize`，Medium）；port trait 保持 ADR-005 域形范式（不收敛 diport）；保留 #997 冻结签名与 INVARIANT（IDENTITY-AUTHZ-TENANT-01 等，跨租 fail-closed）；新契约走 contract-fanout 闭环（schema→generated→metadata→test→docs）；必填依赖构造器位置参（非 Option）；public 降级仅 PrimaryRoute.opt_out。
+填 `todo!()` 体时**不得弱化既有静态强制**：domain 类型字段保持 `pub(crate)` + funnel 构造器（不放成 `pub`）；**不给 domain 类型加 `#[derive(Serialize)]`**（`rss_domain_no_serialize`，Medium）；port trait 保持 ADR-005 域形范式（不收敛 diport）；保留 #997 冻结签名与 INVARIANT（IDENTITY-AUTHZ-TENANT-01 等，跨租 fail-closed）；新契约走 contract-fanout 闭环（schema→generated→metadata→test→docs）；必填依赖构造器位置参（非 Option）；public 降级仅 generated Public evidence + GeneratedPrimaryEndpoint。
 
 **新增核查项**：
 

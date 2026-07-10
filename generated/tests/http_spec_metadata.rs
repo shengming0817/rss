@@ -5,9 +5,9 @@
 //! active-only.
 
 use generated::http::{
-    self, EffectKind, HttpConsistencyLevel, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
-    LocalTxRetry, LocalTxSpec,
+    self, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, LocalTxSpec,
 };
+use vocab::{HttpConsistencyLevel, HttpEffectKind};
 
 const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("audit.list-entries", HttpConsistencyLevel::LocalOnly),
@@ -46,13 +46,13 @@ const EXPECTED_LOCAL_TX_SPECS: &[&str] = &[
 fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
     http::SPECS
         .iter()
-        .find(|spec| spec.contract_id == contract_id)
+        .find(|spec| spec.route.contract_id() == contract_id)
 }
 
 fn count_in_registry(level: HttpConsistencyLevel) -> usize {
     http::SPECS
         .iter()
-        .filter(|spec| spec.consistency_level == level)
+        .filter(|spec| spec.route.consistency_level() == level)
         .count()
 }
 
@@ -85,8 +85,8 @@ fn registry_distribution() -> [(HttpConsistencyLevel, usize); 5] {
 fn active_http_specs_expose_non_empty_effect_profiles() {
     let missing: Vec<_> = http::SPECS
         .iter()
-        .filter(|spec| spec.effect_profile.effects.is_empty())
-        .map(|spec| spec.contract_id)
+        .filter(|spec| spec.route.effect_profile().effects().is_empty())
+        .map(|spec| spec.route.contract_id())
         .collect();
     assert!(
         missing.is_empty(),
@@ -96,24 +96,28 @@ fn active_http_specs_expose_non_empty_effect_profiles() {
 
 #[test]
 fn audit_reads_expose_split_effect_profiles() {
-    let scoped: &[EffectKind] =
-        active_spec("audit.list-entries").map_or(&[], |spec| spec.effect_profile.effects);
+    let scoped: &[HttpEffectKind] =
+        active_spec("audit.list-entries").map_or(&[], |spec| spec.route.effect_profile().effects());
     assert_eq!(
         scoped,
-        &[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]
+        &[
+            HttpEffectKind::Auth,
+            HttpEffectKind::Read,
+            HttpEffectKind::Projection
+        ]
     );
 
-    let target: &[EffectKind] =
-        active_spec("audit.list-tenant-entries").map_or(&[], |spec| spec.effect_profile.effects);
+    let target: &[HttpEffectKind] = active_spec("audit.list-tenant-entries")
+        .map_or(&[], |spec| spec.route.effect_profile().effects());
     assert_eq!(
         target,
         &[
-            EffectKind::Auth,
-            EffectKind::Read,
-            EffectKind::Projection,
-            EffectKind::Write,
-            EffectKind::Transaction,
-            EffectKind::CrossTenantAudit,
+            HttpEffectKind::Auth,
+            HttpEffectKind::Read,
+            HttpEffectKind::Projection,
+            HttpEffectKind::Write,
+            HttpEffectKind::Transaction,
+            HttpEffectKind::CrossTenantAudit,
         ]
     );
 }
@@ -122,12 +126,12 @@ fn audit_reads_expose_split_effect_profiles() {
 fn local_tx_registry_contains_exact_active_l1_contracts() {
     let actual: Vec<_> = http::LOCAL_TX_SPECS
         .iter()
-        .map(|spec| spec.contract_id)
+        .map(|spec| spec.route.contract_id())
         .collect();
     let from_specs: Vec<_> = http::SPECS
         .iter()
-        .filter(|spec| spec.consistency_level == HttpConsistencyLevel::LocalTx)
-        .map(|spec| spec.contract_id)
+        .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::LocalTx)
+        .map(|spec| spec.route.contract_id())
         .collect();
     let expected_evidence = LocalTxSpec {
         boundary: LocalTxBoundary::SingleDomain,
@@ -146,15 +150,18 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
         "LOCAL_TX_SPECS should be derived from active LocalTx HTTP specs"
     );
     for spec in http::LOCAL_TX_SPECS {
-        assert_eq!(spec.consistency_level, HttpConsistencyLevel::LocalTx);
+        assert_eq!(
+            spec.route.consistency_level(),
+            HttpConsistencyLevel::LocalTx
+        );
         assert_eq!(spec.local_tx, Some(expected_evidence));
     }
     for spec in http::SPECS {
         assert_eq!(
             spec.local_tx.is_some(),
-            spec.consistency_level == HttpConsistencyLevel::LocalTx,
+            spec.route.consistency_level() == HttpConsistencyLevel::LocalTx,
             "local_tx evidence should only be present on LocalTx specs: {}",
-            spec.contract_id
+            spec.route.contract_id()
         );
     }
 }
@@ -164,8 +171,8 @@ fn active_http_specs_expose_manifest_consistency_levels() {
     for (contract_id, expected) in EXPECTED_ACTIVE_SPECS {
         let actual = http::SPECS
             .iter()
-            .find(|spec| spec.contract_id == *contract_id)
-            .map(|spec| spec.consistency_level);
+            .find(|spec| spec.route.contract_id() == *contract_id)
+            .map(|spec| spec.route.consistency_level());
         assert_eq!(
             actual,
             Some(*expected),
@@ -178,9 +185,9 @@ fn active_http_specs_expose_manifest_consistency_levels() {
         .filter(|spec| {
             !EXPECTED_ACTIVE_SPECS
                 .iter()
-                .any(|(contract_id, _)| *contract_id == spec.contract_id)
+                .any(|(contract_id, _)| *contract_id == spec.route.contract_id())
         })
-        .map(|spec| spec.contract_id)
+        .map(|spec| spec.route.contract_id())
         .collect();
     assert!(
         unexpected.is_empty(),

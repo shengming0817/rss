@@ -1,0 +1,15 @@
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+ --> tests/ui/generated_endpoint_requires_evidence.rs:4:13
+  |
+4 |     let _ = httpserve::GeneratedEndpoint::<()>::new(|| async { "ok" });
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ----------------- argument #1 of type `vocab::http::HttpRouteBinding<_>` is missing
+  |
+note: associated function defined here
+ --> src/routes.rs
+  |
+  |     pub fn new<M, H, T>(binding: HttpRouteBinding<M>, handler: H) -> Result<Self, RouteGroupError>
+  |            ^^^
+help: provide the argument
+  |
+4 |     let _ = httpserve::GeneratedEndpoint::<()>::new(/* binding */, || async { "ok" });
+  |                                                     ++++++++++++++

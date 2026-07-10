@@ -1,18 +1,23 @@
 use anyhow::{Result, ensure};
-use httpserve::{PrimaryRoute, ResourceProjection, RoutePermission, RouteResourceScope};
-use vocab::{ProjectionField, RoutePermissionId};
+use httpserve::{ContractMarker, GeneratedPrimaryEndpoint, ResourceProjection};
+use vocab::{HttpRouteAuth, HttpRouteBinding, ProjectionField, RoutePermissionId};
+
+enum ProfileRoute {}
+
+fn profile_endpoint<M: 'static>(
+    binding: HttpRouteBinding<M>,
+) -> Result<GeneratedPrimaryEndpoint<()>> {
+    let evidence = binding.evidence();
+    ensure!(evidence.auth() == HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead));
+    ensure!(evidence.self_scoped());
+    Ok(GeneratedPrimaryEndpoint::new(
+        binding,
+        |_: ContractMarker<M>| async {},
+    )?)
+}
 
 fn main() -> Result<()> {
-    let profile_route = PrimaryRoute::permission(
-        "GET".parse()?,
-        "/api/v1/identity/profile",
-        "identity.profile",
-        RoutePermission {
-            permission: RoutePermissionId::IdentityProfileRead,
-            scope: RouteResourceScope::SelfSubject,
-        },
-    );
-    ensure!(profile_route.route_permission().is_some());
+    let _profile_endpoint_factory = profile_endpoint::<ProfileRoute>;
 
     ensure!(
         ProjectionField::from_obligation_key("audit.actor") == Some(ProjectionField::AuditActor)

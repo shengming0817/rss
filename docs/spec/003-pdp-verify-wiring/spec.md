@@ -64,7 +64,7 @@ httpserve 在自身可依赖的层（基础级，零 authn 依赖）定义 `Auth
 
 1. **Given** 一条 `Require(Jwt)` 路由且 request 携 `scheme=Jwt` 的 `Authenticated` extension，**When** enforce 层处理，**Then** 放行到 handler（200）。
 2. **Given** 同路由但 request 无 `Authenticated`，**When** enforce 层处理，**Then** fail-closed 401。
-3. **Given** `PrimaryRoute` 的 `opt_out=Public`，**When** 无 `Authenticated` 请求，**Then** 仍 200（opt-out 不被本改动破坏）。
+3. **Given** generated route evidence 的 auth 为 `Public`，**When** 经 `GeneratedPrimaryEndpoint` 挂载且无 `Authenticated` 请求，**Then** 仍 200。
 4. **Given** 一条 `Require(Jwt)` 路由但 request 携 `scheme=Mtls` 的 `Authenticated`（方案不匹配），**When** enforce 层处理，**Then** fail-closed 401（杜绝 scheme 混淆）。
 
 ---

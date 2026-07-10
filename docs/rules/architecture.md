@@ -34,7 +34,7 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 | Contract | `contracts/{kind}/{domain}/{version}/` 的 `contract.toml` + `*.schema.json` 声明源 | typify/xtask 派生 Rust 进 `generated/` crate;跨边界唯一 wire 载体 |
 | Contract 归属 | `owner` = 域 crate 名 / `_framework`(sentinel) | provider-agnostic 中立契约归框架 |
 | Assembly | `assemblies/{name}/` 的 `assembly.toml`(+ `bins/server` / bin crate) | 依赖闭包 = 物理打包；static assembly intent + DI provider 声明源 |
-| 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 + typed `[capabilities.*]` 证据块；L4 另需顶层 `[reconcile]` block；active HTTP 同源派生 `generated::http::HttpSpec::consistency_level` | 与 wire 语义同源(决策 #1);不放域 crate manifest；`xtask` R22 强制等级、能力证据与 L4 reconcile 声明一致 |
+| 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 + typed `[capabilities.*]` 证据块；L4 另需顶层 `[reconcile]` block；active HTTP 同源派生 `ROUTE: vocab::HttpRouteBinding<RouteMarker>`，`HttpSpec::route` 由 `ROUTE.evidence()` 擦除供元数据查询 | 与 wire 语义同源(决策 #1);不放域 crate manifest；`xtask` R22 强制等级、能力证据与 L4 reconcile 声明一致；endpoint 构造要求 binding marker 与 handler `ContractMarker` 相同，request extension 传播同一 evidence |
 | context 控制流值(tenant/principal) | `runctx::RequestCtx`/`AppCtx`(`task_local` 传播);tenant payload = `vocab::tenant::TenantId` | sealed 构造 + redacted Debug + fail-closed 取用(决策 #2 → ADR-002);base intra-base DAG `runctx → vocab` |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 

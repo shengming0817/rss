@@ -62,6 +62,8 @@ const AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "row_visibility",
     "audited_cross_tenant_visibility",
 ];
+const AUTHN_PRINCIPAL_BRANCH_ALLOWED_METHODS: &[(&str, &[&str])] =
+    &[("authorize", &["ProjectionMaintenanceGrantSet"])];
 const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "verify_maintenance_operator_subject",
     "verified_service_maintenance_operator_subject",
@@ -318,7 +320,14 @@ fn principal_branch_caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bo
     }
     match crate_name {
         "vocab" => enclosing_item_is_any(cx, hir_id, VOCAB_PRINCIPAL_KIND_REPR_ITEMS),
-        "authn" => enclosing_item_is_any(cx, hir_id, AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS),
+        "authn" => {
+            enclosing_item_is_any(cx, hir_id, AUTHN_PRINCIPAL_BRANCH_ALLOWED_ITEMS)
+                || enclosing_method_on_allowed_type_is(
+                    cx,
+                    hir_id,
+                    AUTHN_PRINCIPAL_BRANCH_ALLOWED_METHODS,
+                )
+        }
         "runtime" => {
             enclosing_item_is_any(cx, hir_id, RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS)
                 || enclosing_method_on_allowed_type_is(

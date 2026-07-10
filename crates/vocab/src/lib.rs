@@ -5,6 +5,7 @@ pub mod authz;
 pub mod contract;
 pub mod epoch;
 pub mod error;
+pub mod http;
 pub mod principal;
 pub mod projection;
 pub mod query;
@@ -33,6 +34,10 @@ pub use contract::binding::{
 pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
+pub use http::{
+    HttpConsistencyLevel, HttpEffectKind, HttpEffectProfile, HttpRouteAuth, HttpRouteBinding,
+    HttpRouteEvidence,
+};
 pub use principal::PrincipalKind;
 pub use projection::{
     AUDIT_ACTOR_FIELD_OBLIGATION, AUDIT_FIELD_ACTOR_PERMISSION, AUDIT_FIELD_RESOURCE_ID_PERMISSION,

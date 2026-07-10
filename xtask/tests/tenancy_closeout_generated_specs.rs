@@ -1,13 +1,12 @@
-use anyhow::{Context, Result, ensure};
-use generated::http::{HttpAuthMode, HttpHeaderMode};
-use vocab::{ProjectionField, RoutePermissionId};
+use anyhow::{Result, ensure};
+use generated::http::HttpHeaderMode;
+use vocab::{HttpRouteAuth, ProjectionField, RoutePermissionId};
 
 #[test]
 fn tenancy_closeout_generated_http_specs_match_consumer_contract() -> Result<()> {
     let login = generated::http::identity_v1::login::SPEC;
-    ensure!(login.contract_id == "identity.login");
-    ensure!(login.auth.mode == HttpAuthMode::Public);
-    ensure!(login.auth.permission.is_none());
+    ensure!(login.route.contract_id() == "identity.login");
+    ensure!(login.route.auth() == HttpRouteAuth::Public);
     ensure!(
         login
             .headers
@@ -18,13 +17,10 @@ fn tenancy_closeout_generated_http_specs_match_consumer_contract() -> Result<()>
     );
 
     let profile = generated::http::identity_v1::profile::SPEC;
-    let profile_permission = profile
-        .auth
-        .permission
-        .context("identity.profile must declare a route permission")?;
-    ensure!(profile.auth.mode == HttpAuthMode::Permission);
-    ensure!(profile_permission == RoutePermissionId::IdentityProfileRead);
-    ensure!(profile.self_scoped);
+    ensure!(
+        profile.route.auth() == HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead)
+    );
+    ensure!(profile.route.self_scoped());
     ensure!(
         profile.projection_fields.iter().any(|field| {
             field.field == ProjectionField::IdentityProfileSubject
@@ -36,8 +32,8 @@ fn tenancy_closeout_generated_http_specs_match_consumer_contract() -> Result<()>
     );
 
     let audit = generated::http::audit_v1::list_entries::SPEC;
-    ensure!(audit.contract_id == "audit.list-entries");
-    ensure!(audit.auth.permission == Some(RoutePermissionId::AuditRead));
+    ensure!(audit.route.contract_id() == "audit.list-entries");
+    ensure!(audit.route.auth() == HttpRouteAuth::Permission(RoutePermissionId::AuditRead));
     ensure!(
         audit.projection_fields.iter().any(|field| {
             field.field == ProjectionField::AuditActor
@@ -49,8 +45,8 @@ fn tenancy_closeout_generated_http_specs_match_consumer_contract() -> Result<()>
     );
 
     let target = generated::http::audit_v1::list_tenant_entries::SPEC;
-    ensure!(target.contract_id == "audit.list-tenant-entries");
-    ensure!(target.auth.permission == Some(RoutePermissionId::AuditRead));
+    ensure!(target.route.contract_id() == "audit.list-tenant-entries");
+    ensure!(target.route.auth() == HttpRouteAuth::Permission(RoutePermissionId::AuditRead));
 
     Ok(())
 }

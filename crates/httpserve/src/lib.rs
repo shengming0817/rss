@@ -23,11 +23,13 @@ pub use auth::{
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
-    Admin, AuthenticatedRoutes, Health, Internal, Listener, ListenerRouter, NonPrimaryListener,
-    Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
-    finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
-    finalize_primary_auth_with_audit,
+    Admin, AuthenticatedRoutes, ContractMarker, GeneratedEndpoint, GeneratedPrimaryEndpoint,
+    Health, Internal, Listener, ListenerRouter, NonPrimaryListener, Primary, UnfinalizedRoutes,
+    finalize_auth, finalize_auth_with_audit, finalize_auth_with_audit_and_authorizer,
+    finalize_primary_auth, finalize_primary_auth_with_audit,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};
 
 /// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
 /// [`AuthenticatedRoutes::into_make_service`] 封为**最外层**，ROUTE-REQUESTID-OUTERMOST-01）。
@@ -42,102 +44,14 @@ pub fn request_id_str(extensions: &axum::http::Extensions) -> Option<&str> {
         .map(middleware::RequestId::as_str)
 }
 
-use primitives::RouteAuthOptOut;
-
-/// 非-`Primary` listener 路由声明性元数据：**类型层无 auth opt-out 字段**。
-///
-/// `Internal` / `Admin` / `Health` listener 上的 route 用此类型——opt-out 在类型层不可表达
-/// （input-struct-field-exclusion，Hard）：没有字段可设，故 `resolve_requirement` 对经
-/// [`ListenerRouter::mount`](routes::ListenerRouter::mount) 挂载的 route 恒收 `None`。对外 `Primary`
-/// listener 的 opt-out 走兄弟类型 [`PrimaryRoute`]。
-#[derive(Debug, Clone)]
-pub struct Route {
-    pub method: axum::http::Method,
-    pub path: &'static str,
-    pub contract_id: &'static str,
-}
-
-/// `Primary` listener 路由声明性元数据：**唯一**可携带 auth opt-out 的 route 类型。
-///
-/// INVARIANT: AUTH-OPTOUT-PRIMARYONLY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— auth opt-out（[`RouteAuthOptOut`]）仅 `PrimaryRoute`
-/// 可携带；plain [`Route`] 类型层无此字段（input-struct-field-exclusion，Hard，取代旧裸 `bool` 字段）。
-/// 非-Primary route 经 [`ListenerRouter::mount`](routes::ListenerRouter::mount) 挂载、永远拿不到 opt-out
-/// 值；`Primary` route 经 [`ListenerRouter::mount_primary`](routes::ListenerRouter::mount_primary)
-/// 挂载并透传 `opt_out`。运行期 fail-closed 由 `primitives::resolve_requirement`（INVARIANT
-/// AUTH-FAILCLOSED-01）作 listener-mismatch 残留 seam 的 backstop（defense-in-depth：类型层删常见
-/// 误用类，运行期兜异常接线）。
-#[derive(Debug, Clone)]
-pub struct PrimaryRoute {
-    pub(crate) method: axum::http::Method,
-    pub(crate) path: &'static str,
-    pub(crate) contract_id: &'static str,
-    pub(crate) authz: PrimaryRouteAuthz,
-}
-
-impl PrimaryRoute {
-    pub fn permission(
-        method: axum::http::Method,
-        path: &'static str,
-        contract_id: &'static str,
-        permission: RoutePermission,
-    ) -> Self {
-        Self {
-            method,
-            path,
-            contract_id,
-            authz: PrimaryRouteAuthz::Permission(permission),
-        }
-    }
-
-    pub fn opt_out(
-        method: axum::http::Method,
-        path: &'static str,
-        contract_id: &'static str,
-        opt_out: RouteAuthOptOut,
-    ) -> Self {
-        Self {
-            method,
-            path,
-            contract_id,
-            authz: PrimaryRouteAuthz::OptOut(opt_out),
-        }
-    }
-
-    pub fn method(&self) -> &axum::http::Method {
-        &self.method
-    }
-
-    pub fn path(&self) -> &'static str {
-        self.path
-    }
-
-    pub fn contract_id(&self) -> &'static str {
-        self.contract_id
-    }
-
-    pub fn route_permission(&self) -> Option<RoutePermission> {
-        match self.authz {
-            PrimaryRouteAuthz::Permission(permission) => Some(permission),
-            PrimaryRouteAuthz::OptOut(_) => None,
-        }
-    }
-
-    pub fn opt_out_kind(&self) -> Option<RouteAuthOptOut> {
-        match self.authz {
-            PrimaryRouteAuthz::OptOut(opt_out) => Some(opt_out),
-            PrimaryRouteAuthz::Permission(_) => None,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RoutePermission {
+    pub(crate) permission: vocab::RoutePermissionId,
+    pub(crate) scope: RouteResourceScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoutePermission {
-    pub permission: vocab::RoutePermissionId,
-    pub scope: RouteResourceScope,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteResourceScope {
+pub(crate) enum RouteResourceScope {
     None,
     PathParam(&'static str),
     SelfSubject,
@@ -146,7 +60,7 @@ pub enum RouteResourceScope {
 #[derive(Debug, Clone)]
 pub(crate) enum PrimaryRouteAuthz {
     Permission(RoutePermission),
-    OptOut(RouteAuthOptOut),
+    OptOut(primitives::RouteAuthOptOut),
 }
 
 // 旧 `RouteGroup` struct（接受裸 `axum::Router` 的 register 闭包）已随 ADR-009 typed funnel 退役——
@@ -161,11 +75,56 @@ pub(crate) enum PrimaryRouteAuthz {
 pub enum RouteGroupError {
     #[error("duplicate route registration")]
     DuplicateRoute,
-    #[error("listener mismatch")]
-    ListenerMismatch,
+    #[error(
+        "listener mismatch: registered={registered:?}, conflicting={conflicting:?}, finalized={finalized:?}"
+    )]
+    ListenerMismatch {
+        /// First listener registered in the accumulator, if any.
+        registered: Option<primitives::ListenerKind>,
+        /// A second, incompatible listener observed during group folding, if any.
+        conflicting: Option<primitives::ListenerKind>,
+        /// Listener selected by the auth plan at finalization.
+        finalized: primitives::ListenerKind,
+    },
+    /// The selected listener exposes fixed framework routes that do not support this scheme.
+    #[error("auth scheme {scheme:?} is unsupported for listener {listener:?}")]
+    UnsupportedAuthPlan {
+        /// Listener selected by the auth plan.
+        listener: primitives::ListenerKind,
+        /// Authentication scheme rejected for that listener.
+        scheme: primitives::AuthScheme,
+    },
     #[error("route registration failed")]
     RegistrationFailed,
+    #[error(
+        "generated route method is invalid or unsupported: contract={contract_id}, method={method}, path={path}"
+    )]
+    InvalidMethod {
+        contract_id: &'static str,
+        method: String,
+        path: &'static str,
+    },
+    #[error(
+        "generated route path is outside its route group: contract={contract_id}, method={method}, path={path}, prefix={prefix}, listener={listener:?}"
+    )]
+    PathOutsideGroup {
+        contract_id: &'static str,
+        method: &'static str,
+        path: &'static str,
+        prefix: &'static str,
+        listener: primitives::ListenerKind,
+    },
+    #[error(
+        "generated route auth is incompatible with its listener: contract={contract_id}, method={method}, path={path}, listener={listener:?}, auth={auth:?}"
+    )]
+    InvalidAuth {
+        contract_id: &'static str,
+        method: &'static str,
+        path: &'static str,
+        listener: primitives::ListenerKind,
+        auth: vocab::HttpRouteAuth,
+    },
 }
 
-// 路由挂载（`ListenerRouter::{mount, mount_primary}`）与 auth-finalize funnel（`finalize_auth` /
+// generated endpoint 挂载（`ListenerRouter::mount`）与 auth-finalize funnel（`finalize_auth` /
 // `UnfinalizedRoutes` / `AuthenticatedRoutes`）见 `routes` 模块——typed listener marker + funnel 状态类型。

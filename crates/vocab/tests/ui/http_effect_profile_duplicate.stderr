@@ -1,0 +1,18 @@
+error[E0080]: evaluation panicked: HTTP effect profile must not contain duplicates
+ --> tests/ui/http_effect_profile_duplicate.rs:4:5
+  |
+4 |     vocab::HttpEffectProfile::new(&[HttpEffectKind::Read, HttpEffectKind::Read]);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `PROFILE` failed inside this call
+  |
+note: inside `HttpEffectProfile::new`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: src/http.rs
+  |
+  | /                 assert!(
+  | |                     effects[current] as u8 != effects[candidate] as u8,
+  | |                     "HTTP effect profile must not contain duplicates"
+  | |                 );
+  | |_________________- in this macro invocation

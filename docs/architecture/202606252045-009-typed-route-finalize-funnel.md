@@ -26,8 +26,13 @@
 
 ### 2.1 httpserve 路由类型词汇（`crates/httpserve/src/routes.rs`）
 
-- **listener 类型 marker**（sealed）：`Listener: sealed::Sealed { const KIND: ListenerKind }`，markers `Primary`/`Internal`/`Admin`/`Health`；`NonPrimaryListener: Listener`（Internal/Admin/Health）。外部 crate 无法命名 `sealed::Sealed` ⇒ 无法新增 listener marker。
-- **listener-typed builder** `ListenerRouter<L>`：`mount(Route, _)` 仅 `L: NonPrimaryListener`、`mount_primary(PrimaryRoute, _)` 仅 `L = Primary`（与 AUTH-OPTOUT-PRIMARYONLY-01 在 listener 维对齐）。构造 `new` / 拆 `into_inner` 均 `pub(crate)`——域 crate 只在 register 闭包里**收到** builder、仅能 typed mount，无 raw-bypass。
+- **listener 类型 marker**（sealed）：`Listener: sealed::Sealed { const KIND: ListenerKind }`，markers `Primary`/`Internal`/`Admin`/`Health`；`NonPrimaryListener: Listener`（Internal/Admin）。外部 crate 无法命名 `sealed::Sealed` ⇒ 无法新增 listener marker。
+- **listener-typed builder** `ListenerRouter<L>`：`mount(GeneratedEndpoint)` 仅 `L: NonPrimaryListener`、
+  `mount(GeneratedPrimaryEndpoint)` 仅 `L = Primary`。endpoint 构造只接受 codegen 的
+  `HttpRouteBinding<RouteMarker>`，handler 首 extractor 必须是同一 `ContractMarker<RouteMarker>`；随后 endpoint
+  同时携擦除 marker 的 `HttpRouteEvidence` 与 handler。故不同契约的 evidence/handler 交换在类型层不可表达，
+  path/method/auth/resource scope 不可分别传入。构造 `new` / 拆 `into_inner` 均 `pub(crate)`——域 crate
+  只在 register 闭包里收到 builder、无 raw-bypass；Health 只能经 crate 内固定 builder 挂载。
 - **funnel 三态**：`UnfinalizedRoutes`（未认证态，兼 per-listener 累加器，`empty()` + `nest_group::<L>()`；**无 public bindable 出口**）→ `finalize_auth(UnfinalizedRoutes, AuthPlan) -> Result<AuthenticatedRoutes, _>`（**唯一**生产 `AuthenticatedRoutes`，构造 `pub(crate)`）→ `AuthenticatedRoutes::into_make_service()`（**唯一** bindable 出口；`layer()` 只能加层不能替换，保封印）。
 - **不变量**：任何 public（非 `#[doc(hidden)]` test）API **都不**返回裸 `axum::Router`——裸 Router 全程不出 httpserve。
 
@@ -38,7 +43,9 @@
 
 ### 2.3 INVARIANT 落点
 
-- **ROUTE-LISTENER-TYPED-01**（#1103 Medium→Hard）：路由经 `ListenerRouter<L>` 挂载、随组 fold 进 `L::KIND` listener；Internal/Admin/Health 路由类型层不可能进 Primary Router。取代 BOOTSTRAP-ROUTE-LISTENER-SEGREGATION-01 runtime 反例测试（保留为行为补充测试，类型层 vacuous 后可退役）。
+- **ROUTE-LISTENER-TYPED-01**（#1103 Medium→Hard）：generated endpoint 经 `ListenerRouter<L>` 挂载、随组 fold 进 `L::KIND` listener；Internal/Admin endpoint 类型层不可能进 Primary Router，Health 固定 builder 不接受业务 endpoint。
+- **ROUTE-ENDPOINT-ATOMIC-01 / ROUTE-MOUNT-NOBYPASS-01**（#1690 Hard）：production public API 不接受 raw
+  `MethodRouter` 或 route 字段；endpoint 是 handler 与完整 evidence 的唯一注册单元。
 - **ROUTE-AUTH-FUNNEL-01**（#1113 Hard）：`UnfinalizedRoutes` 无 public bindable 出口。
 - **ROUTE-AUTH-FUNNEL-02**（#1113 Hard）：`finalize_auth` 是 `AuthenticatedRoutes` 唯一生产者，`into_make_service` 唯一 bindable 出口。
 
@@ -46,7 +53,7 @@
 
 - **PR #137 review F1**（`crates/bootstrap/Cargo.toml` 注释「不依赖兄弟服务」）：**收窄为带受控例外**。F1 的实质论据是「kernel 不向兄弟服务横向索取 **runtime provider**（resolver / transport 等由组合根 DI 注入）」——本例外**不**触动该论据：bootstrap→httpserve 边只取**编译期路由类型词汇**（`ListenerRouter<L>` / `UnfinalizedRoutes`），**零 runtime provider** 跨边。
 - **`httpserve/src/lib.rs` `RouteGroupError` 注释「分层禁依赖 bootstrap」**：**仍成立**——本 ADR 只开 `bootstrap → httpserve`（单向），`httpserve → bootstrap` 反向仍禁（layers 反例守）。注释更新为「httpserve 不依赖 bootstrap（反向边仍禁）；正向 bootstrap→httpserve 受控边见 ADR-009」。
-- **signature-freeze（`docs/spec/001-.../layer-services.md`）**：httpserve `finalize_auth` 签名由 `(axum::Router, AuthPlan) -> Result<axum::Router>` 改为 `(UnfinalizedRoutes, AuthPlan) -> Result<AuthenticatedRoutes>`；`mount`/`mount_primary` 自由函数改为 `ListenerRouter<L>` 方法；`RouteGroup{listener,..}` 收集面由 `route_group::<L>` typed 化。pre-GA 无外部消费方，原地改。
+- **signature-freeze（`docs/spec/001-.../layer-services.md`）**：httpserve `finalize_auth` 签名由 `(axum::Router, AuthPlan) -> Result<axum::Router>` 改为 `(UnfinalizedRoutes, AuthPlan) -> Result<AuthenticatedRoutes>`；#1690 再删除字段级 `Route`/`PrimaryRoute` 与 raw mount，替换为 generated endpoint mount。pre-GA 无外部消费方，原地破坏式更新。
 
 ### 威胁矩阵重评（受控边）
 

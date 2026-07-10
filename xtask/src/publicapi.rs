@@ -214,8 +214,30 @@ fn report(check: bool, allow_missing: bool, drift: &[String], missing: &[String]
 mod tests {
     use super::*;
 
+    const HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS: &[&str] = &[
+        "contract",
+        "path",
+        "method",
+        "auth",
+        "resource",
+        "self_scoped",
+        "consistency_level",
+        "effect_profile",
+    ];
+
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn exposed_http_route_evidence_fields(baseline: &str) -> Vec<&'static str> {
+        HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| {
+                let symbol = format!("pub vocab::http::HttpRouteEvidence::{field}:");
+                baseline.lines().any(|line| line.contains(&symbol))
+            })
+            .collect()
     }
 
     #[test]
@@ -390,29 +412,9 @@ mod tests {
             "pub enum generated::ProtectionAadDim",
             "pub enum generated::ProtectionAtRest",
             "pub enum generated::ProtectionMode",
-            "pub enum generated::http::HttpConsistencyLevel",
-            "pub generated::http::HttpConsistencyLevel::LocalOnly",
-            "pub generated::http::HttpConsistencyLevel::LocalTx",
-            "pub generated::http::HttpConsistencyLevel::OutboxFact",
-            "pub generated::http::HttpConsistencyLevel::WorkflowEventual",
-            "pub generated::http::HttpConsistencyLevel::DeviceLatent",
-            "pub generated::http::HttpSpec::consistency_level: generated::http::HttpConsistencyLevel",
-            "pub struct generated::http::EffectProfile",
-            "pub generated::http::EffectProfile::effects: &'static [generated::http::EffectKind]",
-            "pub enum generated::http::EffectKind",
-            "pub generated::http::EffectKind::Read",
-            "pub generated::http::EffectKind::Auth",
-            "pub generated::http::EffectKind::Projection",
-            "pub generated::http::EffectKind::Write",
-            "pub generated::http::EffectKind::Transaction",
-            "pub generated::http::EffectKind::Outbox",
-            "pub generated::http::EffectKind::Publish",
-            "pub generated::http::EffectKind::Workflow",
-            "pub generated::http::EffectKind::Saga",
-            "pub generated::http::EffectKind::Reconcile",
-            "pub generated::http::EffectKind::Worker",
-            "pub generated::http::EffectKind::CrossTenantAudit",
-            "pub generated::http::HttpSpec::effect_profile: generated::http::EffectProfile",
+            "pub generated::http::HttpSpec::route: vocab::http::HttpRouteEvidence",
+            "pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker>",
+            "pub enum generated::http::settings_v4::RouteMarker",
             "pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>",
             "pub struct generated::http::LocalTxSpec",
             "pub generated::http::LocalTxSpec::boundary: generated::http::LocalTxBoundary",
@@ -460,6 +462,20 @@ mod tests {
             "pub generated::event::SubscriptionSpec::group:",
             "pub generated::event::EventSpec::topic:",
             "pub generated::command::CommandSpec::topic:",
+            "generated::http::HttpConsistencyLevel",
+            "generated::http::EffectProfile",
+            "generated::http::EffectKind",
+            "generated::http::HttpAuthMode",
+            "generated::http::HttpAuthSpec",
+            "pub generated::http::HttpSpec::contract_id:",
+            "pub generated::http::HttpSpec::contract:",
+            "pub generated::http::HttpSpec::path:",
+            "pub generated::http::HttpSpec::method:",
+            "pub generated::http::HttpSpec::auth:",
+            "pub generated::http::HttpSpec::resource:",
+            "pub generated::http::HttpSpec::self_scoped:",
+            "pub generated::http::HttpSpec::consistency_level:",
+            "pub generated::http::HttpSpec::effect_profile:",
         ] {
             assert!(
                 !baseline.lines().any(|line| line.contains(forbidden)),
@@ -467,6 +483,75 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn vocab_public_api_golden_exposes_canonical_http_route_evidence() -> anyhow::Result<()> {
+        let baseline = std::fs::read_to_string(baseline_dir()?.join("vocab.txt"))?;
+        for required in [
+            "pub enum vocab::http::HttpConsistencyLevel",
+            "pub enum vocab::http::HttpEffectKind",
+            "pub struct vocab::http::HttpEffectProfile",
+            "pub const fn vocab::http::HttpEffectProfile::new",
+            "pub enum vocab::http::HttpRouteAuth",
+            "pub struct vocab::http::HttpRouteBinding<M>",
+            "pub const fn vocab::http::HttpRouteBinding<M>::from_static",
+            "pub const fn vocab::http::HttpRouteBinding<M>::evidence",
+            "pub struct vocab::http::HttpRouteEvidence",
+            "pub const fn vocab::http::HttpRouteEvidence::from_static",
+            "pub const fn vocab::http::HttpRouteEvidence::effect_profile",
+        ] {
+            assert!(
+                baseline.contains(required),
+                "vocab public-api golden 缺少 canonical HTTP evidence API: {required}"
+            );
+        }
+        let exposed_fields = exposed_http_route_evidence_fields(&baseline);
+        assert!(
+            exposed_fields.is_empty(),
+            "vocab HttpRouteEvidence 全部字段必须保持私有: {exposed_fields:?}"
+        );
+        for forbidden in [
+            "pub vocab::http::HttpEffectProfile::effects:",
+            "pub vocab::http::HttpRouteBinding::evidence:",
+            "pub vocab::http::HttpRouteBinding::marker:",
+            "impl<M> core::default::Default for vocab::http::HttpRouteBinding<M>",
+            "impl core::default::Default for vocab::http::HttpEffectProfile",
+        ] {
+            assert!(
+                !baseline.contains(forbidden),
+                "vocab HTTP evidence 必须保持私有字段且无 Default: {forbidden}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn http_route_evidence_private_field_guard_covers_all_fields() {
+        let synthetic = r#"
+pub vocab::http::HttpRouteEvidence::contract: vocab::contract::binding::ContractBinding
+pub vocab::http::HttpRouteEvidence::path: &'static str
+pub vocab::http::HttpRouteEvidence::method: &'static str
+pub vocab::http::HttpRouteEvidence::auth: vocab::http::HttpRouteAuth
+pub vocab::http::HttpRouteEvidence::resource: core::option::Option<&'static str>
+pub vocab::http::HttpRouteEvidence::self_scoped: bool
+pub vocab::http::HttpRouteEvidence::consistency_level: vocab::http::HttpConsistencyLevel
+pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfile
+"#;
+        assert_eq!(
+            exposed_http_route_evidence_fields(synthetic),
+            vec![
+                "contract",
+                "path",
+                "method",
+                "auth",
+                "resource",
+                "self_scoped",
+                "consistency_level",
+                "effect_profile",
+            ],
+            "a refreshed golden must not hide any newly public HttpRouteEvidence field"
+        );
     }
 
     #[test]

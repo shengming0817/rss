@@ -875,6 +875,14 @@ impl core::marker::Unpin for generated::http::audit_v1::list_entries::error::Con
 impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
+pub enum generated::http::audit_v1::list_entries::RouteMarker
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::RouteMarker
+impl core::marker::Send for generated::http::audit_v1::list_entries::RouteMarker
+impl core::marker::Sync for generated::http::audit_v1::list_entries::RouteMarker
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::RouteMarker
 pub struct generated::http::audit_v1::list_entries::AuditEntryView
 pub generated::http::audit_v1::list_entries::AuditEntryView::action: alloc::string::String
 pub generated::http::audit_v1::list_entries::AuditEntryView::actor: alloc::string::String
@@ -948,10 +956,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponse
 pub const generated::http::audit_v1::list_entries::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::list_entries::CONTRACT_ID: &str
-pub const generated::http::audit_v1::list_entries::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::audit_v1::list_entries::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_entries::PATH: &str
 pub const generated::http::audit_v1::list_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::list_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_entries::RouteMarker>
 pub const generated::http::audit_v1::list_entries::SPEC: generated::http::HttpSpec
 pub mod generated::http::audit_v1::list_tenant_entries
 pub mod generated::http::audit_v1::list_tenant_entries::defaults
@@ -973,6 +982,14 @@ impl core::marker::Unpin for generated::http::audit_v1::list_tenant_entries::err
 impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entries::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::error::ConversionError
+pub enum generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::marker::Freeze for generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::marker::Send for generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::marker::Sync for generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::marker::Unpin for generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::RouteMarker
 pub struct generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest
 pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::cursor: core::option::Option<alloc::string::String>
 pub generated::http::audit_v1::list_tenant_entries::AuditListTenantEntriesRequest::limit: core::num::nonzero::NonZeroU32
@@ -1046,10 +1063,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
 pub const generated::http::audit_v1::list_tenant_entries::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::list_tenant_entries::CONTRACT_ID: &str
-pub const generated::http::audit_v1::list_tenant_entries::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::audit_v1::list_tenant_entries::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_tenant_entries::PATH: &str
 pub const generated::http::audit_v1::list_tenant_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::list_tenant_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_tenant_entries::RouteMarker>
 pub const generated::http::audit_v1::list_tenant_entries::SPEC: generated::http::HttpSpec
 pub mod generated::http::audit_v2
 pub mod generated::http::audit_v2::error
@@ -1132,6 +1150,14 @@ impl core::marker::Unpin for generated::http::identity_v1::login::error::Convers
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::login::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::login::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::login::error::ConversionError
+pub enum generated::http::identity_v1::login::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::login::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::login::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::login::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::login::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::login::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::login::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::login::RouteMarker
 pub struct generated::http::identity_v1::login::IdentityLoginData
 pub generated::http::identity_v1::login::IdentityLoginData::access_expires_at: i64
 pub generated::http::identity_v1::login::IdentityLoginData::access_token: alloc::string::String
@@ -1196,10 +1222,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::l
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::login::IdentityLoginResponse
 pub const generated::http::identity_v1::login::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::login::CONTRACT_ID: &str
-pub const generated::http::identity_v1::login::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::login::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::login::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::login::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::login::PATH: &str
 pub const generated::http::identity_v1::login::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::login::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::login::RouteMarker>
 pub const generated::http::identity_v1::login::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::logout
 pub mod generated::http::identity_v1::logout::error
@@ -1220,6 +1247,14 @@ impl core::marker::Unpin for generated::http::identity_v1::logout::error::Conver
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout::error::ConversionError
+pub enum generated::http::identity_v1::logout::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::logout::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::logout::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::logout::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::logout::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout::RouteMarker
 pub struct generated::http::identity_v1::logout::IdentityLogoutData
 pub generated::http::identity_v1::logout::IdentityLogoutData::logged_out: bool
 impl core::clone::Clone for generated::http::identity_v1::logout::IdentityLogoutData
@@ -1279,10 +1314,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::l
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout::IdentityLogoutResponse
 pub const generated::http::identity_v1::logout::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::logout::CONTRACT_ID: &str
-pub const generated::http::identity_v1::logout::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::logout::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::logout::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::logout::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::logout::PATH: &str
 pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker>
 pub const generated::http::identity_v1::logout::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::password_change
 pub mod generated::http::identity_v1::password_change::error
@@ -1303,6 +1339,14 @@ impl core::marker::Unpin for generated::http::identity_v1::password_change::erro
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::password_change::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::password_change::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::error::ConversionError
+pub enum generated::http::identity_v1::password_change::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::password_change::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::password_change::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::password_change::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::password_change::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::password_change::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::password_change::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::RouteMarker
 pub struct generated::http::identity_v1::password_change::IdentityPasswordChangeData
 pub generated::http::identity_v1::password_change::IdentityPasswordChangeData::changed: bool
 impl core::clone::Clone for generated::http::identity_v1::password_change::IdentityPasswordChangeData
@@ -1363,10 +1407,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeResponse
 pub const generated::http::identity_v1::password_change::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::password_change::CONTRACT_ID: &str
-pub const generated::http::identity_v1::password_change::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::password_change::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::password_change::PATH: &str
 pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker>
 pub const generated::http::identity_v1::password_change::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_create
 pub mod generated::http::identity_v1::policies_create::error
@@ -1636,6 +1681,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_create::Iden
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create::IdentityPolicyCreateRuleViewEffect
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateRuleViewEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateRuleViewEffect
+pub enum generated::http::identity_v1::policies_create::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_create::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::policies_create::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_create::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_create::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::RouteMarker
 pub struct generated::http::identity_v1::policies_create::IdentityPoliciesCreateRequest
 pub generated::http::identity_v1::policies_create::IdentityPoliciesCreateRequest::contract_id: alloc::string::String
 pub generated::http::identity_v1::policies_create::IdentityPoliciesCreateRequest::effective_from: i64
@@ -1854,10 +1907,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateView
 pub const generated::http::identity_v1::policies_create::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_create::CONTRACT_ID: &str
-pub const generated::http::identity_v1::policies_create::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::policies_create::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::policies_create::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::policies_create::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_create::PATH: &str
 pub const generated::http::identity_v1::policies_create::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_create::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_create::RouteMarker>
 pub const generated::http::identity_v1::policies_create::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_deactivate
 pub mod generated::http::identity_v1::policies_deactivate::error
@@ -1878,6 +1932,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_deactivate::
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_deactivate::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_deactivate::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_deactivate::error::ConversionError
+pub enum generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_deactivate::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_deactivate::RouteMarker
 pub struct generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateData
 pub generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateData::deactivated: bool
 pub generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateData::version: core::num::nonzero::NonZeroU32
@@ -1938,10 +2000,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateResponse
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT_ID: &str
-pub const generated::http::identity_v1::policies_deactivate::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::policies_deactivate::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_deactivate::PATH: &str
 pub const generated::http::identity_v1::policies_deactivate::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_deactivate::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_deactivate::RouteMarker>
 pub const generated::http::identity_v1::policies_deactivate::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_get
 pub mod generated::http::identity_v1::policies_get::error
@@ -2096,6 +2159,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_get::Identit
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::IdentityPolicyGetRuleEffect
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetRuleEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetRuleEffect
+pub enum generated::http::identity_v1::policies_get::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_get::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::policies_get::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_get::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_get::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::RouteMarker
 pub struct generated::http::identity_v1::policies_get::IdentityPoliciesGetRequest
 impl core::clone::Clone for generated::http::identity_v1::policies_get::IdentityPoliciesGetRequest
 pub fn generated::http::identity_v1::policies_get::IdentityPoliciesGetRequest::clone(&self) -> generated::http::identity_v1::policies_get::IdentityPoliciesGetRequest
@@ -2247,10 +2318,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetView
 pub const generated::http::identity_v1::policies_get::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_get::CONTRACT_ID: &str
-pub const generated::http::identity_v1::policies_get::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::policies_get::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::policies_get::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::policies_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_get::PATH: &str
 pub const generated::http::identity_v1::policies_get::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_get::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_get::RouteMarker>
 pub const generated::http::identity_v1::policies_get::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_list
 pub mod generated::http::identity_v1::policies_list::defaults
@@ -2406,6 +2478,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_list::Identi
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::IdentityPolicyListRuleEffect
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListRuleEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListRuleEffect
+pub enum generated::http::identity_v1::policies_list::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_list::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::policies_list::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_list::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_list::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::RouteMarker
 pub struct generated::http::identity_v1::policies_list::IdentityPoliciesListRequest
 pub generated::http::identity_v1::policies_list::IdentityPoliciesListRequest::cursor: core::option::Option<alloc::string::String>
 pub generated::http::identity_v1::policies_list::IdentityPoliciesListRequest::limit: core::num::nonzero::NonZeroU32
@@ -2561,10 +2641,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListView
 pub const generated::http::identity_v1::policies_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_list::CONTRACT_ID: &str
-pub const generated::http::identity_v1::policies_list::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::policies_list::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::policies_list::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::policies_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_list::PATH: &str
 pub const generated::http::identity_v1::policies_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_list::RouteMarker>
 pub const generated::http::identity_v1::policies_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_update
 pub mod generated::http::identity_v1::policies_update::error
@@ -2834,6 +2915,14 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_update::Iden
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update::IdentityPolicyUpdateRuleViewEffect
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateRuleViewEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateRuleViewEffect
+pub enum generated::http::identity_v1::policies_update::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::policies_update::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::policies_update::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::policies_update::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::policies_update::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::RouteMarker
 pub struct generated::http::identity_v1::policies_update::IdentityPoliciesUpdateRequest
 pub generated::http::identity_v1::policies_update::IdentityPoliciesUpdateRequest::contract_id: alloc::string::String
 pub generated::http::identity_v1::policies_update::IdentityPoliciesUpdateRequest::effective_from: i64
@@ -3052,10 +3141,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateView
 pub const generated::http::identity_v1::policies_update::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_update::CONTRACT_ID: &str
-pub const generated::http::identity_v1::policies_update::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::policies_update::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::policies_update::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::policies_update::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_update::PATH: &str
 pub const generated::http::identity_v1::policies_update::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_update::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_update::RouteMarker>
 pub const generated::http::identity_v1::policies_update::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::profile
 pub mod generated::http::identity_v1::profile::error
@@ -3123,6 +3213,14 @@ impl core::marker::Unpin for generated::http::identity_v1::profile::IdentityProf
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::profile::IdentityProfileDataKind
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::profile::IdentityProfileDataKind
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::IdentityProfileDataKind
+pub enum generated::http::identity_v1::profile::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::profile::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::profile::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::profile::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::profile::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::profile::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::profile::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::RouteMarker
 pub struct generated::http::identity_v1::profile::IdentityProfileData
 pub generated::http::identity_v1::profile::IdentityProfileData::kind: generated::http::identity_v1::profile::IdentityProfileDataKind
 pub generated::http::identity_v1::profile::IdentityProfileData::subject: alloc::string::String
@@ -3185,10 +3283,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::IdentityProfileResponse
 pub const generated::http::identity_v1::profile::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::profile::CONTRACT_ID: &str
-pub const generated::http::identity_v1::profile::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::profile::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::profile::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::profile::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::profile::PATH: &str
 pub const generated::http::identity_v1::profile::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::profile::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::profile::RouteMarker>
 pub const generated::http::identity_v1::profile::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::refresh
 pub mod generated::http::identity_v1::refresh::error
@@ -3209,6 +3308,14 @@ impl core::marker::Unpin for generated::http::identity_v1::refresh::error::Conve
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::refresh::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::refresh::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::refresh::error::ConversionError
+pub enum generated::http::identity_v1::refresh::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::refresh::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::refresh::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::refresh::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::refresh::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::refresh::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::refresh::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::refresh::RouteMarker
 pub struct generated::http::identity_v1::refresh::IdentityRefreshData
 pub generated::http::identity_v1::refresh::IdentityRefreshData::access_expires_at: i64
 pub generated::http::identity_v1::refresh::IdentityRefreshData::access_token: alloc::string::String
@@ -3270,10 +3377,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::refresh::IdentityRefreshResponse
 pub const generated::http::identity_v1::refresh::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::refresh::CONTRACT_ID: &str
-pub const generated::http::identity_v1::refresh::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::refresh::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::refresh::PATH: &str
 pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker>
 pub const generated::http::identity_v1::refresh::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_assign
 pub mod generated::http::identity_v1::roles_assign::error
@@ -3294,6 +3402,14 @@ impl core::marker::Unpin for generated::http::identity_v1::roles_assign::error::
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_assign::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_assign::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_assign::error::ConversionError
+pub enum generated::http::identity_v1::roles_assign::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::roles_assign::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::roles_assign::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::roles_assign::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::roles_assign::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_assign::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_assign::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_assign::RouteMarker
 pub struct generated::http::identity_v1::roles_assign::IdentityRolesAssignData
 pub generated::http::identity_v1::roles_assign::IdentityRolesAssignData::assigned: bool
 impl core::clone::Clone for generated::http::identity_v1::roles_assign::IdentityRolesAssignData
@@ -3353,10 +3469,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_assign::IdentityRolesAssignResponse
 pub const generated::http::identity_v1::roles_assign::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_assign::CONTRACT_ID: &str
-pub const generated::http::identity_v1::roles_assign::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::roles_assign::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::roles_assign::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::roles_assign::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_assign::PATH: &str
 pub const generated::http::identity_v1::roles_assign::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::roles_assign::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_assign::RouteMarker>
 pub const generated::http::identity_v1::roles_assign::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_list
 pub mod generated::http::identity_v1::roles_list::defaults
@@ -3378,6 +3495,14 @@ impl core::marker::Unpin for generated::http::identity_v1::roles_list::error::Co
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_list::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_list::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::error::ConversionError
+pub enum generated::http::identity_v1::roles_list::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::roles_list::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::roles_list::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::roles_list::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::roles_list::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_list::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_list::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::RouteMarker
 pub struct generated::http::identity_v1::roles_list::IdentityRoleView
 pub generated::http::identity_v1::roles_list::IdentityRoleView::name: alloc::string::String
 pub generated::http::identity_v1::roles_list::IdentityRoleView::permissions: alloc::vec::Vec<alloc::string::String>
@@ -3444,10 +3569,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::IdentityRolesListResponse
 pub const generated::http::identity_v1::roles_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_list::CONTRACT_ID: &str
-pub const generated::http::identity_v1::roles_list::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::roles_list::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::roles_list::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::roles_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_list::PATH: &str
 pub const generated::http::identity_v1::roles_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::roles_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_list::RouteMarker>
 pub const generated::http::identity_v1::roles_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_revoke
 pub mod generated::http::identity_v1::roles_revoke::error
@@ -3468,6 +3594,14 @@ impl core::marker::Unpin for generated::http::identity_v1::roles_revoke::error::
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_revoke::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_revoke::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_revoke::error::ConversionError
+pub enum generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::marker::Freeze for generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::marker::Send for generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::marker::Sync for generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::marker::Unpin for generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_revoke::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_revoke::RouteMarker
 pub struct generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData
 pub generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData::revoked: bool
 impl core::clone::Clone for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeData
@@ -3528,10 +3662,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeResponse
 pub const generated::http::identity_v1::roles_revoke::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_revoke::CONTRACT_ID: &str
-pub const generated::http::identity_v1::roles_revoke::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::identity_v1::roles_revoke::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::identity_v1::roles_revoke::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::identity_v1::roles_revoke::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
 pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::roles_revoke::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_revoke::RouteMarker>
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v2
 pub mod generated::http::identity_v2::error
@@ -3613,6 +3748,14 @@ impl core::marker::Unpin for generated::http::settings_v1::error::ConversionErro
 impl core::marker::UnsafeUnpin for generated::http::settings_v1::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v1::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v1::error::ConversionError
+pub enum generated::http::settings_v1::RouteMarker
+impl core::marker::Freeze for generated::http::settings_v1::RouteMarker
+impl core::marker::Send for generated::http::settings_v1::RouteMarker
+impl core::marker::Sync for generated::http::settings_v1::RouteMarker
+impl core::marker::Unpin for generated::http::settings_v1::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v1::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v1::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v1::RouteMarker
 pub struct generated::http::settings_v1::SettingsConfigPublishData
 pub generated::http::settings_v1::SettingsConfigPublishData::key: alloc::string::String
 pub generated::http::settings_v1::SettingsConfigPublishData::version: i64
@@ -3676,10 +3819,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v1::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v1::SettingsConfigPublishResponse
 pub const generated::http::settings_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v1::CONTRACT_ID: &str
-pub const generated::http::settings_v1::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::settings_v1::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::settings_v1::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::settings_v1::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v1::PATH: &str
 pub const generated::http::settings_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v1::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v1::RouteMarker>
 pub const generated::http::settings_v1::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v2
 pub mod generated::http::settings_v2::error
@@ -3700,6 +3844,14 @@ impl core::marker::Unpin for generated::http::settings_v2::error::ConversionErro
 impl core::marker::UnsafeUnpin for generated::http::settings_v2::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v2::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v2::error::ConversionError
+pub enum generated::http::settings_v2::RouteMarker
+impl core::marker::Freeze for generated::http::settings_v2::RouteMarker
+impl core::marker::Send for generated::http::settings_v2::RouteMarker
+impl core::marker::Sync for generated::http::settings_v2::RouteMarker
+impl core::marker::Unpin for generated::http::settings_v2::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v2::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v2::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v2::RouteMarker
 pub struct generated::http::settings_v2::SettingsSecretPublishData
 pub generated::http::settings_v2::SettingsSecretPublishData::key: alloc::string::String
 pub generated::http::settings_v2::SettingsSecretPublishData::version: i64
@@ -3763,10 +3915,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v2::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v2::SettingsSecretPublishResponse
 pub const generated::http::settings_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v2::CONTRACT_ID: &str
-pub const generated::http::settings_v2::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::settings_v2::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::settings_v2::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::settings_v2::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v2::PATH: &str
 pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v2::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v2::RouteMarker>
 pub const generated::http::settings_v2::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v3
 pub mod generated::http::settings_v3::error
@@ -3848,6 +4001,14 @@ impl core::marker::Unpin for generated::http::settings_v4::error::ConversionErro
 impl core::marker::UnsafeUnpin for generated::http::settings_v4::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::error::ConversionError
+pub enum generated::http::settings_v4::RouteMarker
+impl core::marker::Freeze for generated::http::settings_v4::RouteMarker
+impl core::marker::Send for generated::http::settings_v4::RouteMarker
+impl core::marker::Sync for generated::http::settings_v4::RouteMarker
+impl core::marker::Unpin for generated::http::settings_v4::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v4::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::RouteMarker
 pub struct generated::http::settings_v4::SettingsConfigGetData
 pub generated::http::settings_v4::SettingsConfigGetData::key: alloc::string::String
 pub generated::http::settings_v4::SettingsConfigGetData::value: alloc::string::String
@@ -3910,10 +4071,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::SettingsConfigGetResponse
 pub const generated::http::settings_v4::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v4::CONTRACT_ID: &str
-pub const generated::http::settings_v4::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::settings_v4::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::settings_v4::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::settings_v4::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v4::PATH: &str
 pub const generated::http::settings_v4::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker>
 pub const generated::http::settings_v4::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v5
 pub mod generated::http::settings_v5::error
@@ -3934,6 +4096,14 @@ impl core::marker::Unpin for generated::http::settings_v5::error::ConversionErro
 impl core::marker::UnsafeUnpin for generated::http::settings_v5::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v5::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v5::error::ConversionError
+pub enum generated::http::settings_v5::RouteMarker
+impl core::marker::Freeze for generated::http::settings_v5::RouteMarker
+impl core::marker::Send for generated::http::settings_v5::RouteMarker
+impl core::marker::Sync for generated::http::settings_v5::RouteMarker
+impl core::marker::Unpin for generated::http::settings_v5::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v5::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v5::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v5::RouteMarker
 pub struct generated::http::settings_v5::SettingsConfigDeleteRequest
 impl core::clone::Clone for generated::http::settings_v5::SettingsConfigDeleteRequest
 pub fn generated::http::settings_v5::SettingsConfigDeleteRequest::clone(&self) -> generated::http::settings_v5::SettingsConfigDeleteRequest
@@ -3976,10 +4146,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v5::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v5::SettingsConfigDeleteResponse
 pub const generated::http::settings_v5::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v5::CONTRACT_ID: &str
-pub const generated::http::settings_v5::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::settings_v5::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::settings_v5::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::settings_v5::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v5::PATH: &str
 pub const generated::http::settings_v5::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v5::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v5::RouteMarker>
 pub const generated::http::settings_v5::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v6
 pub mod generated::http::settings_v6::error
@@ -4000,6 +4171,14 @@ impl core::marker::Unpin for generated::http::settings_v6::error::ConversionErro
 impl core::marker::UnsafeUnpin for generated::http::settings_v6::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v6::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v6::error::ConversionError
+pub enum generated::http::settings_v6::RouteMarker
+impl core::marker::Freeze for generated::http::settings_v6::RouteMarker
+impl core::marker::Send for generated::http::settings_v6::RouteMarker
+impl core::marker::Sync for generated::http::settings_v6::RouteMarker
+impl core::marker::Unpin for generated::http::settings_v6::RouteMarker
+impl core::marker::UnsafeUnpin for generated::http::settings_v6::RouteMarker
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v6::RouteMarker
+impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v6::RouteMarker
 pub struct generated::http::settings_v6::SettingsConfigRollbackData
 pub generated::http::settings_v6::SettingsConfigRollbackData::key: alloc::string::String
 pub generated::http::settings_v6::SettingsConfigRollbackData::source_version: i64
@@ -4061,84 +4240,12 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v6::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v6::SettingsConfigRollbackResponse
 pub const generated::http::settings_v6::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v6::CONTRACT_ID: &str
-pub const generated::http::settings_v6::EFFECTS: &[generated::http::EffectKind]
-pub const generated::http::settings_v6::EFFECT_PROFILE: generated::http::EffectProfile
+pub const generated::http::settings_v6::EFFECTS: &[vocab::http::HttpEffectKind]
+pub const generated::http::settings_v6::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v6::PATH: &str
 pub const generated::http::settings_v6::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v6::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v6::RouteMarker>
 pub const generated::http::settings_v6::SPEC: generated::http::HttpSpec
-pub enum generated::http::EffectKind
-pub generated::http::EffectKind::Auth
-pub generated::http::EffectKind::CrossTenantAudit
-pub generated::http::EffectKind::Outbox
-pub generated::http::EffectKind::Projection
-pub generated::http::EffectKind::Publish
-pub generated::http::EffectKind::Read
-pub generated::http::EffectKind::Reconcile
-pub generated::http::EffectKind::Saga
-pub generated::http::EffectKind::Transaction
-pub generated::http::EffectKind::Worker
-pub generated::http::EffectKind::Workflow
-pub generated::http::EffectKind::Write
-impl core::clone::Clone for generated::http::EffectKind
-pub fn generated::http::EffectKind::clone(&self) -> generated::http::EffectKind
-impl core::cmp::Eq for generated::http::EffectKind
-impl core::cmp::PartialEq for generated::http::EffectKind
-pub fn generated::http::EffectKind::eq(&self, &generated::http::EffectKind) -> bool
-impl core::fmt::Debug for generated::http::EffectKind
-pub fn generated::http::EffectKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::EffectKind
-impl core::marker::StructuralPartialEq for generated::http::EffectKind
-impl core::marker::Freeze for generated::http::EffectKind
-impl core::marker::Send for generated::http::EffectKind
-impl core::marker::Sync for generated::http::EffectKind
-impl core::marker::Unpin for generated::http::EffectKind
-impl core::marker::UnsafeUnpin for generated::http::EffectKind
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::EffectKind
-impl core::panic::unwind_safe::UnwindSafe for generated::http::EffectKind
-pub enum generated::http::HttpAuthMode
-pub generated::http::HttpAuthMode::Bootstrap
-pub generated::http::HttpAuthMode::ClientsOnly
-pub generated::http::HttpAuthMode::Permission
-pub generated::http::HttpAuthMode::Public
-pub generated::http::HttpAuthMode::ServiceOwned
-impl core::clone::Clone for generated::http::HttpAuthMode
-pub fn generated::http::HttpAuthMode::clone(&self) -> generated::http::HttpAuthMode
-impl core::cmp::Eq for generated::http::HttpAuthMode
-impl core::cmp::PartialEq for generated::http::HttpAuthMode
-pub fn generated::http::HttpAuthMode::eq(&self, &generated::http::HttpAuthMode) -> bool
-impl core::fmt::Debug for generated::http::HttpAuthMode
-pub fn generated::http::HttpAuthMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::HttpAuthMode
-impl core::marker::StructuralPartialEq for generated::http::HttpAuthMode
-impl core::marker::Freeze for generated::http::HttpAuthMode
-impl core::marker::Send for generated::http::HttpAuthMode
-impl core::marker::Sync for generated::http::HttpAuthMode
-impl core::marker::Unpin for generated::http::HttpAuthMode
-impl core::marker::UnsafeUnpin for generated::http::HttpAuthMode
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpAuthMode
-impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpAuthMode
-pub enum generated::http::HttpConsistencyLevel
-pub generated::http::HttpConsistencyLevel::DeviceLatent
-pub generated::http::HttpConsistencyLevel::LocalOnly
-pub generated::http::HttpConsistencyLevel::LocalTx
-pub generated::http::HttpConsistencyLevel::OutboxFact
-pub generated::http::HttpConsistencyLevel::WorkflowEventual
-impl core::clone::Clone for generated::http::HttpConsistencyLevel
-pub fn generated::http::HttpConsistencyLevel::clone(&self) -> generated::http::HttpConsistencyLevel
-impl core::cmp::Eq for generated::http::HttpConsistencyLevel
-impl core::cmp::PartialEq for generated::http::HttpConsistencyLevel
-pub fn generated::http::HttpConsistencyLevel::eq(&self, &generated::http::HttpConsistencyLevel) -> bool
-impl core::fmt::Debug for generated::http::HttpConsistencyLevel
-pub fn generated::http::HttpConsistencyLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::HttpConsistencyLevel
-impl core::marker::StructuralPartialEq for generated::http::HttpConsistencyLevel
-impl core::marker::Freeze for generated::http::HttpConsistencyLevel
-impl core::marker::Send for generated::http::HttpConsistencyLevel
-impl core::marker::Sync for generated::http::HttpConsistencyLevel
-impl core::marker::Unpin for generated::http::HttpConsistencyLevel
-impl core::marker::UnsafeUnpin for generated::http::HttpConsistencyLevel
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpConsistencyLevel
-impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpConsistencyLevel
 pub enum generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderMode::PopulateOnly
 pub generated::http::HttpHeaderMode::ServiceTokenTenantBound
@@ -4249,44 +4356,6 @@ impl core::marker::Unpin for generated::http::LocalTxRetry
 impl core::marker::UnsafeUnpin for generated::http::LocalTxRetry
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxRetry
 impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxRetry
-pub struct generated::http::EffectProfile
-pub generated::http::EffectProfile::effects: &'static [generated::http::EffectKind]
-impl core::clone::Clone for generated::http::EffectProfile
-pub fn generated::http::EffectProfile::clone(&self) -> generated::http::EffectProfile
-impl core::cmp::Eq for generated::http::EffectProfile
-impl core::cmp::PartialEq for generated::http::EffectProfile
-pub fn generated::http::EffectProfile::eq(&self, &generated::http::EffectProfile) -> bool
-impl core::fmt::Debug for generated::http::EffectProfile
-pub fn generated::http::EffectProfile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::EffectProfile
-impl core::marker::StructuralPartialEq for generated::http::EffectProfile
-impl core::marker::Freeze for generated::http::EffectProfile
-impl core::marker::Send for generated::http::EffectProfile
-impl core::marker::Sync for generated::http::EffectProfile
-impl core::marker::Unpin for generated::http::EffectProfile
-impl core::marker::UnsafeUnpin for generated::http::EffectProfile
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::EffectProfile
-impl core::panic::unwind_safe::UnwindSafe for generated::http::EffectProfile
-pub struct generated::http::HttpAuthSpec
-pub generated::http::HttpAuthSpec::mode: generated::http::HttpAuthMode
-pub generated::http::HttpAuthSpec::permission: core::option::Option<vocab::authz::RoutePermissionId>
-pub generated::http::HttpAuthSpec::reason: core::option::Option<&'static str>
-impl core::clone::Clone for generated::http::HttpAuthSpec
-pub fn generated::http::HttpAuthSpec::clone(&self) -> generated::http::HttpAuthSpec
-impl core::cmp::Eq for generated::http::HttpAuthSpec
-impl core::cmp::PartialEq for generated::http::HttpAuthSpec
-pub fn generated::http::HttpAuthSpec::eq(&self, &generated::http::HttpAuthSpec) -> bool
-impl core::fmt::Debug for generated::http::HttpAuthSpec
-pub fn generated::http::HttpAuthSpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::HttpAuthSpec
-impl core::marker::StructuralPartialEq for generated::http::HttpAuthSpec
-impl core::marker::Freeze for generated::http::HttpAuthSpec
-impl core::marker::Send for generated::http::HttpAuthSpec
-impl core::marker::Sync for generated::http::HttpAuthSpec
-impl core::marker::Unpin for generated::http::HttpAuthSpec
-impl core::marker::UnsafeUnpin for generated::http::HttpAuthSpec
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpAuthSpec
-impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpAuthSpec
 pub struct generated::http::HttpHeaderSpec
 pub generated::http::HttpHeaderSpec::mode: generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderSpec::name: &'static str
@@ -4347,19 +4416,11 @@ impl core::marker::UnsafeUnpin for generated::http::HttpResourceSharingSpec
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpResourceSharingSpec
 impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpResourceSharingSpec
 pub struct generated::http::HttpSpec
-pub generated::http::HttpSpec::auth: generated::http::HttpAuthSpec
-pub generated::http::HttpSpec::consistency_level: generated::http::HttpConsistencyLevel
-pub generated::http::HttpSpec::contract: vocab::contract::binding::ContractBinding
-pub generated::http::HttpSpec::contract_id: &'static str
-pub generated::http::HttpSpec::effect_profile: generated::http::EffectProfile
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]
 pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>
-pub generated::http::HttpSpec::method: &'static str
-pub generated::http::HttpSpec::path: &'static str
 pub generated::http::HttpSpec::projection_fields: &'static [generated::http::HttpProjectionFieldSpec]
-pub generated::http::HttpSpec::resource: core::option::Option<&'static str>
 pub generated::http::HttpSpec::resource_sharing: generated::http::HttpResourceSharingSpec
-pub generated::http::HttpSpec::self_scoped: bool
+pub generated::http::HttpSpec::route: vocab::http::HttpRouteEvidence
 impl core::clone::Clone for generated::http::HttpSpec
 pub fn generated::http::HttpSpec::clone(&self) -> generated::http::HttpSpec
 impl core::cmp::Eq for generated::http::HttpSpec

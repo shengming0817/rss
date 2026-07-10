@@ -228,7 +228,8 @@ NOBYPASSRLS` 已 provision，bootstrap serving pool 已由启动期 RLS 能力�
 
 业务端点授权走 PDP 决策，不在 handler 硬编 role-name 字面量。
 
-- HTTP 路由门禁用 generated `HttpSpec` 派生 `httpserve::RoutePermission`，经
+- HTTP 路由门直接消费 generated `HttpSpec::route: HttpRouteEvidence`，由
+  `GeneratedPrimaryEndpoint` 从 evidence auth/resource scope 推导 route permission，经
   `httpserve::RouteAuthorizer` 单一入口授权；handler 只消费 route gate 插入的
   `httpserve::AuthorizedSubject`，不用 `authn::any_role` / `authn::self_or` /
   `authn::require_any_role` 做授权分支。Admin listener 的 audit read 因保持 Admin
@@ -267,8 +268,8 @@ projection，不读取角色、permission 字符串或 policy 细节。audit 的
 path-param 标识的 resource ownership 是 PDP ABAC 决策，不是 handler 短路。owner-scoped /
 self-scoped gate **contract-derived**：契约声明 `endpoints.http.resource:
 <pathParam>`（owner-scoped）或 `endpoints.http.selfScoped: true`（self-scoped），生成
-handler 经 `httpserve::PrimaryRoute::permission` + `RouteResourceScope` funnel 派生
-path-param resource / self subject resource——业务 handler / 域 crate 不手写 gate。
+handler 经 `GeneratedPrimaryEndpoint` 从同一 `HttpRouteEvidence` 派生 path-param resource / self subject
+resource——业务 handler / 域 crate 不手写 gate 或 scope 映射。
 `resource`/`selfScoped` 各 ⇒ permission、二者互斥（contract validate、codegen check
 和 `cargo xtask` 治理校验）。owner-scoped gate 把 canonical resource id（self-scoped 把
 调用者自身 subject）转发给 PDP。
@@ -403,12 +404,12 @@ coarse allow/deny；唯一例外是 recognized FieldMask obligation 可转成 se
 ## HTTP 授权
 
 HTTP route gate 与 gRPC 同源。HTTP route -> permission 由契约
-`endpoints.http.auth.permission` overlay 派生。codegen 将契约渲染为 `generated::http::HttpSpec`
-的 typed `auth.permission: Option<RoutePermissionId>` / `resource` / `self_scoped`，域 route 装配只能经
-`PrimaryRoute::permission(RoutePermission { permission, scope })` 声明进入 primary route gate。
+`endpoints.http.auth.permission` overlay 派生。codegen 将 contract/path/method/auth/resource/selfScoped/
+consistency/effects 原子渲染为 `generated::http::HttpSpec::route: vocab::HttpRouteEvidence`；域 route 装配只能经
+`GeneratedPrimaryEndpoint::new(SPEC.route, handler)` 声明进入 primary route gate。
 `httpserve::RouteAuthorizer` 在 handler 前做统一判定，允许后插入 `AuthorizedSubject`；handler 只消费
 该授权主体上下文，不回读 `Authenticated`。owner-scoped（`endpoints.http.resource`）/ self-scoped
-（`endpoints.http.selfScoped`）由 `RouteResourceScope::{PathParam,SelfSubject}` 三分支派生，见
+（`endpoints.http.selfScoped`）由 endpoint 内部从 evidence 三分支派生，见
 §Resource ownership。
 
 每个 `lifecycle: active` 且 `codegen` 的 HTTP 契约必须声明恰好一个 AuthZ mode：

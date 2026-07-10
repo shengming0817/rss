@@ -13,8 +13,11 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 
 use anyhow::{Result, anyhow};
+use axum::body::{Body, to_bytes};
+use axum::http::{Method, Request, StatusCode, header};
 use common::memory_tenant_signer;
 use diport::{KEY_TENANT_AUTHORITY, OpaqueActorId, OutboxActor, Subscriber, Topic};
 use futures::StreamExt;
@@ -23,10 +26,11 @@ use generated::event::settings_v1::{
 };
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use memory::{FixedClock, MemBus, MemEmitter};
-use primitives::ListenerKind;
+use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
 use settings::{SettingsDomain, SettingsService, empty_secret_repo};
 use tokio_util::sync::CancellationToken;
-use vocab::TenantId;
+use tower::ServiceExt;
+use vocab::{PrincipalKind, TenantId};
 
 mod common;
 
@@ -44,6 +48,41 @@ fn actor(tenant: TenantId) -> Result<OutboxActor> {
         tenant,
         vocab::ScopedTenant::Tenant,
     ))
+}
+
+#[derive(Clone)]
+struct AllowAuthorizer;
+
+impl httpserve::RouteAuthorizer for AllowAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        _request: httpserve::RouteAuthorizationRequest,
+    ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
+        Box::pin(async { httpserve::RouteAuthorizationDecision::Allow })
+    }
+}
+
+async fn route_request(
+    router: &axum::Router,
+    method: Method,
+    uri: &str,
+    body: &'static str,
+) -> Result<axum::response::Response> {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))?;
+    Ok(router.clone().oneshot(request).await?)
+}
+
+fn assert_route_matched(status: StatusCode, route: &str) {
+    assert_ne!(status, StatusCode::NOT_FOUND, "{route} must be mounted");
+    assert_ne!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "{route} must use its generated method"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -76,16 +115,99 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         "探针经 module result 出向、不在 Domain::init 注册"
     );
     // #1430 review F4：finalize_routes() 实跑 route_group register 闭包——config/secret handler 经
-    // primary_route_from_spec 剥 generated SPEC.path 前缀 + mount_primary 实际挂载。证明生产路由注册链
-    // (compose → finalize_routes → SPEC.path strip/mount) 成立，非仅声明（route_groups 只验声明、不跑闭包）；
-    // SPEC.path 与 SETTINGS_ROUTE_PREFIX 漂移会在 primary_route_from_spec 处 Err、于此暴露。
-    let finalized = registry.finalize_routes()?;
+    // GeneratedPrimaryEndpoint 从 typed ROUTE binding 推导 path/method/auth 并实际挂载。证明生产路由注册链
+    // (compose → finalize_routes → ROUTE.evidence().path strip/mount) 成立，非仅声明（route_groups 只验声明、不跑闭包）；
+    // generated path 与 SETTINGS_ROUTE_PREFIX 漂移会在 mount 处 Err、于此暴露。
+    let mut finalized = registry.finalize_routes()?;
     assert_eq!(
         finalized.len(),
         1,
         "config + secret 两路由 finalize 进单一 Primary listener"
     );
     assert_eq!(finalized[0].0, ListenerKind::Primary);
+
+    // 生产 router 逐条请求：证明五个 generated binding 都实际挂载，且 GET/DELETE 共享同一状态并
+    // 产生可观察副作用。此时尚未订阅 in-mem bus，路由 smoke 产生的事件不会干扰后续闭环断言。
+    let (_, routes) = finalized
+        .pop()
+        .ok_or_else(|| anyhow!("settings Primary routes must exist"))?;
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let router = httpserve::finalize_primary_auth(
+        routes,
+        AuthPlan::new(ListenerKind::Primary, AuthScheme::Jwt)?,
+        Arc::new(AllowAuthorizer),
+    )?
+    .layer(axum::Extension(httpserve::Authenticated::new(
+        RequiredScheme::Jwt,
+        PrincipalKind::Admin,
+        "settings-route-journey",
+        Some(tenant),
+    )))
+    .into_router_for_test();
+
+    let publish = route_request(
+        &router,
+        Method::POST,
+        "/api/v1/settings/configs",
+        r#"{"key":"route.timeout","value":"30s"}"#,
+    )
+    .await?;
+    assert_route_matched(publish.status(), "settings.config-publish");
+    assert_eq!(publish.status(), StatusCode::CREATED);
+
+    let get = route_request(
+        &router,
+        Method::GET,
+        "/api/v1/settings/configs/route.timeout",
+        "",
+    )
+    .await?;
+    assert_route_matched(get.status(), "settings.config-get");
+    assert_eq!(get.status(), StatusCode::OK);
+    let get_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await?)?;
+    assert_eq!(get_body["data"]["value"], "30s");
+
+    let rollback = route_request(
+        &router,
+        Method::POST,
+        "/api/v1/settings/configs/route.timeout/rollbacks",
+        r#"{"toVersion":1}"#,
+    )
+    .await?;
+    assert_route_matched(rollback.status(), "settings.config-rollback");
+
+    let secret = route_request(
+        &router,
+        Method::POST,
+        "/api/v1/settings/secrets",
+        r#"{"key":"db.password","storeId":"vault","refKey":"secret/data/db"}"#,
+    )
+    .await?;
+    assert_route_matched(secret.status(), "settings.secret-publish");
+
+    let delete = route_request(
+        &router,
+        Method::DELETE,
+        "/api/v1/settings/configs/route.timeout",
+        "",
+    )
+    .await?;
+    assert_route_matched(delete.status(), "settings.config-delete");
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    let get_after_delete = route_request(
+        &router,
+        Method::GET,
+        "/api/v1/settings/configs/route.timeout",
+        "",
+    )
+    .await?;
+    assert_eq!(
+        get_after_delete.status(),
+        StatusCode::NOT_FOUND,
+        "DELETE must tombstone the state observed by the GET route"
+    );
 
     // 3. 订阅 config-version-changed（须先于发布——in-mem 无重放）。
     let token = CancellationToken::new();
@@ -99,7 +221,6 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
-    let tenant = TenantId::parse(CANON_TENANT)?;
     let actor = actor(tenant)?;
     let response = service
         .publish_config(

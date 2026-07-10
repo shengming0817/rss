@@ -20,8 +20,9 @@ use std::time::{Duration, SystemTime};
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+#[cfg(test)]
 use axum::routing::{delete, get, post, put};
 use base64::Engine as _;
 use bootstrap::{Domain, KernelError, Registry};
@@ -36,60 +37,73 @@ use generated::event::identity_v1::session_created::{
 use generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
 use generated::http::identity_v1::{
     login::{
-        IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, SPEC as LOGIN_HTTP_SPEC,
+        IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, ROUTE as LOGIN_HTTP_ROUTE,
+        SPEC as LOGIN_HTTP_SPEC,
     },
     logout::{
-        IdentityLogoutData, IdentityLogoutRequest, IdentityLogoutResponse, SPEC as LOGOUT_HTTP_SPEC,
+        IdentityLogoutData, IdentityLogoutRequest, IdentityLogoutResponse,
+        ROUTE as LOGOUT_HTTP_ROUTE, SPEC as LOGOUT_HTTP_SPEC,
     },
     password_change::{
         IdentityPasswordChangeData, IdentityPasswordChangeRequest, IdentityPasswordChangeResponse,
-        SPEC as PASSWORD_CHANGE_HTTP_SPEC,
+        ROUTE as PASSWORD_CHANGE_HTTP_ROUTE, SPEC as PASSWORD_CHANGE_HTTP_SPEC,
     },
-    policies_create::{IdentityPoliciesCreateRequest, SPEC as POLICIES_CREATE_HTTP_SPEC},
+    policies_create::{
+        IdentityPoliciesCreateRequest, ROUTE as POLICIES_CREATE_HTTP_ROUTE,
+        SPEC as POLICIES_CREATE_HTTP_SPEC,
+    },
     policies_deactivate::{
-        IdentityPoliciesDeactivateRequest, SPEC as POLICIES_DEACTIVATE_HTTP_SPEC,
+        IdentityPoliciesDeactivateRequest, ROUTE as POLICIES_DEACTIVATE_HTTP_ROUTE,
+        SPEC as POLICIES_DEACTIVATE_HTTP_SPEC,
     },
-    policies_get::SPEC as POLICIES_GET_HTTP_SPEC,
-    policies_list::{IdentityPoliciesListRequest, SPEC as POLICIES_LIST_HTTP_SPEC},
-    policies_update::{IdentityPoliciesUpdateRequest, SPEC as POLICIES_UPDATE_HTTP_SPEC},
+    policies_get::{ROUTE as POLICIES_GET_HTTP_ROUTE, SPEC as POLICIES_GET_HTTP_SPEC},
+    policies_list::{
+        IdentityPoliciesListRequest, ROUTE as POLICIES_LIST_HTTP_ROUTE,
+        SPEC as POLICIES_LIST_HTTP_SPEC,
+    },
+    policies_update::{
+        IdentityPoliciesUpdateRequest, ROUTE as POLICIES_UPDATE_HTTP_ROUTE,
+        SPEC as POLICIES_UPDATE_HTTP_SPEC,
+    },
     profile::{
         IdentityProfileData, IdentityProfileDataKind, IdentityProfileResponse,
-        SPEC as PROFILE_HTTP_SPEC,
+        ROUTE as PROFILE_HTTP_ROUTE, SPEC as PROFILE_HTTP_SPEC,
     },
     refresh::{
         IdentityRefreshData, IdentityRefreshRequest, IdentityRefreshResponse,
-        SPEC as REFRESH_HTTP_SPEC,
+        ROUTE as REFRESH_HTTP_ROUTE, SPEC as REFRESH_HTTP_SPEC,
     },
     roles_assign::{
         IdentityRolesAssignData, IdentityRolesAssignRequest, IdentityRolesAssignResponse,
-        SPEC as ROLES_ASSIGN_HTTP_SPEC,
+        ROUTE as ROLES_ASSIGN_HTTP_ROUTE, SPEC as ROLES_ASSIGN_HTTP_SPEC,
     },
     roles_list::{
         IdentityRoleView, IdentityRolesListRequest, IdentityRolesListResponse,
-        SPEC as ROLES_LIST_HTTP_SPEC,
+        ROUTE as ROLES_LIST_HTTP_ROUTE, SPEC as ROLES_LIST_HTTP_SPEC,
     },
     roles_revoke::{
-        IdentityRolesRevokeData, IdentityRolesRevokeResponse, SPEC as ROLES_REVOKE_HTTP_SPEC,
+        IdentityRolesRevokeData, IdentityRolesRevokeResponse, ROUTE as ROLES_REVOKE_HTTP_ROUTE,
+        SPEC as ROLES_REVOKE_HTTP_SPEC,
     },
 };
 use generated::http::{
-    HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
+    HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
     settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
     settings_v4::SPEC as SETTINGS_CONFIG_GET_HTTP_SPEC,
     settings_v5::SPEC as SETTINGS_CONFIG_DELETE_HTTP_SPEC,
     settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
 };
 use httpserve::{
-    AuthorizedSubject, Primary, PrimaryRoute, ResourceProjection, RouteAuthorizationDecision,
-    RouteAuthorizationRequest, RouteAuthorizer, RoutePermission, RouteResourceScope,
+    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ResourceProjection,
+    RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
 };
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
-use primitives::RouteAuthOptOut;
 use uuid::Uuid;
 use vocab::{
-    CoreError, CoreErrorKind, GrantPermission, ProjectionField, RoutePermissionId, TenantId,
+    CoreError, CoreErrorKind, GrantPermission, HttpRouteAuth, ProjectionField, RoutePermissionId,
+    TenantId,
 };
 
 use crate::domain::{
@@ -915,70 +929,12 @@ fn request_id_from(req: &Request<Body>) -> String {
         .to_string()
 }
 
-/// 业务相对 path（去掉 [`LOGIN_ROUTE_PREFIX`]，供 route_group 相对挂载）。login/refresh 共用同一前缀。
-fn spec_relative_path(spec: &HttpSpec) -> Result<&'static str, KernelError> {
-    let rel = spec
-        .path
-        .strip_prefix(LOGIN_ROUTE_PREFIX)
-        .ok_or(KernelError::RouteGroup)?;
-    if rel.starts_with('/') && rel.len() > 1 {
-        Ok(rel)
-    } else {
-        Err(KernelError::RouteGroup)
-    }
-}
-
-fn spec_method(spec: &HttpSpec) -> Result<Method, KernelError> {
-    Method::from_bytes(spec.method.as_bytes()).map_err(|_| KernelError::RouteGroup)
-}
-
-fn spec_opt_out(spec: &HttpSpec) -> Result<RouteAuthOptOut, KernelError> {
-    match spec.auth.mode {
-        HttpAuthMode::Public => Ok(RouteAuthOptOut::Public),
-        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
-            Err(KernelError::RouteGroup)
-        }
-        HttpAuthMode::Permission => Err(KernelError::RouteGroup),
-    }
-}
-
-fn primary_route_from_spec(spec: &HttpSpec) -> Result<PrimaryRoute, KernelError> {
-    let method = spec_method(spec)?;
-    let path = spec_relative_path(spec)?;
-    match spec.auth.mode {
-        HttpAuthMode::Permission => {
-            let permission = spec.auth.permission.ok_or(KernelError::RouteGroup)?;
-            let scope = match (spec.resource, spec.self_scoped) {
-                (Some(resource), false) => RouteResourceScope::PathParam(resource),
-                (None, true) => RouteResourceScope::SelfSubject,
-                (None, false) => RouteResourceScope::None,
-                (Some(_), true) => return Err(KernelError::RouteGroup),
-            };
-            Ok(PrimaryRoute::permission(
-                method,
-                path,
-                spec.contract_id,
-                RoutePermission { permission, scope },
-            ))
-        }
-        HttpAuthMode::Public => Ok(PrimaryRoute::opt_out(
-            method,
-            path,
-            spec.contract_id,
-            spec_opt_out(spec)?,
-        )),
-        HttpAuthMode::Bootstrap | HttpAuthMode::ClientsOnly | HttpAuthMode::ServiceOwned => {
-            Err(KernelError::RouteGroup)
-        }
-    }
-}
-
 fn tenant_header_name(spec: &HttpSpec) -> Result<&'static str, KernelError> {
     spec.headers
         .iter()
         .find(|h| h.mode == HttpHeaderMode::PopulateOnly)
         .map(|h| h.name)
-        .ok_or(KernelError::RouteGroup)
+        .ok_or(KernelError::Invariant)
 }
 
 /// 从 `req` 解析 `X-Tenant-ID`（pre-auth tenant 来源）+ 读 body bytes，二者任一失败回 4xx/5xx。
@@ -1004,6 +960,7 @@ async fn parse_tenant_and_body(
 }
 
 async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
+    _: ContractMarker<generated::http::identity_v1::login::RouteMarker>,
     State(service): State<Arc<LoginService<S>>>,
     req: Request<Body>,
 ) -> Response {
@@ -1020,7 +977,7 @@ pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<LoginService<S>>,
 ) -> axum::Router {
     axum::Router::new().route(
-        LOGIN_HTTP_SPEC.path,
+        LOGIN_HTTP_SPEC.route.path(),
         post(login_handler::<S>).with_state(service),
     )
 }
@@ -1030,7 +987,7 @@ pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>
     service: Arc<RefreshService<S>>,
 ) -> axum::Router {
     axum::Router::new().route(
-        REFRESH_HTTP_SPEC.path,
+        REFRESH_HTTP_SPEC.route.path(),
         post(refresh_handler::<S>).with_state(service),
     )
 }
@@ -1066,7 +1023,7 @@ async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
                 error_chain = %secure::redact_error(&err),
                 request_id,
                 tenant_id = %tenant_log,
-                contract_id = LOGIN_HTTP_SPEC.contract_id,
+                contract_id = LOGIN_HTTP_SPEC.route.contract_id(),
                 operation = "login",
                 "identity login failed"
             );
@@ -1076,6 +1033,7 @@ async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
 }
 
 async fn refresh_handler<S: diport::Signer + Send + Sync + 'static>(
+    _: ContractMarker<generated::http::identity_v1::refresh::RouteMarker>,
     State(service): State<Arc<RefreshService<S>>>,
     req: Request<Body>,
 ) -> Response {
@@ -1120,7 +1078,7 @@ async fn refresh_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
                 error_chain = %secure::redact_error(&err),
                 request_id,
                 tenant_id = %tenant_log,
-                contract_id = REFRESH_HTTP_SPEC.contract_id,
+                contract_id = REFRESH_HTTP_SPEC.route.contract_id(),
                 operation = "refresh",
                 "identity refresh failed"
             );
@@ -1160,7 +1118,9 @@ fn permission_from_request(
     request: &RouteAuthorizationRequest,
     spec: &HttpSpec,
 ) -> Result<RoutePermissionId, AuthReject> {
-    let expected = spec.auth.permission.ok_or(AuthReject::Forbidden)?;
+    let HttpRouteAuth::Permission(expected) = spec.route.auth() else {
+        return Err(AuthReject::Forbidden);
+    };
     if request.permission == expected {
         Ok(request.permission)
     } else {
@@ -1177,7 +1137,10 @@ fn builtin_admin_permission(contract_id: &'static str, permission: RoutePermissi
         SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
     ]
     .iter()
-    .any(|spec| spec.contract_id == contract_id && spec.auth.permission == Some(permission))
+    .any(|spec| {
+        spec.route.contract_id() == contract_id
+            && spec.route.auth() == HttpRouteAuth::Permission(permission)
+    })
 }
 
 fn policy_management_permission_for(target_permission: RoutePermissionId) -> GrantPermission {
@@ -1192,47 +1155,47 @@ fn contract_auth_policy(
     request: &RouteAuthorizationRequest,
 ) -> Result<ContractAuthPolicy, AuthReject> {
     match request.contract_id {
-        id if id == PROFILE_HTTP_SPEC.contract_id => {
+        id if id == PROFILE_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &PROFILE_HTTP_SPEC)?;
             Ok(ContractAuthPolicy::SelfScoped)
         }
-        id if id == PASSWORD_CHANGE_HTTP_SPEC.contract_id => {
+        id if id == PASSWORD_CHANGE_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &PASSWORD_CHANGE_HTTP_SPEC)?;
             Ok(ContractAuthPolicy::SelfScoped)
         }
-        id if id == LOGOUT_HTTP_SPEC.contract_id => {
+        id if id == LOGOUT_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &LOGOUT_HTTP_SPEC)?;
             Ok(ContractAuthPolicy::SelfScoped)
         }
-        id if id == ROLES_ASSIGN_HTTP_SPEC.contract_id => {
+        id if id == ROLES_ASSIGN_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &ROLES_ASSIGN_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == ROLES_LIST_HTTP_SPEC.contract_id => {
+        id if id == ROLES_LIST_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &ROLES_LIST_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == ROLES_REVOKE_HTTP_SPEC.contract_id => {
+        id if id == ROLES_REVOKE_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &ROLES_REVOKE_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == POLICIES_CREATE_HTTP_SPEC.contract_id => {
+        id if id == POLICIES_CREATE_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &POLICIES_CREATE_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == POLICIES_UPDATE_HTTP_SPEC.contract_id => {
+        id if id == POLICIES_UPDATE_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &POLICIES_UPDATE_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == POLICIES_DEACTIVATE_HTTP_SPEC.contract_id => {
+        id if id == POLICIES_DEACTIVATE_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &POLICIES_DEACTIVATE_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == POLICIES_GET_HTTP_SPEC.contract_id => {
+        id if id == POLICIES_GET_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &POLICIES_GET_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
-        id if id == POLICIES_LIST_HTTP_SPEC.contract_id => {
+        id if id == POLICIES_LIST_HTTP_SPEC.route.contract_id() => {
             permission_from_request(request, &POLICIES_LIST_HTTP_SPEC)
                 .map(ContractAuthPolicy::RolePermission)
         }
@@ -1553,8 +1516,8 @@ fn projection_spec(
     permission: RoutePermissionId,
 ) -> Option<&'static HttpSpec> {
     HTTP_SPECS.iter().find(|spec| {
-        spec.contract_id == contract_id
-            && spec.auth.permission == Some(permission)
+        spec.route.contract_id() == contract_id
+            && spec.route.auth() == HttpRouteAuth::Permission(permission)
             && !spec.projection_fields.is_empty()
     })
 }
@@ -1808,8 +1771,8 @@ fn route_resource_sharing_is_global_in(
     specs: &[HttpSpec],
 ) -> bool {
     specs.iter().any(|spec| {
-        spec.contract_id == request.contract_id
-            && spec.auth.permission == Some(request.permission)
+        spec.route.contract_id() == request.contract_id
+            && spec.route.auth() == HttpRouteAuth::Permission(request.permission)
             && spec.resource_sharing.mode == HttpResourceSharingMode::Global
     })
 }
@@ -1956,6 +1919,7 @@ fn encode_policy_cursor(policy_id: &PolicyId) -> String {
 }
 
 async fn roles_assign_handler(
+    _: ContractMarker<generated::http::identity_v1::roles_assign::RouteMarker>,
     State(state): State<RbacHandlerState>,
     Path(role_id_raw): Path<String>,
     req: Request<Body>,
@@ -2007,6 +1971,7 @@ async fn roles_assign_handler(
 }
 
 async fn roles_revoke_handler(
+    _: ContractMarker<generated::http::identity_v1::roles_revoke::RouteMarker>,
     State(state): State<RbacHandlerState>,
     Path((role_id_raw, subject_raw)): Path<(String, String)>,
     req: Request<Body>,
@@ -2044,6 +2009,7 @@ async fn roles_revoke_handler(
 }
 
 async fn roles_list_handler(
+    _: ContractMarker<generated::http::identity_v1::roles_list::RouteMarker>,
     State(state): State<RolesListHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2086,7 +2052,7 @@ async fn roles_list_handler(
                 error_chain = %secure::redact_error(&err),
                 request_id,
                 tenant_id = %auth.tenant,
-                contract_id = ROLES_LIST_HTTP_SPEC.contract_id,
+                contract_id = ROLES_LIST_HTTP_SPEC.route.contract_id(),
                 operation = "roles_list",
                 "identity roles list failed"
             );
@@ -2122,6 +2088,7 @@ async fn roles_list_handler(
 }
 
 async fn policies_create_handler(
+    _: ContractMarker<generated::http::identity_v1::policies_create::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2167,6 +2134,7 @@ async fn policies_create_handler(
 }
 
 async fn policies_update_handler(
+    _: ContractMarker<generated::http::identity_v1::policies_update::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2234,6 +2202,7 @@ async fn policies_update_handler(
 }
 
 async fn policies_deactivate_handler(
+    _: ContractMarker<generated::http::identity_v1::policies_deactivate::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2302,6 +2271,7 @@ async fn policies_deactivate_handler(
 }
 
 async fn policies_get_handler(
+    _: ContractMarker<generated::http::identity_v1::policies_get::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2329,6 +2299,7 @@ async fn policies_get_handler(
 }
 
 async fn policies_list_handler(
+    _: ContractMarker<generated::http::identity_v1::policies_list::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2388,7 +2359,10 @@ async fn policies_list_handler(
     }
 }
 
-async fn profile_handler(req: Request<Body>) -> Response {
+async fn profile_handler(
+    _: ContractMarker<generated::http::identity_v1::profile::RouteMarker>,
+    req: Request<Body>,
+) -> Response {
     let request_id = request_id_from(&req);
     let subject = match authenticated_subject_context(&req) {
         Ok(ctx) => ctx,
@@ -2419,6 +2393,7 @@ async fn profile_handler(req: Request<Body>) -> Response {
 }
 
 async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
+    _: ContractMarker<generated::http::identity_v1::password_change::RouteMarker>,
     State(state): State<SelfServiceHandlerState<S>>,
     req: Request<Body>,
 ) -> Response {
@@ -2461,6 +2436,7 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
 }
 
 async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
+    _: ContractMarker<generated::http::identity_v1::logout::RouteMarker>,
     State(state): State<SelfServiceHandlerState<S>>,
     req: Request<Body>,
 ) -> Response {
@@ -2506,7 +2482,7 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
                 error_chain = %secure::redact_error(&err),
                 request_id,
                 tenant_id = %auth.tenant,
-                contract_id = LOGOUT_HTTP_SPEC.contract_id,
+                contract_id = LOGOUT_HTTP_SPEC.route.contract_id(),
                 operation = "logout",
                 "identity logout failed"
             );
@@ -2534,7 +2510,7 @@ fn rbac_error_response(
             error_chain = %secure::redact_error(&err),
             request_id,
             tenant_id = %tenant,
-            contract_id = spec.contract_id,
+            contract_id = spec.route.contract_id(),
             "identity rbac handler failed"
         );
     }
@@ -2563,7 +2539,7 @@ fn policy_error_response(
             error_chain = %secure::redact_error(&err),
             request_id,
             tenant_id = %tenant,
-            contract_id = spec.contract_id,
+            contract_id = spec.route.contract_id(),
             "identity policy handler failed"
         );
     }
@@ -2587,7 +2563,7 @@ fn password_error_response(
             error_chain = %secure::redact_error(&err),
             request_id,
             tenant_id = %tenant,
-            contract_id = PASSWORD_CHANGE_HTTP_SPEC.contract_id,
+            contract_id = PASSWORD_CHANGE_HTTP_SPEC.route.contract_id(),
             operation = "password_change",
             "identity password change failed"
         );
@@ -2677,58 +2653,64 @@ impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
         };
         let logout = password.clone();
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&LOGIN_HTTP_SPEC)?,
-                post(login_handler::<S>).with_state(login),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&REFRESH_HTTP_SPEC)?,
-                post(refresh_handler::<S>).with_state(refresh),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&ROLES_ASSIGN_HTTP_SPEC)?,
-                post(roles_assign_handler).with_state(rbac_assign),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&ROLES_REVOKE_HTTP_SPEC)?,
-                delete(roles_revoke_handler).with_state(rbac_revoke),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&ROLES_LIST_HTTP_SPEC)?,
-                get(roles_list_handler).with_state(roles),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&POLICIES_CREATE_HTTP_SPEC)?,
-                post(policies_create_handler).with_state(policies_create),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&POLICIES_UPDATE_HTTP_SPEC)?,
-                put(policies_update_handler).with_state(policies_update),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&POLICIES_DEACTIVATE_HTTP_SPEC)?,
-                post(policies_deactivate_handler).with_state(policies_deactivate),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&POLICIES_GET_HTTP_SPEC)?,
-                get(policies_get_handler).with_state(policies_get),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&POLICIES_LIST_HTTP_SPEC)?,
-                get(policies_list_handler).with_state(policies_list),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&PROFILE_HTTP_SPEC)?,
-                get(profile_handler),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&PASSWORD_CHANGE_HTTP_SPEC)?,
-                post(password_change_handler::<S>).with_state(password),
-            );
-            let rb = rb.mount_primary(
-                primary_route_from_spec(&LOGOUT_HTTP_SPEC)?,
-                post(logout_handler::<S>).with_state(logout),
-            );
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(LOGIN_HTTP_ROUTE, login_handler::<S>)?
+                    .with_state(login),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(REFRESH_HTTP_ROUTE, refresh_handler::<S>)?
+                    .with_state(refresh),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(ROLES_ASSIGN_HTTP_ROUTE, roles_assign_handler)?
+                    .with_state(rbac_assign),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(ROLES_REVOKE_HTTP_ROUTE, roles_revoke_handler)?
+                    .with_state(rbac_revoke),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(ROLES_LIST_HTTP_ROUTE, roles_list_handler)?
+                    .with_state(roles),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(POLICIES_CREATE_HTTP_ROUTE, policies_create_handler)?
+                    .with_state(policies_create),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(POLICIES_UPDATE_HTTP_ROUTE, policies_update_handler)?
+                    .with_state(policies_update),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(
+                    POLICIES_DEACTIVATE_HTTP_ROUTE,
+                    policies_deactivate_handler,
+                )?
+                .with_state(policies_deactivate),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(POLICIES_GET_HTTP_ROUTE, policies_get_handler)?
+                    .with_state(policies_get),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(POLICIES_LIST_HTTP_ROUTE, policies_list_handler)?
+                    .with_state(policies_list),
+            )?;
+            let rb = rb.mount(GeneratedPrimaryEndpoint::new(
+                PROFILE_HTTP_ROUTE,
+                profile_handler,
+            )?)?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(
+                    PASSWORD_CHANGE_HTTP_ROUTE,
+                    password_change_handler::<S>,
+                )?
+                .with_state(password),
+            )?;
+            let rb = rb.mount(
+                GeneratedPrimaryEndpoint::new(LOGOUT_HTTP_ROUTE, logout_handler::<S>)?
+                    .with_state(logout),
+            )?;
             Ok(rb)
         })?;
         Ok(())
@@ -3126,7 +3108,7 @@ mod tests {
     fn policy_create_body(policy_id: &str) -> serde_json::Value {
         policy_create_body_for(
             policy_id,
-            POLICIES_GET_HTTP_SPEC.contract_id,
+            POLICIES_GET_HTTP_SPEC.route.contract_id(),
             "identity:policy:read",
         )
     }
@@ -3154,7 +3136,7 @@ mod tests {
     fn policy_update_body(expected_version: u32) -> serde_json::Value {
         policy_update_body_for(
             expected_version,
-            POLICIES_GET_HTTP_SPEC.contract_id,
+            POLICIES_GET_HTTP_SPEC.route.contract_id(),
             "identity:policy:read",
         )
     }
@@ -3268,30 +3250,25 @@ mod tests {
 
     fn synthetic_global_spec() -> HttpSpec {
         HttpSpec {
-            contract_id: "other.contract",
-            contract: vocab::ContractBinding::from_static(
-                "other",
-                "other.contract",
-                "v1",
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            route: vocab::HttpRouteEvidence::from_static(
+                vocab::ContractBinding::from_static(
+                    "other",
+                    "other.contract",
+                    "v1",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+                "/api/v1/other/{resourceId}",
+                "GET",
+                vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),
+                Some("resourceId"),
+                false,
+                vocab::HttpConsistencyLevel::LocalOnly,
+                vocab::HttpEffectProfile::new(&[
+                    vocab::HttpEffectKind::Auth,
+                    vocab::HttpEffectKind::Read,
+                ]),
             ),
-            consistency_level: generated::http::HttpConsistencyLevel::LocalOnly,
-            effect_profile: generated::http::EffectProfile {
-                effects: &[
-                    generated::http::EffectKind::Auth,
-                    generated::http::EffectKind::Read,
-                ],
-            },
             local_tx: None,
-            path: "/api/v1/other/{resourceId}",
-            method: "GET",
-            auth: generated::http::HttpAuthSpec {
-                mode: generated::http::HttpAuthMode::Permission,
-                reason: None,
-                permission: Some(vocab::RoutePermissionId::IdentityPolicyRead),
-            },
-            resource: Some("resourceId"),
-            self_scoped: false,
             resource_sharing: generated::http::HttpResourceSharingSpec {
                 mode: HttpResourceSharingMode::Global,
                 reason: Some("shared synthetic test route"),
@@ -3366,6 +3343,7 @@ mod tests {
             .body(Body::empty())
             .expect("assign request");
         assert_send(roles_assign_handler(
+            ContractMarker::for_test(),
             State(rbac),
             Path("role-admin".to_string()),
             assign_req,
@@ -4054,29 +4032,44 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].0, ListenerKind::Primary);
         assert_eq!(
-            spec_relative_path(&LOGIN_HTTP_SPEC).expect("relative path"),
+            LOGIN_HTTP_SPEC
+                .route
+                .path()
+                .strip_prefix(LOGIN_ROUTE_PREFIX)
+                .expect("generated path has identity prefix"),
             generated::http::identity_v1::login::PATH
                 .strip_prefix(LOGIN_ROUTE_PREFIX)
                 .expect("generated path has prefix")
         );
         assert_eq!(
-            LOGIN_HTTP_SPEC.contract_id,
+            LOGIN_HTTP_SPEC.route.contract_id(),
             generated::http::identity_v1::login::CONTRACT_ID
         );
-        assert_eq!(LOGIN_HTTP_SPEC.method, "POST");
+        assert_eq!(LOGIN_HTTP_SPEC.route.method(), "POST");
+        assert_eq!(LOGIN_HTTP_SPEC.route.auth(), HttpRouteAuth::Public);
         assert_eq!(
-            spec_opt_out(&LOGIN_HTTP_SPEC).expect("opt out"),
-            RouteAuthOptOut::Public
-        );
-        assert!(
-            spec_opt_out(&ROLES_ASSIGN_HTTP_SPEC).is_err(),
-            "permission endpoint 不 opt-out"
+            ROLES_ASSIGN_HTTP_SPEC.route.auth(),
+            HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityRoleAssign),
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::expect_used)]
-    fn identity_http_route_specs_match_nested_v1_contracts() {
+    async fn identity_http_route_specs_match_nested_v1_contracts_and_mounted_router() {
+        let domain = seed_domain(CapturingSessionLifecycle::default(), 1_000, 3_600);
+        let authorizer = domain.primary_authorizer();
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        assert_eq!(finalized.len(), 1, "identity owns one Primary listener");
+        let (listener, routes) = finalized.pop().expect("identity Primary routes");
+        assert_eq!(listener, ListenerKind::Primary);
+        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+            .expect("Primary JWT auth plan");
+        let router = httpserve::finalize_primary_auth(routes, plan, authorizer)
+            .expect("finalize Primary auth")
+            .into_router_for_test();
         let cases = [
             (&LOGIN_HTTP_SPEC, "POST", "/login", None),
             (&REFRESH_HTTP_SPEC, "POST", "/refresh", None),
@@ -4149,19 +4142,45 @@ mod tests {
         ];
 
         for (spec, method, path, permission) in cases {
-            assert_eq!(spec.method, method);
-            assert_eq!(spec_relative_path(spec).expect("relative path"), path);
-            assert_eq!(spec.auth.permission, permission);
-            if permission.is_some() {
-                assert_eq!(spec.auth.mode, HttpAuthMode::Permission);
-                assert!(spec_opt_out(spec).is_err());
-            } else {
-                assert_eq!(spec.auth.mode, HttpAuthMode::Public);
-                assert_eq!(
-                    spec_opt_out(spec).expect("public opt-out"),
-                    RouteAuthOptOut::Public
-                );
-            }
+            assert_eq!(spec.route.method(), method);
+            assert_eq!(
+                spec.route
+                    .path()
+                    .strip_prefix(LOGIN_ROUTE_PREFIX)
+                    .expect("generated path has identity prefix"),
+                path
+            );
+            let expected_auth = permission.map_or(HttpRouteAuth::Public, HttpRouteAuth::Permission);
+            assert_eq!(spec.route.auth(), expected_auth);
+
+            let request_path = spec
+                .route
+                .path()
+                .replace("{roleId}", "role-test")
+                .replace("{subject}", "subject-test")
+                .replace("{policyId}", "policy-test");
+            let request_method = axum::http::Method::from_bytes(method.as_bytes())
+                .expect("generated method is valid HTTP");
+            let response = testkit::call(
+                router.clone(),
+                ContractRequest::method(request_method, request_path),
+            )
+            .await
+            .expect("mounted route request");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{} {} must be mounted on the finalized router",
+                method,
+                spec.route.path()
+            );
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{} {} must accept its generated method",
+                method,
+                spec.route.path()
+            );
         }
     }
 
@@ -4228,7 +4247,7 @@ mod tests {
         );
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                contract_id: ROLES_ASSIGN_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityRoleAssign,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
@@ -4264,10 +4283,15 @@ mod tests {
             SETTINGS_CONFIG_DELETE_HTTP_SPEC,
             SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
         ] {
+            let auth = spec.route.auth();
+            assert!(matches!(auth, HttpRouteAuth::Permission(_)));
+            let HttpRouteAuth::Permission(permission) = auth else {
+                continue;
+            };
             let decision = authorizer
                 .authorize(RouteAuthorizationRequest {
-                    contract_id: spec.contract_id,
-                    permission: spec.auth.permission.expect("settings permission"),
+                    contract_id: spec.route.contract_id(),
+                    permission,
                     tenant_id: Some(tid(CANON_TENANT)),
                     principal_kind: vocab::PrincipalKind::Admin,
                     principal_id: CANON_USER.to_string(),
@@ -4278,7 +4302,7 @@ mod tests {
                 decision,
                 RouteAuthorizationDecision::Allow,
                 "trusted Admin gets built-in settings permission for {}",
-                spec.contract_id
+                spec.route.contract_id()
             );
         }
     }
@@ -4308,10 +4332,15 @@ mod tests {
             SETTINGS_CONFIG_DELETE_HTTP_SPEC,
             SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
         ] {
+            let auth = spec.route.auth();
+            assert!(matches!(auth, HttpRouteAuth::Permission(_)));
+            let HttpRouteAuth::Permission(permission) = auth else {
+                continue;
+            };
             let decision = authorizer
                 .authorize(RouteAuthorizationRequest {
-                    contract_id: spec.contract_id,
-                    permission: spec.auth.permission.expect("settings permission"),
+                    contract_id: spec.route.contract_id(),
+                    permission,
                     tenant_id: Some(tid(CANON_TENANT)),
                     principal_kind: vocab::PrincipalKind::User,
                     principal_id: CANON_USER.to_string(),
@@ -4322,7 +4351,7 @@ mod tests {
                 decision,
                 RouteAuthorizationDecision::Deny,
                 "unbound user is denied {}",
-                spec.contract_id
+                spec.route.contract_id()
             );
         }
     }
@@ -4666,14 +4695,15 @@ mod tests {
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
-        let permission = SETTINGS_CONFIG_HTTP_SPEC
-            .auth
-            .permission
-            .expect("settings permission");
+        let auth = SETTINGS_CONFIG_HTTP_SPEC.route.auth();
+        assert!(matches!(auth, HttpRouteAuth::Permission(_)));
+        let HttpRouteAuth::Permission(permission) = auth else {
+            return;
+        };
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
             route_policy(
                 "policy-deny",
-                SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 PolicyEffect::Deny,
                 PolicyObligations::empty(),
@@ -4689,7 +4719,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                contract_id: SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -4710,14 +4740,15 @@ mod tests {
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
-        let permission = SETTINGS_CONFIG_HTTP_SPEC
-            .auth
-            .permission
-            .expect("settings permission");
+        let auth = SETTINGS_CONFIG_HTTP_SPEC.route.auth();
+        assert!(matches!(auth, HttpRouteAuth::Permission(_)));
+        let HttpRouteAuth::Permission(permission) = auth else {
+            return;
+        };
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
             route_policy(
                 "policy-obligation",
-                SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 PolicyEffect::Allow,
                 PolicyObligations::new(Some(vocab::ScopedTenant::Tenant), vec![]),
@@ -4733,7 +4764,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                contract_id: SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -4782,7 +4813,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -4834,7 +4865,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -4866,7 +4897,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::SuperAdmin,
@@ -4934,7 +4965,7 @@ mod tests {
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
             route_policy(
                 "policy-audit-field",
-                AUDIT_LIST_HTTP_SPEC.contract_id,
+                AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 vocab::AUDIT_READ_PERMISSION,
                 PolicyEffect::Allow,
                 PolicyObligations::new(
@@ -4953,7 +4984,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -4986,7 +5017,7 @@ mod tests {
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
             route_policy(
                 "policy-profile-field",
-                PROFILE_HTTP_SPEC.contract_id,
+                PROFILE_HTTP_SPEC.route.contract_id(),
                 vocab::RoutePermissionId::IdentityProfileRead,
                 PolicyEffect::Allow,
                 PolicyObligations::new(
@@ -5007,7 +5038,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: PROFILE_HTTP_SPEC.contract_id,
+                contract_id: PROFILE_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityProfileRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -5057,7 +5088,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: PROFILE_HTTP_SPEC.contract_id,
+                contract_id: PROFILE_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityProfileRead,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::User,
@@ -5088,7 +5119,7 @@ mod tests {
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
             route_policy(
                 "policy-unknown-field",
-                AUDIT_LIST_HTTP_SPEC.contract_id,
+                AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 vocab::AUDIT_READ_PERMISSION,
                 PolicyEffect::Allow,
                 PolicyObligations::new(None, vec![AttributeKey::new("audit.email")]),
@@ -5104,7 +5135,7 @@ mod tests {
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: AUDIT_LIST_HTTP_SPEC.contract_id,
+                contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -5134,14 +5165,15 @@ mod tests {
             empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
-        let permission = SETTINGS_CONFIG_HTTP_SPEC
-            .auth
-            .permission
-            .expect("settings permission");
+        let auth = SETTINGS_CONFIG_HTTP_SPEC.route.auth();
+        assert!(matches!(auth, HttpRouteAuth::Permission(_)));
+        let HttpRouteAuth::Permission(permission) = auth else {
+            return;
+        };
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
-                contract_id: SETTINGS_CONFIG_HTTP_SPEC.contract_id,
+                contract_id: SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 tenant_id: Some(tid(CANON_TENANT)),
                 principal_kind: vocab::PrincipalKind::Admin,
@@ -5465,7 +5497,7 @@ mod tests {
             router,
             ContractRequest::post("/policies").json(&policy_create_body_for(
                 "policy-target-scope",
-                ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                ROLES_ASSIGN_HTTP_SPEC.route.contract_id(),
                 "identity:role:assign",
             )),
         )
@@ -5495,7 +5527,7 @@ mod tests {
         let update_to_role_assign =
             ContractRequest::put("/policies/policy-scope-change").json(&policy_update_body_for(
                 1,
-                ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                ROLES_ASSIGN_HTTP_SPEC.route.contract_id(),
                 "identity:role:assign",
             ));
         let denied_update = testkit::call(router.clone(), update_to_role_assign)
@@ -5522,7 +5554,7 @@ mod tests {
             broad_router.clone(),
             ContractRequest::put("/policies/policy-scope-change").json(&policy_update_body_for(
                 1,
-                ROLES_ASSIGN_HTTP_SPEC.contract_id,
+                ROLES_ASSIGN_HTTP_SPEC.route.contract_id(),
                 "identity:role:assign",
             )),
         )
@@ -5645,7 +5677,7 @@ mod tests {
             with_auth(router.clone(), admin_evidence(CANON_USER)),
             ContractRequest::post("/policies").json(&serde_json::json!({
                 "policyId": "policy-empty-rules",
-                "contractId": POLICIES_GET_HTTP_SPEC.contract_id,
+                "contractId": POLICIES_GET_HTTP_SPEC.route.contract_id(),
                 "permission": "identity:policy:read",
                 "effectiveFrom": 1_700_000_000,
                 "rules": []
@@ -5769,10 +5801,10 @@ mod tests {
     async fn profile_handler_uses_generated_path_and_allows_non_uuid_subject() {
         let subject = "opaque-user-subject";
         let router = with_auth(
-            axum::Router::new().route(PROFILE_HTTP_SPEC.path, get(profile_handler)),
+            axum::Router::new().route(PROFILE_HTTP_SPEC.route.path(), get(profile_handler)),
             user_evidence(subject),
         );
-        let resp = testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.path))
+        let resp = testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.route.path()))
             .await
             .expect("call");
         resp.ensure_status(StatusCode::OK).expect("200");
@@ -5784,8 +5816,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn profile_handler_missing_auth_returns_401() {
-        let router = axum::Router::new().route(PROFILE_HTTP_SPEC.path, get(profile_handler));
-        let resp = testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.path))
+        let router =
+            axum::Router::new().route(PROFILE_HTTP_SPEC.route.path(), get(profile_handler));
+        let resp = testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.route.path()))
             .await
             .expect("call");
         resp.ensure_status(StatusCode::UNAUTHORIZED)
@@ -5849,13 +5882,13 @@ mod tests {
         let capture = CapturingSessionLifecycle::default();
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
         let router = axum::Router::new().route(
-            PASSWORD_CHANGE_HTTP_SPEC.path,
+            PASSWORD_CHANGE_HTTP_SPEC.route.path(),
             post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
         );
 
         let missing_auth = testkit::call(
             router.clone(),
-            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.path).json(
+            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
                 &IdentityPasswordChangeRequest {
                     current_password: "correct-horse".to_string(),
                     new_password: "new-correct-horse".to_string(),
@@ -5871,7 +5904,7 @@ mod tests {
         let authed = with_auth(router.clone(), user_evidence(CANON_USER));
         let malformed = testkit::call(
             authed,
-            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.path)
+            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path())
                 .raw_json(br#"{"currentPassword":"correct-horse""#.to_vec()),
         )
         .await
@@ -5882,7 +5915,7 @@ mod tests {
 
         let bad_subject = testkit::call(
             with_auth(router, user_evidence("not-a-user-uuid")),
-            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.path).json(
+            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
                 &IdentityPasswordChangeRequest {
                     current_password: "correct-horse".to_string(),
                     new_password: "new-correct-horse".to_string(),
@@ -5993,13 +6026,13 @@ mod tests {
         let capture = CapturingSessionLifecycle::default();
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
         let router = axum::Router::new().route(
-            LOGOUT_HTTP_SPEC.path,
+            LOGOUT_HTTP_SPEC.route.path(),
             post(logout_handler::<TestSigner>).with_state(self_service_state(Arc::clone(&svc))),
         );
 
         let missing_auth = testkit::call(
             router.clone(),
-            ContractRequest::post(LOGOUT_HTTP_SPEC.path).json(&IdentityLogoutRequest {
+            ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
                 session_id: "session-1".to_string(),
             }),
         )
@@ -6011,7 +6044,7 @@ mod tests {
 
         let malformed = testkit::call(
             with_auth(router.clone(), user_evidence(CANON_USER)),
-            ContractRequest::post(LOGOUT_HTTP_SPEC.path)
+            ContractRequest::post(LOGOUT_HTTP_SPEC.route.path())
                 .raw_json(br#"{"sessionId":"session-1""#.to_vec()),
         )
         .await
@@ -6022,7 +6055,7 @@ mod tests {
 
         let bad_subject = testkit::call(
             with_auth(router, user_evidence("not-a-user-uuid")),
-            ContractRequest::post(LOGOUT_HTTP_SPEC.path).json(&IdentityLogoutRequest {
+            ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
                 session_id: "session-1".to_string(),
             }),
         )
@@ -6789,7 +6822,7 @@ mod tests {
 
         let resp = testkit::call(
             router,
-            ContractRequest::post(LOGIN_HTTP_SPEC.path)
+            ContractRequest::post(LOGIN_HTTP_SPEC.route.path())
                 .header("X-Tenant-ID", CANON_TENANT)
                 .json(&IdentityLoginRequest {
                     username: "alice".to_string(),
@@ -6847,7 +6880,7 @@ mod tests {
 
         let resp = testkit::call(
             router,
-            ContractRequest::post(REFRESH_HTTP_SPEC.path)
+            ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
                 .header("X-Tenant-ID", CANON_TENANT)
                 .json(&IdentityRefreshRequest {
                     refresh_token: rf.as_str().to_string(),
@@ -6879,7 +6912,7 @@ mod tests {
         // 不带 X-Tenant-ID header → parse_tenant_and_body → 400
         let resp = testkit::call(
             router,
-            ContractRequest::post(REFRESH_HTTP_SPEC.path).json(&IdentityRefreshRequest {
+            ContractRequest::post(REFRESH_HTTP_SPEC.route.path()).json(&IdentityRefreshRequest {
                 refresh_token: "any-token".to_string(),
             }),
         )
@@ -6920,7 +6953,7 @@ mod tests {
         // 发送非 JSON body → serde_json::from_slice 失败 → 400
         let resp = testkit::call(
             router,
-            ContractRequest::post(REFRESH_HTTP_SPEC.path)
+            ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
                 .header("X-Tenant-ID", CANON_TENANT)
                 .raw_json(b"not-valid-json"),
         )
@@ -6960,7 +6993,7 @@ mod tests {
         // 未知 token → RefreshError::Invalid → 401
         let resp = testkit::call(
             router,
-            ContractRequest::post(REFRESH_HTTP_SPEC.path)
+            ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
                 .header("X-Tenant-ID", CANON_TENANT)
                 .json(&IdentityRefreshRequest {
                     refresh_token: "this-token-was-never-issued".to_string(),
