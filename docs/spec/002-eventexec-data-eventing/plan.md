@@ -43,7 +43,7 @@
 - **分层依赖（crate 图 + deny.toml）**：✅ consistency(引擎) 不依赖服务/域/adapter；eventexec(服务) 依赖基础+引擎+diport，不依赖域/adapter；adapter 实现 trait 不被域依赖；resolver 落组合根侧 bootstrap。无新增跨域 crate 依赖。
 - **跨域只经 contract**：✅ 新增 command/saga 契约走 `contracts/` 声明 → `generated/`；不新增手写共享 wire crate。
 - **一致性等级落 contract.toml**：✅ consistencyLevel 在 contract.toml（command=L2、saga=L3），不入域 crate manifest。
-- **AI-robust 三档**：✅ 优先编译期（sealed in-mem 原语、Tenancy 必填 sealed 参、构造器必填依赖、Entry/HandleResult funnel、`#[non_exhaustive]` 穷尽 match）；治理测试仅用于类型系统管不到的边界（active subscriber、L2 原子性+幂等、saga governance、command 双侧对称、append-only DML），均 Medium；append-only DML 守用 dylint（AST 级）。无 Soft 新增。
+- **AI-robust 三档**：✅ 优先编译期（sealed in-mem 原语、Tenancy 必填 sealed 参、构造器必填依赖、EventEntry/StoredOutboxEntry/HandleResult funnel、`#[non_exhaustive]` 穷尽 match）；治理测试仅用于类型系统管不到的边界（active subscriber、L2 原子性+幂等、saga governance、command 双侧对称、append-only DML），均 Medium；append-only DML 守用 dylint（AST 级）。无 Soft 新增。
 - **错误/PII**：✅ engine message const literal、broker 凭据 redaction、envelope reserved key 受控注入。
 - **Rust 规范**：✅ Clock 构造器位置参（非 Option/Config）；必填依赖非 Option；认知复杂度 ≤15（已见 dispatch_one 拆分范式）；覆盖率 consistency ≥90% / 其余 ≥80%。
 - **API 版本**：✅ pre-GA 窗口（至 2026-12-31）内 wire 破坏式原地改 active 版本 + 扇出闭环。
@@ -94,7 +94,7 @@ crates/eventexec/src/
 ├── saga.rs                      # P9：SagaExecutor/SagaTailer body + 逆序补偿
 ├── projection.rs                # P10：投影 harness + 断点续投
 ├── reconcile.rs                 # P11（决策1）：Loop harness + Builder + leader-gated
-└── command.rs                   # P12：runtime command::emit_async
+└── command.rs                   # P12：typed direct/journaled command dispatcher
 crates/diport/src/              # P11：leader_elector.rs / fenced_writer.rs；P9：checkpoint_store.rs（DI port）
 crates/bootstrap/src/           # P5/P6/P9：eventtransport / replaydeps / sagaprojectiondeps resolver（sealed）
 adapters/postgres/              # P3 基座；P4 outbox 表；P5 inbox；P7 dead-letter；P9 saga instance+journal+checkpoint；P10 projection_events

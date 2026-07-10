@@ -322,7 +322,7 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 trace、correlation、principal、occurred_at、schemaVersion、schemaHash 等 reserved envelope 字段由 **adapter 在受控构造点经
 sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；schema 字段来自 generated
 `vocab::ContractBinding`，并同源落 outbox `contract_version` / `schema_hash` 物理列；同 crate 时间编码
-单源）。`consistency::Entry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
+单源）。`consistency::StoredOutboxEntry` 只持业务三字段（topic / idem_key / payload），envelope 不落引擎类型（`Clock`
 在 `diport`，`consistency` 不可依赖之）。注入源现状（#1296 分链）：
 
 - `occurred_at`：✅ 取注入 `Clock`（构造期必填，见下）。
@@ -348,7 +348,7 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
 
 **统一 delivery envelope（#1160）**：envelope metadata 经统一类型 `diport::EnvelopeMetadata`
 （`string→string`，broker header 通用形态）；只有 transport-safe view 从 **producer→broker→consumer 全程保真**。relay 经
-`acquire_lease` 的 `UPDATE…RETURNING metadata::text, contract_version, schema_hash` 读 outbox 行（**不**扩 `consistency::Entry`、
+`acquire_lease` 的 `UPDATE…RETURNING metadata::text, contract_version, schema_hash` 读 outbox 行（**不**扩 `consistency::StoredOutboxEntry`、
 **不**动 `poll_pending`），`hydrate_envelope_metadata` 重建后由物理列覆盖 `schemaVersion` / `schemaHash`，
 再携入 `PublishRequest`；adapter publisher 映射进
 broker header（AMQP `with_timestamp`(occurred_at) + transport-safe `FieldTable` headers / MQTT v5

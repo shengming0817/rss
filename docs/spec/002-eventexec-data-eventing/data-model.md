@@ -8,11 +8,11 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 |------|------|------|------------|
 | `IdemKey` | idempotency(L0) | newtype(String) | parse 拒空 |
 | `SeenState` | idempotency | enum {Fresh,Duplicate} | 穷尽 |
-| `Topic` | outbox(L1) | newtype(String) | parse 拒空/非 canonical dotted |
+| `EventTopic` | outbox(L1) | newtype(String) | parse 拒空/非 canonical dotted/command namespace |
 | `Disposition` | outbox | enum {Ack,Requeue,Reject} | as_label 闭映射 |
 | `PermanentError`/`Kind` | outbox | struct/enum {Permanent,Invariant} | 排除 Transient |
 | `HandleResult` | outbox | struct(私有) | ack/requeue/reject funnel |
-| `Entry` | outbox | struct(私有: topic,idem_key,payload) | new funnel + envelope 注入 |
+| `EventEntry` / `StoredOutboxEntry` | outbox | producer-only / hydrated read carrier | authoring funnel 与持久化回读类型分离 |
 | `EngineError`/`Kind` | error | struct/enum {Transient,Permanent,Invariant} | message &'static const |
 | `StepName` | saga(L3) | newtype | parse 合法 Rust 标识符 |
 | `SagaOutcome`/`CompensationOutcome` | saga | enum | 穷尽 |

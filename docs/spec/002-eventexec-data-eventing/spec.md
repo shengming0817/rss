@@ -31,18 +31,18 @@
 
 ### User Story 1 - 一致性引擎类型可用（consistency body，L0–L4）(Priority: P1)
 
-域 crate 作者引用 `consistency` 的 `IdemKey`/`Topic`/`Entry`/`HandleResult`/`Disposition`/`EngineError`/`StepName`/`EntityId`/`Request`/`Outcome`/`Lsn` 等类型时，构造器与访问器**真正可用**（当前全是 `todo!()`），且非法输入（空 key、非 canonical topic、空 entity id）在构造期被 fail-closed 拒绝。
+域 crate 作者引用 `consistency` 的 `IdemKey`/`EventTopic`/`EventEntry`/`StoredOutboxEntry`/`HandleResult`/`Disposition`/`EngineError`/`StepName`/`EntityId`/`Request`/`Outcome`/`Lsn` 等类型时，构造器与访问器**真正可用**，且非法输入（空 key、非 canonical topic、空 entity id）在构造期被 fail-closed 拒绝。
 
 **Why this priority**: 所有上层机制（outbox/saga/reconcile/projection/command）都消费这些类型。它们是纯计算、无 I/O、无外部依赖，是整个 feature 的临界路径地基；不落地则其余 11 个 PR 全部 `todo!()` panic。
 
-**Independent Test**: 表驱动单测覆盖每个 newtype 的 parse 正常/边界/拒绝路径、每个穷尽 enum 的 label/message、Entry/HandleResult funnel 构造与访问；`consistency` crate 覆盖率 ≥ 90%，无需任何 adapter 或运行时。
+**Independent Test**: 表驱动单测覆盖每个 newtype 的 parse 正常/边界/拒绝路径、每个穷尽 enum 的 label/message、EventEntry/StoredOutboxEntry/HandleResult funnel 构造与访问；`consistency` crate 覆盖率 ≥ 90%，无需任何 adapter 或运行时。
 
 **Acceptance Scenarios**:
 
 1. **Given** 一个非空 canonical dotted 字符串，**When** 调 `Topic::parse`，**Then** 返回 `Ok(Topic)` 且 `as_str` 回显原值。
 2. **Given** 空字符串或非法标识符，**When** 调 `IdemKey::parse` / `StepName::parse` / `EntityId::parse`，**Then** 返回对应 `*Error`（fail-closed），不 panic。
 3. **Given** `EngineErrorKind::{Transient,Permanent,Invariant}`，**When** 查 `is_transient`/`is_permanent`/`message`，**Then** 分类与 `&'static str` const message 正确，message 不含 runtime 数据（无 `format!`）。
-4. **Given** topic+idem_key+payload，**When** `Entry::new` 再读 `topic()`/`idem_key()`/`payload()`，**Then** 回显一致；外部无法绕过 funnel 字面构造 `Entry`/`HandleResult`/`PermanentError`。
+4. **Given** topic+idem_key+payload，**When** `EventEntry::new` 再读 `topic()`/`idem_key()`/`payload()`，**Then** 回显一致；持久化回读只产生 `StoredOutboxEntry`，外部无法绕过 funnel 字面构造 `EventEntry`/`HandleResult`/`PermanentError`。
 
 ---
 
@@ -178,7 +178,7 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 
 ### User Story 10 - 命令分发与双侧收口（command dispatch + codegen，L2/L3）(Priority: P3)
 
-域 crate 经 `kind: command` 契约 codegen 出 producer `<cmd>::emit_async` 与 consumer `<cmd>::register_handler` wrapper（triple funnel：业务→生成 wrapper→runtime `command::emit_async`→`outbox::Entry::new`）；禁裸调 runtime emit；DispatchId + claimer 两阶段幂等；命令 topic 稳定 dotted 命名。
+域 crate 经 `kind: command` 契约的显式 journal policy codegen 出互斥 producer wrapper 与 typed consumer registration；producer 经 `DirectCommandDispatcher` 或 `JournaledCommandDispatcher` 构造不可外部伪造的 reviewed DTO，再进入对应 store；DispatchId + claimer 两阶段幂等；命令 topic 稳定 dotted 命名。
 
 **Why this priority**: L2/L3 命令面，依赖 outbox + ConsumerBase + codegen 管道。与 saga/projection 并行。
 
@@ -222,14 +222,14 @@ durable 拓扑下，事件经 per-domain 隔离的 amqp broker 在进程间传�
 - **FR-014**: 投影器 MUST 从 checkpoint(Lsn) 断点续投，崩溃重启 MUST 从 checkpoint 继续（不重做不遗漏）；从 offset 0 重放结果 MUST 与增量更新一致；`projection_events` MUST append-only（DML DELETE/TRUNCATE 被守卫拒）。
 - **FR-015**: reconcile Loop MUST 仅经 `Builder`（必填 sealed Tenancy + Trigger）构造，缺 Tenancy MUST 编译错；level-triggered 触发、`Request::default()`=resync 全量、瞬态错误 per-entity 指数退避。
 - **FR-016**: 多副本 reconcile MUST 仅 leader dispatch，丢 lease MUST cancel 在途 reconcile；跨副本正确性 MUST 靠单调 epoch FencedWriter（CAS，旧 epoch 写拒）+ 消费幂等，不靠 lease 本身。旧 epoch 写被 FencedWriter 拒绝时 MUST 产生可观测日志（`tracing::warn!`，带 key / epoch_attempted / current_epoch），便于运维发现脑裂。
-- **FR-017**: 命令分发 MUST 经 codegen triple funnel（业务→`<cmd>::emit_async` wrapper→runtime `command::emit_async`→`outbox::Entry::new`），MUST 禁裸调 runtime emit；DispatchId + claimer 两阶段幂等；producer/consumer/wiring 同源 key。
+- **FR-017**: 命令分发 MUST 经 policy-exclusive codegen wrapper → typed eventexec dispatcher → reviewed command DTO → provider store；外部 MUST NOT 能构造 `CommandSpec` 或 reviewed DTO；DispatchId + claimer 两阶段幂等；producer/consumer/wiring 同源 key。
 - **FR-018**: 每个 PR MUST ≤ 2000 行净增删（特殊情况例外须在 PR 说明理由）；MUST 只在 G0/#997 冻结签名内兑现 body，不改公共接缝；破坏式 wire/API 变更走 pre-GA 窗口原地改 + 扇出闭环。#1627 的 saga durable model 收口是 intentional breaking API：`diport` 旧 saga journal 类型删除，消费方迁移到 `consistency::saga`。
 - **FR-019**: 各一致性等级 MUST 配对应治理/测试：L0 表驱动、L1 事务完整性、L2 outbox 原子性+consumer 幂等、L3 replay+投影重建、L4 状态机+超时+fencing；新增治理机制 MUST ≥ Medium（严禁 Soft）。
 - **FR-020**: outbox/event envelope 的 reserved key（trace/correlation/subjectId/principal/actor/occurredAt/tenantId/tenantAuthority）MUST 由受控构造注入，业务 MUST 不可经 metadata 伪造；broker 凭据 / PII MUST 不进 wire 与默认日志。`subjectId` 与 `actor` MUST 使用 typed opaque/newtype 入口写入 persisted metadata，MUST NOT 进入 AMQP header / MQTT user property；完整 `Principal` 或含 email/姓名/phone/token 等 PII 不得序列化进 envelope。
 
 ### Key Entities *(include if feature involves data)*
 
-- **Outbox Entry**：已持久化的待发事件——topic + idem_key（EventId）+ 已编码 payload（`OutboxPayload`）+ envelope（transport-safe trace/correlation/tenant authority + persisted-only subject/actor）+ 投递状态（pending/publishing/published/dlx）+ retry 计数 + retry_after + lease/fencing token。
+- **Stored Outbox Entry**：已持久化的待发事件——`StoredOutboxEntry` 的 topic + idem_key（EventId）+ 已编码 payload（`OutboxPayload`）+ envelope（transport-safe trace/correlation/tenant authority + persisted-only subject/actor）+ 投递状态（pending/publishing/published/dlx）+ retry 计数 + retry_after + lease/fencing token。
 - **Idempotency / Inbox Record**：消费侧去重记录——idem key + consumer group + lease/done 状态 + 命名空间（per-domain）。
 - **Dead Letter Record**：永久失败或预算耗尽的 entry——原始 entry 引用 + 错误摘要 + 尝试次数 + 首末尝试时间。
 - **Saga Instance / Journal Entry**：saga instance 以 `(tenant_id, saga_id)` 标识并承载 status、lease token、epoch、expiry；journal entry 以 `(tenant_id, saga_id, seq)` 记录 step name + 状态（executing/completed/compensating/compensated/failed）+ 补偿失败安全摘要 + 时间；不持久化 step output。tailer 对 instance `Degraded`、replay / definition drift 返回 `Degraded`，不得把损坏 journal 伪装成 `Done`。

@@ -12,17 +12,15 @@
 
 use std::sync::Arc;
 
-use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{
     Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
 };
 use generated::event::identity_v1::role_assigned::{
-    CONTRACT as ROLE_ASSIGNED_CONTRACT, IdentityRoleAssignedPayload,
-    IdentityRoleAssignedPayloadActorKind, TOPIC as ROLE_ASSIGNED_TOPIC,
+    IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind, SPEC as ROLE_ASSIGNED_SPEC,
 };
 use generated::event::identity_v1::role_revoked::{
-    CONTRACT as ROLE_REVOKED_CONTRACT, IdentityRoleRevokedPayload,
-    IdentityRoleRevokedPayloadActorKind, TOPIC as ROLE_REVOKED_TOPIC,
+    IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind, SPEC as ROLE_REVOKED_SPEC,
 };
 use uuid::Uuid;
 use vocab::TenantId;
@@ -34,7 +32,7 @@ use crate::ports::{
 };
 
 /// 发布域（tracing span 标签）。从契约绑定单源派生（= contract.toml `domain`，两 role 事件同域 `identity`）。
-const RBAC_DOMAIN: &str = ROLE_ASSIGNED_CONTRACT.domain();
+const RBAC_DOMAIN: &str = ROLE_ASSIGNED_SPEC.contract().domain();
 
 /// 角色管理失败。库错误枚举（const-literal message；handler 层映射状态码）。
 #[derive(Debug, thiserror::Error)]
@@ -126,7 +124,12 @@ impl RbacAdminService {
             occurred_at: unix_secs(now),
         };
         let bytes = serde_json::to_vec(&payload).map_err(RbacAdminError::PayloadEncode)?;
-        let entry = build_entry(ROLE_ASSIGNED_TOPIC, bytes)?;
+        let entry = EventEntry::new(
+            EventTopic::parse(ROLE_ASSIGNED_SPEC.topic())
+                .map_err(|_| RbacAdminError::EntryBuild)?,
+            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(|_| RbacAdminError::EntryBuild)?,
+            OutboxPayload::from_reviewed_event_bytes(bytes),
+        );
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
@@ -137,7 +140,8 @@ impl RbacAdminService {
             tenant,
             vocab::ScopedTenant::Tenant,
         );
-        let envelope = OutboxEnvelopeParts::new(ROLE_ASSIGNED_CONTRACT, tenant, subject_id, actor);
+        let envelope =
+            OutboxEnvelopeParts::new(ROLE_ASSIGNED_SPEC.contract(), tenant, subject_id, actor);
 
         // 3. L2 co-tx（binding 行 + outbox 行同一事务原子写入）。
         let binding = RoleBinding::new(subject, role_id, tenant);
@@ -180,7 +184,11 @@ impl RbacAdminService {
             occurred_at: unix_secs(now),
         };
         let bytes = serde_json::to_vec(&payload).map_err(RbacAdminError::PayloadEncode)?;
-        let entry = build_entry(ROLE_REVOKED_TOPIC, bytes)?;
+        let entry = EventEntry::new(
+            EventTopic::parse(ROLE_REVOKED_SPEC.topic()).map_err(|_| RbacAdminError::EntryBuild)?,
+            IdemKey::parse(&Uuid::new_v4().to_string()).map_err(|_| RbacAdminError::EntryBuild)?,
+            OutboxPayload::from_reviewed_event_bytes(bytes),
+        );
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
@@ -191,24 +199,14 @@ impl RbacAdminService {
             tenant,
             vocab::ScopedTenant::Tenant,
         );
-        let envelope = OutboxEnvelopeParts::new(ROLE_REVOKED_CONTRACT, tenant, subject_id, actor);
+        let envelope =
+            OutboxEnvelopeParts::new(ROLE_REVOKED_SPEC.contract(), tenant, subject_id, actor);
 
         self.bindings
             .revoke_and_emit(tenant_scope, role_id, subject, entry, envelope)
             .await
             .map_err(RbacAdminError::BindingWrite)
     }
-}
-
-/// 构造角色事件 outbox [`Entry`]：已编码 payload 字节 + mint 独立 opaque EventId（非业务键；幂等去重键）。
-fn build_entry(topic: &str, bytes: Vec<u8>) -> Result<Entry, RbacAdminError> {
-    // EventId 是独立 opaque 标识（非角色 / subject；不得进 broker metadata 明文）。
-    let event_id = Uuid::new_v4().to_string();
-    Ok(Entry::new(
-        Topic::parse(topic).map_err(|_| RbacAdminError::EntryBuild)?,
-        IdemKey::parse(&event_id).map_err(|_| RbacAdminError::EntryBuild)?,
-        OutboxPayload::from_reviewed_event_bytes(bytes),
-    ))
 }
 
 fn role_assigned_actor_kind_wire(

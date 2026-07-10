@@ -224,6 +224,25 @@ pub(crate) fn route_funnel_allows(from_crate: &str, to_crate: &str) -> bool {
     (from_crate, to_crate) == ("bootstrap", "httpserve")
 }
 
+/// Command authoring seam 的精确 crate edge：只允许 `eventexec → generated`。
+///
+/// `generated::command::{CommandEmit, CommandJournal}` 接受字段私有、仅 generated 可构造的
+/// `CommandSpec`；`eventexec` 必须实现这些 seam，才能在自身 crate 内构造不可外部伪造的 reviewed DTO。
+/// 这是类型/可见性 Hard seal 的必要编译边，不是一般 `Service → Generated` 放宽。
+/// fail-closed：任一端名称不同、反向或其它 service 一律返回 false。
+pub(crate) fn command_generated_seam_allows(from_crate: &str, to_crate: &str) -> bool {
+    (from_crate, to_crate) == ("eventexec", "generated")
+}
+
+/// `cargo-deny` 对 dev-dependency 也要求列出 wrapper；只允许 postgres 的生成契约测试依赖。
+///
+/// 这不是生产分层边。`layerdeps::check_layers` 不调用本函数，因此
+/// `postgres → generated` 一旦出现在 shipped dependency 中仍会被 `AdapterScope` 拒绝。
+/// fail-closed：仅供 `check_wrappers` 核验 deny.toml 中这一条测试 wrapper。
+pub(crate) fn generated_dev_wrapper_allows(wrapper: &str, banned_crate: &str) -> bool {
+    (wrapper, banned_crate) == ("postgres", "generated")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +367,33 @@ mod tests {
         #[case] want: bool,
     ) {
         assert_eq!(route_funnel_allows(from, to), want);
+    }
+
+    #[rstest]
+    #[case("eventexec", "generated", true)]
+    #[case("authn", "generated", false)]
+    #[case("bootstrap", "generated", false)]
+    #[case("generated", "eventexec", false)]
+    #[case("eventexec", "eventexec", false)]
+    fn command_generated_seam_allows_exact_edge_only(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] want: bool,
+    ) {
+        assert_eq!(command_generated_seam_allows(from, to), want);
+    }
+
+    #[rstest]
+    #[case("postgres", "generated", true)]
+    #[case("redis", "generated", false)]
+    #[case("postgres", "identity", false)]
+    #[case("generated", "postgres", false)]
+    fn generated_dev_wrapper_allows_postgres_contract_tests_only(
+        #[case] wrapper: &str,
+        #[case] banned_crate: &str,
+        #[case] want: bool,
+    ) {
+        assert_eq!(generated_dev_wrapper_allows(wrapper, banned_crate), want);
     }
 
     #[rstest]

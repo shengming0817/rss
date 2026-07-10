@@ -20,4 +20,6 @@ fn ui() {
     t.compile_fail("tests/ui/external_cannot_construct_outbound_mtls_policy_fail.rs");
     t.compile_fail("tests/ui/external_cannot_construct_audited_visibility_fail.rs");
     t.compile_fail("tests/ui/audited_visibility_non_clone_fail.rs");
+    t.compile_fail("tests/ui/external_cannot_construct_projection_receipt_fail.rs");
+    t.compile_fail("tests/ui/projection_receipt_non_clone_fail.rs");
 }

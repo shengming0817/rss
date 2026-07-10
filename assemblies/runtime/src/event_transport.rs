@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use base64::Engine as _;
-use bootstrap::{DomainModuleResult, SubscriberBinding, SubscriberHandler, WorkerSpec};
+use bootstrap::{DomainModuleResult, SubscriberBinding, WorkerSpec};
 use consistency::{ConsumerGroup, RetentionSweeper};
 use crypto::RustCryptoMacVerifier;
 use diport::{
@@ -38,7 +38,7 @@ use eventexec::{
     SWEEPER_WORKER_NAME, SweeperConfig, SweeperWorker, TenantAuthority, WorkerHealth,
     backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
-use generated::event::SubscriptionSpec;
+use generated::event::{EventSpec, SubscriberReadiness, SubscriptionSpec};
 use postgres::{DlxPayloadProtector, PgRuntimeDeps, caps};
 use primitives::{HealthCheck, MacKey, ProbeName};
 use settings::SettingsService;
@@ -104,18 +104,6 @@ impl Default for EventRuntime {
 }
 
 // ── 内部类型 ──────────────────────────────────────────────────────────────────
-
-/// 生产 AMQP relay 发布域集。
-///
-/// 只列已经具备 broker routing 拓扑的 active 事件域。每个域必须同时满足：
-/// active event contract + generated subscription + runtime subscriber binding；否则 AMQP
-/// publisher 的 `mandatory=true` 会把未接线事件判为 unroutable 并反复 retry/DLX。
-const RELAY_DOMAINS: &[&str] = &["identity", "settings"];
-
-#[cfg(test)]
-fn relay_domains_for_test() -> &'static [&'static str] {
-    RELAY_DOMAINS
-}
 
 pub(crate) const INBOX_SWEEPER_WORKER_NAME: &str = "inbox-sweeper";
 pub(crate) const INBOX_SWEEPER_PROBE: &str = "inbox_sweeper";
@@ -216,38 +204,38 @@ struct EventSecurity {
 }
 
 pub struct BridgedSubscription {
-    spec: SubscriptionSpec,
+    event: EventSpec,
+    subscription: SubscriptionSpec,
     group: ConsumerGroup,
-    #[allow(dead_code)]
-    // reason: bridge still consumes bootstrap subscriber registrations to prove generated topology
-    // and domain declarations are aligned. Durable runtime execution uses ConsumerTx registry
-    // instead of this legacy handler.
-    handler: Box<dyn SubscriberHandler>,
 }
 
 impl BridgedSubscription {
     fn contract_id(&self) -> &'static str {
-        self.spec.contract_id
+        self.event.contract_id()
     }
 
     fn topic(&self) -> &'static str {
-        self.spec.topic
+        self.event.topic()
     }
 
     fn schema_version(&self) -> &'static str {
-        self.spec.schema_version
+        self.event.schema_version()
     }
 
     fn schema_hash(&self) -> &'static str {
-        self.spec.schema_hash
+        self.event.schema_hash()
     }
 
     fn consumer(&self) -> &'static str {
-        self.spec.consumer
+        self.subscription.consumer()
     }
 
     fn group(&self) -> &ConsumerGroup {
         &self.group
+    }
+
+    fn readiness(&self) -> SubscriberReadiness {
+        self.subscription.readiness()
     }
 
     fn topic_owner(&self) -> String {
@@ -266,11 +254,14 @@ impl BridgedSubscription {
 
 // ── 公开函数 ──────────────────────────────────────────────────────────────────
 
-/// 需要 per-domain AMQP vhost 连接的域集 = **relay 发布域（[`RELAY_DOMAINS`]）∪ consumer 订阅 topic owner**
+/// 需要 per-domain AMQP vhost 连接的域集 = **generated producer domain ∪ consumer 订阅 topic owner**
 /// （topic 首 '.' 前的前缀段）。两类都要 vhost：relay 往发布域 vhost 发布 outbox，consumer 从订阅 topic owner
 /// vhost 拉取。转小写、去重、排序。
 pub(crate) fn required_domains(subscribers: &[BridgedSubscription]) -> Vec<String> {
-    let mut domains: Vec<String> = RELAY_DOMAINS.iter().map(|d| (*d).to_string()).collect();
+    let mut domains: Vec<String> = generated::event::PRODUCER_DOMAINS
+        .iter()
+        .map(|domain| domain.as_str().to_string())
+        .collect();
     domains.extend(subscribers.iter().map(BridgedSubscription::topic_owner));
     domains.sort_unstable();
     domains.dedup();
@@ -314,22 +305,31 @@ fn consumer_meta_for_subscription(
 pub fn bridge_generated_subscriptions(
     bindings: Vec<SubscriberBinding>,
 ) -> anyhow::Result<Vec<BridgedSubscription>> {
-    bridge_subscriptions_with_specs(bindings, generated::event::SUBSCRIPTIONS)
+    bridge_subscriptions_with_events(bindings, generated::event::EVENTS)
 }
 
-fn bridge_subscriptions_with_specs(
+fn bridge_subscriptions_with_events(
     bindings: Vec<SubscriberBinding>,
-    specs: &'static [SubscriptionSpec],
+    events: &[EventSpec],
 ) -> anyhow::Result<Vec<BridgedSubscription>> {
+    let specs: Vec<(EventSpec, SubscriptionSpec)> = events
+        .iter()
+        .flat_map(|event| {
+            event
+                .subscriptions()
+                .iter()
+                .map(move |subscription| (*event, *subscription))
+        })
+        .collect();
     let mut bridged = Vec::with_capacity(bindings.len());
     let mut matched_specs = vec![false; specs.len()];
     for binding in bindings {
-        let mut matches = specs.iter().enumerate().filter(|(_, spec)| {
-            spec.contract_id == binding.contract_id
-                && spec.topic == binding.topic
-                && spec.consumer == binding.consumer
+        let mut matches = specs.iter().enumerate().filter(|(_, (event, spec))| {
+            event.contract_id() == binding.contract_id
+                && event.topic() == binding.topic
+                && spec.consumer() == binding.consumer
         });
-        let Some((matched_index, spec)) = matches.next() else {
+        let Some((matched_index, (event, spec))) = matches.next() else {
             anyhow::bail!(
                 "subscriber binding has no generated topology spec: contract={} topic={} consumer={} group={}",
                 binding.contract_id,
@@ -347,45 +347,46 @@ fn bridge_subscriptions_with_specs(
                 binding.group.as_str()
             );
         }
+        let event = *event;
         let spec = *spec;
-        let group = ConsumerGroup::parse(spec.group).map_err(|_| {
+        let group = ConsumerGroup::parse(spec.group()).map_err(|_| {
             anyhow::anyhow!(
                 "generated subscription group is invalid: contract={} consumer={} group={}",
-                spec.contract_id,
-                spec.consumer,
-                spec.group
+                event.contract_id(),
+                spec.consumer(),
+                spec.group()
             )
         })?;
         anyhow::ensure!(
             group == binding.group,
             "subscriber group drift after generated topology parse: contract={} consumer={} group={}",
-            spec.contract_id,
-            spec.consumer,
-            spec.group
+            event.contract_id(),
+            spec.consumer(),
+            spec.group()
         );
         anyhow::ensure!(
             !matched_specs[matched_index],
             "subscriber binding duplicates generated topology spec: contract={} topic={} consumer={} group={}",
-            spec.contract_id,
-            spec.topic,
-            spec.consumer,
-            spec.group
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            spec.group()
         );
         matched_specs[matched_index] = true;
         bridged.push(BridgedSubscription {
-            spec,
+            event,
+            subscription: spec,
             group,
-            handler: binding.handler,
         });
     }
-    for (spec, matched) in specs.iter().zip(matched_specs) {
+    for ((event, spec), matched) in specs.iter().zip(matched_specs) {
         anyhow::ensure!(
             matched,
             "generated topology spec has no subscriber binding: contract={} topic={} consumer={} group={}",
-            spec.contract_id,
-            spec.topic,
-            spec.consumer,
-            spec.group
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            spec.group()
         );
     }
     Ok(bridged)
@@ -507,7 +508,8 @@ pub fn build_event_transport_config_from(
         // env builder 不提前收窄语义（review #342 F1：durable-shared 仅配 RSS_AMQP_URL 也应可启动）。
         let policy = plaintext_endpoint_policy_from(&get, AMQP_ALLOW_PLAINTEXT_ENV)?;
         let mut per_domain = BTreeMap::new();
-        for domain in RELAY_DOMAINS {
+        for domain in generated::event::PRODUCER_DOMAINS {
+            let domain = domain.as_str();
             let env = format!("RSS_{}_AMQP_URL", domain.to_ascii_uppercase());
             if let Some(url) = get(&env) {
                 let parsed = bootstrap::AmqpUrl::parse(url, policy).with_context(|| {
@@ -515,7 +517,7 @@ pub fn build_event_transport_config_from(
                         "{env} must be amqps:// or loopback amqp:// with explicit plaintext opt-in"
                     )
                 })?;
-                per_domain.insert((*domain).to_string(), parsed);
+                per_domain.insert(domain.to_string(), parsed);
             }
         }
         let shared = get("RSS_AMQP_URL")
@@ -610,7 +612,7 @@ async fn wire_durable(
     let mut infra_guards: Vec<Box<DynManagedResource<'static>>> = Vec::new();
     let mut module = DomainModuleResult::default();
 
-    // 每个 required 域（[`RELAY_DOMAINS`] 发布域 ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
+    // 每个 required 域（generated producer domain ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
     // AMQP URL → 下方 amqp_map 逐域连接；relay/consumer 取连接时 `.context(...)` 兜底 fail-closed，无需额外 guard。
 
     // AMQP per-domain 连接（relay 发布 + consumer 订阅共用同一 vhost 连接）。
@@ -625,25 +627,24 @@ async fn wire_durable(
         amqp_map.insert(domain, amqp_deps);
     }
 
-    // Relay workers：每个生产 AMQP 发布域（[`RELAY_DOMAINS`]）一个 relay。caps::* 是编译期 marker、
-    // 无法对 domain 字符串泛型循环 → 显式 block（新增 active 发布域时在此加一块 + 在 RELAY_DOMAINS 追加）。
-    {
-        let publisher = relay_publisher(&amqp_map, "identity")?;
-        let outbox = pg.for_domain::<caps::Identity>().outbox(
-            publisher,
-            Arc::clone(&security.tenant_authority),
-            security.dlx_payload_protector.clone(),
-        );
-        wire_domain_relay("identity", outbox, &timing, &mut module)?;
-    }
-    {
-        let publisher = relay_publisher(&amqp_map, "settings")?;
-        let outbox = pg.for_domain::<caps::Settings>().outbox(
-            publisher,
-            Arc::clone(&security.tenant_authority),
-            security.dlx_payload_protector.clone(),
-        );
-        wire_domain_relay("settings", outbox, &timing, &mut module)?;
+    // Relay workers：generated producer registry 是迭代单源；闭枚举 match 把每个 producer 映射到
+    // postgres sealed capability。新增 producer 变体若未接 PG capability 会在此编译失败。
+    for producer in generated::event::PRODUCER_DOMAINS.iter().copied() {
+        let domain = producer.as_str();
+        let publisher = relay_publisher(&amqp_map, domain)?;
+        let outbox = match producer {
+            generated::event::ProducerDomain::Identity => pg.for_domain::<caps::Identity>().outbox(
+                publisher,
+                Arc::clone(&security.tenant_authority),
+                security.dlx_payload_protector.clone(),
+            ),
+            generated::event::ProducerDomain::Settings => pg.for_domain::<caps::Settings>().outbox(
+                publisher,
+                Arc::clone(&security.tenant_authority),
+                security.dlx_payload_protector.clone(),
+            ),
+        };
+        wire_domain_relay(domain, outbox, &timing, &mut module)?;
     }
     wire_outbox_maintenance(pg, distributed, &security, &timing, &mut module)?;
 
@@ -736,7 +737,10 @@ fn wire_outbox_maintenance(
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let relay_cfg = RelayConfig::new(
-        RELAY_DOMAINS.iter().map(|d| (*d).to_string()).collect(),
+        generated::event::PRODUCER_DOMAINS
+            .iter()
+            .map(|domain| domain.as_str().to_string())
+            .collect(),
         timing.poll,
         timing.batch,
         timing.sample,
@@ -934,8 +938,14 @@ fn wire_consumer_resource_bundle(
                 health,
             ))
         });
-        module.workers.push(worker);
-        module.probes.push(consumer_probe);
+        match subscription.readiness() {
+            SubscriberReadiness::Required => {
+                // Required 是 generated topology 的强制服务语义：worker 与 readyz probe 必须成对注册。
+                // 穷尽 match 让未来新增 readiness variant 在组合根编译失败，而不是静默降级。
+                module.workers.push(worker);
+                module.probes.push(consumer_probe);
+            }
+        }
     }
     wire_inbox_sweeper(pg, timing, module)?;
     Ok(())
@@ -960,8 +970,13 @@ fn consumer_tx_kind_for_subscription(subscription: &BridgedSubscription) -> Opti
 }
 
 #[cfg(test)]
-fn consumer_tx_kind_for_spec(spec: &SubscriptionSpec) -> Option<ConsumerTxKind> {
-    consumer_tx_kind_for_parts(spec.consumer, spec.contract_id, spec.topic, spec.group)
+fn consumer_tx_kind_for_spec(event: EventSpec, spec: SubscriptionSpec) -> Option<ConsumerTxKind> {
+    consumer_tx_kind_for_parts(
+        spec.consumer(),
+        event.contract_id(),
+        event.topic(),
+        spec.group(),
+    )
 }
 
 fn consumer_tx_kind_for_parts(
@@ -1279,23 +1294,8 @@ pub(crate) fn build_dlx_payload_protector_from(
 
 #[cfg(test)]
 mod tests {
-    const TEST_SCHEMA_VERSION: &str = "v1";
-    const TEST_SCHEMA_HASH: &str =
-        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
     use super::*;
-    use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-    use futures::future::BoxFuture;
-
-    struct TestNopHandler;
-    impl bootstrap::SubscriberHandler for TestNopHandler {
-        fn handle(
-            &self,
-            _: diport::Message,
-        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
+    use bootstrap::SubscriberBinding;
 
     #[allow(clippy::unwrap_used)]
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
@@ -1310,31 +1310,25 @@ mod tests {
             topic,
             consumer,
             group: consistency::ConsumerGroup::parse(group).unwrap(),
-            handler: Box::new(TestNopHandler),
         }
     }
 
     #[allow(clippy::unwrap_used)]
-    // reason: synthetic spec 与 binding 精确匹配；失败即测试写错。
+    // reason: generated registry 与 binding 精确匹配；失败即测试写错。
     fn test_subscription(
         contract_id: &'static str,
         topic: &'static str,
         consumer: &'static str,
         group: &'static str,
     ) -> BridgedSubscription {
-        let spec = Box::leak(Box::new([SubscriptionSpec {
-            contract_id,
-            topic,
-            schema_version: TEST_SCHEMA_VERSION,
-            schema_hash: TEST_SCHEMA_HASH,
-            consumer,
-            group,
-            partition_key: "none",
-            readiness: "required",
-        }]));
-        bridge_subscriptions_with_specs(
+        let event = generated::event::EVENTS
+            .iter()
+            .copied()
+            .find(|event| event.contract_id() == contract_id && event.topic() == topic)
+            .unwrap();
+        bridge_subscriptions_with_events(
             vec![test_binding(contract_id, topic, consumer, group)],
-            spec,
+            &[event],
         )
         .unwrap()
         .pop()
@@ -1360,126 +1354,49 @@ mod tests {
 
     #[test]
     fn required_domains_includes_publishing_domains_without_subscribers() {
-        // 无 subscriber → 仍含 production RELAY_DOMAINS 发布域（relay 需 per-domain vhost）。
-        assert_eq!(
-            required_domains(&[]),
-            vec!["identity".to_string(), "settings".to_string()]
-        );
+        // 无 subscriber → 仍含 generated producer domain（relay 需 per-domain vhost）。
+        let expected = generated::event::PRODUCER_DOMAINS
+            .iter()
+            .map(|domain| domain.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(required_domains(&[]), expected);
     }
 
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 helper nop_binding 用，parse 失败即测试写错；item-level carve-out。
+    // reason: generated 测试 fixture 必须存在；缺失即 codegen 漂移。
     #[test]
     fn required_domains_deduplicates_and_sorts() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        fn nop_binding(topic: &'static str, consumer: &'static str) -> SubscriberBinding {
-            SubscriberBinding {
-                contract_id: "test.event",
-                topic,
-                consumer,
-                group: consistency::ConsumerGroup::parse("test.group").unwrap(),
-                handler: Box::new(NopHandler),
-            }
-        }
-
-        static SPECS: &[SubscriptionSpec] = &[
-            SubscriptionSpec {
-                contract_id: "test.event",
-                topic: "identity.session-created",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "test-consumer",
-                group: "test.group",
-                partition_key: "none",
-                readiness: "required",
-            },
-            SubscriptionSpec {
-                contract_id: "test.event",
-                topic: "identity.token-refreshed",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "test-consumer",
-                group: "test.group",
-                partition_key: "none",
-                readiness: "required",
-            },
-            SubscriptionSpec {
-                contract_id: "test.event",
-                topic: "audit.entry-written",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "test-consumer",
-                group: "test.group",
-                partition_key: "none",
-                readiness: "required",
-            },
-        ];
-        let bindings = bridge_subscriptions_with_specs(
-            vec![
-                nop_binding("identity.session-created", "test-consumer"),
-                nop_binding("identity.token-refreshed", "test-consumer"),
-                nop_binding("audit.entry-written", "test-consumer"),
-            ],
-            SPECS,
-        )
-        .unwrap();
-        // subscriber owner {identity, audit} ∪ RELAY_DOMAINS {identity, settings} → 去重排序。
+        let bindings = vec![test_subscription(
+            generated::event::identity_v1::session_created::SPEC.contract_id(),
+            generated::event::identity_v1::session_created::SPEC.topic(),
+            "audit",
+            "audit.session-created",
+        )];
         let domains = required_domains(&bindings);
-        assert_eq!(domains, vec!["audit", "identity", "settings"]);
+        let mut expected = generated::event::PRODUCER_DOMAINS
+            .iter()
+            .map(|domain| domain.as_str().to_string())
+            .collect::<Vec<_>>();
+        expected.push("identity".to_string());
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(domains, expected);
     }
 
     #[allow(clippy::unwrap_used)]
     // reason: 测试 helper 构造合法 consumer group；parse 失败即测试写错。
     #[test]
     fn consumer_meta_uses_subscription_consumer_not_topic_owner() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        static SPECS: &[SubscriptionSpec] = &[SubscriptionSpec {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            schema_version: TEST_SCHEMA_VERSION,
-            schema_hash: TEST_SCHEMA_HASH,
-            consumer: "audit",
-            group: "audit.session-created",
-            partition_key: "none",
-            readiness: "required",
-        }];
-        let binding = SubscriberBinding {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            consumer: "audit",
-            group: consistency::ConsumerGroup::parse("audit.session-created").unwrap(),
-            handler: Box::new(NopHandler),
-        };
-        let bridged = bridge_subscriptions_with_specs(vec![binding], SPECS).unwrap();
-        let subscription = &bridged[0];
+        let subscription = test_subscription(
+            generated::event::identity_v1::session_created::SPEC.contract_id(),
+            generated::event::identity_v1::session_created::SPEC.topic(),
+            "audit",
+            "audit.session-created",
+        );
 
         assert_eq!(subscription.topic_owner(), "identity");
         assert_eq!(
-            consumer_meta_parts_for_subscription(subscription),
+            consumer_meta_parts_for_subscription(&subscription),
             (
                 "audit",
                 "identity.session-created",
@@ -1490,13 +1407,22 @@ mod tests {
 
     #[test]
     fn generated_subscriptions_all_have_consumer_tx_kind_mapping() {
-        let missing: Vec<String> = generated::event::SUBSCRIPTIONS
+        let missing: Vec<String> = generated::event::EVENTS
             .iter()
-            .filter(|spec| consumer_tx_kind_for_spec(spec).is_none())
-            .map(|spec| {
+            .flat_map(|event| {
+                event
+                    .subscriptions()
+                    .iter()
+                    .map(move |spec| (*event, *spec))
+            })
+            .filter(|(event, spec)| consumer_tx_kind_for_spec(*event, *spec).is_none())
+            .map(|(event, spec)| {
                 format!(
                     "{}:{}:{}:{}",
-                    spec.contract_id, spec.topic, spec.consumer, spec.group
+                    event.contract_id(),
+                    event.topic(),
+                    spec.consumer(),
+                    spec.group()
                 )
             })
             .collect();
@@ -1511,27 +1437,13 @@ mod tests {
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
     #[test]
     fn bridge_generated_subscriptions_rejects_missing_spec() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        let binding = SubscriberBinding {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            consumer: "audit",
-            group: consistency::ConsumerGroup::parse("audit.session-created").unwrap(),
-            handler: Box::new(NopHandler),
-        };
-        let result = bridge_subscriptions_with_specs(vec![binding], &[]);
+        let binding = test_binding(
+            "identity.session-created",
+            "identity.session-created",
+            "audit",
+            "audit.session-created",
+        );
+        let result = bridge_subscriptions_with_events(vec![binding], &[]);
         assert!(
             result.is_err(),
             "expected missing generated topology spec error"
@@ -1544,37 +1456,9 @@ mod tests {
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
     #[test]
     fn bridge_generated_subscriptions_rejects_group_mismatch() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        static SPECS: &[SubscriptionSpec] = &[SubscriptionSpec {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            schema_version: TEST_SCHEMA_VERSION,
-            schema_hash: TEST_SCHEMA_HASH,
-            consumer: "audit",
-            group: "audit.session-created",
-            partition_key: "none",
-            readiness: "required",
-        }];
-        let binding = SubscriberBinding {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            consumer: "audit",
-            group: consistency::ConsumerGroup::parse("audit.other").unwrap(),
-            handler: Box::new(NopHandler),
-        };
-        let result = bridge_subscriptions_with_specs(vec![binding], SPECS);
+        let event = generated::event::identity_v1::session_created::SPEC;
+        let binding = test_binding(event.contract_id(), event.topic(), "audit", "audit.other");
+        let result = bridge_subscriptions_with_events(vec![binding], &[event]);
         assert!(result.is_err(), "expected group mismatch error");
         let err = result.err().unwrap();
         assert!(err.to_string().contains("subscriber group drift"));
@@ -1584,49 +1468,14 @@ mod tests {
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
     #[test]
     fn bridge_generated_subscriptions_rejects_duplicate_specs() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        static SPECS: &[SubscriptionSpec] = &[
-            SubscriptionSpec {
-                contract_id: "identity.session-created",
-                topic: "identity.session-created",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "audit",
-                group: "audit.session-created",
-                partition_key: "none",
-                readiness: "required",
-            },
-            SubscriptionSpec {
-                contract_id: "identity.session-created",
-                topic: "identity.session-created",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "audit",
-                group: "audit.session-created",
-                partition_key: "none",
-                readiness: "required",
-            },
-        ];
-        let binding = SubscriberBinding {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            consumer: "audit",
-            group: consistency::ConsumerGroup::parse("audit.session-created").unwrap(),
-            handler: Box::new(NopHandler),
-        };
-        let result = bridge_subscriptions_with_specs(vec![binding], SPECS);
+        let event = generated::event::identity_v1::session_created::SPEC;
+        let binding = test_binding(
+            event.contract_id(),
+            event.topic(),
+            "audit",
+            "audit.session-created",
+        );
+        let result = bridge_subscriptions_with_events(vec![binding], &[event, event]);
         assert!(
             result.is_err(),
             "expected duplicate generated topology spec error"
@@ -1642,37 +1491,16 @@ mod tests {
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
     #[test]
     fn bridge_generated_subscriptions_rejects_duplicate_runtime_bindings() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        static SPECS: &[SubscriptionSpec] = &[SubscriptionSpec {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            schema_version: TEST_SCHEMA_VERSION,
-            schema_hash: TEST_SCHEMA_HASH,
-            consumer: "audit",
-            group: "audit.session-created",
-            partition_key: "none",
-            readiness: "required",
-        }];
-        let binding = || SubscriberBinding {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            consumer: "audit",
-            group: consistency::ConsumerGroup::parse("audit.session-created").unwrap(),
-            handler: Box::new(NopHandler),
+        let event = generated::event::identity_v1::session_created::SPEC;
+        let binding = || {
+            test_binding(
+                event.contract_id(),
+                event.topic(),
+                "audit",
+                "audit.session-created",
+            )
         };
-        let result = bridge_subscriptions_with_specs(vec![binding(), binding()], SPECS);
+        let result = bridge_subscriptions_with_events(vec![binding(), binding()], &[event]);
         assert!(
             result.is_err(),
             "expected duplicate runtime subscriber binding error"
@@ -1688,49 +1516,8 @@ mod tests {
     // reason: 测试构造合法 consumer group；parse 失败即测试写错。
     #[test]
     fn bridge_generated_subscriptions_rejects_unbound_generated_spec() {
-        use bootstrap::{SubscriberBinding, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct NopHandler;
-        impl bootstrap::SubscriberHandler for NopHandler {
-            fn handle(
-                &self,
-                _: diport::Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
-        static SPECS: &[SubscriptionSpec] = &[
-            SubscriptionSpec {
-                contract_id: "identity.session-created",
-                topic: "identity.session-created",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "audit",
-                group: "audit.session-created",
-                partition_key: "none",
-                readiness: "required",
-            },
-            SubscriptionSpec {
-                contract_id: "identity.token-refreshed",
-                topic: "identity.token-refreshed",
-                schema_version: TEST_SCHEMA_VERSION,
-                schema_hash: TEST_SCHEMA_HASH,
-                consumer: "audit",
-                group: "audit.token-refreshed",
-                partition_key: "none",
-                readiness: "required",
-            },
-        ];
-        let binding = SubscriberBinding {
-            contract_id: "identity.session-created",
-            topic: "identity.session-created",
-            consumer: "audit",
-            group: consistency::ConsumerGroup::parse("audit.session-created").unwrap(),
-            handler: Box::new(NopHandler),
-        };
-        let result = bridge_subscriptions_with_specs(vec![binding], SPECS);
+        let event = generated::event::identity_v1::session_created::SPEC;
+        let result = bridge_subscriptions_with_events(Vec::new(), &[event]);
         assert!(
             result.is_err(),
             "expected unbound generated topology spec error"
@@ -2060,9 +1847,11 @@ mod tests {
     }
 
     #[test]
-    fn active_settings_event_is_in_production_relay_domains() {
+    fn active_settings_event_is_in_generated_producer_domains() {
         assert!(
-            relay_domains_for_test().contains(&"settings"),
+            generated::event::PRODUCER_DOMAINS
+                .iter()
+                .any(|domain| domain.as_str() == "settings"),
             "settings.config-version-changed is active and has subscriber topology; production relay must publish settings outbox rows"
         );
         assert!(
@@ -2247,7 +2036,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     // reason: 同上。
     #[test]
-    fn make_consumer_probe_multi_binding_distinguishes_same_topic_consumers() {
+    fn make_consumer_probe_multi_binding_distinguishes_generated_subscriptions() {
         let first = test_subscription(
             "identity.session-created",
             "identity.session-created",
@@ -2255,10 +2044,10 @@ mod tests {
             "audit.session-created",
         );
         let second = test_subscription(
-            "identity.session-created",
-            "identity.session-created",
-            "metrics",
-            "metrics.session-created",
+            "identity.role-assigned",
+            "identity.role-assigned",
+            "audit",
+            "audit.role-assigned",
         );
         let (first_name, _first_probe) =
             make_consumer_probe(2, &first, Arc::new(WorkerHealth::healthy())).unwrap();
@@ -2268,7 +2057,7 @@ mod tests {
         assert_ne!(
             first_name.as_str(),
             second_name.as_str(),
-            "同 topic 不同 consumer/group 的 probe name 必须不撞"
+            "不同 generated subscription 的 probe name 必须不撞"
         );
         assert!(
             first_name
@@ -2278,7 +2067,7 @@ mod tests {
         assert!(
             second_name
                 .as_str()
-                .contains("__metrics__metrics_session-created")
+                .contains("identity_role-assigned__audit__audit_role-assigned")
         );
     }
 }

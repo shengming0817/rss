@@ -5,8 +5,8 @@
 //!   `cargo xtask cdc-config debezium`   输出 Debezium PostgreSQL outbox_log CDC connector JSON skeleton（只读）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
-//!   `cargo xtask archrules list|verify` ArchRules 派生索引（从真实 carrier 的 `INVARIANT:` 反向索引 rule
-//!                                      → carrier → evidence → gate；verify 为 CI 门）
+//!   `cargo xtask archrules list|verify|matrix [--write|--check]`
+//!                                      ArchRules 派生索引与持久化 funnel 单源矩阵；verify/matrix --check 为 CI 门
 //!   `cargo xtask contract breaking [--against <git-ref>] [--deny]`
 //!                                      wire JSON-Schema 跨版本破坏检测门（ADR-008，对标 Buf WIRE_JSON）：base ref
 //!                                      （默认 origin/develop）↔ working-tree schema 递归 diff；窗口分级默认 warn
@@ -110,6 +110,7 @@ enum Command {
     AssemblyValidate,
     ArchRulesList,
     ArchRulesVerify,
+    ArchRulesMatrix(archrules::MatrixAction),
     RuntimeBaselineList,
     RuntimeBaselineVerify,
     RuntimeDepsGuard,
@@ -199,7 +200,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -228,8 +229,13 @@ fn parse_archrules(args: &[&str]) -> Result<Command> {
     match args {
         ["list"] => Ok(Command::ArchRulesList),
         ["verify"] => Ok(Command::ArchRulesVerify),
+        ["matrix"] => Ok(Command::ArchRulesMatrix(archrules::MatrixAction::Print)),
+        ["matrix", "--write"] => Ok(Command::ArchRulesMatrix(archrules::MatrixAction::Write)),
+        ["matrix", "--check"] => Ok(Command::ArchRulesMatrix(archrules::MatrixAction::Check)),
         other => {
-            bail!("未知 archrules 子命令: {other:?}；用法: cargo xtask archrules <list | verify>")
+            bail!(
+                "未知 archrules 子命令: {other:?}；用法: cargo xtask archrules <list | verify | matrix [--write|--check]>"
+            )
         }
     }
 }
@@ -424,6 +430,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
+        Command::ArchRulesMatrix(action) => archrules::matrix(action),
         Command::RuntimeBaselineList => runtime_baseline::list(),
         Command::RuntimeBaselineVerify => diagnostic::run_check(&runtime_baseline::RuntimeBaseline),
         Command::RuntimeDepsGuard => diagnostic::run_check(&runtime_deps_guard::RuntimeDepsGuard),
@@ -562,6 +569,18 @@ mod tests {
             parse_command(&s(&["archrules", "verify"]))?,
             Command::ArchRulesVerify
         );
+        assert_eq!(
+            parse_command(&s(&["archrules", "matrix"]))?,
+            Command::ArchRulesMatrix(archrules::MatrixAction::Print)
+        );
+        assert_eq!(
+            parse_command(&s(&["archrules", "matrix", "--write"]))?,
+            Command::ArchRulesMatrix(archrules::MatrixAction::Write)
+        );
+        assert_eq!(
+            parse_command(&s(&["archrules", "matrix", "--check"]))?,
+            Command::ArchRulesMatrix(archrules::MatrixAction::Check)
+        );
         Ok(())
     }
 
@@ -571,6 +590,7 @@ mod tests {
         assert!(parse_command(&s(&["archrules", "--list"])).is_err());
         assert!(parse_command(&s(&["archrules", "list", "extra"])).is_err());
         assert!(parse_command(&s(&["archrules", "bogus"])).is_err());
+        assert!(parse_command(&s(&["archrules", "matrix", "--bogus"])).is_err());
     }
 
     #[test]

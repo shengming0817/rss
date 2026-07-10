@@ -811,7 +811,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         action: consistency::ConvergeAction,
         command: ReviewedCommand,
     ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
-        let (entry, envelope_parts) = command.into_parts();
+        let (intent, envelope_parts) = command.into_parts();
         let (contract, command_tenant, subject_id, actor, partition_key, causation_id) =
             envelope_parts.into_parts();
         if command_tenant != attempt.target().tenant() {
@@ -844,6 +844,9 @@ impl ReconcileScheduleStore for PgReconcileStore {
                         if !held {
                             return Ok(ScheduleLeaseOutcome::Lost);
                         }
+                        let prepared = crate::command_journal::prepare_command(tx, tenant, intent)
+                            .await
+                            .map_err(ReconcileScheduleError::new)?;
                         sqlx::query(
                             r#"
                             INSERT INTO reconcile_actions
@@ -859,13 +862,13 @@ impl ReconcileScheduleStore for PgReconcileStore {
                         .execute(tx.conn())
                         .await
                         .map_err(ReconcileScheduleError::new)?;
-                        match append_outbox(tx, &entry, &env)
+                        match append_outbox(tx, &prepared.entry, &env)
                             .await
                             .map_err(ReconcileScheduleError::new)?
                         {
                             OutboxAppendOutcome::Inserted => {}
                             OutboxAppendOutcome::AlreadyExists => {
-                                ensure_existing_outbox_matches(tx, &entry, &env)
+                                ensure_existing_outbox_matches(tx, &prepared.entry, &env)
                                     .await
                                     .map_err(ReconcileScheduleError::new)?;
                             }
@@ -1090,7 +1093,7 @@ async fn lock_held_lease(
 
 async fn ensure_existing_outbox_matches(
     tx: &mut TxCapability<'_>,
-    entry: &consistency::outbox::Entry,
+    entry: &consistency::StoredOutboxEntry,
     env: &OutboxEnvelope,
 ) -> Result<(), ReconcileOutboxConflict> {
     let row: Option<(bool,)> = sqlx::query_as(

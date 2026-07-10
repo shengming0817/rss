@@ -1,7 +1,7 @@
 //! 契约归属 `ContractOwner`（sealed：私有内层 enum，构造经受控关联函数 `framework()` / `of_domain()`）。
 //! owner→域解析只经 [`ContractOwner::domain`]；Framework 归属返回 None（类型层收口，无运行期 guard）。
 //!
-//! INVARIANT: CONTRACT-OWNER-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 外部 crate 无法命名私有内层 [`Owner`] enum，故无法 raw-mint 任意
+//! INVARIANT: CONTRACT-OWNER-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "owner-type" }—— 外部 crate 无法命名私有内层 [`Owner`] enum，故无法 raw-mint 任意
 //! owner；构造只经 [`ContractOwner::framework`] / [`ContractOwner::of_domain`] 受控入口（type-layer Hard
 //! seal，对齐 house `vocab::tenant::CrossTenantCapability` 私有构造封闭先例——该先例用私有字段 `_seal: ()`，
 //! 本 PR 用私有内层 enum，二者同属类型层 Hard seal）。
@@ -9,7 +9,7 @@
 /// 契约归属。`Framework` 是 provider-agnostic 中立契约的保留 sentinel，不绑定单一域。
 ///
 /// 构造经 [`ContractOwner::framework`] / [`ContractOwner::of_domain`] 受控入口；内层 [`Owner`] 变体私有，
-/// 外部 crate 无法 raw-mint 任意 owner（INVARIANT: CONTRACT-OWNER-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）。
+/// 外部 crate 无法 raw-mint 任意 owner（INVARIANT: CONTRACT-OWNER-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "owner-type" }）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractOwner(Owner);
 
@@ -160,7 +160,7 @@ mod smoke {
     //! enum 模式不同于 sealed-trait，无外部 impl 面需 `compile_fail` 守）。
     use super::{ContractOwner, DomainName, DomainNameError};
 
-    // INVARIANT: CONTRACT-OWNER-SEAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+    // INVARIANT: CONTRACT-OWNER-SEAL-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "regression-test" }
     #[test]
     fn contract_owner_seal_signatures_are_consumable() {
         // 受控构造入口签名可绑定为函数指针：raw 变体在外部不可表达，仅此二函数可 mint。

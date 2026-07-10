@@ -24,7 +24,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use consistency::outbox::{Entry, OutboxPayload, Topic};
 use consistency::{
     Context, ConvergeAction, EntityId, Outcome, ReconcileError, ReconcileResultLabel, Reconciler,
     Request,
@@ -35,7 +34,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::WorkerHealth;
-use crate::command::{CommandEmitError, DispatchId};
+use crate::command::{
+    CommandEmitError, CommandIdempotencyKeyring, ReviewedCommandIntent, reviewed_keyed_intent,
+};
 
 /// readyz probe 名（无 `_ready` 后缀，对齐 relay probe 约定）。
 pub const RECONCILE_PROBE: &str = "reconcile";
@@ -332,78 +333,57 @@ impl AttemptResult {
     }
 }
 
-/// Stable dispatch key required for reconcile command outbox writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StableDispatchKey(String);
-
-impl StableDispatchKey {
-    /// Parse a reviewed stable dispatch key.
-    pub fn parse(raw: impl Into<String>) -> Result<Self, CommandEmitError> {
-        let raw = raw.into();
-        DispatchId::from_idempotency_key(&raw)?;
-        Ok(Self(raw))
-    }
-
-    /// Borrow the stable key.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Reviewed command entry that can only be built with a stable dispatch key.
+/// Reviewed reconcile command capability. Providers can consume it, while authoring stays behind
+/// generated schema-typed command wrappers.
 ///
 /// This is the transactional counterpart of `eventexec::command::emit_async`: it produces the
 /// same command outbox primitives but does not call an emitter, so a provider can append action
 /// ledger + outbox row in one tenant transaction.
 pub struct ReviewedCommand {
-    entry: Entry,
+    intent: ReviewedCommandIntent,
     envelope: OutboxEnvelopeParts,
 }
 
 impl ReviewedCommand {
-    /// Build a reviewed command outbox write.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dispatch_key: StableDispatchKey,
-        topic: &str,
-        contract: vocab::ContractBinding,
-        tenant: vocab::TenantId,
-        payload: Vec<u8>,
-        subject_id: EnvelopeSubjectId,
-        actor: OutboxActor,
-    ) -> Result<Self, CommandEmitError> {
-        let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
-        let scoped_key = scoped_dispatch_key(tenant, &parsed_topic, &dispatch_key);
-        let dispatch_id = DispatchId::from_idempotency_key(&scoped_key)?;
-        let entry = Entry::new(
-            parsed_topic,
-            dispatch_id.into_idem_key(),
-            OutboxPayload::from_reviewed_event_bytes(payload),
-        );
-        let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id, actor);
-        Ok(Self { entry, envelope })
+    /// Convert a generated typed command wrapper into a provider capability. The sealed generated
+    /// trait prevents callers from supplying raw topic/contract/payload combinations.
+    pub fn from_spec<C>(
+        command: C,
+        keyring: &CommandIdempotencyKeyring,
+    ) -> Result<Self, CommandEmitError>
+    where
+        C: generated::command::TypedCommandSpec<SubjectId = EnvelopeSubjectId, Actor = OutboxActor>,
+    {
+        let tenant = command.tenant();
+        let payload =
+            serde_json::to_vec(command.request()).map_err(|_| CommandEmitError::Serialization)?;
+        let spec = <C::Contract as generated::command::CommandContract>::SPEC;
+        let raw_idempotency_key = command.idempotency_key().to_string();
+        let (subject_id, actor) = command.into_identity();
+        let (intent, envelope) = reviewed_keyed_intent(
+            keyring,
+            spec,
+            tenant,
+            payload,
+            subject_id,
+            actor,
+            &raw_idempotency_key,
+        )?;
+        Ok(Self { intent, envelope })
+    }
+
+    /// Borrow sealed keyed alias probes for provider idempotency claim.
+    ///
+    /// The raw key is never recoverable from this value; command authoring remains sealed behind
+    /// generated [`generated::command::TypedCommandSpec`] implementations.
+    pub fn aliases(&self) -> &crate::command::CommandAliasProbeSet {
+        self.intent.aliases()
     }
 
     /// Consume into provider outbox primitives.
-    pub fn into_parts(self) -> (Entry, OutboxEnvelopeParts) {
-        (self.entry, self.envelope)
+    pub fn into_parts(self) -> (ReviewedCommandIntent, OutboxEnvelopeParts) {
+        (self.intent, self.envelope)
     }
-}
-
-fn scoped_dispatch_key(
-    tenant: vocab::TenantId,
-    topic: &Topic,
-    dispatch_key: &StableDispatchKey,
-) -> String {
-    let tenant = tenant.to_string();
-    let topic = topic.as_str();
-    let key = dispatch_key.as_str();
-    format!(
-        "reconcile:v1:t{}:{tenant}:p{}:{topic}:k{}:{key}",
-        tenant.len(),
-        topic.len(),
-        key.len()
-    )
 }
 
 /// Provider-agnostic durable reconcile store.
@@ -472,12 +452,21 @@ pub trait ReconcileScheduleStore {
 /// Attempt-scoped recorder handed to durable reconcilers.
 pub struct AttemptScope<'a, S: ReconcileScheduleStore> {
     store: &'a S,
+    keyring: &'a CommandIdempotencyKeyring,
     attempt: ReconcileAttempt,
 }
 
 impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
-    fn new(store: &'a S, attempt: ReconcileAttempt) -> Self {
-        Self { store, attempt }
+    fn new(
+        store: &'a S,
+        keyring: &'a CommandIdempotencyKeyring,
+        attempt: ReconcileAttempt,
+    ) -> Self {
+        Self {
+            store,
+            keyring,
+            attempt,
+        }
     }
 
     /// Current attempt id for correlation.
@@ -486,11 +475,16 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
     }
 
     /// Record a converge action and enqueue its command in the same provider transaction.
-    pub async fn record_action_and_enqueue_command(
+    pub async fn record_action_and_enqueue_command<C>(
         &self,
         action: ConvergeAction,
-        command: ReviewedCommand,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+        command: C,
+    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>
+    where
+        C: generated::command::TypedCommandSpec<SubjectId = EnvelopeSubjectId, Actor = OutboxActor>,
+    {
+        let command = ReviewedCommand::from_spec(command, self.keyring)
+            .map_err(ReconcileScheduleError::new)?;
         self.store
             .record_action_and_enqueue_command(&self.attempt, action, command)
             .await
@@ -517,6 +511,7 @@ where
 {
     store: S,
     reconciler: R,
+    keyring: Arc<CommandIdempotencyKeyring>,
     tenant: vocab::TenantId,
     reconciler_id: String,
     holder_id: String,
@@ -532,9 +527,13 @@ where
     R: DurableReconciler<S>,
 {
     /// New durable scheduler builder. Store, tenancy and trigger are required at construction.
+    #[allow(clippy::too_many_arguments)]
+    // reason: the mandatory idempotency keyring is an independent security dependency; grouping
+    // store/reconciler/tenant/identity/tenancy/trigger would only hide required constructor inputs.
     pub fn new(
         store: S,
         reconciler: R,
+        keyring: Arc<CommandIdempotencyKeyring>,
         tenant: vocab::TenantId,
         reconciler_id: impl Into<String>,
         holder_id: impl Into<String>,
@@ -544,6 +543,7 @@ where
         Self {
             store,
             reconciler,
+            keyring,
             tenant,
             reconciler_id: reconciler_id.into(),
             holder_id: holder_id.into(),
@@ -582,6 +582,7 @@ where
         ReconcileWorker {
             store: self.store,
             reconciler: self.reconciler,
+            keyring: self.keyring,
             tenant: self.tenant,
             reconciler_id: self.reconciler_id,
             holder_id: self.holder_id,
@@ -627,6 +628,7 @@ where
 {
     store: S,
     reconciler: R,
+    keyring: Arc<CommandIdempotencyKeyring>,
     tenant: vocab::TenantId,
     reconciler_id: String,
     holder_id: String,
@@ -865,7 +867,7 @@ where
         token: &CancellationToken,
     ) -> TargetRun {
         let ctx = Context::for_harness(Some(vocab::Epoch::new(target.epoch())));
-        let scope = AttemptScope::new(&self.store, attempt.clone());
+        let scope = AttemptScope::new(&self.store, &self.keyring, attempt.clone());
         tokio::select! {
             biased;
             () = token.cancelled() => {
@@ -1636,7 +1638,7 @@ mod tests {
         ClaimedTarget, DurableReconciler, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
         ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileScheduleError,
         ReconcileScheduleStore, ReconcileSchedulerBuilder, ReviewedCommand, ScheduleAttemptOutcome,
-        ScheduleLeaseOutcome, StableDispatchKey, Tenancy, Trigger, TriggerError, bump_attempts,
+        ScheduleLeaseOutcome, Tenancy, Trigger, TriggerError, bump_attempts,
     };
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -1655,8 +1657,20 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::WorkerHealth;
+    use crate::command::{CommandAliasKey, CommandIdempotencyKeyring};
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    #[allow(clippy::expect_used)]
+    fn keyring() -> Arc<CommandIdempotencyKeyring> {
+        Arc::new(
+            CommandIdempotencyKeyring::new(
+                CommandAliasKey::new("current", vec![0x42; 32]).expect("key"),
+                vec![CommandAliasKey::new("previous", vec![0x24; 32]).expect("key")],
+            )
+            .expect("keyring"),
+        )
+    }
 
     // ── 测试 Reconciler：按行为脚本返回，记录看到的 epoch + 调用次数 ──────────
 
@@ -2052,18 +2066,21 @@ mod tests {
             Ok(ScheduleLeaseOutcome::Held)
         }
 
+        #[allow(clippy::expect_used)]
+        // reason: the typed reconcile path always derives a current keyed alias before store I/O.
         async fn record_action_and_enqueue_command(
             &self,
             _attempt: &ReconcileAttempt,
             action: ConvergeAction,
             command: ReviewedCommand,
         ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
-            let (entry, _envelope) = command.into_parts();
+            let (intent, _envelope) = command.into_parts();
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.actions.push(action);
+            let current = intent.aliases().current().expect("keyed reconcile command");
             state
                 .command_keys
-                .push(entry.idem_key().as_str().to_string());
+                .push(format!("{}:{}", current.key_id(), current.digest().len()));
             Ok(ScheduleLeaseOutcome::Held)
         }
 
@@ -2155,72 +2172,63 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn reviewed_command(key: &str) -> ReviewedCommand {
-        ReviewedCommand::new(
-            StableDispatchKey::parse(key).expect("dispatch key"),
-            "test.command",
-            vocab::ContractBinding::from_static(
-                "test",
-                "test.command",
-                "v1",
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ReviewedCommand::from_spec(
+            generated::command::_seed_v1::reconcile_command(
+                generated::command::_seed_v1::SeedDoThingRequest {
+                    amount: 1,
+                    target_id: "device-1".to_string(),
+                },
+                tenant(),
+                EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
+                OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
+                key.to_string(),
             ),
-            tenant(),
-            b"{}".to_vec(),
-            EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
-            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
+            &keyring(),
         )
         .expect("reviewed command")
     }
 
     #[test]
-    fn stable_dispatch_key_rejects_empty_and_reviewed_command_uses_key() -> TestResult {
-        assert!(StableDispatchKey::parse("").is_err());
+    #[allow(clippy::expect_used)]
+    // reason: fixed keyed reconcile fixtures must contain the current alias probe.
+    fn typed_reviewed_command_scopes_opaque_dispatch_identity() -> TestResult {
+        let empty_key = generated::command::_seed_v1::reconcile_command(
+            generated::command::_seed_v1::SeedDoThingRequest {
+                amount: 1,
+                target_id: "device-1".to_string(),
+            },
+            tenant(),
+            EnvelopeSubjectId::from_opaque("device-1")?,
+            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
+            String::new(),
+        );
+        assert!(ReviewedCommand::from_spec(empty_key, &keyring()).is_err());
 
         let command = reviewed_command("reconcile-device-1-create");
-        let (entry, envelope) = command.into_parts();
-        assert_eq!(
-            entry.idem_key().as_str(),
-            "reconcile:v1:t36:11111111-1111-1111-1111-111111111111:p12:test.command:k25:reconcile-device-1-create"
-        );
-        assert_eq!(entry.topic().as_str(), "test.command");
+        let (intent, envelope) = command.into_parts();
+        let first_digest = intent.aliases().current().expect("keyed").digest().to_vec();
+        assert_eq!(intent.topic(), generated::command::_seed_v1::TOPIC);
         assert_eq!(envelope.tenant(), tenant());
 
-        let same_raw_other_tenant = ReviewedCommand::new(
-            StableDispatchKey::parse("reconcile-device-1-create")?,
-            "test.command",
-            vocab::ContractBinding::from_static(
-                "test",
-                "test.command",
-                "v1",
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        let same_raw_other_tenant = ReviewedCommand::from_spec(
+            generated::command::_seed_v1::reconcile_command(
+                generated::command::_seed_v1::SeedDoThingRequest {
+                    amount: 1,
+                    target_id: "device-1".to_string(),
+                },
+                vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+                EnvelopeSubjectId::from_opaque("device-1")?,
+                OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
+                "reconcile-device-1-create".to_string(),
             ),
-            vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
-            b"{}".to_vec(),
-            EnvelopeSubjectId::from_opaque("device-1")?,
-            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
+            &keyring(),
         )?;
-        let (other_entry, _) = same_raw_other_tenant.into_parts();
+        let (other_intent, _) = same_raw_other_tenant.into_parts();
         assert_ne!(
-            entry.idem_key().as_str(),
-            other_entry.idem_key().as_str(),
-            "same raw key must not collide across tenants"
+            first_digest,
+            other_intent.aliases().current().expect("keyed").digest()
         );
 
-        let bad_topic = ReviewedCommand::new(
-            StableDispatchKey::parse("reconcile-device-1-update")?,
-            "not canonical topic",
-            vocab::ContractBinding::from_static(
-                "test",
-                "test.command",
-                "v1",
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            ),
-            tenant(),
-            Vec::new(),
-            EnvelopeSubjectId::from_opaque("device-1")?,
-            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
-        );
-        assert!(bad_topic.is_err(), "invalid topic must fail closed");
         Ok(())
     }
 
@@ -2228,25 +2236,30 @@ mod tests {
     async fn attempt_scope_records_action_and_command_through_single_store_call() -> TestResult {
         let store = FakeScheduleStore::default();
         let attempt = ReconcileAttempt::new("attempt-scope", claimed_target());
-        let scope = AttemptScope::new(&store, attempt);
+        let keys = keyring();
+        let scope = AttemptScope::new(&store, &keys, attempt);
 
         let outcome = scope
             .record_action_and_enqueue_command(
                 ConvergeAction::Create,
-                reviewed_command("reconcile-device-1-create"),
+                generated::command::_seed_v1::reconcile_command(
+                    generated::command::_seed_v1::SeedDoThingRequest {
+                        amount: 1,
+                        target_id: "device-1".to_string(),
+                    },
+                    tenant(),
+                    EnvelopeSubjectId::from_opaque("device-1")?,
+                    OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
+                    "reconcile-device-1-create".to_string(),
+                ),
             )
             .await?;
 
         assert_eq!(outcome, ScheduleLeaseOutcome::Held);
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.actions, vec![ConvergeAction::Create]);
-        assert_eq!(
-            state.command_keys,
-            vec![
-                "reconcile:v1:t36:11111111-1111-1111-1111-111111111111:p12:test.command:k25:reconcile-device-1-create"
-                    .to_string()
-            ]
-        );
+        assert_eq!(state.command_keys.len(), 1);
+        assert_eq!(state.command_keys[0], "current:32");
         Ok(())
     }
 
@@ -2262,6 +2275,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             reconciler,
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2303,6 +2317,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             DurableScript::new(DurableBehavior::Transient),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2334,6 +2349,7 @@ mod tests {
         let result = ReconcileSchedulerBuilder::new(
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2352,6 +2368,7 @@ mod tests {
         let result = ReconcileSchedulerBuilder::new(
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2367,6 +2384,7 @@ mod tests {
         let result = ReconcileSchedulerBuilder::new(
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2385,6 +2403,7 @@ mod tests {
         let result = ReconcileSchedulerBuilder::new(
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2455,6 +2474,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             reconciler,
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2493,6 +2513,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             reconciler,
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2520,6 +2541,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2551,6 +2573,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -2597,6 +2620,7 @@ mod tests {
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
+            keyring(),
             tenant(),
             "test-reconciler",
             "holder-a",

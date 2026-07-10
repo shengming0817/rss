@@ -95,9 +95,12 @@ API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWork
 ## Durable command outbox seam
 
 durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope` 只暴露
-`record_action_and_enqueue_command(action, command)`，这是唯一 action + command outbox 写入口。`ReviewedCommand`
-字段私有，构造必须传 `StableDispatchKey`；没有 `Option`/随机 dispatch key 路径。最终 durable dispatch id 由
-`tenant + topic + StableDispatchKey` 规范编码生成，同 raw key 跨 tenant/topic 不共享 outbox `event_id`。Postgres
+`record_action_and_enqueue_command(action, generated_typed_command)`，这是唯一 action + command outbox 写入口。
+每个 command contract 生成字段私有的 `ReconcileCommand<Request, Subject, Actor>`；sealed
+`TypedCommandSpec` 把 baked `CommandSpec` 与 schema-typed request 绑定，外部无法实现或替换 topic/contract/payload。
+`ReviewedCommand::from_spec` 只把该 typed wrapper 转成 provider capability，不存在 raw 构造器或
+`StableDispatchKey` 公共模型。最终 durable dispatch id 由 `tenant + topic + raw key` 的长度分隔 SHA-256
+派生为 opaque key，同 raw key 跨 tenant/topic 不共享 outbox `event_id`，且 raw key 不落库。Postgres
 实现必须在同一 tenant transaction 内先以 `lease_token + epoch` CAS 确认 lease，再 append
 `reconcile_actions`，再 append outbox entry；若 outbox 行已存在，必须校验同 tenant/topic/contract/payload 后才视为幂等。
 `reconcile_actions` 不保存 terminal attempt result；不得 direct publisher/broker，也不得在 `eventexec` 内裸 `append_outbox`。
@@ -116,7 +119,7 @@ durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope`
 reconciler 在 tenantless system 身份下发射命令（Claimer key 落 `_notenant`），故必须显式声明该命名空间是否正确；
 `trigger` 是 `Trigger`（当前仅 `Trigger::interval(period)`，事件驱动 targeted dispatch 后续兑现）：原「`build()` 强制
 一个 Trigger」（运行期 fail-fast）已上移到类型系统（ai-robust：能编译期强制不退化运行期）。TenantScoped durable command
-dispatch id 的 tenant 维度由 `ReviewedCommand` 构造时注入。由类型系统（Hard，构造器必填位置参）强制：
+dispatch id 的 tenant 维度由 generated typed wrapper 的必填位置参注入。由类型系统（Hard）强制：
 INVARIANT RECONCILE-TENANCY-REQ-01，回归见 `crates/eventexec/tests/ui/reconcile_missing_{tenancy,trigger}_fail.rs`
 （trybuild compile_fail）。
 

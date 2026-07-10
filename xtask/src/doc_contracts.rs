@@ -1,8 +1,8 @@
 //! `doc-contracts` —— 文档契约片段漂移门（AI-robust Medium 内容扫描门）。
 //!
-//! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code" }—— tenant + actor aware command /
+//! INVARIANT: DOC-CONTRACTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_removed_event_topology_and_entry_symbols", anti_vacuity = "tests::scan_content_accepts_current_event_topology_and_entry_symbols" }—— tenant + actor aware command /
 //! outbox envelope 签名已经进入 codegen 与 runtime；规则 / spec 文档与相关 public rustdoc 不得残留 tenantless /
-//! actorless 旧片段。
+//! actorless 旧片段，也不得引用已删除的 event topology / entry symbols。
 //! 该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文。
 
 use std::path::{Path, PathBuf};
@@ -13,14 +13,52 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-const DOC_ROOTS: &[&str] = &["docs/rules", "docs/spec"];
+const CONTENT_ROOTS: &[(&str, &str)] = &[
+    ("docs/rules", "md"),
+    ("docs/spec", "md"),
+    ("contracts", "toml"),
+    ("journeys", "toml"),
+];
 const SOURCE_DOC_FILES: &[&str] = &[
     "crates/consistency/src/outbox.rs",
     "crates/diport/src/outbox_emitter.rs",
     "adapters/postgres/src/outbox.rs",
+    "crates/eventexec/src/relay_config.rs",
+    "journeys/tests/identity_login_audit_journey.rs",
+    "journeys/tests/identity_login_audit_durable_journey.rs",
 ];
 
 const FORBIDDEN: &[ForbiddenPattern] = &[
+    ForbiddenPattern {
+        rule: Rule::RemovedSymbol,
+        needle: "`SUBSCRIPTIONS`",
+        detail: "event topology root is `EVENTS`; per-contract subscribers come from `SPEC.subscriptions()`",
+    },
+    ForbiddenPattern {
+        rule: Rule::RemovedSymbol,
+        needle: "generated SUBSCRIPTIONS",
+        detail: "event topology root is generated `EVENTS`; per-contract subscribers come from `SPEC.subscriptions()`",
+    },
+    ForbiddenPattern {
+        rule: Rule::RemovedSymbol,
+        needle: "generated::event::SUBSCRIPTIONS",
+        detail: "event topology root is `generated::event::EVENTS`",
+    },
+    ForbiddenPattern {
+        rule: Rule::RemovedSymbol,
+        needle: "consistency::Entry",
+        detail: "producer authoring uses EventEntry; persisted relay rows use StoredOutboxEntry",
+    },
+    ForbiddenPattern {
+        rule: Rule::RemovedSymbol,
+        needle: "outbox::Entry",
+        detail: "producer authoring uses EventEntry; persisted relay rows use StoredOutboxEntry",
+    },
+    ForbiddenPattern {
+        rule: Rule::RemovedSymbol,
+        needle: "Vec<Entry>",
+        detail: "persisted relay batches use Vec<StoredOutboxEntry>",
+    },
     ForbiddenPattern {
         rule: Rule::CommandWrapper,
         needle: "emit_async(emitter, request, subject_id, idempotency_key)",
@@ -130,6 +168,7 @@ const FORBIDDEN: &[ForbiddenPattern] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
+    RemovedSymbol,
     CommandWrapper,
     RuntimeCommandEmit,
     OutboxEnvelope,
@@ -171,10 +210,10 @@ impl GovernanceCheck for DocContracts {
 
 fn scan_docs(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let mut files = Vec::new();
-    for dir in DOC_ROOTS {
-        let mut found = md_files(&root.join(dir))?;
+    for (dir, extension) in CONTENT_ROOTS {
+        let mut found = content_files(&root.join(dir), extension)?;
         if found.is_empty() {
-            bail!("doc-contracts: {dir} 下无 .md 文件，fail-closed");
+            bail!("doc-contracts: {dir} 下无 .{extension} 文件，fail-closed");
         }
         files.append(&mut found);
     }
@@ -197,24 +236,24 @@ fn scan_docs(root: &Path) -> Result<(usize, Vec<Finding>)> {
     Ok((files.len(), findings))
 }
 
-fn md_files(dir: &Path) -> Result<Vec<PathBuf>> {
+fn content_files(dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
     if !dir.is_dir() {
         bail!("doc-contracts: 目录 {} 缺失，fail-closed", dir.display());
     }
     let mut out = Vec::new();
-    collect_md(dir, &mut out)?;
+    collect_content(dir, extension, &mut out)?;
     Ok(out)
 }
 
-fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_content(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir)
         .map_err(|e| anyhow::anyhow!("doc-contracts: 读目录 {} 失败: {e}", dir.display()))?
     {
         let entry = entry.map_err(|e| anyhow::anyhow!("doc-contracts: 遍历目录项失败: {e}"))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_md(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "md") {
+            collect_content(&path, extension, out)?;
+        } else if path.extension().is_some_and(|ext| ext == extension) {
             out.push(path);
         }
     }
@@ -240,6 +279,24 @@ fn scan_content(path: &Path, content: &str) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_content_rejects_removed_event_topology_and_entry_symbols() {
+        let src = "generated `SUBSCRIPTIONS`\ngenerated::event::SUBSCRIPTIONS\nconsistency::Entry\noutbox::Entry\nVec<Entry>";
+        let findings = scan_content(Path::new("docs/rules/eventbus.md"), src);
+        assert_eq!(findings.len(), 5);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::RemovedSymbol)
+        );
+    }
+
+    #[test]
+    fn scan_content_accepts_current_event_topology_and_entry_symbols() {
+        let src = "generated::event::EVENTS\nSPEC.subscriptions()\nEventEntry\nStoredOutboxEntry";
+        assert!(scan_content(Path::new("docs/rules/eventbus.md"), src).is_empty());
+    }
 
     #[test]
     fn scan_content_reports_tenantless_command_and_envelope_fragments() {

@@ -1,4 +1,4 @@
-//! RW-W settings journey：配置发布 → in-mem outbox → `settings.config-version-changed` 事件闭环，
+//! settings journey：配置发布/读取/回滚/删除 → in-mem outbox → `settings.config-version-changed` 事件闭环，
 //! 组装在 bootstrap（compose）+ memory（in-mem DI port）上，端到端证明 settings L2 OutboxFact 接缝
 //! 能拼成闭环（对标 identity 登录 → session-created journey）。
 //!
@@ -7,8 +7,7 @@
 //! - DI 注入：settings 经具体 `memory::MemEmitter`（co-tx UoW 须 Sync）发射 config-version-changed fact；clock 注入。
 //! - L2 OutboxFact：publish_config CAS 写 v1 → 发 outbox fact → MemBus → 订阅者消费（跨域只经 contract）。
 //!
-//! 追踪弹边界（同 identity G1）：服务层闭环——配置服务直接调用，不逐字节跑 axum（httpserve mount 留 Join）；
-//! 契约 lifecycle=draft（active serving + subscriber 校验留 #1120 订阅缓存）。
+//! 读取每次以 authoritative head revision 校验 cache；事件订阅只优化预热/失效，不参与正确性证明。
 //!
 //! ref: watermill message/router.go@fbce4d6cd13c8657c668c7e7990fef90d2471b8a（分发循环）
 
@@ -52,7 +51,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     // 1. in-mem 基础设施（DI port provider 替身）。
     let bus = MemBus::new();
 
-    // 2. bootstrap 组装：settings durable module 实例（#1430）经 Domain::init 挂 config-publish /
+    // 2. bootstrap 组装：settings durable module 经 Domain::init 挂 config publish/get/delete/rollback /
     //    secret-publish 业务路由组（config 服务 + secret 仓储端口构造器注入）。
     let domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
@@ -66,7 +65,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     assert_eq!(
         route_groups.len(),
         1,
-        "config + secret 同 /api/v1/settings 业务路由组"
+        "settings active contracts 同 /api/v1/settings 业务路由组"
     );
     assert_eq!(route_groups[0], (ListenerKind::Primary, "/api/v1/settings"));
     // configs_ready 探针经组合根 wire_settings 的 DomainModuleResult 出向（探针包 PgDbReadiness=adapter 类型），
@@ -155,13 +154,13 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
     let tenant = TenantId::parse(CANON_TENANT)?;
-    let actor = actor(tenant)?;
+    let subject = actor(tenant)?;
 
     // 4. publish v1 + v2。
     service
         .publish_config(
             tenant,
-            actor.clone(),
+            subject.clone(),
             SettingsConfigPublishRequest {
                 key: "app.k".to_string(),
                 value: "v1".to_string(),
@@ -171,7 +170,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
     service
         .publish_config(
             tenant,
-            actor.clone(),
+            subject.clone(),
             SettingsConfigPublishRequest {
                 key: "app.k".to_string(),
                 value: "v2".to_string(),
@@ -180,8 +179,14 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
         .await?;
 
     // 5. rollback to v1（生成 v3）。
-    let resp = service.rollback(tenant, actor, "app.k", 1).await?;
+    let resp = service.rollback(tenant, subject, "app.k", 1).await?;
     assert_eq!(resp.data.version, 3, "rollback 应生成 v3");
+    let restored = service
+        .get_config(tenant, "app.k")
+        .await?
+        .ok_or_else(|| anyhow!("rolled back config must exist"))?;
+    assert_eq!(restored.value(), "v1");
+    assert_eq!(restored.version(), 3);
 
     // 6. 从订阅流读 3 条事件。
     let mut last_payload: Option<SettingsConfigVersionChangedPayload> = None;
@@ -209,6 +214,24 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
     );
     assert_eq!(last.key, "app.k");
     assert_eq!(last.tenant_id, CANON_TENANT);
+
+    // 8. delete 追加 v4 tombstone；重复 delete 是 no-op，读取权威 head 后返回 None。
+    service.delete(tenant, actor(tenant)?, "app.k").await?;
+    service.delete(tenant, actor(tenant)?, "app.k").await?;
+    assert!(service.get_config(tenant, "app.k").await?.is_none());
+    let deleted_message = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await?
+        .ok_or_else(|| anyhow!("expected deleted event"))?;
+    let deleted: SettingsConfigVersionChangedPayload =
+        serde_json::from_slice(deleted_message.payload.as_bytes())?;
+    assert_eq!(deleted.change_kind, SettingsConfigChangeKind::Deleted);
+    assert_eq!(deleted.version, 4);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err(),
+        "idempotent delete must not emit a second fact"
+    );
 
     token.cancel();
     Ok(())

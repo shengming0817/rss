@@ -48,7 +48,7 @@
 |------|------|----|---------------|
 | in-mem 原语生产不可达 | sealed `pub(crate)` + resolver 私有构造（类型系统） | Hard | TOPO-INMEM-SEAL-01 |
 | durable 缺配置 fail-closed | resolver 返 `Result` + bootstrap fail-fast | Medium | TOPO-FAILCLOSED-01 |
-| Entry/HandleResult/PermanentError 受控构造 | 私有字段 funnel（类型系统） | Hard | （已冻结） |
+| EventEntry/StoredOutboxEntry/HandleResult/PermanentError 受控构造 | 私有字段 funnel（类型系统） | Hard | （已冻结） |
 | Tenancy 必填、Clock 位置参 | 构造器必填非 Option 参 | Hard | RECONCILE-TENANCY-REQ-01 |
 | active 事件有 subscriber | xtask governance #[test] | Medium | EVENT-ACTIVE-SUB-01 |
 | L2 outbox 原子性 + consumer 幂等 | xtask/集成 governance #[test] | Medium | OUTBOX-ATOMIC-IDEM-01 |

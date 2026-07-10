@@ -60,8 +60,8 @@ pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 pub use bundle::{
-    MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps, PgRuntimeDeps,
-    PgSettingsBundle, caps,
+    MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps,
+    PgProjectionReplayStores, PgRuntimeDeps, PgSettingsBundle, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -81,8 +81,8 @@ pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use outbox_cdc::PgOutboxCdcEmitter;
 pub use policy_repo::{PgPolicyLifecycle, PgPolicyRepo};
 pub use projection_control::{
-    PgProjectionControl, ProjectionControlError, ProjectionMaintenanceCapability,
-    ProjectionPointerPrecondition, ProjectionPointerStatus, ProjectionPromoteOutcome,
+    PgProjectionControl, ProjectionControlError, ProjectionPointerPrecondition,
+    ProjectionPointerStatus, ProjectionPromoteOutcome,
 };
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
@@ -129,7 +129,7 @@ pub(crate) const PG_STORE_NAME: &str = "postgres";
 /// PostgreSQL 存储 adapter（sealed-marker）。持 `sqlx::PgPool`（`pub(crate)`，仅 crate 内 repo / tx /
 /// migrator impl 取用）。外部经 [`PgRuntimeDeps::setup`](crate::PgRuntimeDeps::setup) 构造
 /// （PG-BUNDLE-FUNNEL-01）；`connect`/`run_migrations` 为 `pub(crate)`、不对外暴露。
-pub struct PgStore {
+pub(crate) struct PgStore {
     pub(crate) pool: PgPool,
 }
 

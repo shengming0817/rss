@@ -22,21 +22,26 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::Result;
-use bootstrap::SubscriberHandler;
+use anyhow::{Context as _, Result};
+use audit::ports::{
+    AuditEventKind, AuditRepo as _, DynAuditRepo, TenantRepoScope, audit_record_from_event_message,
+};
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
     SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
-    session_created_subscription, signed_metadata, tenant_authority,
+    session_created_subscription,
 };
-use consistency::{HandleResult, OutboxRelay, OutboxSource, PermanentError, PermanentErrorKind};
+use consistency::{
+    Disposition, EngineError, EngineErrorKind, HandleResult, OutboxRelay, OutboxSource,
+    PermanentError, PermanentErrorKind,
+};
 use diagctx::{CorrelationId, DiagnosticCtx};
 use diport::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynPublisher,
     EnvelopeMetadata, KEY_CORRELATION, KEY_SUBJECT_ID, Message, MessageId, PublishRequest,
     Publisher, Subscriber, Topic,
 };
-use eventexec::{ConsumerMeta, LeaseConfig, run_consumer};
+use eventexec::{ConsumerMeta, LeaseConfig, TenantAuthority, TenantAuthorityBinding, run_consumer};
 use futures::future::BoxFuture;
 use generated::event::identity_v1::session_created::IdentitySessionCreatedPayload;
 use generated::http::identity_v1::login::IdentityLoginRequest;
@@ -44,6 +49,7 @@ use identity::LoginService;
 use identity::ports::DynSessionLifecycle;
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
+use primitives::MacKey;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
@@ -54,6 +60,46 @@ const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
 /// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
+
+fn durable_tenant_authority(database_now_epoch: i64) -> Result<Arc<TenantAuthority>> {
+    let now_epoch_secs = Arc::new(move || database_now_epoch);
+    Ok(Arc::new(TenantAuthority::new(
+        Arc::new(CapturingVerifier::default()),
+        MacKey::from_bytes(vec![0x42; 32]),
+        3600,
+        60,
+        now_epoch_secs,
+    )?))
+}
+
+fn signed_metadata_at(
+    authority: &TenantAuthority,
+    domain: &str,
+    contract_id: &str,
+    topic: &str,
+    message_id: &str,
+) -> Result<EnvelopeMetadata> {
+    let tenant = TenantId::parse(CANON_TENANT)?;
+    let token = authority.sign(TenantAuthorityBinding::new(
+        tenant,
+        domain,
+        contract_id,
+        topic,
+        message_id,
+    ))?;
+    let mut metadata = EnvelopeMetadata::empty();
+    metadata.insert_wire_pair(diport::KEY_TENANT_ID, CANON_TENANT);
+    metadata.insert_wire_pair(diport::KEY_TENANT_AUTHORITY, token);
+    metadata.insert_wire_pair(
+        diport::KEY_SCHEMA_VERSION,
+        generated::event::identity_v1::session_created::CONTRACT.version(),
+    );
+    metadata.insert_wire_pair(
+        diport::KEY_SCHEMA_HASH,
+        generated::event::identity_v1::session_created::CONTRACT.schema_hash(),
+    );
+    Ok(metadata)
+}
 
 /// 由 testkit fixture 参数构造配置。
 /// 库名严格校验已由 `testkit::env_or_postgres` 单源执行（外部路径须 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`
@@ -115,6 +161,27 @@ async fn provision_rss_app_login(p: &testkit::PgConnParams) -> Result<()> {
     Ok(())
 }
 
+async fn database_now_epoch(p: &testkit::PgConnParams) -> Result<i64> {
+    let options = PgConnectOptions::new()
+        .host(&p.host)
+        .port(p.port)
+        .database(&p.database)
+        .username(&p.username)
+        .password(&p.password)
+        .ssl_mode(SqlxPgSslMode::Prefer);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?;
+    let now_epoch =
+        sqlx::query_scalar::<_, i64>("SELECT extract(epoch FROM clock_timestamp())::bigint")
+            .fetch_one(&pool)
+            .await?;
+    pool.close().await;
+    Ok(now_epoch)
+}
+
 /// noop DLX（journey 不验死信路径；eventexec consumer.rs 已覆盖三路径）。
 struct NoopDlx;
 impl DeadLetterStore for NoopDlx {
@@ -131,30 +198,33 @@ impl DeadLetterStore for NoopDlx {
     }
 }
 
-/// SubscriberHandler → run_consumer HandleResult handler（Ok→ack；Err→reject 永久）。
+/// Journey-local audit decode/repo append → run_consumer HandleResult handler。
 /// `captured` 记录每条消费消息的 envelope metadata（#1160 端到端 occurred_at/subjectId/correlation 保真断言）。
-///
-/// 注：此 handler 刻意映射所有错误到永久 reject（而非区分 transient/permanent）并捕获 EnvelopeMetadata，
-/// 与 `bootstrap::adapt_subscriber_handler` 语义不同——故不替换为后者。
 fn consumer_handler(
-    handler: Box<dyn SubscriberHandler>,
+    repo: Arc<DynAuditRepo<'static>>,
     captured: Arc<Mutex<Vec<EnvelopeMetadata>>>,
 ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
-    let handler: Arc<dyn SubscriberHandler> = Arc::from(handler);
     move |message: Message| {
-        let handler = handler.clone();
+        let repo = Arc::clone(&repo);
         let captured = captured.clone();
         Box::pin(async move {
             captured
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(message.metadata.clone());
-            match handler.handle(message).await {
+            let record =
+                match audit_record_from_event_message(AuditEventKind::SessionCreated, &message) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        return HandleResult::reject(PermanentError::new(
+                            PermanentErrorKind::Permanent,
+                        ));
+                    }
+                };
+            let scope = TenantRepoScope::for_test(record.tenant);
+            match repo.append(scope, record).await {
                 Ok(()) => HandleResult::ack(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "durable journey: handler errored, rejecting");
-                    HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
-                }
+                Err(_) => HandleResult::requeue(EngineError::new(EngineErrorKind::Transient)),
             }
         })
     }
@@ -181,21 +251,26 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 async fn login_audit_durable_topology() -> Result<()> {
     let pg = testkit::env_or_postgres().await?;
     provision_rss_app_login(pg.params()).await?;
+    let authority_epoch = database_now_epoch(pg.params()).await?;
     let owner_config = pg_config(pg.params())?;
     let app_config = pg_config_for(pg.params(), RSS_APP_ROLE, RSS_APP_PASSWORD);
     // postgres capability bundle（#1423）：`setup` 含 connect + run_migrations；identity 域受控句柄派发 repo。
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &app_config,
+        generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
     .await?;
     let id = deps.for_domain::<caps::Identity>();
 
     let bus = MemBus::new();
-    let (audit_domain, audit) = audit_domain();
+    let (audit_domain, audit, audit_repo) = audit_domain();
+    // relay 的 iat 来自 PostgreSQL `now()`；consumer 必须以实时钟验证同一 authority，不能复用
+    // payload 的固定业务时钟（NOW_SECS），否则所有真实 durable 消息都会被误判为未来 token。
+    let durable_authority = durable_tenant_authority(authority_epoch)?;
 
-    // 组装 audit 订阅（contract_id/topic/group 单源自 generated SUBSCRIPTIONS）。
+    // 组装 audit 订阅（contract/topic/group 单源自 generated SPEC.subscriptions()）。
     let refresh_identity = identity::seed_refresh_service(
         || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         Duration::from_secs(TTL_SECS),
@@ -233,7 +308,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         binding.contract_id,
         binding.topic,
         binding.group.as_str(),
-        tenant_authority(),
+        Arc::clone(&durable_authority),
     );
     // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。
     let captured: Arc<Mutex<Vec<EnvelopeMetadata>>> = Arc::new(Mutex::new(Vec::new()));
@@ -242,7 +317,7 @@ async fn login_audit_durable_topology() -> Result<()> {
         claimer.clone(),
         DynDeadLetterStore::new_box(NoopDlx),
         meta,
-        consumer_handler(binding.handler, captured.clone()),
+        consumer_handler(audit_repo, captured.clone()),
         // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
         LeaseConfig::from_ttl(claimer.lease_ttl()),
     );
@@ -269,7 +344,7 @@ async fn login_audit_durable_topology() -> Result<()> {
     )?;
     let relay = id.outbox(
         DynPublisher::new_box(bus.publisher()),
-        tenant_authority(),
+        Arc::clone(&durable_authority),
         dlx_payload_protector(),
     );
 
@@ -319,8 +394,15 @@ async fn login_audit_durable_topology() -> Result<()> {
         // relay CAS 中继 → MemBus（message_id = entry 自身的独立 EventId）。
         let event_id = our.idem_key().as_str().to_string();
         let payload = our.payload().to_vec();
-        OutboxRelay::relay(&relay, &our).await?;
-        wait_until_audited(&audit).await?;
+        let disposition = OutboxRelay::relay(&relay, &our).await?;
+        anyhow::ensure!(
+            disposition == Disposition::Ack,
+            "outbox relay 未发布：{disposition:?}"
+        );
+        wait_until_audited(&audit).await.with_context(|| {
+            let consumed = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+            format!("audit 未落链；consumer 已观察 {consumed} 条消息")
+        })?;
 
         // 重投同一 EventId（模拟 broker 重投）→ PgInbox Duplicate → audit 不重复。
         bus.publisher()
@@ -330,7 +412,8 @@ async fn login_audit_durable_topology() -> Result<()> {
                     MessageId::new(event_id.as_str()),
                     payload,
                 )
-                .with_metadata(signed_metadata(
+                .with_metadata(signed_metadata_at(
+                    &durable_authority,
                     event_domain,
                     event_contract_id,
                     event_topic,
@@ -339,11 +422,20 @@ async fn login_audit_durable_topology() -> Result<()> {
             )
             .await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        token.cancel();
         anyhow::Ok(())
     };
 
-    let (_, driven) = tokio::join!(consume, drive);
+    tokio::pin!(consume);
+    tokio::pin!(drive);
+    let driven = tokio::select! {
+        result = &mut drive => {
+            // drive 任一路径（含 `?` 提前失败）都终止 consumer，避免永久等待并吞掉原始诊断。
+            token.cancel();
+            consume.await;
+            result
+        }
+        () = &mut consume => Err(anyhow::anyhow!("consumer 在 durable drive 完成前退出")),
+    };
     driven?;
 
     assert_eq!(

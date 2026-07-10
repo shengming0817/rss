@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, Entry, IdemKey,
+    BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, EventEntry, IdemKey,
     OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxPayload, OutboxRelay, OutboxSource,
-    PendingEntry, RetentionSweeper, Topic,
+    PendingEntry, RetentionSweeper, StoredOutboxEntry,
 };
 use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
@@ -562,9 +562,43 @@ pub(crate) struct ReplayedOutboxAppend {
 /// 或同等 postgres 事务 funnel 传入 `TxCapability`；裸 `PgPool::acquire()` / `PgConnection` 无法调用（Hard）。
 // 生产 caller：`PgEmitter::emit`（impl `diport::OutboxEmitter`）在事务内调用——域 crate 不直接 import 本
 // adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。
-pub(crate) async fn append_outbox(
+pub(crate) trait OutboxWriteEntry {
+    fn topic_str(&self) -> &str;
+    fn idem_key(&self) -> &IdemKey;
+    fn payload(&self) -> &[u8];
+}
+
+impl OutboxWriteEntry for EventEntry {
+    fn topic_str(&self) -> &str {
+        self.topic().as_str()
+    }
+
+    fn idem_key(&self) -> &IdemKey {
+        self.idem_key()
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.payload()
+    }
+}
+
+impl OutboxWriteEntry for StoredOutboxEntry {
+    fn topic_str(&self) -> &str {
+        self.topic().as_str()
+    }
+
+    fn idem_key(&self) -> &IdemKey {
+        self.idem_key()
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.payload()
+    }
+}
+
+pub(crate) async fn append_outbox<E: OutboxWriteEntry>(
     tx: &mut TxCapability<'_>,
-    entry: &Entry,
+    entry: &E,
     env: &OutboxEnvelope,
 ) -> Result<OutboxAppendOutcome, sqlx::Error> {
     let result = sqlx::query(
@@ -580,7 +614,7 @@ pub(crate) async fn append_outbox(
     .bind(entry.idem_key().as_str())
     .bind(env.tenant().to_string())
     .bind(env.domain())
-    .bind(entry.topic().as_str())
+    .bind(entry.topic_str())
     .bind(env.contract_id())
     .bind(env.contract_version())
     .bind(env.schema_hash())
@@ -601,7 +635,7 @@ pub(crate) async fn append_outbox(
 /// Append outbox and mirror to projection_events only for newly inserted generated-bound facts.
 pub(crate) async fn append_outbox_with_projection(
     tx: &mut TxCapability<'_>,
-    entry: &Entry,
+    entry: &EventEntry,
     env: &OutboxEnvelope,
     projection_registry: &ProjectionWriteRegistry,
 ) -> Result<OutboxAppendOutcome, sqlx::Error> {
@@ -827,15 +861,14 @@ impl OutboxSource for PgOutbox {
         rows.into_iter()
             .map(|(tenant_id, contract_id, topic_str, event_id, payload)| {
                 let subject = parse_metric_subject(&tenant_id, &contract_id)?;
-                let topic = Topic::parse(&topic_str)
-                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                 let idem_key = IdemKey::parse(&event_id)
                     .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                let entry = Entry::new(
-                    topic,
+                let entry = StoredOutboxEntry::hydrate(
+                    topic_str,
                     idem_key,
                     OutboxPayload::from_reviewed_event_bytes(payload),
-                );
+                )
+                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                 Ok(PendingEntry::new(entry, subject))
             })
             .collect()
@@ -1028,7 +1061,7 @@ impl PgOutbox {
     async fn settle_publish_failure(
         &self,
         tenant: vocab::TenantId,
-        entry: &Entry,
+        entry: &StoredOutboxEntry,
         retry_count: i32,
         lease_token: &str,
         err: &RelayPublishFailure,
@@ -1435,6 +1468,7 @@ async fn settle_dlx(
                                 tenant,
                                 DeadLetterSource::OutboxRelay.as_str(),
                                 &domain,
+                                None,
                                 &contract_id,
                                 &topic,
                                 None,
@@ -1450,10 +1484,11 @@ async fn settle_dlx(
                     sqlx::query(
                         r#"
                         INSERT INTO dead_letter
-                            (tenant_id, message_id, domain, contract_id, topic, consumer_group,
+                            (tenant_id, message_id, producer_domain, consumer_domain,
+                             contract_id, topic, consumer_group,
                              original_entry, original_entry_key_ref, original_entry_payload_len,
                              original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
-                        VALUES ($1::uuid, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13)
+                        VALUES ($1::uuid, $2, $3, NULL, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13)
                         "#,
                     )
                     .bind(tenant.to_string())
@@ -1656,7 +1691,7 @@ pub(crate) const fn max_redelivery_window_secs() -> i64 {
 mod tests {
     // reserved key / subject key 常量来自 diport 单源（#1160 A4）。
     use super::{
-        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata,
+        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, OutboxWriteEntry,
         RelayEnvelopeValidationReason, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED,
         STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds, dlx_decision,
         hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient,
@@ -1699,6 +1734,41 @@ mod tests {
         md.insert_wire_pair(KEY_SCHEMA_VERSION, "v1");
         md.insert_wire_pair(KEY_SCHEMA_HASH, HASH);
         md
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn event_and_stored_entries_share_only_the_private_write_view() {
+        let event = consistency::EventEntry::new(
+            consistency::EventTopic::parse("identity.session-created").expect("event topic"),
+            consistency::IdemKey::parse("event-entry-id").expect("event id"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"event".to_vec()),
+        );
+        assert_eq!(
+            OutboxWriteEntry::topic_str(&event),
+            "identity.session-created"
+        );
+        assert_eq!(
+            OutboxWriteEntry::idem_key(&event).as_str(),
+            "event-entry-id"
+        );
+        assert_eq!(OutboxWriteEntry::payload(&event), b"event");
+
+        let stored = consistency::StoredOutboxEntry::hydrate(
+            "seed.commands.do-thing",
+            consistency::IdemKey::parse("stored-entry-id").expect("stored id"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"stored".to_vec()),
+        )
+        .expect("stored command topic hydrates read-side entry");
+        assert_eq!(
+            OutboxWriteEntry::topic_str(&stored),
+            "seed.commands.do-thing"
+        );
+        assert_eq!(
+            OutboxWriteEntry::idem_key(&stored).as_str(),
+            "stored-entry-id"
+        );
+        assert_eq!(OutboxWriteEntry::payload(&stored), b"stored");
     }
 
     #[allow(clippy::expect_used)]

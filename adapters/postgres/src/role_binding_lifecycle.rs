@@ -3,7 +3,7 @@
 //! 最小生产闭环：assign / revoke 的 binding 行写删与 role event outbox append 同事务原子落库；不实现
 //! audit consumer、不扩展授权查询模型。revoke 未命中时提交空事务并返回 `false`，不写 outbox，避免泄露存在性。
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId, TenantRepoScope};
 
@@ -59,7 +59,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
         &self,
         scope: TenantRepoScope,
         binding: RoleBinding,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         let tenant = binding.tenant();
@@ -108,7 +108,7 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError> {
         let tenant = scope.tenant();

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider, KeyProviderError,
     KeyRef, KeyVersion, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
@@ -257,14 +257,23 @@ pub fn dlx_payload_protector() -> postgres::DlxPayloadProtector {
 /// `InMemAuditRepo::new` + `Arc::from(DynAuditRepo::new_box(...))` 装配后经 `AuditDomain::new`
 /// （不可失败）注入——组合根装配路径与生产 `PgAuditRepo` 同形。
 #[allow(clippy::expect_used)]
-pub fn audit_domain() -> (AuditDomain<NoopAuditSink>, CapturingVerifier) {
+pub fn audit_domain() -> (
+    AuditDomain<NoopAuditSink>,
+    CapturingVerifier,
+    Arc<DynAuditRepo<'static>>,
+) {
     let verifier = CapturingVerifier::default();
     let hasher = AuditChainHasher::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
         .expect("32B audit key satisfies MIN_KEY_LEN");
     let repo: Arc<DynAuditRepo<'static>> =
         Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)));
-    let domain = AuditDomain::new(repo, None, NoopAuditSink, Arc::new(FixedAuditClock));
-    (domain, verifier)
+    let domain = AuditDomain::new(
+        Arc::clone(&repo),
+        None,
+        NoopAuditSink,
+        Arc::new(FixedAuditClock),
+    );
+    (domain, verifier, repo)
 }
 
 struct NoopRoleRepo;
@@ -301,7 +310,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
         &self,
         _scope: TenantRepoScope,
         _binding: RoleBinding,
-        _entry: Entry,
+        _entry: EventEntry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         Ok(())
@@ -312,7 +321,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
         _scope: TenantRepoScope,
         _role_id: RoleId,
         _subject: String,
-        _entry: Entry,
+        _entry: EventEntry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError> {
         Ok(false)
@@ -406,7 +415,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
         &self,
         _scope: TenantRepoScope,
         policy: Policy,
-        _entry: Entry,
+        _entry: EventEntry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
         Ok(policy)
@@ -417,7 +426,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
         _scope: TenantRepoScope,
         policy: Policy,
         _expected: PolicyVersion,
-        _entry: Entry,
+        _entry: EventEntry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
         Ok(policy)
@@ -428,7 +437,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
         _scope: TenantRepoScope,
         _id: PolicyId,
         _expected: PolicyVersion,
-        _entry: Entry,
+        _entry: EventEntry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<bool, IdentityError> {
         Ok(false)

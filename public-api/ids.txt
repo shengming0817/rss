@@ -13,24 +13,6 @@ impl core::marker::Unpin for ids::IdParseError
 impl core::marker::UnsafeUnpin for ids::IdParseError
 impl core::panic::unwind_safe::RefUnwindSafe for ids::IdParseError
 impl core::panic::unwind_safe::UnwindSafe for ids::IdParseError
-impl<T, U> core::convert::Into<U> for ids::IdParseError where U: core::convert::From<T>
-pub fn ids::IdParseError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for ids::IdParseError where U: core::convert::Into<T>
-pub type ids::IdParseError::Error = core::convert::Infallible
-pub fn ids::IdParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for ids::IdParseError where U: core::convert::TryFrom<T>
-pub type ids::IdParseError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn ids::IdParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for ids::IdParseError where T: core::fmt::Display + ?core::marker::Sized
-pub fn ids::IdParseError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for ids::IdParseError where T: 'static + ?core::marker::Sized
-pub fn ids::IdParseError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for ids::IdParseError where T: ?core::marker::Sized
-pub fn ids::IdParseError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for ids::IdParseError where T: ?core::marker::Sized
-pub fn ids::IdParseError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for ids::IdParseError
-pub fn ids::IdParseError::from(T) -> T
 pub struct ids::DeviceId(_)
 impl ids::DeviceId
 pub fn ids::DeviceId::as_uuid(&self) -> uuid::Uuid
@@ -54,28 +36,6 @@ impl core::marker::Unpin for ids::DeviceId
 impl core::marker::UnsafeUnpin for ids::DeviceId
 impl core::panic::unwind_safe::RefUnwindSafe for ids::DeviceId
 impl core::panic::unwind_safe::UnwindSafe for ids::DeviceId
-impl<T, U> core::convert::Into<U> for ids::DeviceId where U: core::convert::From<T>
-pub fn ids::DeviceId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for ids::DeviceId where U: core::convert::Into<T>
-pub type ids::DeviceId::Error = core::convert::Infallible
-pub fn ids::DeviceId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for ids::DeviceId where U: core::convert::TryFrom<T>
-pub type ids::DeviceId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn ids::DeviceId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for ids::DeviceId where T: core::clone::Clone
-pub type ids::DeviceId::Owned = T
-pub fn ids::DeviceId::clone_into(&self, &mut T)
-pub fn ids::DeviceId::to_owned(&self) -> T
-impl<T> core::any::Any for ids::DeviceId where T: 'static + ?core::marker::Sized
-pub fn ids::DeviceId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for ids::DeviceId where T: ?core::marker::Sized
-pub fn ids::DeviceId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for ids::DeviceId where T: ?core::marker::Sized
-pub fn ids::DeviceId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for ids::DeviceId where T: core::clone::Clone
-pub unsafe fn ids::DeviceId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for ids::DeviceId
-pub fn ids::DeviceId::from(T) -> T
 pub struct ids::SessionId(_)
 impl ids::SessionId
 pub fn ids::SessionId::as_uuid(&self) -> uuid::Uuid
@@ -99,28 +59,6 @@ impl core::marker::Unpin for ids::SessionId
 impl core::marker::UnsafeUnpin for ids::SessionId
 impl core::panic::unwind_safe::RefUnwindSafe for ids::SessionId
 impl core::panic::unwind_safe::UnwindSafe for ids::SessionId
-impl<T, U> core::convert::Into<U> for ids::SessionId where U: core::convert::From<T>
-pub fn ids::SessionId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for ids::SessionId where U: core::convert::Into<T>
-pub type ids::SessionId::Error = core::convert::Infallible
-pub fn ids::SessionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for ids::SessionId where U: core::convert::TryFrom<T>
-pub type ids::SessionId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn ids::SessionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for ids::SessionId where T: core::clone::Clone
-pub type ids::SessionId::Owned = T
-pub fn ids::SessionId::clone_into(&self, &mut T)
-pub fn ids::SessionId::to_owned(&self) -> T
-impl<T> core::any::Any for ids::SessionId where T: 'static + ?core::marker::Sized
-pub fn ids::SessionId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for ids::SessionId where T: ?core::marker::Sized
-pub fn ids::SessionId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for ids::SessionId where T: ?core::marker::Sized
-pub fn ids::SessionId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for ids::SessionId where T: core::clone::Clone
-pub unsafe fn ids::SessionId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for ids::SessionId
-pub fn ids::SessionId::from(T) -> T
 pub struct ids::UserId(_)
 impl ids::UserId
 pub fn ids::UserId::as_uuid(&self) -> uuid::Uuid
@@ -144,25 +82,3 @@ impl core::marker::Unpin for ids::UserId
 impl core::marker::UnsafeUnpin for ids::UserId
 impl core::panic::unwind_safe::RefUnwindSafe for ids::UserId
 impl core::panic::unwind_safe::UnwindSafe for ids::UserId
-impl<T, U> core::convert::Into<U> for ids::UserId where U: core::convert::From<T>
-pub fn ids::UserId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for ids::UserId where U: core::convert::Into<T>
-pub type ids::UserId::Error = core::convert::Infallible
-pub fn ids::UserId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for ids::UserId where U: core::convert::TryFrom<T>
-pub type ids::UserId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn ids::UserId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for ids::UserId where T: core::clone::Clone
-pub type ids::UserId::Owned = T
-pub fn ids::UserId::clone_into(&self, &mut T)
-pub fn ids::UserId::to_owned(&self) -> T
-impl<T> core::any::Any for ids::UserId where T: 'static + ?core::marker::Sized
-pub fn ids::UserId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for ids::UserId where T: ?core::marker::Sized
-pub fn ids::UserId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for ids::UserId where T: ?core::marker::Sized
-pub fn ids::UserId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for ids::UserId where T: core::clone::Clone
-pub unsafe fn ids::UserId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for ids::UserId
-pub fn ids::UserId::from(T) -> T

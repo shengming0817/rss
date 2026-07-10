@@ -65,7 +65,7 @@ cargo nextest run -p rss-postgres -p rss-redis -p rss-amqp --features integratio
 ### command 双侧对称（P12）
 - 新增 command 契约 → `cargo xtask`（codegen）→ 生成 emit/register wrapper。
 - 删除 generated 的 emit 或 register wrapper 任一侧（如 codegen `render_command_glue` 丢侧）→ `cargo xtask verify` 双侧对称治理（COMMAND-SYMMETRY-01）失败。
-  > **能力边界（mechanism-landing）**：当前守的是 **generated wrapper 双侧存在 + 无裸 emit 出口 + seam impl 仅限组合根**（codegen 完整性 + AST 收口），**非**「真实 consumer handler 已注册」——active command consumer 的 handler 注册扫描随第一个真实命令消费域 + bridge 落地后补足，不在本 PR。
+  > **能力边界（mechanism-landing）**：command authoring 由私有 `CommandSpec`、policy-exclusive wrapper 与 reviewed DTO 类型封闭；AST 只检查生产 provider impl/callsite 集合，不承担 authoring seal。真实 consumer handler 注册仍由 active contract topology 校验。
 
 > **bridge 延迟落地**：generated wrapper 的 `emitter: &E`（`E: CommandEmit`）和 `registrar: &mut Reg`（`Reg: CommandRegister`）由组合根（bin / assembly crate）的 bridge impl 提供。该 impl 随**第一个真实命令消费域**一并接线，不在本 mechanism-landing PR 中包含。bridge 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
 

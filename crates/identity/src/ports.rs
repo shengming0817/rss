@@ -16,7 +16,7 @@
 
 use std::time::SystemTime;
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
 
@@ -186,7 +186,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
         &self,
         scope: TenantRepoScope,
         policy: Policy,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError>;
 
@@ -195,7 +195,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError>;
 
@@ -204,7 +204,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, IdentityError>;
 }
@@ -306,7 +306,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
         &self,
         scope: TenantRepoScope,
         binding: RoleBinding,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError>;
 
@@ -318,7 +318,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError>;
 
@@ -490,7 +490,7 @@ pub trait SessionLifecycleLocal: Send + Sync {
         &self,
         scope: TenantRepoScope,
         session: Session,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError>;
 
@@ -595,7 +595,7 @@ mod smoke {
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        DynRoleRepo, DynSessionLifecycle, Entry, IdentityError, OutboxEmitError,
+        DynRoleRepo, DynSessionLifecycle, EventEntry, IdentityError, OutboxEmitError,
         OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionLifecycle,
         TenantRepoScope,
     };
@@ -684,7 +684,7 @@ mod smoke {
             &self,
             _scope: TenantRepoScope,
             _session: Session,
-            _entry: Entry,
+            _entry: EventEntry,
             _envelope: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
             todo!()
@@ -749,7 +749,7 @@ mod smoke {
                 &self,
                 scope: TenantRepoScope,
                 session: Session,
-                entry: Entry,
+                entry: EventEntry,
                 envelope: OutboxEnvelopeParts,
             ) -> Result<(), OutboxEmitError>;
             async fn find(

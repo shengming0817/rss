@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{Clock, OutboxEnvelopeParts};
 use identity::ports::{
     AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, Policy, PolicyCondition,
@@ -465,7 +465,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         &self,
         tenant_scope: TenantRepoScope,
         policy: Policy,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
         let tenant = tenant_scope.tenant();
@@ -539,7 +539,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         tenant_scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
         let tenant = tenant_scope.tenant();
@@ -632,7 +632,7 @@ impl PolicyLifecycle for PgPolicyLifecycle {
         tenant_scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, IdentityError> {
         let tenant = tenant_scope.tenant();

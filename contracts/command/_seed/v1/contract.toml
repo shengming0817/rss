@@ -16,5 +16,8 @@ topic = "seed.commands.do-thing"
 [schemas]
 request = "request.schema.json"
 
+[command]
+journal = "required"
+
 [capabilities.outbox]
 role = "command"

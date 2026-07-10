@@ -722,8 +722,8 @@ mod tests {
     use std::time::Duration;
 
     use consistency::outbox::{
-        BacklogMetricSample, BacklogSample, Disposition, Entry, OutboxContractId,
-        OutboxMetricSubject, OutboxPayload, PendingEntry, Topic,
+        BacklogMetricSample, BacklogSample, Disposition, OutboxContractId, OutboxMetricSubject,
+        OutboxPayload, PendingEntry, StoredOutboxEntry,
     };
     use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use diport::ManagedResource;
@@ -916,15 +916,16 @@ mod tests {
 
     // ── Fake store（具体类型；Send 友好：用 Arc<Mutex>/Atomic，不跨 await 持有锁）──
 
-    /// 构造测试 Entry（topic + idem_key + payload）。
-    fn make_entry() -> Entry {
+    /// 构造测试持久化 entry（topic + idem_key + payload）。
+    fn make_entry() -> StoredOutboxEntry {
         #[allow(clippy::unwrap_used)]
         // reason: 测试 happy-path，item-level carve-out
-        Entry::new(
-            Topic::parse("session.created").unwrap(),
+        StoredOutboxEntry::hydrate(
+            "session.created",
             consistency::idempotency::IdemKey::parse("evt-001").unwrap(),
             OutboxPayload::from_reviewed_event_bytes(vec![1u8, 2, 3]),
         )
+        .unwrap()
     }
 
     /// 构造带 metric subject 的测试 PendingEntry。

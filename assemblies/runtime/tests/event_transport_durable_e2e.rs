@@ -21,7 +21,7 @@ use anyhow::{Context as _, Result};
 use audit::ports::{AuditChainHasher, DynAuditRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
-use consistency::{Entry, IdemKey, OutboxPayload, OutboxSource, Topic as OutboxTopic};
+use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload, OutboxSource};
 use diport::{
     DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName,
     KeyProvider, KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor,
@@ -291,6 +291,7 @@ async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
     .await?;
@@ -437,7 +438,7 @@ async fn audit_policy_count(
         SELECT count(*)
         FROM audit_entries
         WHERE tenant_id = $1::uuid
-          AND action = 'identity:policy:create'
+          AND action = 'identity:policy_create'
           AND resource_kind = 'policy'
           AND resource_id = $2
           AND outcome = 'success'
@@ -457,7 +458,7 @@ fn policy_updated_entry_and_envelope(
     contract_id: &str,
     permission: &str,
     event_id: &str,
-) -> Result<(Entry, diport::OutboxEnvelopeParts)> {
+) -> Result<(EventEntry, diport::OutboxEnvelopeParts)> {
     let payload = IdentityPolicyUpdatedPayload {
         policy_id: policy_id.to_string(),
         change_kind: policy_updated::IdentityPolicyUpdatedPayloadChangeKind::Created,
@@ -469,8 +470,8 @@ fn policy_updated_entry_and_envelope(
         tenant_id: tenant.to_string(),
         occurred_at: i64::try_from(NOW_SECS)?,
     };
-    let entry = Entry::new(
-        OutboxTopic::parse(policy_updated::TOPIC)?,
+    let entry = EventEntry::new(
+        EventTopic::parse(policy_updated::TOPIC)?,
         IdemKey::parse(event_id)?,
         OutboxPayload::from_reviewed_event_bytes(serde_json::to_vec(&payload)?),
     );
@@ -635,23 +636,26 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let mut registry =
         bootstrap::compose(&[&identity_domain, &settings_domain, &audit_domain_inst])?;
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
-    let consumer_group = generated::event::SUBSCRIPTIONS
-        .iter()
-        .find(|spec| {
-            spec.contract_id == generated::event::identity_v1::session_created::CONTRACT_ID
-                && spec.consumer == "audit"
-        })
-        .map(|spec| spec.group.to_owned())
-        .context("e2e must declare audit session-created subscriber")?;
-    let settings_consumer_group = generated::event::SUBSCRIPTIONS
-        .iter()
-        .find(|spec| spec.contract_id == settings_v1::CONTRACT_ID && spec.consumer == "settings")
-        .map(|spec| spec.group.to_owned())
+    let generated_group = |contract_id: &str, consumer: &str| {
+        generated::event::EVENTS
+            .iter()
+            .find(|event| event.contract_id() == contract_id)
+            .and_then(|event| {
+                event
+                    .subscriptions()
+                    .iter()
+                    .find(|spec| spec.consumer() == consumer)
+            })
+            .map(|spec| spec.group().to_owned())
+    };
+    let consumer_group = generated_group(
+        generated::event::identity_v1::session_created::SPEC.contract_id(),
+        "audit",
+    )
+    .context("e2e must declare audit session-created subscriber")?;
+    let settings_consumer_group = generated_group(settings_v1::SPEC.contract_id(), "settings")
         .context("e2e must declare settings config-version-changed subscriber")?;
-    let policy_consumer_group = generated::event::SUBSCRIPTIONS
-        .iter()
-        .find(|spec| spec.contract_id == policy_updated::CONTRACT_ID && spec.consumer == "audit")
-        .map(|spec| spec.group.to_owned())
+    let policy_consumer_group = generated_group(policy_updated::SPEC.contract_id(), "audit")
         .context("e2e must declare audit policy-updated subscriber")?;
 
     // ── 步骤 5：构造 EventTransportConfig（注入式 env builder，无 ambient env 侧效应）────────────
@@ -732,7 +736,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         event_runtime.module.resources.is_empty(),
         "event transport workers must drain through DomainModuleResult::workers"
     );
-    let expected_worker_count = generated::event::SUBSCRIPTIONS.len() + 6;
+    let generated_subscription_count = generated::event::EVENTS
+        .iter()
+        .map(|event| event.subscriptions().len())
+        .sum::<usize>();
+    let expected_worker_count = generated_subscription_count + 6;
     assert_eq!(
         event_runtime.module.workers.len(),
         expected_worker_count,

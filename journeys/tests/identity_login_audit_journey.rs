@@ -9,8 +9,8 @@
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
 //!   sink）；幂等 store 经 `memory::InMemClaimer` 注入、DLX 经 `memory::MemDeadLetterStore` 注入。
 //! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
-//! - **消费（#1171 实交付）**：bootstrap `SubscriberHandler` 经 `bootstrap::adapt_subscriber_handler` 适配成
-//!   `run_consumer` 的 `HandleResult` handler，再经 `eventexec::ConsumerWorker`（专用线程驱动 `run_consumer`、
+//! - **消费（#1171 实交付）**：Registry 只声明 generated subscription identity；journey 的测试 handler
+//!   直接复用 audit wire decode + repo append，再经 `eventexec::ConsumerWorker`（专用线程驱动 `run_consumer`、
 //!   impl `ManagedResource`）接 `bootstrap::shutdown::ShutdownStack` 两阶段关闭——闭合「`run_consumer` 0 个
 //!   真实调用点」缺口：ConsumerBase 由真实受监督后台 worker 驱动，而非内联 `tokio::join!`。
 //! - 幂等（acc #2）：relay 重投同一 EventId → audit 仅 append 一次（`relay_redelivery_audits_once`）。
@@ -38,20 +38,20 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use audit::ports::{
+    AuditEventKind, AuditRepo as _, DynAuditRepo, TenantRepoScope, audit_record_from_event_message,
+};
 use bootstrap::replaydeps::resolve;
 use bootstrap::shutdown::ShutdownStack;
-use bootstrap::{
-    IdempotencyConfig, ResolvedIdempotency, SubscriberBinding, SubscriberHandler, Topology,
-    adapt_subscriber_handler,
-};
+use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberBinding, Topology};
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
     audit_domain, identity_domain, memory_tenant_signer, session_created_subscription,
     signed_metadata, tenant_authority,
 };
 use consistency::{
-    EngineError, Entry, HandleResult, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
-    LeaseToken, OutboxPayload, PermanentError, PermanentErrorKind, SeenState,
+    EngineError, EventEntry, EventTopic, HandleResult, IdemKey, InboxReceiptContext, InboxStore,
+    LeaseOutcome, LeaseToken, OutboxPayload, PermanentError, PermanentErrorKind, SeenState,
 };
 use diport::{
     DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
@@ -91,6 +91,32 @@ fn demo_claimer() -> Result<InMemClaimer> {
     match resolve(Topology::Demo, IdempotencyConfig::default())? {
         ResolvedIdempotency::Demo => Ok(InMemClaimer::new()),
         other => anyhow::bail!("demo journey 须解析为 Demo 幂等决策，实得 {other:?}"),
+    }
+}
+
+fn audit_consumer_handler(
+    repo: Arc<DynAuditRepo<'static>>,
+) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
+    move |message| {
+        let repo = Arc::clone(&repo);
+        Box::pin(async move {
+            let record =
+                match audit_record_from_event_message(AuditEventKind::SessionCreated, &message) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        return HandleResult::reject(PermanentError::new(
+                            PermanentErrorKind::Permanent,
+                        ));
+                    }
+                };
+            let scope = TenantRepoScope::for_test(record.tenant);
+            match repo.append(scope, record).await {
+                Ok(()) => HandleResult::ack(),
+                Err(_) => {
+                    HandleResult::requeue(EngineError::new(consistency::EngineErrorKind::Transient))
+                }
+            }
+        })
     }
 }
 
@@ -249,7 +275,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     let bus = MemBus::new();
 
     // bootstrap 组装：identity 声明登录路由组，audit 声明 session-created 订阅 + admin 读路由组。
-    let (audit_domain, audit) = audit_domain();
+    let (audit_domain, audit, audit_repo) = audit_domain();
     let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
     let identity_domain = identity_domain(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
@@ -278,7 +304,6 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         topic,
         consumer: _,
         group,
-        handler,
     } = binding;
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
@@ -291,7 +316,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
         topic,
         &consumer_group,
         MemDeadLetterStore::new(),
-        adapt_subscriber_handler(handler),
+        audit_consumer_handler(audit_repo),
         token.clone(),
         &mut stack,
     )
@@ -358,12 +383,12 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 }
 
 /// acc #2（L2 consumer 幂等）：relay 重投同一 EventId 的 session.created → audit 仅 append 一次。
-/// 经 `MemEmitter` 发同一 `Entry`（同 idem_key）两次，共享同一 `InMemClaimer` 经受监督 ConsumerWorker 消费——
+/// 经 `MemEmitter` 发同一 `EventEntry`（同 idem_key）两次，共享同一 `InMemClaimer` 经受监督 ConsumerWorker 消费——
 /// 首次 `Fresh`（handler 跑、append）、二次 `Duplicate`（短路）。
 #[tokio::test(flavor = "multi_thread")]
 async fn relay_redelivery_audits_once() -> Result<()> {
     let bus = MemBus::new();
-    let (audit_domain, audit) = audit_domain();
+    let (audit_domain, audit, audit_repo) = audit_domain();
     let registry = bootstrap::compose(&[&audit_domain])?;
 
     let SubscriberBinding {
@@ -371,26 +396,19 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         topic,
         consumer: _,
         group,
-        handler,
     } = session_created_subscription(registry)?;
 
     // anti-vacuity（acc #2）：计数器包装 handler，证明内层 handler 恰调用一次——ConsumerBase 幂等短路
     // 第二条投递（不执行 handler），而非 sink 自身去重。
     let handler_call_count = Arc::new(AtomicU32::new(0));
     let counter = handler_call_count.clone();
-    let inner: Arc<dyn SubscriberHandler> = Arc::from(handler);
+    let inner = Arc::new(audit_consumer_handler(audit_repo));
     let counted = move |message: Message| -> BoxFuture<'static, HandleResult> {
         let inner = inner.clone();
         let counter = counter.clone();
         Box::pin(async move {
             counter.fetch_add(1, Ordering::SeqCst);
-            match inner.handle(message).await {
-                Ok(()) => HandleResult::ack(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "journey: counted handler errored, rejecting");
-                    HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
-                }
-            }
+            inner(message).await
         })
     };
 
@@ -429,9 +447,8 @@ async fn relay_redelivery_audits_once() -> Result<()> {
         vocab::ScopedTenant::SelfOnly,
     );
     for _ in 0..2 {
-        let entry = Entry::new(
-            consistency::Topic::parse(SESSION_CREATED_TOPIC)
-                .map_err(|_| anyhow::anyhow!("topic parse"))?,
+        let entry = EventEntry::new(
+            EventTopic::parse(SESSION_CREATED_TOPIC).map_err(|_| anyhow::anyhow!("topic parse"))?,
             IdemKey::parse(EVENT_ID).map_err(|_| anyhow::anyhow!("idem parse"))?,
             OutboxPayload::from_reviewed_event_bytes(payload.clone()),
         );
@@ -488,7 +505,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_login_does_not_audit() -> Result<()> {
     let bus = MemBus::new();
-    let (audit_domain, audit) = audit_domain();
+    let (audit_domain, audit, audit_repo) = audit_domain();
     let (login, refresh) = login_service(&bus, TenantId::parse(CANON_TENANT)?)?;
     let identity_domain = identity_domain(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
@@ -498,7 +515,6 @@ async fn rejected_login_does_not_audit() -> Result<()> {
         topic,
         consumer: _,
         group,
-        handler,
     } = session_created_subscription(registry)?;
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
@@ -511,7 +527,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
         topic,
         &consumer_group,
         MemDeadLetterStore::new(),
-        adapt_subscriber_handler(handler),
+        audit_consumer_handler(audit_repo),
         token.clone(),
         &mut stack,
     )
@@ -546,7 +562,7 @@ async fn rejected_login_does_not_audit() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     let bus = MemBus::new();
-    let (audit_domain, _audit) = audit_domain();
+    let (audit_domain, _audit, _audit_repo) = audit_domain();
     let registry = bootstrap::compose(&[&audit_domain])?;
 
     let SubscriberBinding {
@@ -554,7 +570,6 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
         topic,
         consumer: _,
         group,
-        handler: _,
     } = session_created_subscription(registry)?;
 
     // 永久失败 handler（绕过真实 audit handler）：恒 reject → ConsumerBase 写 DLX。
@@ -623,9 +638,14 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
         "死信记录归因 topic"
     );
     assert_eq!(
-        records[0].domain(),
-        "audit",
-        "死信记录 domain 归因（ConsumerMeta domain）"
+        records[0].producer_domain(),
+        "identity",
+        "死信记录 producer domain 取事件 authority"
+    );
+    assert_eq!(
+        records[0].consumer_domain(),
+        Some("audit"),
+        "死信记录 consumer domain 取 ConsumerMeta domain"
     );
     assert_eq!(
         records[0].num_attempts(),

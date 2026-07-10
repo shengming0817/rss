@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use consistency::outbox::Topic;
+use consistency::outbox::EventTopic;
 use consistency::{
     EngineError, Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionBatchLimit,
     ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
@@ -309,7 +309,7 @@ async fn wait_for_checkpoint(store: &SharedCheckpointStore, expected: u64) -> bo
 fn record(seq: u64) -> ProjectionEventRecord {
     ProjectionEventRecord::with_metadata(
         Lsn::new(seq),
-        Topic::parse("proj.test").expect("valid topic"),
+        EventTopic::parse("proj.test").expect("valid topic"),
         vec![],
         ProjectionEventMetadata::new(
             vocab::TenantId::parse(TENANT).expect("canonical tenant"),

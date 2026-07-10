@@ -1,6 +1,6 @@
 //! pass：dynosaur Send DI port 可 native AFIT impl + 经 `Box<DynX>` / `Arc<DynX>` 注入。
 //! 覆盖全部 12 个 async DI port（DIPORT-DYN-COMPAT-01 回归锁随新增端口同步扩展）：Signer / AuditSink / Subscriber / Publisher / RateLimiter / ObjectStore / Pdp / ManagedResource / OutboxEmitter / RevocationStore / CasStore / LockStore。
-use consistency::{Entry, IdemKey, Topic as ConsistencyTopic};
+use consistency::{EventEntry, EventTopic, IdemKey};
 use diport::{
     AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreOutcome, CasStoreRequest, CertScope,
     CertSerial, DynAuditSink, DynCasStore, DynLockStore, DynManagedResource, DynObjectStore,
@@ -120,7 +120,7 @@ struct OkOutboxEmitter;
 impl OutboxEmitter for OkOutboxEmitter {
     async fn emit(
         &self,
-        _entry: Entry,
+        _entry: EventEntry,
         _env: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         Ok(())
@@ -243,6 +243,6 @@ fn main() {
     let _lock_boxed: Box<DynLockStore> = DynLockStore::new_box(OkLockStore);
     let _lock_arced: Arc<DynLockStore> = DynLockStore::new_arc(OkLockStore);
 
-    let _ = ConsistencyTopic::parse("t");
+    let _ = EventTopic::parse("events.t");
     let _ = IdemKey::parse("k");
 }

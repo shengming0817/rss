@@ -1,4 +1,4 @@
-use diport::{DeadLetterRecord, DeadLetterSummary, EnvelopeMetadata, WritableDeadLetterSource};
+use diport::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSummary, EnvelopeMetadata};
 
 fn main() {
     let tenant =
@@ -6,14 +6,13 @@ fn main() {
     let record = DeadLetterRecord::new(
         tenant,
         "message-1",
-        "identity",
+        DeadLetterProvenance::consumer("identity", "audit"),
         "contract-session",
         "session.created",
         Some("identity.session.consumer".to_string()),
         b"payload".to_vec(),
         DeadLetterSummary::new("max retries exhausted"),
         10,
-        WritableDeadLetterSource::Consumer,
         EnvelopeMetadata::empty(),
     );
     let _ = (record.tenant(), record.message_id());

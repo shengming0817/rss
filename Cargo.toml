@@ -266,7 +266,7 @@ syn = { version = "2", features = ["full", "parsing"] }
 # securederive proc-macro（#[derive(Redact)]）的 token 生成 + AST：与 syn 配对的标准 proc-macro 三件套。
 # 均 MIT OR Apache-2.0（deny.toml allow-list 内），已在 syn/typify 传递树——升直接依赖不引入新供应链面。
 quote = "1"
-proc-macro2 = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
 toml = "0.8"
 # 测试
 rstest = "0.24"

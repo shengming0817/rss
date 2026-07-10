@@ -1,12 +1,12 @@
 //! `PgEmitter` —— durable outbox 发射 adapter（impl `diport::OutboxEmitter`）。
 //!
 //! producer 侧 durable 落库端口：域 crate（如 identity 登录）经 `diport::OutboxEmitter` 触发，把一条
-//! `consistency::Entry`（topic + idem_key(EventId) + 编码 payload）写进 `outbox` 表（pending）；relay
+//! `consistency::EventEntry`（topic + idem_key(EventId) + 编码 payload）写进 `outbox` 表（pending）；relay
 //! （[`crate::PgOutbox`]）随后 CAS 中继到 broker。域**不**命名 `PgConnection` / `OutboxEnvelope`——envelope
 //! 字段以 opaque `diport::OutboxEnvelopeParts` 传入，本 adapter 经 sealed [`crate::outbox::OutboxMetadata`]
 //! funnel 组装（仅 opaque subject_id，FR-020 / `observability.md` §Outbox Envelope）。
 //!
-//! **单事实 emit 语义（#1100）**：本 adapter 将一条 [`consistency::Entry`] 原子落库（单事务），用于**无
+//! **单事实 emit 语义（#1100）**：本 adapter 将一条 [`consistency::EventEntry`] 原子落库（单事务），用于**无
 //! co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写（如 session 持久化）同事务的 **co-tx 原子性**
 //! （FR-003 完整 L2）**已交付**（#1083/#1192）：经 [`crate::PgSessionLifecycle`]（复用 `append_outbox` + 同
 //! 一事务写 session 行，INVARIANT OUTBOX-COTX-SESSION-01）承载，与本 emit-only adapter 语义正交。本 adapter
@@ -14,7 +14,7 @@
 //!
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 
 use crate::PgStore;
@@ -63,7 +63,7 @@ impl PgEmitter {
 impl OutboxEmitter for PgEmitter {
     async fn emit(
         &self,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subject_id，FR-020）。`contract` 是契约派生

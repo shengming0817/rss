@@ -315,22 +315,17 @@ pub mod policy_updated {
         "sha256:47b84018a53fa99bd8674f8b3344b11da69a9964e569b57de821483c8b2d0de2",
     );
 
-    /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-    /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
-    /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
-    /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
-    /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] =
-        &[super::super::SubscriptionSpec {
-            contract_id: CONTRACT_ID,
-            topic: TOPIC,
-            schema_version: CONTRACT.version(),
-            schema_hash: CONTRACT.schema_hash(),
-            consumer: "audit",
-            group: "audit.policy-updated",
-            partition_key: "none",
-            readiness: "required",
-        }];
+    /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+    pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
+        CONTRACT,
+        TOPIC,
+        super::super::PartitionKeyStrategy::None,
+        &[super::super::SubscriptionSpec::new(
+            "audit",
+            "audit.policy-updated",
+            super::super::SubscriberReadiness::Required,
+        )],
+    );
 }
 
 /// 端点 `role-assigned` 派生契约（源 `role-assigned/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
@@ -545,22 +540,17 @@ pub mod role_assigned {
         "sha256:fc6a7fae4a70adde19490fdc933f3aee257a3ea758902b4c834890922681171d",
     );
 
-    /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-    /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
-    /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
-    /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
-    /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] =
-        &[super::super::SubscriptionSpec {
-            contract_id: CONTRACT_ID,
-            topic: TOPIC,
-            schema_version: CONTRACT.version(),
-            schema_hash: CONTRACT.schema_hash(),
-            consumer: "audit",
-            group: "audit.role-assigned",
-            partition_key: "none",
-            readiness: "required",
-        }];
+    /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+    pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
+        CONTRACT,
+        TOPIC,
+        super::super::PartitionKeyStrategy::None,
+        &[super::super::SubscriptionSpec::new(
+            "audit",
+            "audit.role-assigned",
+            super::super::SubscriberReadiness::Required,
+        )],
+    );
 }
 
 /// 端点 `role-revoked` 派生契约（源 `role-revoked/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
@@ -775,22 +765,17 @@ pub mod role_revoked {
         "sha256:c590835ecdadb62478a2074dbce19d3e3729066ccaa2e8b6f6f811006fa78f66",
     );
 
-    /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-    /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
-    /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
-    /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
-    /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] =
-        &[super::super::SubscriptionSpec {
-            contract_id: CONTRACT_ID,
-            topic: TOPIC,
-            schema_version: CONTRACT.version(),
-            schema_hash: CONTRACT.schema_hash(),
-            consumer: "audit",
-            group: "audit.role-revoked",
-            partition_key: "none",
-            readiness: "required",
-        }];
+    /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+    pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
+        CONTRACT,
+        TOPIC,
+        super::super::PartitionKeyStrategy::None,
+        &[super::super::SubscriptionSpec::new(
+            "audit",
+            "audit.role-revoked",
+            super::super::SubscriberReadiness::Required,
+        )],
+    );
 }
 
 /// 端点 `session-created` 派生契约（源 `session-created/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
@@ -891,20 +876,15 @@ pub mod session_created {
         "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516",
     );
 
-    /// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-    /// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
-    /// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
-    /// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
-    /// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const SUBSCRIPTIONS: &[super::super::SubscriptionSpec] =
-        &[super::super::SubscriptionSpec {
-            contract_id: CONTRACT_ID,
-            topic: TOPIC,
-            schema_version: CONTRACT.version(),
-            schema_hash: CONTRACT.schema_hash(),
-            consumer: "audit",
-            group: "audit.session-created",
-            partition_key: "none",
-            readiness: "required",
-        }];
+    /// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+    pub const SPEC: super::super::EventSpec = super::super::EventSpec::new(
+        CONTRACT,
+        TOPIC,
+        super::super::PartitionKeyStrategy::None,
+        &[super::super::SubscriptionSpec::new(
+            "audit",
+            "audit.session-created",
+            super::super::SubscriberReadiness::Required,
+        )],
+    );
 }

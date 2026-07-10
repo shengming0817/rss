@@ -15,24 +15,6 @@ impl core::marker::Unpin for vocab::authz::ActionError
 impl core::marker::UnsafeUnpin for vocab::authz::ActionError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::ActionError
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::ActionError
-impl<T, U> core::convert::Into<U> for vocab::authz::ActionError where U: core::convert::From<T>
-pub fn vocab::authz::ActionError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::ActionError where U: core::convert::Into<T>
-pub type vocab::authz::ActionError::Error = core::convert::Infallible
-pub fn vocab::authz::ActionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::ActionError where U: core::convert::TryFrom<T>
-pub type vocab::authz::ActionError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::ActionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::authz::ActionError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::ActionError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::ActionError where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::ActionError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::ActionError where T: ?core::marker::Sized
-pub fn vocab::authz::ActionError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::ActionError where T: ?core::marker::Sized
-pub fn vocab::authz::ActionError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::authz::ActionError
-pub fn vocab::authz::ActionError::from(T) -> T
 #[non_exhaustive] pub enum vocab::authz::Decision
 pub vocab::authz::Decision::Allow
 pub vocab::authz::Decision::Deny
@@ -52,28 +34,6 @@ impl core::marker::Unpin for vocab::authz::Decision
 impl core::marker::UnsafeUnpin for vocab::authz::Decision
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Decision
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Decision
-impl<T, U> core::convert::Into<U> for vocab::authz::Decision where U: core::convert::From<T>
-pub fn vocab::authz::Decision::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::Decision where U: core::convert::Into<T>
-pub type vocab::authz::Decision::Error = core::convert::Infallible
-pub fn vocab::authz::Decision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::Decision where U: core::convert::TryFrom<T>
-pub type vocab::authz::Decision::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::Decision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::Decision where T: core::clone::Clone
-pub type vocab::authz::Decision::Owned = T
-pub fn vocab::authz::Decision::clone_into(&self, &mut T)
-pub fn vocab::authz::Decision::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::authz::Decision where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::Decision::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::Decision where T: ?core::marker::Sized
-pub fn vocab::authz::Decision::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::Decision where T: ?core::marker::Sized
-pub fn vocab::authz::Decision::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::Decision where T: core::clone::Clone
-pub unsafe fn vocab::authz::Decision::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::Decision
-pub fn vocab::authz::Decision::from(T) -> T
 pub enum vocab::authz::GrantPermission
 pub vocab::authz::GrantPermission::PolicyManage(vocab::authz::RoutePermissionId)
 pub vocab::authz::GrantPermission::Route(vocab::authz::RoutePermissionId)
@@ -106,30 +66,6 @@ impl core::marker::Unpin for vocab::authz::GrantPermission
 impl core::marker::UnsafeUnpin for vocab::authz::GrantPermission
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::GrantPermission
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::GrantPermission
-impl<T, U> core::convert::Into<U> for vocab::authz::GrantPermission where U: core::convert::From<T>
-pub fn vocab::authz::GrantPermission::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::GrantPermission where U: core::convert::Into<T>
-pub type vocab::authz::GrantPermission::Error = core::convert::Infallible
-pub fn vocab::authz::GrantPermission::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::GrantPermission where U: core::convert::TryFrom<T>
-pub type vocab::authz::GrantPermission::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::GrantPermission::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::GrantPermission where T: core::clone::Clone
-pub type vocab::authz::GrantPermission::Owned = T
-pub fn vocab::authz::GrantPermission::clone_into(&self, &mut T)
-pub fn vocab::authz::GrantPermission::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::authz::GrantPermission where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::GrantPermission where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::GrantPermission where T: core::clone::Clone
-pub unsafe fn vocab::authz::GrantPermission::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::GrantPermission
-pub fn vocab::authz::GrantPermission::from(T) -> T
 #[non_exhaustive] pub enum vocab::authz::PermissionParseError
 pub vocab::authz::PermissionParseError::Unknown
 impl core::clone::Clone for vocab::authz::PermissionParseError
@@ -151,30 +87,6 @@ impl core::marker::Unpin for vocab::authz::PermissionParseError
 impl core::marker::UnsafeUnpin for vocab::authz::PermissionParseError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::PermissionParseError
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::PermissionParseError
-impl<T, U> core::convert::Into<U> for vocab::authz::PermissionParseError where U: core::convert::From<T>
-pub fn vocab::authz::PermissionParseError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::PermissionParseError where U: core::convert::Into<T>
-pub type vocab::authz::PermissionParseError::Error = core::convert::Infallible
-pub fn vocab::authz::PermissionParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::PermissionParseError where U: core::convert::TryFrom<T>
-pub type vocab::authz::PermissionParseError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::PermissionParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::PermissionParseError where T: core::clone::Clone
-pub type vocab::authz::PermissionParseError::Owned = T
-pub fn vocab::authz::PermissionParseError::clone_into(&self, &mut T)
-pub fn vocab::authz::PermissionParseError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::authz::PermissionParseError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::PermissionParseError where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::PermissionParseError where T: core::clone::Clone
-pub unsafe fn vocab::authz::PermissionParseError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::PermissionParseError
-pub fn vocab::authz::PermissionParseError::from(T) -> T
 pub enum vocab::authz::RoutePermissionId
 pub vocab::authz::RoutePermissionId::AuditFieldActor
 pub vocab::authz::RoutePermissionId::AuditFieldResourceId
@@ -193,7 +105,10 @@ pub vocab::authz::RoutePermissionId::IdentityRoleRead
 pub vocab::authz::RoutePermissionId::IdentityRoleRevoke
 pub vocab::authz::RoutePermissionId::IdentitySessionWrite
 pub vocab::authz::RoutePermissionId::MtlsInvoke
+pub vocab::authz::RoutePermissionId::SettingsConfigDelete
+pub vocab::authz::RoutePermissionId::SettingsConfigGet
 pub vocab::authz::RoutePermissionId::SettingsConfigPublish
+pub vocab::authz::RoutePermissionId::SettingsConfigRollback
 pub vocab::authz::RoutePermissionId::SettingsSecretPublish
 impl vocab::authz::RoutePermissionId
 pub const vocab::authz::RoutePermissionId::ALL: &'static [Self]
@@ -220,30 +135,6 @@ impl core::marker::Unpin for vocab::authz::RoutePermissionId
 impl core::marker::UnsafeUnpin for vocab::authz::RoutePermissionId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::RoutePermissionId
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::RoutePermissionId
-impl<T, U> core::convert::Into<U> for vocab::authz::RoutePermissionId where U: core::convert::From<T>
-pub fn vocab::authz::RoutePermissionId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::RoutePermissionId where U: core::convert::Into<T>
-pub type vocab::authz::RoutePermissionId::Error = core::convert::Infallible
-pub fn vocab::authz::RoutePermissionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::RoutePermissionId where U: core::convert::TryFrom<T>
-pub type vocab::authz::RoutePermissionId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::RoutePermissionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::RoutePermissionId where T: core::clone::Clone
-pub type vocab::authz::RoutePermissionId::Owned = T
-pub fn vocab::authz::RoutePermissionId::clone_into(&self, &mut T)
-pub fn vocab::authz::RoutePermissionId::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::authz::RoutePermissionId where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::RoutePermissionId where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::RoutePermissionId where T: core::clone::Clone
-pub unsafe fn vocab::authz::RoutePermissionId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::RoutePermissionId
-pub fn vocab::authz::RoutePermissionId::from(T) -> T
 pub struct vocab::authz::Action(_)
 impl vocab::authz::Action
 pub fn vocab::authz::Action::as_str(&self) -> &str
@@ -263,28 +154,6 @@ impl core::marker::Unpin for vocab::authz::Action
 impl core::marker::UnsafeUnpin for vocab::authz::Action
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Action
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Action
-impl<T, U> core::convert::Into<U> for vocab::authz::Action where U: core::convert::From<T>
-pub fn vocab::authz::Action::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::Action where U: core::convert::Into<T>
-pub type vocab::authz::Action::Error = core::convert::Infallible
-pub fn vocab::authz::Action::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::Action where U: core::convert::TryFrom<T>
-pub type vocab::authz::Action::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::Action::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::Action where T: core::clone::Clone
-pub type vocab::authz::Action::Owned = T
-pub fn vocab::authz::Action::clone_into(&self, &mut T)
-pub fn vocab::authz::Action::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::authz::Action where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::Action::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::Action where T: ?core::marker::Sized
-pub fn vocab::authz::Action::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::Action where T: ?core::marker::Sized
-pub fn vocab::authz::Action::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone::Clone
-pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::Action
-pub fn vocab::authz::Action::from(T) -> T
 pub const vocab::authz::POLICY_MANAGE_PERMISSION_PREFIX: &str
 pub mod vocab::contract
 pub mod vocab::contract::binding
@@ -311,28 +180,6 @@ impl core::marker::Unpin for vocab::contract::binding::ContractBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ContractBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::ContractBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::ContractBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::ContractBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::ContractBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::ContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::ContractBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::ContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::ContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::ContractBinding where T: core::clone::Clone
-pub type vocab::contract::binding::ContractBinding::Owned = T
-pub fn vocab::contract::binding::ContractBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::ContractBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::ContractBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::ContractBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ContractBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ContractBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::ContractBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::ContractBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::ContractBinding
-pub fn vocab::contract::binding::ContractBinding::from(T) -> T
 pub struct vocab::contract::binding::ProjectionInputBinding
 impl vocab::contract::binding::ProjectionInputBinding
 pub const fn vocab::contract::binding::ProjectionInputBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -359,28 +206,6 @@ impl core::marker::Unpin for vocab::contract::binding::ProjectionInputBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::ProjectionInputBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ProjectionInputBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ProjectionInputBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::ProjectionInputBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::ProjectionInputBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::ProjectionInputBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::ProjectionInputBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::ProjectionInputBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::ProjectionInputBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::ProjectionInputBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::ProjectionInputBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::ProjectionInputBinding where T: core::clone::Clone
-pub type vocab::contract::binding::ProjectionInputBinding::Owned = T
-pub fn vocab::contract::binding::ProjectionInputBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::ProjectionInputBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::ProjectionInputBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::ProjectionInputBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::ProjectionInputBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ProjectionInputBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::ProjectionInputBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ProjectionInputBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::ProjectionInputBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::ProjectionInputBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::ProjectionInputBinding
-pub fn vocab::contract::binding::ProjectionInputBinding::from(T) -> T
 pub struct vocab::contract::binding::SagaContractBinding
 impl vocab::contract::binding::SagaContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -407,28 +232,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaContractBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaContractBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaContractBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaContractBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::SagaContractBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::SagaContractBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::SagaContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::SagaContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::SagaContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
-pub type vocab::contract::binding::SagaContractBinding::Owned = T
-pub fn vocab::contract::binding::SagaContractBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::SagaContractBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::SagaContractBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::SagaContractBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaContractBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaContractBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::SagaContractBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::SagaContractBinding
-pub fn vocab::contract::binding::SagaContractBinding::from(T) -> T
 pub struct vocab::contract::binding::SagaRuntimePolicySpec
 impl vocab::contract::binding::SagaRuntimePolicySpec
 pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_millis(u64, u64) -> Self
@@ -450,28 +253,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaRuntimePolicySpec
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRuntimePolicySpec
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::From<T>
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::Into<T>
-pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = core::convert::Infallible
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
-pub type vocab::contract::binding::SagaRuntimePolicySpec::Owned = T
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::SagaRuntimePolicySpec where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::SagaRuntimePolicySpec::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::SagaRuntimePolicySpec
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::from(T) -> T
 pub struct vocab::contract::binding::SagaStepBinding
 impl vocab::contract::binding::SagaStepBinding
 pub const fn vocab::contract::binding::SagaStepBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -498,28 +279,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::SagaStepBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::SagaStepBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::SagaStepBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::SagaStepBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::SagaStepBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
-pub type vocab::contract::binding::SagaStepBinding::Owned = T
-pub fn vocab::contract::binding::SagaStepBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::SagaStepBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::SagaStepBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::SagaStepBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaStepBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaStepBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::SagaStepBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::SagaStepBinding
-pub fn vocab::contract::binding::SagaStepBinding::from(T) -> T
 pub trait vocab::contract::binding::SagaStepOutputBinding
 pub const vocab::contract::binding::SagaStepOutputBinding::BINDING: vocab::contract::binding::SagaStepBinding
 pub mod vocab::contract::owner
@@ -538,24 +297,6 @@ impl core::marker::Unpin for vocab::contract::owner::DomainNameError
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainNameError where U: core::convert::From<T>
-pub fn vocab::contract::owner::DomainNameError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainNameError where U: core::convert::Into<T>
-pub type vocab::contract::owner::DomainNameError::Error = core::convert::Infallible
-pub fn vocab::contract::owner::DomainNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainNameError where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::DomainNameError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::DomainNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::contract::owner::DomainNameError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::contract::owner::DomainNameError where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
-pub fn vocab::contract::owner::DomainNameError::from(T) -> T
 pub struct vocab::contract::owner::ContractOwner(_)
 impl vocab::contract::owner::ContractOwner
 pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
@@ -576,28 +317,6 @@ impl core::marker::Unpin for vocab::contract::owner::ContractOwner
 impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::ContractOwner where U: core::convert::From<T>
-pub fn vocab::contract::owner::ContractOwner::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::ContractOwner where U: core::convert::Into<T>
-pub type vocab::contract::owner::ContractOwner::Error = core::convert::Infallible
-pub fn vocab::contract::owner::ContractOwner::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::ContractOwner where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::ContractOwner::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::ContractOwner::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::owner::ContractOwner where T: core::clone::Clone
-pub type vocab::contract::owner::ContractOwner::Owned = T
-pub fn vocab::contract::owner::ContractOwner::clone_into(&self, &mut T)
-pub fn vocab::contract::owner::ContractOwner::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::owner::ContractOwner where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner where T: core::clone::Clone
-pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::from(T) -> T
 pub struct vocab::contract::owner::DomainName(_)
 impl vocab::contract::owner::DomainName
 pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
@@ -617,28 +336,6 @@ impl core::marker::Unpin for vocab::contract::owner::DomainName
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainName
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainName
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainName
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainName where U: core::convert::From<T>
-pub fn vocab::contract::owner::DomainName::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainName where U: core::convert::Into<T>
-pub type vocab::contract::owner::DomainName::Error = core::convert::Infallible
-pub fn vocab::contract::owner::DomainName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainName where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::DomainName::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::DomainName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::owner::DomainName where T: core::clone::Clone
-pub type vocab::contract::owner::DomainName::Owned = T
-pub fn vocab::contract::owner::DomainName::clone_into(&self, &mut T)
-pub fn vocab::contract::owner::DomainName::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::owner::DomainName where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainName::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainName::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainName::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::owner::DomainName where T: core::clone::Clone
-pub unsafe fn vocab::contract::owner::DomainName::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::owner::DomainName
-pub fn vocab::contract::owner::DomainName::from(T) -> T
 pub mod vocab::epoch
 pub struct vocab::epoch::Epoch(_)
 impl vocab::epoch::Epoch
@@ -667,28 +364,6 @@ impl core::marker::Unpin for vocab::epoch::Epoch
 impl core::marker::UnsafeUnpin for vocab::epoch::Epoch
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::epoch::Epoch
 impl core::panic::unwind_safe::UnwindSafe for vocab::epoch::Epoch
-impl<T, U> core::convert::Into<U> for vocab::epoch::Epoch where U: core::convert::From<T>
-pub fn vocab::epoch::Epoch::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::epoch::Epoch where U: core::convert::Into<T>
-pub type vocab::epoch::Epoch::Error = core::convert::Infallible
-pub fn vocab::epoch::Epoch::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::epoch::Epoch where U: core::convert::TryFrom<T>
-pub type vocab::epoch::Epoch::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::epoch::Epoch::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::epoch::Epoch where T: core::clone::Clone
-pub type vocab::epoch::Epoch::Owned = T
-pub fn vocab::epoch::Epoch::clone_into(&self, &mut T)
-pub fn vocab::epoch::Epoch::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::epoch::Epoch where T: 'static + ?core::marker::Sized
-pub fn vocab::epoch::Epoch::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::epoch::Epoch where T: ?core::marker::Sized
-pub fn vocab::epoch::Epoch::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::epoch::Epoch where T: ?core::marker::Sized
-pub fn vocab::epoch::Epoch::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::epoch::Epoch where T: core::clone::Clone
-pub unsafe fn vocab::epoch::Epoch::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::epoch::Epoch
-pub fn vocab::epoch::Epoch::from(T) -> T
 pub mod vocab::error
 #[non_exhaustive] pub enum vocab::error::CoreErrorKind
 pub vocab::error::CoreErrorKind::Conflict
@@ -719,28 +394,6 @@ impl core::marker::Unpin for vocab::error::CoreErrorKind
 impl core::marker::UnsafeUnpin for vocab::error::CoreErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreErrorKind
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreErrorKind
-impl<T, U> core::convert::Into<U> for vocab::error::CoreErrorKind where U: core::convert::From<T>
-pub fn vocab::error::CoreErrorKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreErrorKind where U: core::convert::Into<T>
-pub type vocab::error::CoreErrorKind::Error = core::convert::Infallible
-pub fn vocab::error::CoreErrorKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::CoreErrorKind where U: core::convert::TryFrom<T>
-pub type vocab::error::CoreErrorKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::CoreErrorKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::error::CoreErrorKind where T: core::clone::Clone
-pub type vocab::error::CoreErrorKind::Owned = T
-pub fn vocab::error::CoreErrorKind::clone_into(&self, &mut T)
-pub fn vocab::error::CoreErrorKind::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::error::CoreErrorKind where T: 'static + ?core::marker::Sized
-pub fn vocab::error::CoreErrorKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
-pub fn vocab::error::CoreErrorKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
-pub fn vocab::error::CoreErrorKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::error::CoreErrorKind where T: core::clone::Clone
-pub unsafe fn vocab::error::CoreErrorKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::error::CoreErrorKind
-pub fn vocab::error::CoreErrorKind::from(T) -> T
 #[non_exhaustive] pub enum vocab::error::InternalAttr
 pub vocab::error::InternalAttr::Int(&'static str, i64)
 pub vocab::error::InternalAttr::Str(&'static str, alloc::string::String)
@@ -755,28 +408,6 @@ impl core::marker::Unpin for vocab::error::InternalAttr
 impl core::marker::UnsafeUnpin for vocab::error::InternalAttr
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::InternalAttr
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::InternalAttr
-impl<T, U> core::convert::Into<U> for vocab::error::InternalAttr where U: core::convert::From<T>
-pub fn vocab::error::InternalAttr::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::InternalAttr where U: core::convert::Into<T>
-pub type vocab::error::InternalAttr::Error = core::convert::Infallible
-pub fn vocab::error::InternalAttr::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::InternalAttr where U: core::convert::TryFrom<T>
-pub type vocab::error::InternalAttr::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::InternalAttr::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::error::InternalAttr where T: core::clone::Clone
-pub type vocab::error::InternalAttr::Owned = T
-pub fn vocab::error::InternalAttr::clone_into(&self, &mut T)
-pub fn vocab::error::InternalAttr::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::error::InternalAttr where T: 'static + ?core::marker::Sized
-pub fn vocab::error::InternalAttr::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
-pub fn vocab::error::InternalAttr::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
-pub fn vocab::error::InternalAttr::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::error::InternalAttr where T: core::clone::Clone
-pub unsafe fn vocab::error::InternalAttr::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::error::InternalAttr
-pub fn vocab::error::InternalAttr::from(T) -> T
 #[non_exhaustive] pub enum vocab::error::PublicDetail
 pub vocab::error::PublicDetail::Bool(&'static str, bool)
 pub vocab::error::PublicDetail::Duration(&'static str, core::time::Duration)
@@ -797,28 +428,6 @@ impl core::marker::Unpin for vocab::error::PublicDetail
 impl core::marker::UnsafeUnpin for vocab::error::PublicDetail
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::PublicDetail
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::PublicDetail
-impl<T, U> core::convert::Into<U> for vocab::error::PublicDetail where U: core::convert::From<T>
-pub fn vocab::error::PublicDetail::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::PublicDetail where U: core::convert::Into<T>
-pub type vocab::error::PublicDetail::Error = core::convert::Infallible
-pub fn vocab::error::PublicDetail::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::PublicDetail where U: core::convert::TryFrom<T>
-pub type vocab::error::PublicDetail::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::PublicDetail::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::error::PublicDetail where T: core::clone::Clone
-pub type vocab::error::PublicDetail::Owned = T
-pub fn vocab::error::PublicDetail::clone_into(&self, &mut T)
-pub fn vocab::error::PublicDetail::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::error::PublicDetail where T: 'static + ?core::marker::Sized
-pub fn vocab::error::PublicDetail::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
-pub fn vocab::error::PublicDetail::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
-pub fn vocab::error::PublicDetail::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::error::PublicDetail where T: core::clone::Clone
-pub unsafe fn vocab::error::PublicDetail::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::error::PublicDetail
-pub fn vocab::error::PublicDetail::from(T) -> T
 pub struct vocab::error::CoreError
 impl vocab::error::CoreError
 pub fn vocab::error::CoreError::internal_attrs(&self) -> &[vocab::error::InternalAttr]
@@ -839,24 +448,6 @@ impl core::marker::Unpin for vocab::error::CoreError
 impl core::marker::UnsafeUnpin for vocab::error::CoreError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreError
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreError
-impl<T, U> core::convert::Into<U> for vocab::error::CoreError where U: core::convert::From<T>
-pub fn vocab::error::CoreError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreError where U: core::convert::Into<T>
-pub type vocab::error::CoreError::Error = core::convert::Infallible
-pub fn vocab::error::CoreError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::CoreError where U: core::convert::TryFrom<T>
-pub type vocab::error::CoreError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::CoreError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::error::CoreError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::error::CoreError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::error::CoreError where T: 'static + ?core::marker::Sized
-pub fn vocab::error::CoreError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::CoreError where T: ?core::marker::Sized
-pub fn vocab::error::CoreError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreError where T: ?core::marker::Sized
-pub fn vocab::error::CoreError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::error::CoreError
-pub fn vocab::error::CoreError::from(T) -> T
 pub mod vocab::principal
 #[non_exhaustive] pub enum vocab::principal::PrincipalKind
 pub vocab::principal::PrincipalKind::Admin
@@ -883,28 +474,6 @@ impl core::marker::Unpin for vocab::principal::PrincipalKind
 impl core::marker::UnsafeUnpin for vocab::principal::PrincipalKind
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::principal::PrincipalKind
 impl core::panic::unwind_safe::UnwindSafe for vocab::principal::PrincipalKind
-impl<T, U> core::convert::Into<U> for vocab::principal::PrincipalKind where U: core::convert::From<T>
-pub fn vocab::principal::PrincipalKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::principal::PrincipalKind where U: core::convert::Into<T>
-pub type vocab::principal::PrincipalKind::Error = core::convert::Infallible
-pub fn vocab::principal::PrincipalKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::principal::PrincipalKind where U: core::convert::TryFrom<T>
-pub type vocab::principal::PrincipalKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::principal::PrincipalKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::principal::PrincipalKind where T: core::clone::Clone
-pub type vocab::principal::PrincipalKind::Owned = T
-pub fn vocab::principal::PrincipalKind::clone_into(&self, &mut T)
-pub fn vocab::principal::PrincipalKind::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::principal::PrincipalKind where T: 'static + ?core::marker::Sized
-pub fn vocab::principal::PrincipalKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::principal::PrincipalKind where T: ?core::marker::Sized
-pub fn vocab::principal::PrincipalKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::principal::PrincipalKind where T: ?core::marker::Sized
-pub fn vocab::principal::PrincipalKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::principal::PrincipalKind where T: core::clone::Clone
-pub unsafe fn vocab::principal::PrincipalKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::from(T) -> T
 pub mod vocab::projection
 #[non_exhaustive] pub enum vocab::projection::ProjectionField
 pub vocab::projection::ProjectionField::AuditActor
@@ -934,28 +503,6 @@ impl core::marker::Unpin for vocab::projection::ProjectionField
 impl core::marker::UnsafeUnpin for vocab::projection::ProjectionField
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::projection::ProjectionField
 impl core::panic::unwind_safe::UnwindSafe for vocab::projection::ProjectionField
-impl<T, U> core::convert::Into<U> for vocab::projection::ProjectionField where U: core::convert::From<T>
-pub fn vocab::projection::ProjectionField::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::projection::ProjectionField where U: core::convert::Into<T>
-pub type vocab::projection::ProjectionField::Error = core::convert::Infallible
-pub fn vocab::projection::ProjectionField::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::projection::ProjectionField where U: core::convert::TryFrom<T>
-pub type vocab::projection::ProjectionField::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::projection::ProjectionField::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::projection::ProjectionField where T: core::clone::Clone
-pub type vocab::projection::ProjectionField::Owned = T
-pub fn vocab::projection::ProjectionField::clone_into(&self, &mut T)
-pub fn vocab::projection::ProjectionField::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::projection::ProjectionField where T: 'static + ?core::marker::Sized
-pub fn vocab::projection::ProjectionField::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
-pub fn vocab::projection::ProjectionField::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
-pub fn vocab::projection::ProjectionField::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::projection::ProjectionField where T: core::clone::Clone
-pub unsafe fn vocab::projection::ProjectionField::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::projection::ProjectionField
-pub fn vocab::projection::ProjectionField::from(T) -> T
 pub const vocab::projection::AUDIT_ACTOR_FIELD_OBLIGATION: &str
 pub const vocab::projection::AUDIT_FIELD_ACTOR_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::projection::AUDIT_FIELD_RESOURCE_ID_PERMISSION: vocab::authz::RoutePermissionId
@@ -982,24 +529,6 @@ impl core::marker::Unpin for vocab::query::CursorError
 impl core::marker::UnsafeUnpin for vocab::query::CursorError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::CursorError
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::CursorError
-impl<T, U> core::convert::Into<U> for vocab::query::CursorError where U: core::convert::From<T>
-pub fn vocab::query::CursorError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::CursorError where U: core::convert::Into<T>
-pub type vocab::query::CursorError::Error = core::convert::Infallible
-pub fn vocab::query::CursorError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::CursorError where U: core::convert::TryFrom<T>
-pub type vocab::query::CursorError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::CursorError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::query::CursorError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::query::CursorError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::query::CursorError where T: 'static + ?core::marker::Sized
-pub fn vocab::query::CursorError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::CursorError where T: ?core::marker::Sized
-pub fn vocab::query::CursorError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::CursorError where T: ?core::marker::Sized
-pub fn vocab::query::CursorError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::query::CursorError
-pub fn vocab::query::CursorError::from(T) -> T
 #[non_exhaustive] pub enum vocab::query::LimitError
 pub vocab::query::LimitError::TooLarge
 impl core::error::Error for vocab::query::LimitError
@@ -1014,24 +543,6 @@ impl core::marker::Unpin for vocab::query::LimitError
 impl core::marker::UnsafeUnpin for vocab::query::LimitError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::LimitError
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::LimitError
-impl<T, U> core::convert::Into<U> for vocab::query::LimitError where U: core::convert::From<T>
-pub fn vocab::query::LimitError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::LimitError where U: core::convert::Into<T>
-pub type vocab::query::LimitError::Error = core::convert::Infallible
-pub fn vocab::query::LimitError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::LimitError where U: core::convert::TryFrom<T>
-pub type vocab::query::LimitError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::LimitError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::query::LimitError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::query::LimitError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::query::LimitError where T: 'static + ?core::marker::Sized
-pub fn vocab::query::LimitError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::LimitError where T: ?core::marker::Sized
-pub fn vocab::query::LimitError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::LimitError where T: ?core::marker::Sized
-pub fn vocab::query::LimitError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::query::LimitError
-pub fn vocab::query::LimitError::from(T) -> T
 pub struct vocab::query::Cursor(_)
 impl vocab::query::Cursor
 pub fn vocab::query::Cursor::as_str(&self) -> &str
@@ -1051,28 +562,6 @@ impl core::marker::Unpin for vocab::query::Cursor
 impl core::marker::UnsafeUnpin for vocab::query::Cursor
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Cursor
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::Cursor
-impl<T, U> core::convert::Into<U> for vocab::query::Cursor where U: core::convert::From<T>
-pub fn vocab::query::Cursor::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::Cursor where U: core::convert::Into<T>
-pub type vocab::query::Cursor::Error = core::convert::Infallible
-pub fn vocab::query::Cursor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::Cursor where U: core::convert::TryFrom<T>
-pub type vocab::query::Cursor::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::Cursor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::query::Cursor where T: core::clone::Clone
-pub type vocab::query::Cursor::Owned = T
-pub fn vocab::query::Cursor::clone_into(&self, &mut T)
-pub fn vocab::query::Cursor::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::query::Cursor where T: 'static + ?core::marker::Sized
-pub fn vocab::query::Cursor::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::Cursor where T: ?core::marker::Sized
-pub fn vocab::query::Cursor::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::Cursor where T: ?core::marker::Sized
-pub fn vocab::query::Cursor::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::query::Cursor where T: core::clone::Clone
-pub unsafe fn vocab::query::Cursor::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::query::Cursor
-pub fn vocab::query::Cursor::from(T) -> T
 pub struct vocab::query::Limit(_)
 impl vocab::query::Limit
 pub fn vocab::query::Limit::get(&self) -> u16
@@ -1093,28 +582,6 @@ impl core::marker::Unpin for vocab::query::Limit
 impl core::marker::UnsafeUnpin for vocab::query::Limit
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Limit
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::Limit
-impl<T, U> core::convert::Into<U> for vocab::query::Limit where U: core::convert::From<T>
-pub fn vocab::query::Limit::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::Limit where U: core::convert::Into<T>
-pub type vocab::query::Limit::Error = core::convert::Infallible
-pub fn vocab::query::Limit::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::Limit where U: core::convert::TryFrom<T>
-pub type vocab::query::Limit::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::Limit::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::query::Limit where T: core::clone::Clone
-pub type vocab::query::Limit::Owned = T
-pub fn vocab::query::Limit::clone_into(&self, &mut T)
-pub fn vocab::query::Limit::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::query::Limit where T: 'static + ?core::marker::Sized
-pub fn vocab::query::Limit::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::Limit where T: ?core::marker::Sized
-pub fn vocab::query::Limit::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::Limit where T: ?core::marker::Sized
-pub fn vocab::query::Limit::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::query::Limit where T: core::clone::Clone
-pub unsafe fn vocab::query::Limit::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::query::Limit
-pub fn vocab::query::Limit::from(T) -> T
 pub mod vocab::tenant
 #[non_exhaustive] pub enum vocab::tenant::RowScope
 pub vocab::tenant::RowScope::All
@@ -1139,28 +606,6 @@ impl core::marker::Unpin for vocab::tenant::RowScope
 impl core::marker::UnsafeUnpin for vocab::tenant::RowScope
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowScope
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowScope
-impl<T, U> core::convert::Into<U> for vocab::tenant::RowScope where U: core::convert::From<T>
-pub fn vocab::tenant::RowScope::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::RowScope where U: core::convert::Into<T>
-pub type vocab::tenant::RowScope::Error = core::convert::Infallible
-pub fn vocab::tenant::RowScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::RowScope where U: core::convert::TryFrom<T>
-pub type vocab::tenant::RowScope::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::RowScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::RowScope where T: core::clone::Clone
-pub type vocab::tenant::RowScope::Owned = T
-pub fn vocab::tenant::RowScope::clone_into(&self, &mut T)
-pub fn vocab::tenant::RowScope::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::tenant::RowScope where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::RowScope::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::RowScope where T: ?core::marker::Sized
-pub fn vocab::tenant::RowScope::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::RowScope where T: ?core::marker::Sized
-pub fn vocab::tenant::RowScope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::RowScope where T: core::clone::Clone
-pub unsafe fn vocab::tenant::RowScope::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::from(T) -> T
 #[non_exhaustive] pub enum vocab::tenant::ScopedTenant
 pub vocab::tenant::ScopedTenant::Device
 pub vocab::tenant::ScopedTenant::SelfOnly
@@ -1183,28 +628,6 @@ impl core::marker::Unpin for vocab::tenant::ScopedTenant
 impl core::marker::UnsafeUnpin for vocab::tenant::ScopedTenant
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::ScopedTenant
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::ScopedTenant
-impl<T, U> core::convert::Into<U> for vocab::tenant::ScopedTenant where U: core::convert::From<T>
-pub fn vocab::tenant::ScopedTenant::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::ScopedTenant where U: core::convert::Into<T>
-pub type vocab::tenant::ScopedTenant::Error = core::convert::Infallible
-pub fn vocab::tenant::ScopedTenant::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::ScopedTenant where U: core::convert::TryFrom<T>
-pub type vocab::tenant::ScopedTenant::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::ScopedTenant::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::ScopedTenant where T: core::clone::Clone
-pub type vocab::tenant::ScopedTenant::Owned = T
-pub fn vocab::tenant::ScopedTenant::clone_into(&self, &mut T)
-pub fn vocab::tenant::ScopedTenant::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::tenant::ScopedTenant where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::ScopedTenant::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::ScopedTenant where T: ?core::marker::Sized
-pub fn vocab::tenant::ScopedTenant::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::ScopedTenant where T: ?core::marker::Sized
-pub fn vocab::tenant::ScopedTenant::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::ScopedTenant where T: core::clone::Clone
-pub unsafe fn vocab::tenant::ScopedTenant::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::from(T) -> T
 #[non_exhaustive] pub enum vocab::tenant::TenantIdError
 pub vocab::tenant::TenantIdError::Empty
 pub vocab::tenant::TenantIdError::Format
@@ -1227,30 +650,6 @@ impl core::marker::Unpin for vocab::tenant::TenantIdError
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
-impl<T, U> core::convert::Into<U> for vocab::tenant::TenantIdError where U: core::convert::From<T>
-pub fn vocab::tenant::TenantIdError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantIdError where U: core::convert::Into<T>
-pub type vocab::tenant::TenantIdError::Error = core::convert::Infallible
-pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
-pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantIdError where T: core::clone::Clone
-pub type vocab::tenant::TenantIdError::Owned = T
-pub fn vocab::tenant::TenantIdError::clone_into(&self, &mut T)
-pub fn vocab::tenant::TenantIdError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::TenantIdError where T: core::clone::Clone
-pub unsafe fn vocab::tenant::TenantIdError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::from(T) -> T
 pub struct vocab::tenant::CrossTenantCapability
 impl vocab::tenant::CrossTenantCapability
 pub fn vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin() -> Self
@@ -1261,22 +660,6 @@ impl core::marker::Unpin for vocab::tenant::CrossTenantCapability
 impl core::marker::UnsafeUnpin for vocab::tenant::CrossTenantCapability
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::CrossTenantCapability
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::CrossTenantCapability
-impl<T, U> core::convert::Into<U> for vocab::tenant::CrossTenantCapability where U: core::convert::From<T>
-pub fn vocab::tenant::CrossTenantCapability::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::CrossTenantCapability where U: core::convert::Into<T>
-pub type vocab::tenant::CrossTenantCapability::Error = core::convert::Infallible
-pub fn vocab::tenant::CrossTenantCapability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::CrossTenantCapability where U: core::convert::TryFrom<T>
-pub type vocab::tenant::CrossTenantCapability::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::CrossTenantCapability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for vocab::tenant::CrossTenantCapability where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantCapability::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::CrossTenantCapability where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantCapability::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::CrossTenantCapability where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantCapability::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::CrossTenantCapability
-pub fn vocab::tenant::CrossTenantCapability::from(T) -> T
 pub struct vocab::tenant::CrossTenantVisibility
 impl vocab::tenant::CrossTenantVisibility
 pub fn vocab::tenant::CrossTenantVisibility::authorize(vocab::tenant::CrossTenantCapability) -> Self
@@ -1287,22 +670,6 @@ impl core::marker::Unpin for vocab::tenant::CrossTenantVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::CrossTenantVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::CrossTenantVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::CrossTenantVisibility
-impl<T, U> core::convert::Into<U> for vocab::tenant::CrossTenantVisibility where U: core::convert::From<T>
-pub fn vocab::tenant::CrossTenantVisibility::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::CrossTenantVisibility where U: core::convert::Into<T>
-pub type vocab::tenant::CrossTenantVisibility::Error = core::convert::Infallible
-pub fn vocab::tenant::CrossTenantVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::CrossTenantVisibility where U: core::convert::TryFrom<T>
-pub type vocab::tenant::CrossTenantVisibility::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::CrossTenantVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for vocab::tenant::CrossTenantVisibility where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantVisibility::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::CrossTenantVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantVisibility::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::CrossTenantVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantVisibility::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::CrossTenantVisibility
-pub fn vocab::tenant::CrossTenantVisibility::from(T) -> T
 pub struct vocab::tenant::RowVisibility
 impl vocab::tenant::RowVisibility
 pub fn vocab::tenant::RowVisibility::new(vocab::tenant::ScopedTenant, vocab::tenant::TenantId) -> Self
@@ -1316,22 +683,6 @@ impl core::marker::Unpin for vocab::tenant::RowVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowVisibility
-impl<T, U> core::convert::Into<U> for vocab::tenant::RowVisibility where U: core::convert::From<T>
-pub fn vocab::tenant::RowVisibility::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::RowVisibility where U: core::convert::Into<T>
-pub type vocab::tenant::RowVisibility::Error = core::convert::Infallible
-pub fn vocab::tenant::RowVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::RowVisibility where U: core::convert::TryFrom<T>
-pub type vocab::tenant::RowVisibility::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::RowVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for vocab::tenant::RowVisibility where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::RowVisibility::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::RowVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::RowVisibility::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::RowVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::RowVisibility::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::RowVisibility
-pub fn vocab::tenant::RowVisibility::from(T) -> T
 pub struct vocab::tenant::TenantId(_)
 impl vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
@@ -1356,30 +707,6 @@ impl core::marker::Unpin for vocab::tenant::TenantId
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
-impl<T, U> core::convert::Into<U> for vocab::tenant::TenantId where U: core::convert::From<T>
-pub fn vocab::tenant::TenantId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantId where U: core::convert::Into<T>
-pub type vocab::tenant::TenantId::Error = core::convert::Infallible
-pub fn vocab::tenant::TenantId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantId where U: core::convert::TryFrom<T>
-pub type vocab::tenant::TenantId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::TenantId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone::Clone
-pub type vocab::tenant::TenantId::Owned = T
-pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
-pub fn vocab::tenant::TenantId::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::tenant::TenantId where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::tenant::TenantId::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::clone::Clone
-pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::from(T) -> T
 #[non_exhaustive] pub enum vocab::ActionError
 pub vocab::ActionError::Empty
 pub vocab::ActionError::Format
@@ -1395,24 +722,6 @@ impl core::marker::Unpin for vocab::authz::ActionError
 impl core::marker::UnsafeUnpin for vocab::authz::ActionError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::ActionError
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::ActionError
-impl<T, U> core::convert::Into<U> for vocab::authz::ActionError where U: core::convert::From<T>
-pub fn vocab::authz::ActionError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::ActionError where U: core::convert::Into<T>
-pub type vocab::authz::ActionError::Error = core::convert::Infallible
-pub fn vocab::authz::ActionError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::ActionError where U: core::convert::TryFrom<T>
-pub type vocab::authz::ActionError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::ActionError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::authz::ActionError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::ActionError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::ActionError where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::ActionError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::ActionError where T: ?core::marker::Sized
-pub fn vocab::authz::ActionError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::ActionError where T: ?core::marker::Sized
-pub fn vocab::authz::ActionError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::authz::ActionError
-pub fn vocab::authz::ActionError::from(T) -> T
 #[non_exhaustive] pub enum vocab::CoreErrorKind
 pub vocab::CoreErrorKind::Conflict
 pub vocab::CoreErrorKind::Forbidden
@@ -1442,28 +751,6 @@ impl core::marker::Unpin for vocab::error::CoreErrorKind
 impl core::marker::UnsafeUnpin for vocab::error::CoreErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreErrorKind
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreErrorKind
-impl<T, U> core::convert::Into<U> for vocab::error::CoreErrorKind where U: core::convert::From<T>
-pub fn vocab::error::CoreErrorKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreErrorKind where U: core::convert::Into<T>
-pub type vocab::error::CoreErrorKind::Error = core::convert::Infallible
-pub fn vocab::error::CoreErrorKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::CoreErrorKind where U: core::convert::TryFrom<T>
-pub type vocab::error::CoreErrorKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::CoreErrorKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::error::CoreErrorKind where T: core::clone::Clone
-pub type vocab::error::CoreErrorKind::Owned = T
-pub fn vocab::error::CoreErrorKind::clone_into(&self, &mut T)
-pub fn vocab::error::CoreErrorKind::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::error::CoreErrorKind where T: 'static + ?core::marker::Sized
-pub fn vocab::error::CoreErrorKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
-pub fn vocab::error::CoreErrorKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreErrorKind where T: ?core::marker::Sized
-pub fn vocab::error::CoreErrorKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::error::CoreErrorKind where T: core::clone::Clone
-pub unsafe fn vocab::error::CoreErrorKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::error::CoreErrorKind
-pub fn vocab::error::CoreErrorKind::from(T) -> T
 #[non_exhaustive] pub enum vocab::CursorError
 pub vocab::CursorError::Malformed
 impl core::error::Error for vocab::query::CursorError
@@ -1478,24 +765,6 @@ impl core::marker::Unpin for vocab::query::CursorError
 impl core::marker::UnsafeUnpin for vocab::query::CursorError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::CursorError
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::CursorError
-impl<T, U> core::convert::Into<U> for vocab::query::CursorError where U: core::convert::From<T>
-pub fn vocab::query::CursorError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::CursorError where U: core::convert::Into<T>
-pub type vocab::query::CursorError::Error = core::convert::Infallible
-pub fn vocab::query::CursorError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::CursorError where U: core::convert::TryFrom<T>
-pub type vocab::query::CursorError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::CursorError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::query::CursorError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::query::CursorError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::query::CursorError where T: 'static + ?core::marker::Sized
-pub fn vocab::query::CursorError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::CursorError where T: ?core::marker::Sized
-pub fn vocab::query::CursorError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::CursorError where T: ?core::marker::Sized
-pub fn vocab::query::CursorError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::query::CursorError
-pub fn vocab::query::CursorError::from(T) -> T
 #[non_exhaustive] pub enum vocab::Decision
 pub vocab::Decision::Allow
 pub vocab::Decision::Deny
@@ -1515,28 +784,6 @@ impl core::marker::Unpin for vocab::authz::Decision
 impl core::marker::UnsafeUnpin for vocab::authz::Decision
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Decision
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Decision
-impl<T, U> core::convert::Into<U> for vocab::authz::Decision where U: core::convert::From<T>
-pub fn vocab::authz::Decision::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::Decision where U: core::convert::Into<T>
-pub type vocab::authz::Decision::Error = core::convert::Infallible
-pub fn vocab::authz::Decision::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::Decision where U: core::convert::TryFrom<T>
-pub type vocab::authz::Decision::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::Decision::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::Decision where T: core::clone::Clone
-pub type vocab::authz::Decision::Owned = T
-pub fn vocab::authz::Decision::clone_into(&self, &mut T)
-pub fn vocab::authz::Decision::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::authz::Decision where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::Decision::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::Decision where T: ?core::marker::Sized
-pub fn vocab::authz::Decision::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::Decision where T: ?core::marker::Sized
-pub fn vocab::authz::Decision::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::Decision where T: core::clone::Clone
-pub unsafe fn vocab::authz::Decision::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::Decision
-pub fn vocab::authz::Decision::from(T) -> T
 #[non_exhaustive] pub enum vocab::DomainNameError
 pub vocab::DomainNameError::Empty
 pub vocab::DomainNameError::Format
@@ -1552,24 +799,6 @@ impl core::marker::Unpin for vocab::contract::owner::DomainNameError
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainNameError where U: core::convert::From<T>
-pub fn vocab::contract::owner::DomainNameError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainNameError where U: core::convert::Into<T>
-pub type vocab::contract::owner::DomainNameError::Error = core::convert::Infallible
-pub fn vocab::contract::owner::DomainNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainNameError where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::DomainNameError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::DomainNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::contract::owner::DomainNameError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::contract::owner::DomainNameError where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainNameError where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainNameError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::contract::owner::DomainNameError
-pub fn vocab::contract::owner::DomainNameError::from(T) -> T
 pub enum vocab::GrantPermission
 pub vocab::GrantPermission::PolicyManage(vocab::authz::RoutePermissionId)
 pub vocab::GrantPermission::Route(vocab::authz::RoutePermissionId)
@@ -1602,30 +831,6 @@ impl core::marker::Unpin for vocab::authz::GrantPermission
 impl core::marker::UnsafeUnpin for vocab::authz::GrantPermission
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::GrantPermission
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::GrantPermission
-impl<T, U> core::convert::Into<U> for vocab::authz::GrantPermission where U: core::convert::From<T>
-pub fn vocab::authz::GrantPermission::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::GrantPermission where U: core::convert::Into<T>
-pub type vocab::authz::GrantPermission::Error = core::convert::Infallible
-pub fn vocab::authz::GrantPermission::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::GrantPermission where U: core::convert::TryFrom<T>
-pub type vocab::authz::GrantPermission::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::GrantPermission::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::GrantPermission where T: core::clone::Clone
-pub type vocab::authz::GrantPermission::Owned = T
-pub fn vocab::authz::GrantPermission::clone_into(&self, &mut T)
-pub fn vocab::authz::GrantPermission::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::authz::GrantPermission where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::GrantPermission where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::GrantPermission where T: ?core::marker::Sized
-pub fn vocab::authz::GrantPermission::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::GrantPermission where T: core::clone::Clone
-pub unsafe fn vocab::authz::GrantPermission::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::GrantPermission
-pub fn vocab::authz::GrantPermission::from(T) -> T
 #[non_exhaustive] pub enum vocab::InternalAttr
 pub vocab::InternalAttr::Int(&'static str, i64)
 pub vocab::InternalAttr::Str(&'static str, alloc::string::String)
@@ -1640,28 +845,6 @@ impl core::marker::Unpin for vocab::error::InternalAttr
 impl core::marker::UnsafeUnpin for vocab::error::InternalAttr
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::InternalAttr
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::InternalAttr
-impl<T, U> core::convert::Into<U> for vocab::error::InternalAttr where U: core::convert::From<T>
-pub fn vocab::error::InternalAttr::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::InternalAttr where U: core::convert::Into<T>
-pub type vocab::error::InternalAttr::Error = core::convert::Infallible
-pub fn vocab::error::InternalAttr::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::InternalAttr where U: core::convert::TryFrom<T>
-pub type vocab::error::InternalAttr::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::InternalAttr::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::error::InternalAttr where T: core::clone::Clone
-pub type vocab::error::InternalAttr::Owned = T
-pub fn vocab::error::InternalAttr::clone_into(&self, &mut T)
-pub fn vocab::error::InternalAttr::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::error::InternalAttr where T: 'static + ?core::marker::Sized
-pub fn vocab::error::InternalAttr::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
-pub fn vocab::error::InternalAttr::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::InternalAttr where T: ?core::marker::Sized
-pub fn vocab::error::InternalAttr::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::error::InternalAttr where T: core::clone::Clone
-pub unsafe fn vocab::error::InternalAttr::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::error::InternalAttr
-pub fn vocab::error::InternalAttr::from(T) -> T
 #[non_exhaustive] pub enum vocab::LimitError
 pub vocab::LimitError::TooLarge
 impl core::error::Error for vocab::query::LimitError
@@ -1676,24 +859,6 @@ impl core::marker::Unpin for vocab::query::LimitError
 impl core::marker::UnsafeUnpin for vocab::query::LimitError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::LimitError
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::LimitError
-impl<T, U> core::convert::Into<U> for vocab::query::LimitError where U: core::convert::From<T>
-pub fn vocab::query::LimitError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::LimitError where U: core::convert::Into<T>
-pub type vocab::query::LimitError::Error = core::convert::Infallible
-pub fn vocab::query::LimitError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::LimitError where U: core::convert::TryFrom<T>
-pub type vocab::query::LimitError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::LimitError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::query::LimitError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::query::LimitError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::query::LimitError where T: 'static + ?core::marker::Sized
-pub fn vocab::query::LimitError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::LimitError where T: ?core::marker::Sized
-pub fn vocab::query::LimitError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::LimitError where T: ?core::marker::Sized
-pub fn vocab::query::LimitError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::query::LimitError
-pub fn vocab::query::LimitError::from(T) -> T
 #[non_exhaustive] pub enum vocab::PermissionParseError
 pub vocab::PermissionParseError::Unknown
 impl core::clone::Clone for vocab::authz::PermissionParseError
@@ -1715,30 +880,6 @@ impl core::marker::Unpin for vocab::authz::PermissionParseError
 impl core::marker::UnsafeUnpin for vocab::authz::PermissionParseError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::PermissionParseError
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::PermissionParseError
-impl<T, U> core::convert::Into<U> for vocab::authz::PermissionParseError where U: core::convert::From<T>
-pub fn vocab::authz::PermissionParseError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::PermissionParseError where U: core::convert::Into<T>
-pub type vocab::authz::PermissionParseError::Error = core::convert::Infallible
-pub fn vocab::authz::PermissionParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::PermissionParseError where U: core::convert::TryFrom<T>
-pub type vocab::authz::PermissionParseError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::PermissionParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::PermissionParseError where T: core::clone::Clone
-pub type vocab::authz::PermissionParseError::Owned = T
-pub fn vocab::authz::PermissionParseError::clone_into(&self, &mut T)
-pub fn vocab::authz::PermissionParseError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::authz::PermissionParseError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::PermissionParseError where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::PermissionParseError where T: ?core::marker::Sized
-pub fn vocab::authz::PermissionParseError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::PermissionParseError where T: core::clone::Clone
-pub unsafe fn vocab::authz::PermissionParseError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::PermissionParseError
-pub fn vocab::authz::PermissionParseError::from(T) -> T
 #[non_exhaustive] pub enum vocab::PrincipalKind
 pub vocab::PrincipalKind::Admin
 pub vocab::PrincipalKind::Anonymous
@@ -1764,28 +905,6 @@ impl core::marker::Unpin for vocab::principal::PrincipalKind
 impl core::marker::UnsafeUnpin for vocab::principal::PrincipalKind
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::principal::PrincipalKind
 impl core::panic::unwind_safe::UnwindSafe for vocab::principal::PrincipalKind
-impl<T, U> core::convert::Into<U> for vocab::principal::PrincipalKind where U: core::convert::From<T>
-pub fn vocab::principal::PrincipalKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::principal::PrincipalKind where U: core::convert::Into<T>
-pub type vocab::principal::PrincipalKind::Error = core::convert::Infallible
-pub fn vocab::principal::PrincipalKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::principal::PrincipalKind where U: core::convert::TryFrom<T>
-pub type vocab::principal::PrincipalKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::principal::PrincipalKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::principal::PrincipalKind where T: core::clone::Clone
-pub type vocab::principal::PrincipalKind::Owned = T
-pub fn vocab::principal::PrincipalKind::clone_into(&self, &mut T)
-pub fn vocab::principal::PrincipalKind::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::principal::PrincipalKind where T: 'static + ?core::marker::Sized
-pub fn vocab::principal::PrincipalKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::principal::PrincipalKind where T: ?core::marker::Sized
-pub fn vocab::principal::PrincipalKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::principal::PrincipalKind where T: ?core::marker::Sized
-pub fn vocab::principal::PrincipalKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::principal::PrincipalKind where T: core::clone::Clone
-pub unsafe fn vocab::principal::PrincipalKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::from(T) -> T
 #[non_exhaustive] pub enum vocab::ProjectionField
 pub vocab::ProjectionField::AuditActor
 pub vocab::ProjectionField::AuditResourceId
@@ -1814,28 +933,6 @@ impl core::marker::Unpin for vocab::projection::ProjectionField
 impl core::marker::UnsafeUnpin for vocab::projection::ProjectionField
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::projection::ProjectionField
 impl core::panic::unwind_safe::UnwindSafe for vocab::projection::ProjectionField
-impl<T, U> core::convert::Into<U> for vocab::projection::ProjectionField where U: core::convert::From<T>
-pub fn vocab::projection::ProjectionField::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::projection::ProjectionField where U: core::convert::Into<T>
-pub type vocab::projection::ProjectionField::Error = core::convert::Infallible
-pub fn vocab::projection::ProjectionField::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::projection::ProjectionField where U: core::convert::TryFrom<T>
-pub type vocab::projection::ProjectionField::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::projection::ProjectionField::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::projection::ProjectionField where T: core::clone::Clone
-pub type vocab::projection::ProjectionField::Owned = T
-pub fn vocab::projection::ProjectionField::clone_into(&self, &mut T)
-pub fn vocab::projection::ProjectionField::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::projection::ProjectionField where T: 'static + ?core::marker::Sized
-pub fn vocab::projection::ProjectionField::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
-pub fn vocab::projection::ProjectionField::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::projection::ProjectionField where T: ?core::marker::Sized
-pub fn vocab::projection::ProjectionField::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::projection::ProjectionField where T: core::clone::Clone
-pub unsafe fn vocab::projection::ProjectionField::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::projection::ProjectionField
-pub fn vocab::projection::ProjectionField::from(T) -> T
 #[non_exhaustive] pub enum vocab::PublicDetail
 pub vocab::PublicDetail::Bool(&'static str, bool)
 pub vocab::PublicDetail::Duration(&'static str, core::time::Duration)
@@ -1856,28 +953,6 @@ impl core::marker::Unpin for vocab::error::PublicDetail
 impl core::marker::UnsafeUnpin for vocab::error::PublicDetail
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::PublicDetail
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::PublicDetail
-impl<T, U> core::convert::Into<U> for vocab::error::PublicDetail where U: core::convert::From<T>
-pub fn vocab::error::PublicDetail::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::PublicDetail where U: core::convert::Into<T>
-pub type vocab::error::PublicDetail::Error = core::convert::Infallible
-pub fn vocab::error::PublicDetail::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::PublicDetail where U: core::convert::TryFrom<T>
-pub type vocab::error::PublicDetail::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::PublicDetail::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::error::PublicDetail where T: core::clone::Clone
-pub type vocab::error::PublicDetail::Owned = T
-pub fn vocab::error::PublicDetail::clone_into(&self, &mut T)
-pub fn vocab::error::PublicDetail::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::error::PublicDetail where T: 'static + ?core::marker::Sized
-pub fn vocab::error::PublicDetail::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
-pub fn vocab::error::PublicDetail::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::PublicDetail where T: ?core::marker::Sized
-pub fn vocab::error::PublicDetail::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::error::PublicDetail where T: core::clone::Clone
-pub unsafe fn vocab::error::PublicDetail::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::error::PublicDetail
-pub fn vocab::error::PublicDetail::from(T) -> T
 pub enum vocab::RoutePermissionId
 pub vocab::RoutePermissionId::AuditFieldActor
 pub vocab::RoutePermissionId::AuditFieldResourceId
@@ -1896,7 +971,10 @@ pub vocab::RoutePermissionId::IdentityRoleRead
 pub vocab::RoutePermissionId::IdentityRoleRevoke
 pub vocab::RoutePermissionId::IdentitySessionWrite
 pub vocab::RoutePermissionId::MtlsInvoke
+pub vocab::RoutePermissionId::SettingsConfigDelete
+pub vocab::RoutePermissionId::SettingsConfigGet
 pub vocab::RoutePermissionId::SettingsConfigPublish
+pub vocab::RoutePermissionId::SettingsConfigRollback
 pub vocab::RoutePermissionId::SettingsSecretPublish
 impl vocab::authz::RoutePermissionId
 pub const vocab::authz::RoutePermissionId::ALL: &'static [Self]
@@ -1923,30 +1001,6 @@ impl core::marker::Unpin for vocab::authz::RoutePermissionId
 impl core::marker::UnsafeUnpin for vocab::authz::RoutePermissionId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::RoutePermissionId
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::RoutePermissionId
-impl<T, U> core::convert::Into<U> for vocab::authz::RoutePermissionId where U: core::convert::From<T>
-pub fn vocab::authz::RoutePermissionId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::RoutePermissionId where U: core::convert::Into<T>
-pub type vocab::authz::RoutePermissionId::Error = core::convert::Infallible
-pub fn vocab::authz::RoutePermissionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::RoutePermissionId where U: core::convert::TryFrom<T>
-pub type vocab::authz::RoutePermissionId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::RoutePermissionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::RoutePermissionId where T: core::clone::Clone
-pub type vocab::authz::RoutePermissionId::Owned = T
-pub fn vocab::authz::RoutePermissionId::clone_into(&self, &mut T)
-pub fn vocab::authz::RoutePermissionId::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::authz::RoutePermissionId where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::authz::RoutePermissionId where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::RoutePermissionId where T: ?core::marker::Sized
-pub fn vocab::authz::RoutePermissionId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::RoutePermissionId where T: core::clone::Clone
-pub unsafe fn vocab::authz::RoutePermissionId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::RoutePermissionId
-pub fn vocab::authz::RoutePermissionId::from(T) -> T
 #[non_exhaustive] pub enum vocab::RowScope
 pub vocab::RowScope::All
 pub vocab::RowScope::Device
@@ -1970,28 +1024,6 @@ impl core::marker::Unpin for vocab::tenant::RowScope
 impl core::marker::UnsafeUnpin for vocab::tenant::RowScope
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowScope
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowScope
-impl<T, U> core::convert::Into<U> for vocab::tenant::RowScope where U: core::convert::From<T>
-pub fn vocab::tenant::RowScope::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::RowScope where U: core::convert::Into<T>
-pub type vocab::tenant::RowScope::Error = core::convert::Infallible
-pub fn vocab::tenant::RowScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::RowScope where U: core::convert::TryFrom<T>
-pub type vocab::tenant::RowScope::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::RowScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::RowScope where T: core::clone::Clone
-pub type vocab::tenant::RowScope::Owned = T
-pub fn vocab::tenant::RowScope::clone_into(&self, &mut T)
-pub fn vocab::tenant::RowScope::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::tenant::RowScope where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::RowScope::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::RowScope where T: ?core::marker::Sized
-pub fn vocab::tenant::RowScope::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::RowScope where T: ?core::marker::Sized
-pub fn vocab::tenant::RowScope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::RowScope where T: core::clone::Clone
-pub unsafe fn vocab::tenant::RowScope::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::from(T) -> T
 #[non_exhaustive] pub enum vocab::ScopedTenant
 pub vocab::ScopedTenant::Device
 pub vocab::ScopedTenant::SelfOnly
@@ -2014,28 +1046,6 @@ impl core::marker::Unpin for vocab::tenant::ScopedTenant
 impl core::marker::UnsafeUnpin for vocab::tenant::ScopedTenant
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::ScopedTenant
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::ScopedTenant
-impl<T, U> core::convert::Into<U> for vocab::tenant::ScopedTenant where U: core::convert::From<T>
-pub fn vocab::tenant::ScopedTenant::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::ScopedTenant where U: core::convert::Into<T>
-pub type vocab::tenant::ScopedTenant::Error = core::convert::Infallible
-pub fn vocab::tenant::ScopedTenant::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::ScopedTenant where U: core::convert::TryFrom<T>
-pub type vocab::tenant::ScopedTenant::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::ScopedTenant::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::ScopedTenant where T: core::clone::Clone
-pub type vocab::tenant::ScopedTenant::Owned = T
-pub fn vocab::tenant::ScopedTenant::clone_into(&self, &mut T)
-pub fn vocab::tenant::ScopedTenant::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::tenant::ScopedTenant where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::ScopedTenant::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::ScopedTenant where T: ?core::marker::Sized
-pub fn vocab::tenant::ScopedTenant::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::ScopedTenant where T: ?core::marker::Sized
-pub fn vocab::tenant::ScopedTenant::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::ScopedTenant where T: core::clone::Clone
-pub unsafe fn vocab::tenant::ScopedTenant::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::from(T) -> T
 #[non_exhaustive] pub enum vocab::TenantIdError
 pub vocab::TenantIdError::Empty
 pub vocab::TenantIdError::Format
@@ -2058,30 +1068,6 @@ impl core::marker::Unpin for vocab::tenant::TenantIdError
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
-impl<T, U> core::convert::Into<U> for vocab::tenant::TenantIdError where U: core::convert::From<T>
-pub fn vocab::tenant::TenantIdError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantIdError where U: core::convert::Into<T>
-pub type vocab::tenant::TenantIdError::Error = core::convert::Infallible
-pub fn vocab::tenant::TenantIdError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantIdError where U: core::convert::TryFrom<T>
-pub type vocab::tenant::TenantIdError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::TenantIdError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantIdError where T: core::clone::Clone
-pub type vocab::tenant::TenantIdError::Owned = T
-pub fn vocab::tenant::TenantIdError::clone_into(&self, &mut T)
-pub fn vocab::tenant::TenantIdError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::tenant::TenantIdError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::tenant::TenantIdError where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantIdError where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantIdError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::TenantIdError where T: core::clone::Clone
-pub unsafe fn vocab::tenant::TenantIdError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::from(T) -> T
 pub struct vocab::Action(_)
 impl vocab::authz::Action
 pub fn vocab::authz::Action::as_str(&self) -> &str
@@ -2101,28 +1087,6 @@ impl core::marker::Unpin for vocab::authz::Action
 impl core::marker::UnsafeUnpin for vocab::authz::Action
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Action
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Action
-impl<T, U> core::convert::Into<U> for vocab::authz::Action where U: core::convert::From<T>
-pub fn vocab::authz::Action::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::authz::Action where U: core::convert::Into<T>
-pub type vocab::authz::Action::Error = core::convert::Infallible
-pub fn vocab::authz::Action::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::authz::Action where U: core::convert::TryFrom<T>
-pub type vocab::authz::Action::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::authz::Action::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::authz::Action where T: core::clone::Clone
-pub type vocab::authz::Action::Owned = T
-pub fn vocab::authz::Action::clone_into(&self, &mut T)
-pub fn vocab::authz::Action::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::authz::Action where T: 'static + ?core::marker::Sized
-pub fn vocab::authz::Action::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::authz::Action where T: ?core::marker::Sized
-pub fn vocab::authz::Action::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::authz::Action where T: ?core::marker::Sized
-pub fn vocab::authz::Action::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::authz::Action where T: core::clone::Clone
-pub unsafe fn vocab::authz::Action::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::authz::Action
-pub fn vocab::authz::Action::from(T) -> T
 pub struct vocab::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
@@ -2146,28 +1110,6 @@ impl core::marker::Unpin for vocab::contract::binding::ContractBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ContractBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::ContractBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::ContractBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::ContractBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::ContractBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::ContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::ContractBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::ContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::ContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::ContractBinding where T: core::clone::Clone
-pub type vocab::contract::binding::ContractBinding::Owned = T
-pub fn vocab::contract::binding::ContractBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::ContractBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::ContractBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::ContractBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ContractBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::ContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ContractBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::ContractBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::ContractBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::ContractBinding
-pub fn vocab::contract::binding::ContractBinding::from(T) -> T
 pub struct vocab::ContractOwner(_)
 impl vocab::contract::owner::ContractOwner
 pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
@@ -2188,28 +1130,6 @@ impl core::marker::Unpin for vocab::contract::owner::ContractOwner
 impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::ContractOwner where U: core::convert::From<T>
-pub fn vocab::contract::owner::ContractOwner::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::ContractOwner where U: core::convert::Into<T>
-pub type vocab::contract::owner::ContractOwner::Error = core::convert::Infallible
-pub fn vocab::contract::owner::ContractOwner::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::ContractOwner where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::ContractOwner::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::ContractOwner::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::owner::ContractOwner where T: core::clone::Clone
-pub type vocab::contract::owner::ContractOwner::Owned = T
-pub fn vocab::contract::owner::ContractOwner::clone_into(&self, &mut T)
-pub fn vocab::contract::owner::ContractOwner::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::owner::ContractOwner where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::ContractOwner where T: ?core::marker::Sized
-pub fn vocab::contract::owner::ContractOwner::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::owner::ContractOwner where T: core::clone::Clone
-pub unsafe fn vocab::contract::owner::ContractOwner::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::from(T) -> T
 pub struct vocab::CoreError
 impl vocab::error::CoreError
 pub fn vocab::error::CoreError::internal_attrs(&self) -> &[vocab::error::InternalAttr]
@@ -2230,24 +1150,6 @@ impl core::marker::Unpin for vocab::error::CoreError
 impl core::marker::UnsafeUnpin for vocab::error::CoreError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::error::CoreError
 impl core::panic::unwind_safe::UnwindSafe for vocab::error::CoreError
-impl<T, U> core::convert::Into<U> for vocab::error::CoreError where U: core::convert::From<T>
-pub fn vocab::error::CoreError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::error::CoreError where U: core::convert::Into<T>
-pub type vocab::error::CoreError::Error = core::convert::Infallible
-pub fn vocab::error::CoreError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::error::CoreError where U: core::convert::TryFrom<T>
-pub type vocab::error::CoreError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::error::CoreError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for vocab::error::CoreError where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::error::CoreError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::error::CoreError where T: 'static + ?core::marker::Sized
-pub fn vocab::error::CoreError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::error::CoreError where T: ?core::marker::Sized
-pub fn vocab::error::CoreError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::error::CoreError where T: ?core::marker::Sized
-pub fn vocab::error::CoreError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::error::CoreError
-pub fn vocab::error::CoreError::from(T) -> T
 pub struct vocab::CrossTenantVisibility
 impl vocab::tenant::CrossTenantVisibility
 pub fn vocab::tenant::CrossTenantVisibility::authorize(vocab::tenant::CrossTenantCapability) -> Self
@@ -2258,22 +1160,6 @@ impl core::marker::Unpin for vocab::tenant::CrossTenantVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::CrossTenantVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::CrossTenantVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::CrossTenantVisibility
-impl<T, U> core::convert::Into<U> for vocab::tenant::CrossTenantVisibility where U: core::convert::From<T>
-pub fn vocab::tenant::CrossTenantVisibility::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::CrossTenantVisibility where U: core::convert::Into<T>
-pub type vocab::tenant::CrossTenantVisibility::Error = core::convert::Infallible
-pub fn vocab::tenant::CrossTenantVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::CrossTenantVisibility where U: core::convert::TryFrom<T>
-pub type vocab::tenant::CrossTenantVisibility::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::CrossTenantVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for vocab::tenant::CrossTenantVisibility where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantVisibility::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::CrossTenantVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantVisibility::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::CrossTenantVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::CrossTenantVisibility::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::CrossTenantVisibility
-pub fn vocab::tenant::CrossTenantVisibility::from(T) -> T
 pub struct vocab::Cursor(_)
 impl vocab::query::Cursor
 pub fn vocab::query::Cursor::as_str(&self) -> &str
@@ -2293,28 +1179,6 @@ impl core::marker::Unpin for vocab::query::Cursor
 impl core::marker::UnsafeUnpin for vocab::query::Cursor
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Cursor
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::Cursor
-impl<T, U> core::convert::Into<U> for vocab::query::Cursor where U: core::convert::From<T>
-pub fn vocab::query::Cursor::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::Cursor where U: core::convert::Into<T>
-pub type vocab::query::Cursor::Error = core::convert::Infallible
-pub fn vocab::query::Cursor::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::Cursor where U: core::convert::TryFrom<T>
-pub type vocab::query::Cursor::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::Cursor::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::query::Cursor where T: core::clone::Clone
-pub type vocab::query::Cursor::Owned = T
-pub fn vocab::query::Cursor::clone_into(&self, &mut T)
-pub fn vocab::query::Cursor::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::query::Cursor where T: 'static + ?core::marker::Sized
-pub fn vocab::query::Cursor::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::Cursor where T: ?core::marker::Sized
-pub fn vocab::query::Cursor::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::Cursor where T: ?core::marker::Sized
-pub fn vocab::query::Cursor::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::query::Cursor where T: core::clone::Clone
-pub unsafe fn vocab::query::Cursor::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::query::Cursor
-pub fn vocab::query::Cursor::from(T) -> T
 pub struct vocab::DomainName(_)
 impl vocab::contract::owner::DomainName
 pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
@@ -2334,28 +1198,6 @@ impl core::marker::Unpin for vocab::contract::owner::DomainName
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainName
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainName
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainName
-impl<T, U> core::convert::Into<U> for vocab::contract::owner::DomainName where U: core::convert::From<T>
-pub fn vocab::contract::owner::DomainName::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::owner::DomainName where U: core::convert::Into<T>
-pub type vocab::contract::owner::DomainName::Error = core::convert::Infallible
-pub fn vocab::contract::owner::DomainName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::owner::DomainName where U: core::convert::TryFrom<T>
-pub type vocab::contract::owner::DomainName::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::owner::DomainName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::owner::DomainName where T: core::clone::Clone
-pub type vocab::contract::owner::DomainName::Owned = T
-pub fn vocab::contract::owner::DomainName::clone_into(&self, &mut T)
-pub fn vocab::contract::owner::DomainName::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::owner::DomainName where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::owner::DomainName::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainName::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::owner::DomainName where T: ?core::marker::Sized
-pub fn vocab::contract::owner::DomainName::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::owner::DomainName where T: core::clone::Clone
-pub unsafe fn vocab::contract::owner::DomainName::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::owner::DomainName
-pub fn vocab::contract::owner::DomainName::from(T) -> T
 pub struct vocab::Epoch(_)
 impl vocab::epoch::Epoch
 pub fn vocab::epoch::Epoch::get(self) -> u64
@@ -2383,28 +1225,6 @@ impl core::marker::Unpin for vocab::epoch::Epoch
 impl core::marker::UnsafeUnpin for vocab::epoch::Epoch
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::epoch::Epoch
 impl core::panic::unwind_safe::UnwindSafe for vocab::epoch::Epoch
-impl<T, U> core::convert::Into<U> for vocab::epoch::Epoch where U: core::convert::From<T>
-pub fn vocab::epoch::Epoch::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::epoch::Epoch where U: core::convert::Into<T>
-pub type vocab::epoch::Epoch::Error = core::convert::Infallible
-pub fn vocab::epoch::Epoch::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::epoch::Epoch where U: core::convert::TryFrom<T>
-pub type vocab::epoch::Epoch::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::epoch::Epoch::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::epoch::Epoch where T: core::clone::Clone
-pub type vocab::epoch::Epoch::Owned = T
-pub fn vocab::epoch::Epoch::clone_into(&self, &mut T)
-pub fn vocab::epoch::Epoch::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::epoch::Epoch where T: 'static + ?core::marker::Sized
-pub fn vocab::epoch::Epoch::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::epoch::Epoch where T: ?core::marker::Sized
-pub fn vocab::epoch::Epoch::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::epoch::Epoch where T: ?core::marker::Sized
-pub fn vocab::epoch::Epoch::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::epoch::Epoch where T: core::clone::Clone
-pub unsafe fn vocab::epoch::Epoch::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::epoch::Epoch
-pub fn vocab::epoch::Epoch::from(T) -> T
 pub struct vocab::Limit(_)
 impl vocab::query::Limit
 pub fn vocab::query::Limit::get(&self) -> u16
@@ -2425,28 +1245,6 @@ impl core::marker::Unpin for vocab::query::Limit
 impl core::marker::UnsafeUnpin for vocab::query::Limit
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::Limit
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::Limit
-impl<T, U> core::convert::Into<U> for vocab::query::Limit where U: core::convert::From<T>
-pub fn vocab::query::Limit::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::query::Limit where U: core::convert::Into<T>
-pub type vocab::query::Limit::Error = core::convert::Infallible
-pub fn vocab::query::Limit::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::query::Limit where U: core::convert::TryFrom<T>
-pub type vocab::query::Limit::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::query::Limit::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::query::Limit where T: core::clone::Clone
-pub type vocab::query::Limit::Owned = T
-pub fn vocab::query::Limit::clone_into(&self, &mut T)
-pub fn vocab::query::Limit::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::query::Limit where T: 'static + ?core::marker::Sized
-pub fn vocab::query::Limit::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::query::Limit where T: ?core::marker::Sized
-pub fn vocab::query::Limit::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::query::Limit where T: ?core::marker::Sized
-pub fn vocab::query::Limit::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::query::Limit where T: core::clone::Clone
-pub unsafe fn vocab::query::Limit::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::query::Limit
-pub fn vocab::query::Limit::from(T) -> T
 pub struct vocab::ProjectionInputBinding
 impl vocab::contract::binding::ProjectionInputBinding
 pub const fn vocab::contract::binding::ProjectionInputBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -2473,28 +1271,6 @@ impl core::marker::Unpin for vocab::contract::binding::ProjectionInputBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::ProjectionInputBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ProjectionInputBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ProjectionInputBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::ProjectionInputBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::ProjectionInputBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::ProjectionInputBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::ProjectionInputBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::ProjectionInputBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::ProjectionInputBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::ProjectionInputBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::ProjectionInputBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::ProjectionInputBinding where T: core::clone::Clone
-pub type vocab::contract::binding::ProjectionInputBinding::Owned = T
-pub fn vocab::contract::binding::ProjectionInputBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::ProjectionInputBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::ProjectionInputBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::ProjectionInputBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::ProjectionInputBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ProjectionInputBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::ProjectionInputBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::ProjectionInputBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::ProjectionInputBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::ProjectionInputBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::ProjectionInputBinding
-pub fn vocab::contract::binding::ProjectionInputBinding::from(T) -> T
 pub struct vocab::RowVisibility
 impl vocab::tenant::RowVisibility
 pub fn vocab::tenant::RowVisibility::new(vocab::tenant::ScopedTenant, vocab::tenant::TenantId) -> Self
@@ -2508,22 +1284,6 @@ impl core::marker::Unpin for vocab::tenant::RowVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowVisibility
-impl<T, U> core::convert::Into<U> for vocab::tenant::RowVisibility where U: core::convert::From<T>
-pub fn vocab::tenant::RowVisibility::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::RowVisibility where U: core::convert::Into<T>
-pub type vocab::tenant::RowVisibility::Error = core::convert::Infallible
-pub fn vocab::tenant::RowVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::RowVisibility where U: core::convert::TryFrom<T>
-pub type vocab::tenant::RowVisibility::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::RowVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for vocab::tenant::RowVisibility where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::RowVisibility::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::RowVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::RowVisibility::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::RowVisibility where T: ?core::marker::Sized
-pub fn vocab::tenant::RowVisibility::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for vocab::tenant::RowVisibility
-pub fn vocab::tenant::RowVisibility::from(T) -> T
 pub struct vocab::SagaContractBinding
 impl vocab::contract::binding::SagaContractBinding
 pub const fn vocab::contract::binding::SagaContractBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -2550,28 +1310,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaContractBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaContractBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaContractBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaContractBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::SagaContractBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::SagaContractBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::SagaContractBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaContractBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::SagaContractBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::SagaContractBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
-pub type vocab::contract::binding::SagaContractBinding::Owned = T
-pub fn vocab::contract::binding::SagaContractBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::SagaContractBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::SagaContractBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::SagaContractBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaContractBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaContractBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaContractBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaContractBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::SagaContractBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::SagaContractBinding
-pub fn vocab::contract::binding::SagaContractBinding::from(T) -> T
 pub struct vocab::SagaRuntimePolicySpec
 impl vocab::contract::binding::SagaRuntimePolicySpec
 pub const fn vocab::contract::binding::SagaRuntimePolicySpec::from_millis(u64, u64) -> Self
@@ -2593,28 +1331,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaRuntimePolicySpec
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRuntimePolicySpec
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRuntimePolicySpec
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::From<T>
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::Into<T>
-pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = core::convert::Infallible
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaRuntimePolicySpec where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::SagaRuntimePolicySpec::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
-pub type vocab::contract::binding::SagaRuntimePolicySpec::Owned = T
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::SagaRuntimePolicySpec where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaRuntimePolicySpec where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaRuntimePolicySpec where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::SagaRuntimePolicySpec::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::SagaRuntimePolicySpec
-pub fn vocab::contract::binding::SagaRuntimePolicySpec::from(T) -> T
 pub struct vocab::SagaStepBinding
 impl vocab::contract::binding::SagaStepBinding
 pub const fn vocab::contract::binding::SagaStepBinding::contract(&self) -> vocab::contract::binding::ContractBinding
@@ -2641,28 +1357,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
-impl<T, U> core::convert::Into<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::From<T>
-pub fn vocab::contract::binding::SagaStepBinding::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::Into<T>
-pub type vocab::contract::binding::SagaStepBinding::Error = core::convert::Infallible
-pub fn vocab::contract::binding::SagaStepBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::contract::binding::SagaStepBinding where U: core::convert::TryFrom<T>
-pub type vocab::contract::binding::SagaStepBinding::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::contract::binding::SagaStepBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
-pub type vocab::contract::binding::SagaStepBinding::Owned = T
-pub fn vocab::contract::binding::SagaStepBinding::clone_into(&self, &mut T)
-pub fn vocab::contract::binding::SagaStepBinding::to_owned(&self) -> T
-impl<T> core::any::Any for vocab::contract::binding::SagaStepBinding where T: 'static + ?core::marker::Sized
-pub fn vocab::contract::binding::SagaStepBinding::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaStepBinding::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::contract::binding::SagaStepBinding where T: ?core::marker::Sized
-pub fn vocab::contract::binding::SagaStepBinding::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::contract::binding::SagaStepBinding where T: core::clone::Clone
-pub unsafe fn vocab::contract::binding::SagaStepBinding::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::contract::binding::SagaStepBinding
-pub fn vocab::contract::binding::SagaStepBinding::from(T) -> T
 pub struct vocab::TenantId(_)
 impl vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
@@ -2687,30 +1381,6 @@ impl core::marker::Unpin for vocab::tenant::TenantId
 impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
-impl<T, U> core::convert::Into<U> for vocab::tenant::TenantId where U: core::convert::From<T>
-pub fn vocab::tenant::TenantId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for vocab::tenant::TenantId where U: core::convert::Into<T>
-pub type vocab::tenant::TenantId::Error = core::convert::Infallible
-pub fn vocab::tenant::TenantId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for vocab::tenant::TenantId where U: core::convert::TryFrom<T>
-pub type vocab::tenant::TenantId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn vocab::tenant::TenantId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for vocab::tenant::TenantId where T: core::clone::Clone
-pub type vocab::tenant::TenantId::Owned = T
-pub fn vocab::tenant::TenantId::clone_into(&self, &mut T)
-pub fn vocab::tenant::TenantId::to_owned(&self) -> T
-impl<T> alloc::string::ToString for vocab::tenant::TenantId where T: core::fmt::Display + ?core::marker::Sized
-pub fn vocab::tenant::TenantId::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for vocab::tenant::TenantId where T: 'static + ?core::marker::Sized
-pub fn vocab::tenant::TenantId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for vocab::tenant::TenantId where T: ?core::marker::Sized
-pub fn vocab::tenant::TenantId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for vocab::tenant::TenantId where T: core::clone::Clone
-pub unsafe fn vocab::tenant::TenantId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::from(T) -> T
 pub const vocab::AUDIT_ACTOR_FIELD_OBLIGATION: &str
 pub const vocab::AUDIT_FIELD_ACTOR_PERMISSION: vocab::authz::RoutePermissionId
 pub const vocab::AUDIT_FIELD_RESOURCE_ID_PERMISSION: vocab::authz::RoutePermissionId

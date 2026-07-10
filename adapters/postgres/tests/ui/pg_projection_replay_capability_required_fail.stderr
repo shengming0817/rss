@@ -1,0 +1,15 @@
+error[E0061]: this method takes 3 arguments but 1 argument was supplied
+ --> tests/ui/pg_projection_replay_capability_required_fail.rs:7:18
+  |
+7 |     let _ = deps.projection_replay_stores(protector);
+  |                  ^^^^^^^^^^^^^^^^^^^^^^^^----------- two arguments of type `&authn::ProjectionMaintenanceReceipt` and `&eventexec::projection::ProjectionSelector` are missing
+  |
+note: method defined here
+ --> src/bundle.rs
+  |
+  |     pub fn projection_replay_stores<'a>(
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the arguments
+  |
+7 |     let _ = deps.projection_replay_stores(/* &authn::ProjectionMaintenanceReceipt */, /* &eventexec::projection::ProjectionSelector */, protector);
+  |                                           +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

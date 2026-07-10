@@ -14,7 +14,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use consistency::SeenState;
 use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use diport::{
-    AckAction, AckableSubscriber, Acker, DynPublisher, MessageId, PublishRequest, Publisher, Topic,
+    AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeSubjectId, MessageId, OpaqueActorId,
+    OutboxActor, PublishRequest, Publisher, Topic,
 };
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
@@ -333,6 +334,8 @@ async fn rabbit_unsettled_redelivers(
     Ok(())
 }
 
+#[allow(clippy::cognitive_complexity)]
+// reason: fault-matrix journey 顺序表达三次真实 broker 交付/结算状态；拆分会隐藏同一连接生命周期。
 async fn outbox_publish_before_settle_redelivers(
     pg: &PgHarness,
     rabbit: &RabbitHarness,
@@ -741,14 +744,22 @@ fn run_reconcile_dispatch_before_result_record<'a>(
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let event_id = scope.name("reconcile-dispatch-v1");
+        let command = || {
+            eventexec::ReviewedCommand::from_spec(generated::command::_seed_v1::reconcile_command(
+                generated::command::_seed_v1::SeedDoThingRequest {
+                    amount: 1,
+                    target_id: format!("resource-{event_id}"),
+                },
+                scope.tenant,
+                EnvelopeSubjectId::from_opaque(format!("resource-{event_id}"))?,
+                OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix")?),
+                event_id.clone(),
+            ))
+            .map_err(anyhow::Error::from)
+        };
         let count = pg
             .harness
-            .reconcile_dispatch_key_stable(
-                scope.tenant,
-                &event_id,
-                generated::event::identity_v1::role_revoked::TOPIC,
-                generated::event::identity_v1::role_revoked::CONTRACT,
-            )
+            .reconcile_dispatch_key_stable(scope.tenant, &event_id, [command()?, command()?])
             .await
             .with_context(|| format!("{} stable dispatch key invariant failed", case.id()))?;
         if count != 1 {

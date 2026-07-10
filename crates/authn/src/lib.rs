@@ -19,7 +19,7 @@
 //! `Principal::row_visibility` 的 `SuperAdmin`（裸同步路径）/ `Service` / `Anonymous` 分支返回
 //! `Err(runctx::MissingCtx)`，强制调用方 deny；字段私有，外部无法绕过 funnel 伪造特权主体。
 //! 跨租户 All-scope 唯一经 [`Principal::audited_cross_tenant_visibility`] 派生——派生与持久 audit ledger
-//! INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— All-scope 派生与持久 audit ledger 写入同址；
+//! INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "audit-before-mint", synthetic_red = "audited_cross_tenant_tests::audited_fail_closed_when_audit_fails", anti_vacuity = "audited_cross_tenant_tests::audited_ok_writes_audit_then_mints_all_scope" }—— All-scope 派生与持久 audit ledger 写入同址；
 //! 无审计无 All-scope，audit 写失败 fail-closed。
 
 #![forbid(unsafe_code)]
@@ -56,6 +56,170 @@ const KIND_SUPER_ADMIN: &str = "superAdmin";
 // reason: service 主体（HS256 service-token）的 kind 串——本轮仅 mint 侧 `kind_claim` 用；与上列同址，
 // 保 kind claim 名单源（验签 service-token 路径经 `from_verified_service_token` 固定 Service、不读本串）。
 const KIND_SERVICE: &str = "service";
+
+/// Closed projection maintenance action set used by grants and sealed receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionMaintenanceAction {
+    /// Read projection pointer and replay status.
+    Status,
+    /// Replay one generated projection target.
+    Replay,
+    /// Promote one generated projection version.
+    Swap,
+}
+
+/// One configured service-principal grant for an exact projection maintenance target.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProjectionMaintenanceGrant {
+    subject: Box<str>,
+    action: ProjectionMaintenanceAction,
+    tenant: TenantId,
+    projection: Box<str>,
+}
+
+impl ProjectionMaintenanceGrant {
+    /// Build an exact grant. Empty subjects and projection identifiers fail closed.
+    pub fn new(
+        subject: impl Into<String>,
+        action: ProjectionMaintenanceAction,
+        tenant: TenantId,
+        projection: impl Into<String>,
+    ) -> Result<Self, ProjectionMaintenanceGrantError> {
+        let subject = subject.into();
+        let projection = projection.into();
+        if subject.trim().is_empty() {
+            return Err(ProjectionMaintenanceGrantError::EmptySubject);
+        }
+        if projection.trim().is_empty() {
+            return Err(ProjectionMaintenanceGrantError::EmptyProjection);
+        }
+        Ok(Self {
+            subject: subject.into_boxed_str(),
+            action,
+            tenant,
+            projection: projection.into_boxed_str(),
+        })
+    }
+}
+
+/// Configured projection maintenance grants. This is the sole public receipt mint funnel.
+pub struct ProjectionMaintenanceGrantSet {
+    grants: Vec<ProjectionMaintenanceGrant>,
+}
+
+impl ProjectionMaintenanceGrantSet {
+    /// Build a non-empty grant set.
+    pub fn new(
+        grants: Vec<ProjectionMaintenanceGrant>,
+    ) -> Result<Self, ProjectionMaintenanceGrantError> {
+        if grants.is_empty() {
+            return Err(ProjectionMaintenanceGrantError::EmptySet);
+        }
+        Ok(Self { grants })
+    }
+
+    /// Authorize an already verified service principal for one exact action and target.
+    pub fn authorize(
+        &self,
+        principal: &Principal,
+        action: ProjectionMaintenanceAction,
+        tenant: TenantId,
+        projection: &str,
+    ) -> Result<ProjectionMaintenanceReceipt, ProjectionMaintenanceGrantError> {
+        if principal.kind() != PrincipalKind::Service {
+            return Err(ProjectionMaintenanceGrantError::Forbidden);
+        }
+        let allowed = self.grants.iter().any(|grant| {
+            principal.matches_subject(&grant.subject)
+                && grant.action == action
+                && grant.tenant == tenant
+                && grant.projection.as_ref() == projection
+        });
+        if !allowed {
+            return Err(ProjectionMaintenanceGrantError::Forbidden);
+        }
+        Ok(ProjectionMaintenanceReceipt::seal(
+            principal.audit_subject(),
+            action,
+            tenant,
+            projection,
+        ))
+    }
+}
+
+/// Authn-owned, target-bound proof for one authorized projection maintenance operation.
+///
+/// Private fields and a private mint make forgery impossible outside authn. The type deliberately
+/// does not implement `Clone`, so a receipt cannot be widened into an ambient reusable capability.
+/// INVARIANT: AUTHN-PROJECTION-RECEIPT-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private target-bound receipt and sealed mint funnel", facet = "sealed-receipt" }.
+pub struct ProjectionMaintenanceReceipt {
+    operator_subject: Box<str>,
+    action: ProjectionMaintenanceAction,
+    tenant: TenantId,
+    projection: Box<str>,
+    _seal: (),
+}
+
+impl ProjectionMaintenanceReceipt {
+    fn seal(
+        operator_subject: &str,
+        action: ProjectionMaintenanceAction,
+        tenant: TenantId,
+        projection: &str,
+    ) -> Self {
+        Self {
+            operator_subject: operator_subject.into(),
+            action,
+            tenant,
+            projection: projection.into(),
+            _seal: (),
+        }
+    }
+
+    /// Audit subject of the verified service principal that received this proof.
+    pub fn operator_subject(&self) -> &str {
+        &self.operator_subject
+    }
+
+    /// Return whether this receipt authorizes exactly the supplied action and target.
+    pub fn authorizes(
+        &self,
+        action: ProjectionMaintenanceAction,
+        tenant: TenantId,
+        projection: &str,
+    ) -> bool {
+        self.action == action && self.tenant == tenant && self.projection.as_ref() == projection
+    }
+}
+
+impl std::fmt::Debug for ProjectionMaintenanceReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectionMaintenanceReceipt")
+            .field("operator_subject", &"<redacted>")
+            .field("action", &self.action)
+            .field("tenant", &self.tenant)
+            .field("projection", &self.projection)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Projection grant validation and authorization failure.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ProjectionMaintenanceGrantError {
+    /// A grant subject was empty.
+    #[error("projection maintenance grant subject must be non-empty")]
+    EmptySubject,
+    /// A grant projection identifier was empty.
+    #[error("projection maintenance grant projection must be non-empty")]
+    EmptyProjection,
+    /// At least one explicit grant is required.
+    #[error("projection maintenance grant set must be non-empty")]
+    EmptySet,
+    /// The verified principal did not match the exact action and target.
+    #[error("projection maintenance operation is not authorized")]
+    Forbidden,
+}
 
 // 主体类别 `PrincipalKind` 单一源已上移基础层 `vocab`（crates/vocab/src/principal.rs）：authn `Principal.kind` /
 // httpserve `Authenticated` 证据 / audit `actor_kind` 共用同一枚举，杜绝双源漂移。本 crate 经顶部
@@ -318,7 +482,7 @@ pub fn app_ctx(principal: std::sync::Arc<Principal>) -> Option<runctx::AppCtx> {
 }
 
 // ---------------------------------------------------------------------------
-// 跨租户 All-scope 审计漏斗（同址强制审计，INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）
+// 跨租户 All-scope 审计漏斗（同址强制审计，INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "audit-before-mint", synthetic_red = "audited_cross_tenant_tests::audited_fail_closed_when_audit_fails", anti_vacuity = "audited_cross_tenant_tests::audited_ok_writes_audit_then_mints_all_scope" }）
 // ---------------------------------------------------------------------------
 
 pub use crosstenant::{
@@ -327,7 +491,7 @@ pub use crosstenant::{
 
 /// 跨租户 All-scope 派生与持久审计「同址」漏斗。
 ///
-/// # 类型层强制（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）
+/// # 类型层强制（INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private target-bound receipt and sealed mint funnel", facet = "sealed-receipt" }）
 ///
 /// All-scope `RowVisibility` 只能由本模块 [`AuditedCrossTenantVisibility`] receipt 持有；receipt 的
 /// `seal` 为**模块私有**，唯一 mint 点是 [`Principal::audited_cross_tenant_visibility`]——它在
@@ -438,7 +602,7 @@ mod crosstenant {
     /// public opaque struct + **模块私有** `seal`：外部 crate / authn 模块外均不可 mint，唯一 mint 点是
     /// 本模块 [`Principal::audited_cross_tenant_visibility`]（对应 target 的 record 成功后）。不 derive
     /// `Clone`（一次性证据）；私有字段保证 target 与 visibility 不能被拆开后重组。
-    /// INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private target-bound receipt and sealed mint funnel" }
+    /// INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private target-bound receipt and sealed mint funnel", facet = "sealed-receipt" }
     pub struct AuditedCrossTenantVisibility {
         visibility: RowVisibility,
         target: vocab::TenantId,
@@ -469,7 +633,7 @@ mod crosstenant {
 
     impl Principal {
         /// super-admin 跨租户 All-scope 派生的【唯一】sanctioned 入口：先同址写持久 audit，record 成功
-        /// 才签发 All-scope（无审计无 All-scope）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+        /// 才签发 All-scope（无审计无 All-scope）。INVARIANT: TENANCY-CROSSTENANT-AUDIT-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "audit-before-mint", synthetic_red = "audited_cross_tenant_tests::audited_fail_closed_when_audit_fails", anti_vacuity = "audited_cross_tenant_tests::audited_ok_writes_audit_then_mints_all_scope" }
         ///
         /// fail-closed：`record` 失败 → `Err(CrossTenantError::Audit)`，`?` 短路在 `seal` 之前，绝不签发；
         /// 非 super-admin → `Err(CrossTenantError::NotSuperAdmin)`（不静默降级）。审计「先于」签发由 `?`-链
@@ -950,6 +1114,106 @@ mod principal_facet_tests {
             app_ctx(super_admin).is_none(),
             "superAdmin 跨租户 ⇒ app_ctx None"
         );
+    }
+}
+
+#[cfg(test)]
+mod projection_maintenance_receipt_tests {
+    use super::*;
+
+    fn tenant(raw: &str) -> TenantId {
+        TenantId::parse(raw).unwrap_or_else(|_| unreachable!("static tenant fixture is valid"))
+    }
+
+    fn service(subject: &str) -> Principal {
+        Principal::for_test(PrincipalKind::Service, subject, None)
+    }
+
+    #[test]
+    fn receipt_requires_exact_verified_service_action_tenant_and_projection() {
+        let target_tenant = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        let other_tenant = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d480");
+        let grants = ProjectionMaintenanceGrantSet::new(vec![
+            ProjectionMaintenanceGrant::new(
+                "projection-operator",
+                ProjectionMaintenanceAction::Replay,
+                target_tenant,
+                "audit.session-projection",
+            )
+            .unwrap_or_else(|_| unreachable!("static grant fixture is valid")),
+        ])
+        .unwrap_or_else(|_| unreachable!("static grant set is non-empty"));
+
+        let receipt = grants
+            .authorize(
+                &service("projection-operator"),
+                ProjectionMaintenanceAction::Replay,
+                target_tenant,
+                "audit.session-projection",
+            )
+            .unwrap_or_else(|_| unreachable!("exact grant must authorize"));
+        assert!(receipt.authorizes(
+            ProjectionMaintenanceAction::Replay,
+            target_tenant,
+            "audit.session-projection"
+        ));
+        assert!(!receipt.authorizes(
+            ProjectionMaintenanceAction::Status,
+            target_tenant,
+            "audit.session-projection"
+        ));
+        assert!(!receipt.authorizes(
+            ProjectionMaintenanceAction::Replay,
+            other_tenant,
+            "audit.session-projection"
+        ));
+        assert!(matches!(
+            grants.authorize(
+                &service("another-service"),
+                ProjectionMaintenanceAction::Replay,
+                target_tenant,
+                "audit.session-projection"
+            ),
+            Err(ProjectionMaintenanceGrantError::Forbidden)
+        ));
+    }
+
+    #[test]
+    fn grant_inputs_fail_closed_and_receipt_debug_redacts_subject() {
+        let target_tenant = tenant("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        assert!(matches!(
+            ProjectionMaintenanceGrant::new(
+                " ",
+                ProjectionMaintenanceAction::Status,
+                target_tenant,
+                "audit.session-projection"
+            ),
+            Err(ProjectionMaintenanceGrantError::EmptySubject)
+        ));
+        assert!(matches!(
+            ProjectionMaintenanceGrantSet::new(Vec::new()),
+            Err(ProjectionMaintenanceGrantError::EmptySet)
+        ));
+
+        let grants = ProjectionMaintenanceGrantSet::new(vec![
+            ProjectionMaintenanceGrant::new(
+                "secret-operator",
+                ProjectionMaintenanceAction::Status,
+                target_tenant,
+                "audit.session-projection",
+            )
+            .unwrap_or_else(|_| unreachable!("static grant fixture is valid")),
+        ])
+        .unwrap_or_else(|_| unreachable!("static grant set is non-empty"));
+        let receipt = grants
+            .authorize(
+                &service("secret-operator"),
+                ProjectionMaintenanceAction::Status,
+                target_tenant,
+                "audit.session-projection",
+            )
+            .unwrap_or_else(|_| unreachable!("exact grant must authorize"));
+        assert!(!format!("{receipt:?}").contains("secret-operator"));
     }
 }
 

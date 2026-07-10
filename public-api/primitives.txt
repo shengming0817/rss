@@ -14,24 +14,6 @@ impl core::marker::Unpin for primitives::authplan::AuthPlanError
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthPlanError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthPlanError
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthPlanError
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthPlanError where U: core::convert::From<T>
-pub fn primitives::authplan::AuthPlanError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthPlanError where U: core::convert::Into<T>
-pub type primitives::authplan::AuthPlanError::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthPlanError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthPlanError where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthPlanError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthPlanError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for primitives::authplan::AuthPlanError where T: core::fmt::Display + ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for primitives::authplan::AuthPlanError where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthPlanError where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthPlanError where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for primitives::authplan::AuthPlanError
-pub fn primitives::authplan::AuthPlanError::from(T) -> T
 #[non_exhaustive] pub enum primitives::authplan::AuthRequirement
 pub primitives::authplan::AuthRequirement::Allow
 pub primitives::authplan::AuthRequirement::Deny
@@ -52,28 +34,6 @@ impl core::marker::Unpin for primitives::authplan::AuthRequirement
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthRequirement
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthRequirement where U: core::convert::From<T>
-pub fn primitives::authplan::AuthRequirement::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthRequirement where U: core::convert::Into<T>
-pub type primitives::authplan::AuthRequirement::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthRequirement::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthRequirement where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthRequirement::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthRequirement::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::AuthRequirement where T: core::clone::Clone
-pub type primitives::authplan::AuthRequirement::Owned = T
-pub fn primitives::authplan::AuthRequirement::clone_into(&self, &mut T)
-pub fn primitives::authplan::AuthRequirement::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::AuthRequirement where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthRequirement::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthRequirement where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthRequirement::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthRequirement where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthRequirement::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::AuthRequirement where T: core::clone::Clone
-pub unsafe fn primitives::authplan::AuthRequirement::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::AuthRequirement
-pub fn primitives::authplan::AuthRequirement::from(T) -> T
 #[non_exhaustive] pub enum primitives::authplan::AuthScheme
 pub primitives::authplan::AuthScheme::Jwt
 pub primitives::authplan::AuthScheme::JwtFromAssembly
@@ -96,28 +56,6 @@ impl core::marker::Unpin for primitives::authplan::AuthScheme
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthScheme
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthScheme
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthScheme
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthScheme where U: core::convert::From<T>
-pub fn primitives::authplan::AuthScheme::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthScheme where U: core::convert::Into<T>
-pub type primitives::authplan::AuthScheme::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthScheme::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthScheme where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthScheme::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthScheme::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::AuthScheme where T: core::clone::Clone
-pub type primitives::authplan::AuthScheme::Owned = T
-pub fn primitives::authplan::AuthScheme::clone_into(&self, &mut T)
-pub fn primitives::authplan::AuthScheme::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::AuthScheme where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthScheme::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthScheme::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthScheme::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::AuthScheme where T: core::clone::Clone
-pub unsafe fn primitives::authplan::AuthScheme::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::AuthScheme
-pub fn primitives::authplan::AuthScheme::from(T) -> T
 #[non_exhaustive] pub enum primitives::authplan::ListenerKind
 pub primitives::authplan::ListenerKind::Admin
 pub primitives::authplan::ListenerKind::Health
@@ -139,28 +77,6 @@ impl core::marker::Unpin for primitives::authplan::ListenerKind
 impl core::marker::UnsafeUnpin for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::ListenerKind
-impl<T, U> core::convert::Into<U> for primitives::authplan::ListenerKind where U: core::convert::From<T>
-pub fn primitives::authplan::ListenerKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::ListenerKind where U: core::convert::Into<T>
-pub type primitives::authplan::ListenerKind::Error = core::convert::Infallible
-pub fn primitives::authplan::ListenerKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::ListenerKind where U: core::convert::TryFrom<T>
-pub type primitives::authplan::ListenerKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::ListenerKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::ListenerKind where T: core::clone::Clone
-pub type primitives::authplan::ListenerKind::Owned = T
-pub fn primitives::authplan::ListenerKind::clone_into(&self, &mut T)
-pub fn primitives::authplan::ListenerKind::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::ListenerKind where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::ListenerKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::ListenerKind where T: ?core::marker::Sized
-pub fn primitives::authplan::ListenerKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::ListenerKind where T: ?core::marker::Sized
-pub fn primitives::authplan::ListenerKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::ListenerKind where T: core::clone::Clone
-pub unsafe fn primitives::authplan::ListenerKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::ListenerKind
-pub fn primitives::authplan::ListenerKind::from(T) -> T
 #[non_exhaustive] pub enum primitives::authplan::RequiredScheme
 pub primitives::authplan::RequiredScheme::Jwt
 pub primitives::authplan::RequiredScheme::JwtFromAssembly
@@ -182,28 +98,6 @@ impl core::marker::Unpin for primitives::authplan::RequiredScheme
 impl core::marker::UnsafeUnpin for primitives::authplan::RequiredScheme
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::RequiredScheme
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::RequiredScheme
-impl<T, U> core::convert::Into<U> for primitives::authplan::RequiredScheme where U: core::convert::From<T>
-pub fn primitives::authplan::RequiredScheme::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::RequiredScheme where U: core::convert::Into<T>
-pub type primitives::authplan::RequiredScheme::Error = core::convert::Infallible
-pub fn primitives::authplan::RequiredScheme::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::RequiredScheme where U: core::convert::TryFrom<T>
-pub type primitives::authplan::RequiredScheme::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::RequiredScheme::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::RequiredScheme where T: core::clone::Clone
-pub type primitives::authplan::RequiredScheme::Owned = T
-pub fn primitives::authplan::RequiredScheme::clone_into(&self, &mut T)
-pub fn primitives::authplan::RequiredScheme::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::RequiredScheme where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::RequiredScheme::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::RequiredScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::RequiredScheme::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::RequiredScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::RequiredScheme::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::RequiredScheme where T: core::clone::Clone
-pub unsafe fn primitives::authplan::RequiredScheme::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::RequiredScheme
-pub fn primitives::authplan::RequiredScheme::from(T) -> T
 #[non_exhaustive] pub enum primitives::authplan::RouteAuthOptOut
 pub primitives::authplan::RouteAuthOptOut::PasswordResetExempt
 pub primitives::authplan::RouteAuthOptOut::Public
@@ -223,28 +117,6 @@ impl core::marker::Unpin for primitives::authplan::RouteAuthOptOut
 impl core::marker::UnsafeUnpin for primitives::authplan::RouteAuthOptOut
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::RouteAuthOptOut
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::RouteAuthOptOut
-impl<T, U> core::convert::Into<U> for primitives::authplan::RouteAuthOptOut where U: core::convert::From<T>
-pub fn primitives::authplan::RouteAuthOptOut::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::RouteAuthOptOut where U: core::convert::Into<T>
-pub type primitives::authplan::RouteAuthOptOut::Error = core::convert::Infallible
-pub fn primitives::authplan::RouteAuthOptOut::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::RouteAuthOptOut where U: core::convert::TryFrom<T>
-pub type primitives::authplan::RouteAuthOptOut::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::RouteAuthOptOut::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::RouteAuthOptOut where T: core::clone::Clone
-pub type primitives::authplan::RouteAuthOptOut::Owned = T
-pub fn primitives::authplan::RouteAuthOptOut::clone_into(&self, &mut T)
-pub fn primitives::authplan::RouteAuthOptOut::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::RouteAuthOptOut where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::RouteAuthOptOut::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::RouteAuthOptOut where T: ?core::marker::Sized
-pub fn primitives::authplan::RouteAuthOptOut::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::RouteAuthOptOut where T: ?core::marker::Sized
-pub fn primitives::authplan::RouteAuthOptOut::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::RouteAuthOptOut where T: core::clone::Clone
-pub unsafe fn primitives::authplan::RouteAuthOptOut::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::RouteAuthOptOut
-pub fn primitives::authplan::RouteAuthOptOut::from(T) -> T
 pub struct primitives::authplan::AuthPlan
 impl primitives::authplan::AuthPlan
 pub fn primitives::authplan::AuthPlan::listener(self) -> primitives::authplan::ListenerKind
@@ -267,28 +139,6 @@ impl core::marker::Unpin for primitives::authplan::AuthPlan
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthPlan
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthPlan
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthPlan
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthPlan where U: core::convert::From<T>
-pub fn primitives::authplan::AuthPlan::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthPlan where U: core::convert::Into<T>
-pub type primitives::authplan::AuthPlan::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthPlan::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthPlan where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthPlan::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthPlan::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::AuthPlan where T: core::clone::Clone
-pub type primitives::authplan::AuthPlan::Owned = T
-pub fn primitives::authplan::AuthPlan::clone_into(&self, &mut T)
-pub fn primitives::authplan::AuthPlan::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::AuthPlan where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthPlan::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthPlan where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlan::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthPlan where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlan::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::AuthPlan where T: core::clone::Clone
-pub unsafe fn primitives::authplan::AuthPlan::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::AuthPlan
-pub fn primitives::authplan::AuthPlan::from(T) -> T
 pub fn primitives::authplan::resolve_requirement(primitives::authplan::AuthPlan, core::option::Option<primitives::authplan::RouteAuthOptOut>) -> primitives::authplan::AuthRequirement
 pub mod primitives::circuitbreaker
 #[non_exhaustive] pub enum primitives::circuitbreaker::BreakerConfigError
@@ -307,24 +157,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::BreakerConfigError
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::BreakerConfigError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::BreakerConfigError
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::BreakerConfigError
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::BreakerConfigError where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::BreakerConfigError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::BreakerConfigError where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::BreakerConfigError::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::BreakerConfigError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::BreakerConfigError where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::BreakerConfigError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::BreakerConfigError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for primitives::circuitbreaker::BreakerConfigError where T: core::fmt::Display + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for primitives::circuitbreaker::BreakerConfigError where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::BreakerConfigError where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::BreakerConfigError where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for primitives::circuitbreaker::BreakerConfigError
-pub fn primitives::circuitbreaker::BreakerConfigError::from(T) -> T
 #[non_exhaustive] pub enum primitives::circuitbreaker::BreakerEvent
 pub primitives::circuitbreaker::BreakerEvent::Call(primitives::circuitbreaker::CallOutcome)
 pub primitives::circuitbreaker::BreakerEvent::TimeoutElapsed
@@ -344,28 +176,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::BreakerEvent
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::BreakerEvent
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::BreakerEvent
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::BreakerEvent
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::BreakerEvent where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::BreakerEvent::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::BreakerEvent where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::BreakerEvent::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::BreakerEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::BreakerEvent where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::BreakerEvent::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::BreakerEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::BreakerEvent where T: core::clone::Clone
-pub type primitives::circuitbreaker::BreakerEvent::Owned = T
-pub fn primitives::circuitbreaker::BreakerEvent::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::BreakerEvent::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::BreakerEvent where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerEvent::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::BreakerEvent where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerEvent::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::BreakerEvent where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerEvent::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::BreakerEvent where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::BreakerEvent::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::BreakerEvent
-pub fn primitives::circuitbreaker::BreakerEvent::from(T) -> T
 #[non_exhaustive] pub enum primitives::circuitbreaker::CallOutcome
 pub primitives::circuitbreaker::CallOutcome::Failure
 pub primitives::circuitbreaker::CallOutcome::Success
@@ -385,28 +195,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::CallOutcome
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CallOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CallOutcome
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CallOutcome
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::CallOutcome where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::CallOutcome::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::CallOutcome where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::CallOutcome::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::CallOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::CallOutcome where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::CallOutcome::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::CallOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::CallOutcome where T: core::clone::Clone
-pub type primitives::circuitbreaker::CallOutcome::Owned = T
-pub fn primitives::circuitbreaker::CallOutcome::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::CallOutcome::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::CallOutcome where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::CallOutcome::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::CallOutcome where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CallOutcome::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::CallOutcome where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CallOutcome::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::CallOutcome where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::CallOutcome::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::CallOutcome
-pub fn primitives::circuitbreaker::CallOutcome::from(T) -> T
 #[non_exhaustive] pub enum primitives::circuitbreaker::CircuitState
 pub primitives::circuitbreaker::CircuitState::Closed
 pub primitives::circuitbreaker::CircuitState::HalfOpen
@@ -429,28 +217,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::CircuitState
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CircuitState
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CircuitState
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CircuitState
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::CircuitState where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::CircuitState::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::CircuitState where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::CircuitState::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::CircuitState::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::CircuitState where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::CircuitState::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::CircuitState::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::CircuitState where T: core::clone::Clone
-pub type primitives::circuitbreaker::CircuitState::Owned = T
-pub fn primitives::circuitbreaker::CircuitState::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::CircuitState::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::CircuitState where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitState::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::CircuitState where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitState::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::CircuitState where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitState::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::CircuitState where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::CircuitState::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::CircuitState
-pub fn primitives::circuitbreaker::CircuitState::from(T) -> T
 pub struct primitives::circuitbreaker::BreakerConfig
 impl primitives::circuitbreaker::BreakerConfig
 pub fn primitives::circuitbreaker::BreakerConfig::failure_threshold(self) -> u32
@@ -474,28 +240,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::BreakerConfig
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::BreakerConfig
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::BreakerConfig
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::BreakerConfig
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::BreakerConfig where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::BreakerConfig::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::BreakerConfig where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::BreakerConfig::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::BreakerConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::BreakerConfig where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::BreakerConfig::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::BreakerConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::BreakerConfig where T: core::clone::Clone
-pub type primitives::circuitbreaker::BreakerConfig::Owned = T
-pub fn primitives::circuitbreaker::BreakerConfig::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::BreakerConfig::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::BreakerConfig where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfig::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::BreakerConfig where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfig::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::BreakerConfig where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfig::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::BreakerConfig where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::BreakerConfig::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::BreakerConfig
-pub fn primitives::circuitbreaker::BreakerConfig::from(T) -> T
 pub struct primitives::circuitbreaker::CircuitCounts
 impl primitives::circuitbreaker::CircuitCounts
 pub fn primitives::circuitbreaker::CircuitCounts::consecutive_failures(self) -> u32
@@ -524,28 +268,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::CircuitCounts
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CircuitCounts
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CircuitCounts
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CircuitCounts
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::CircuitCounts where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::CircuitCounts::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::CircuitCounts where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::CircuitCounts::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::CircuitCounts::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::CircuitCounts where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::CircuitCounts::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::CircuitCounts::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::CircuitCounts where T: core::clone::Clone
-pub type primitives::circuitbreaker::CircuitCounts::Owned = T
-pub fn primitives::circuitbreaker::CircuitCounts::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::CircuitCounts::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::CircuitCounts where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitCounts::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::CircuitCounts where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitCounts::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::CircuitCounts where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitCounts::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::CircuitCounts where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::CircuitCounts::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::CircuitCounts
-pub fn primitives::circuitbreaker::CircuitCounts::from(T) -> T
 pub fn primitives::circuitbreaker::allows_request(primitives::circuitbreaker::CircuitState, primitives::circuitbreaker::CircuitCounts, primitives::circuitbreaker::BreakerConfig) -> bool
 pub fn primitives::circuitbreaker::next_state(primitives::circuitbreaker::CircuitState, primitives::circuitbreaker::CircuitCounts, primitives::circuitbreaker::BreakerConfig, primitives::circuitbreaker::BreakerEvent) -> primitives::circuitbreaker::CircuitState
 pub mod primitives::crypto
@@ -569,28 +291,6 @@ impl core::marker::Unpin for primitives::crypto::DigestAlgorithm
 impl core::marker::UnsafeUnpin for primitives::crypto::DigestAlgorithm
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::DigestAlgorithm
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::DigestAlgorithm
-impl<T, U> core::convert::Into<U> for primitives::crypto::DigestAlgorithm where U: core::convert::From<T>
-pub fn primitives::crypto::DigestAlgorithm::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::DigestAlgorithm where U: core::convert::Into<T>
-pub type primitives::crypto::DigestAlgorithm::Error = core::convert::Infallible
-pub fn primitives::crypto::DigestAlgorithm::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::DigestAlgorithm where U: core::convert::TryFrom<T>
-pub type primitives::crypto::DigestAlgorithm::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::DigestAlgorithm::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::DigestAlgorithm where T: core::clone::Clone
-pub type primitives::crypto::DigestAlgorithm::Owned = T
-pub fn primitives::crypto::DigestAlgorithm::clone_into(&self, &mut T)
-pub fn primitives::crypto::DigestAlgorithm::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::DigestAlgorithm where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::DigestAlgorithm::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::DigestAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::DigestAlgorithm::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::DigestAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::DigestAlgorithm::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::DigestAlgorithm where T: core::clone::Clone
-pub unsafe fn primitives::crypto::DigestAlgorithm::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::DigestAlgorithm
-pub fn primitives::crypto::DigestAlgorithm::from(T) -> T
 #[non_exhaustive] pub enum primitives::crypto::MacAlgorithm
 pub primitives::crypto::MacAlgorithm::HmacSha256
 pub primitives::crypto::MacAlgorithm::HmacSha384
@@ -611,28 +311,6 @@ impl core::marker::Unpin for primitives::crypto::MacAlgorithm
 impl core::marker::UnsafeUnpin for primitives::crypto::MacAlgorithm
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::MacAlgorithm
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::MacAlgorithm
-impl<T, U> core::convert::Into<U> for primitives::crypto::MacAlgorithm where U: core::convert::From<T>
-pub fn primitives::crypto::MacAlgorithm::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::MacAlgorithm where U: core::convert::Into<T>
-pub type primitives::crypto::MacAlgorithm::Error = core::convert::Infallible
-pub fn primitives::crypto::MacAlgorithm::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::MacAlgorithm where U: core::convert::TryFrom<T>
-pub type primitives::crypto::MacAlgorithm::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::MacAlgorithm::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::MacAlgorithm where T: core::clone::Clone
-pub type primitives::crypto::MacAlgorithm::Owned = T
-pub fn primitives::crypto::MacAlgorithm::clone_into(&self, &mut T)
-pub fn primitives::crypto::MacAlgorithm::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::MacAlgorithm where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::MacAlgorithm::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::MacAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::MacAlgorithm::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::MacAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::MacAlgorithm::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::MacAlgorithm where T: core::clone::Clone
-pub unsafe fn primitives::crypto::MacAlgorithm::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::MacAlgorithm
-pub fn primitives::crypto::MacAlgorithm::from(T) -> T
 pub struct primitives::crypto::Digest(_)
 impl primitives::crypto::Digest
 pub fn primitives::crypto::Digest::as_bytes(&self) -> &[u8]
@@ -652,28 +330,6 @@ impl core::marker::Unpin for primitives::crypto::Digest
 impl core::marker::UnsafeUnpin for primitives::crypto::Digest
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::Digest
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::Digest
-impl<T, U> core::convert::Into<U> for primitives::crypto::Digest where U: core::convert::From<T>
-pub fn primitives::crypto::Digest::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::Digest where U: core::convert::Into<T>
-pub type primitives::crypto::Digest::Error = core::convert::Infallible
-pub fn primitives::crypto::Digest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::Digest where U: core::convert::TryFrom<T>
-pub type primitives::crypto::Digest::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::Digest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::Digest where T: core::clone::Clone
-pub type primitives::crypto::Digest::Owned = T
-pub fn primitives::crypto::Digest::clone_into(&self, &mut T)
-pub fn primitives::crypto::Digest::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::Digest where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::Digest::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::Digest where T: ?core::marker::Sized
-pub fn primitives::crypto::Digest::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::Digest where T: ?core::marker::Sized
-pub fn primitives::crypto::Digest::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::Digest where T: core::clone::Clone
-pub unsafe fn primitives::crypto::Digest::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::Digest
-pub fn primitives::crypto::Digest::from(T) -> T
 pub struct primitives::crypto::Mac(_)
 impl primitives::crypto::Mac
 pub fn primitives::crypto::Mac::as_bytes(&self) -> &[u8]
@@ -689,28 +345,6 @@ impl core::marker::Unpin for primitives::crypto::Mac
 impl core::marker::UnsafeUnpin for primitives::crypto::Mac
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::Mac
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::Mac
-impl<T, U> core::convert::Into<U> for primitives::crypto::Mac where U: core::convert::From<T>
-pub fn primitives::crypto::Mac::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::Mac where U: core::convert::Into<T>
-pub type primitives::crypto::Mac::Error = core::convert::Infallible
-pub fn primitives::crypto::Mac::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::Mac where U: core::convert::TryFrom<T>
-pub type primitives::crypto::Mac::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::Mac::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::Mac where T: core::clone::Clone
-pub type primitives::crypto::Mac::Owned = T
-pub fn primitives::crypto::Mac::clone_into(&self, &mut T)
-pub fn primitives::crypto::Mac::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::Mac where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::Mac::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::Mac where T: ?core::marker::Sized
-pub fn primitives::crypto::Mac::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::Mac where T: ?core::marker::Sized
-pub fn primitives::crypto::Mac::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::Mac where T: core::clone::Clone
-pub unsafe fn primitives::crypto::Mac::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::Mac
-pub fn primitives::crypto::Mac::from(T) -> T
 pub struct primitives::crypto::MacKey(_)
 impl primitives::crypto::MacKey
 pub fn primitives::crypto::MacKey::as_bytes(&self) -> &[u8]
@@ -726,28 +360,6 @@ impl core::marker::Unpin for primitives::crypto::MacKey
 impl core::marker::UnsafeUnpin for primitives::crypto::MacKey
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::MacKey
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::MacKey
-impl<T, U> core::convert::Into<U> for primitives::crypto::MacKey where U: core::convert::From<T>
-pub fn primitives::crypto::MacKey::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::MacKey where U: core::convert::Into<T>
-pub type primitives::crypto::MacKey::Error = core::convert::Infallible
-pub fn primitives::crypto::MacKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::MacKey where U: core::convert::TryFrom<T>
-pub type primitives::crypto::MacKey::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::MacKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::MacKey where T: core::clone::Clone
-pub type primitives::crypto::MacKey::Owned = T
-pub fn primitives::crypto::MacKey::clone_into(&self, &mut T)
-pub fn primitives::crypto::MacKey::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::MacKey where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::MacKey::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::MacKey where T: ?core::marker::Sized
-pub fn primitives::crypto::MacKey::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::MacKey where T: ?core::marker::Sized
-pub fn primitives::crypto::MacKey::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::MacKey where T: core::clone::Clone
-pub unsafe fn primitives::crypto::MacKey::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::MacKey
-pub fn primitives::crypto::MacKey::from(T) -> T
 pub trait primitives::crypto::Digester
 pub fn primitives::crypto::Digester::digest(&self, primitives::crypto::DigestAlgorithm, &[u8]) -> primitives::crypto::Digest
 pub trait primitives::crypto::MacVerifier
@@ -781,28 +393,6 @@ impl core::marker::Unpin for primitives::healthz::HealthStatus
 impl core::marker::UnsafeUnpin for primitives::healthz::HealthStatus
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::HealthStatus
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::HealthStatus
-impl<T, U> core::convert::Into<U> for primitives::healthz::HealthStatus where U: core::convert::From<T>
-pub fn primitives::healthz::HealthStatus::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::HealthStatus where U: core::convert::Into<T>
-pub type primitives::healthz::HealthStatus::Error = core::convert::Infallible
-pub fn primitives::healthz::HealthStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::HealthStatus where U: core::convert::TryFrom<T>
-pub type primitives::healthz::HealthStatus::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::HealthStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::HealthStatus where T: core::clone::Clone
-pub type primitives::healthz::HealthStatus::Owned = T
-pub fn primitives::healthz::HealthStatus::clone_into(&self, &mut T)
-pub fn primitives::healthz::HealthStatus::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::HealthStatus where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::HealthStatus::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::HealthStatus where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthStatus::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::HealthStatus where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthStatus::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::HealthStatus where T: core::clone::Clone
-pub unsafe fn primitives::healthz::HealthStatus::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::HealthStatus
-pub fn primitives::healthz::HealthStatus::from(T) -> T
 #[non_exhaustive] pub enum primitives::healthz::ProbeNameError
 pub primitives::healthz::ProbeNameError::Empty
 pub primitives::healthz::ProbeNameError::Format
@@ -818,24 +408,6 @@ impl core::marker::Unpin for primitives::healthz::ProbeNameError
 impl core::marker::UnsafeUnpin for primitives::healthz::ProbeNameError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeNameError
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeNameError
-impl<T, U> core::convert::Into<U> for primitives::healthz::ProbeNameError where U: core::convert::From<T>
-pub fn primitives::healthz::ProbeNameError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::ProbeNameError where U: core::convert::Into<T>
-pub type primitives::healthz::ProbeNameError::Error = core::convert::Infallible
-pub fn primitives::healthz::ProbeNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::ProbeNameError where U: core::convert::TryFrom<T>
-pub type primitives::healthz::ProbeNameError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::ProbeNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for primitives::healthz::ProbeNameError where T: core::fmt::Display + ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for primitives::healthz::ProbeNameError where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::ProbeNameError where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::ProbeNameError where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for primitives::healthz::ProbeNameError
-pub fn primitives::healthz::ProbeNameError::from(T) -> T
 pub struct primitives::healthz::HealthCheck
 impl primitives::healthz::HealthCheck
 pub fn primitives::healthz::HealthCheck::detail(&self) -> &'static str
@@ -857,28 +429,6 @@ impl core::marker::Unpin for primitives::healthz::HealthCheck
 impl core::marker::UnsafeUnpin for primitives::healthz::HealthCheck
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::HealthCheck
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::HealthCheck
-impl<T, U> core::convert::Into<U> for primitives::healthz::HealthCheck where U: core::convert::From<T>
-pub fn primitives::healthz::HealthCheck::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::HealthCheck where U: core::convert::Into<T>
-pub type primitives::healthz::HealthCheck::Error = core::convert::Infallible
-pub fn primitives::healthz::HealthCheck::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::HealthCheck where U: core::convert::TryFrom<T>
-pub type primitives::healthz::HealthCheck::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::HealthCheck::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::HealthCheck where T: core::clone::Clone
-pub type primitives::healthz::HealthCheck::Owned = T
-pub fn primitives::healthz::HealthCheck::clone_into(&self, &mut T)
-pub fn primitives::healthz::HealthCheck::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::HealthCheck where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::HealthCheck::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::HealthCheck where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthCheck::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::HealthCheck where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthCheck::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::HealthCheck where T: core::clone::Clone
-pub unsafe fn primitives::healthz::HealthCheck::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::HealthCheck
-pub fn primitives::healthz::HealthCheck::from(T) -> T
 pub struct primitives::healthz::HealthReport
 impl primitives::healthz::HealthReport
 pub fn primitives::healthz::HealthReport::aggregate(alloc::vec::Vec<primitives::healthz::HealthCheck>) -> Self
@@ -899,28 +449,6 @@ impl core::marker::Unpin for primitives::healthz::HealthReport
 impl core::marker::UnsafeUnpin for primitives::healthz::HealthReport
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::HealthReport
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::HealthReport
-impl<T, U> core::convert::Into<U> for primitives::healthz::HealthReport where U: core::convert::From<T>
-pub fn primitives::healthz::HealthReport::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::HealthReport where U: core::convert::Into<T>
-pub type primitives::healthz::HealthReport::Error = core::convert::Infallible
-pub fn primitives::healthz::HealthReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::HealthReport where U: core::convert::TryFrom<T>
-pub type primitives::healthz::HealthReport::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::HealthReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::HealthReport where T: core::clone::Clone
-pub type primitives::healthz::HealthReport::Owned = T
-pub fn primitives::healthz::HealthReport::clone_into(&self, &mut T)
-pub fn primitives::healthz::HealthReport::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::HealthReport where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::HealthReport::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::HealthReport where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthReport::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::HealthReport where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthReport::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::HealthReport where T: core::clone::Clone
-pub unsafe fn primitives::healthz::HealthReport::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::HealthReport
-pub fn primitives::healthz::HealthReport::from(T) -> T
 pub struct primitives::healthz::ProbeName(_)
 impl primitives::healthz::ProbeName
 pub fn primitives::healthz::ProbeName::as_str(&self) -> &str
@@ -942,28 +470,6 @@ impl core::marker::Unpin for primitives::healthz::ProbeName
 impl core::marker::UnsafeUnpin for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeName
-impl<T, U> core::convert::Into<U> for primitives::healthz::ProbeName where U: core::convert::From<T>
-pub fn primitives::healthz::ProbeName::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::ProbeName where U: core::convert::Into<T>
-pub type primitives::healthz::ProbeName::Error = core::convert::Infallible
-pub fn primitives::healthz::ProbeName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::ProbeName where U: core::convert::TryFrom<T>
-pub type primitives::healthz::ProbeName::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::ProbeName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::ProbeName where T: core::clone::Clone
-pub type primitives::healthz::ProbeName::Owned = T
-pub fn primitives::healthz::ProbeName::clone_into(&self, &mut T)
-pub fn primitives::healthz::ProbeName::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::ProbeName where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::ProbeName::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::ProbeName where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeName::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::ProbeName where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeName::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::ProbeName where T: core::clone::Clone
-pub unsafe fn primitives::healthz::ProbeName::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::ProbeName
-pub fn primitives::healthz::ProbeName::from(T) -> T
 #[non_exhaustive] pub enum primitives::AuthPlanError
 pub primitives::AuthPlanError::NoAuthOnControlPlane
 impl core::error::Error for primitives::authplan::AuthPlanError
@@ -978,24 +484,6 @@ impl core::marker::Unpin for primitives::authplan::AuthPlanError
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthPlanError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthPlanError
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthPlanError
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthPlanError where U: core::convert::From<T>
-pub fn primitives::authplan::AuthPlanError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthPlanError where U: core::convert::Into<T>
-pub type primitives::authplan::AuthPlanError::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthPlanError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthPlanError where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthPlanError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthPlanError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for primitives::authplan::AuthPlanError where T: core::fmt::Display + ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for primitives::authplan::AuthPlanError where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthPlanError where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthPlanError where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlanError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for primitives::authplan::AuthPlanError
-pub fn primitives::authplan::AuthPlanError::from(T) -> T
 #[non_exhaustive] pub enum primitives::AuthRequirement
 pub primitives::AuthRequirement::Allow
 pub primitives::AuthRequirement::Deny
@@ -1016,28 +504,6 @@ impl core::marker::Unpin for primitives::authplan::AuthRequirement
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthRequirement
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthRequirement
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthRequirement where U: core::convert::From<T>
-pub fn primitives::authplan::AuthRequirement::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthRequirement where U: core::convert::Into<T>
-pub type primitives::authplan::AuthRequirement::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthRequirement::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthRequirement where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthRequirement::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthRequirement::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::AuthRequirement where T: core::clone::Clone
-pub type primitives::authplan::AuthRequirement::Owned = T
-pub fn primitives::authplan::AuthRequirement::clone_into(&self, &mut T)
-pub fn primitives::authplan::AuthRequirement::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::AuthRequirement where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthRequirement::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthRequirement where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthRequirement::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthRequirement where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthRequirement::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::AuthRequirement where T: core::clone::Clone
-pub unsafe fn primitives::authplan::AuthRequirement::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::AuthRequirement
-pub fn primitives::authplan::AuthRequirement::from(T) -> T
 #[non_exhaustive] pub enum primitives::AuthScheme
 pub primitives::AuthScheme::Jwt
 pub primitives::AuthScheme::JwtFromAssembly
@@ -1060,28 +526,6 @@ impl core::marker::Unpin for primitives::authplan::AuthScheme
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthScheme
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthScheme
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthScheme
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthScheme where U: core::convert::From<T>
-pub fn primitives::authplan::AuthScheme::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthScheme where U: core::convert::Into<T>
-pub type primitives::authplan::AuthScheme::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthScheme::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthScheme where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthScheme::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthScheme::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::AuthScheme where T: core::clone::Clone
-pub type primitives::authplan::AuthScheme::Owned = T
-pub fn primitives::authplan::AuthScheme::clone_into(&self, &mut T)
-pub fn primitives::authplan::AuthScheme::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::AuthScheme where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthScheme::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthScheme::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthScheme::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::AuthScheme where T: core::clone::Clone
-pub unsafe fn primitives::authplan::AuthScheme::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::AuthScheme
-pub fn primitives::authplan::AuthScheme::from(T) -> T
 #[non_exhaustive] pub enum primitives::BreakerConfigError
 pub primitives::BreakerConfigError::ZeroDuration
 pub primitives::BreakerConfigError::ZeroHalfOpen
@@ -1098,24 +542,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::BreakerConfigError
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::BreakerConfigError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::BreakerConfigError
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::BreakerConfigError
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::BreakerConfigError where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::BreakerConfigError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::BreakerConfigError where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::BreakerConfigError::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::BreakerConfigError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::BreakerConfigError where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::BreakerConfigError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::BreakerConfigError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for primitives::circuitbreaker::BreakerConfigError where T: core::fmt::Display + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for primitives::circuitbreaker::BreakerConfigError where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::BreakerConfigError where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::BreakerConfigError where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfigError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for primitives::circuitbreaker::BreakerConfigError
-pub fn primitives::circuitbreaker::BreakerConfigError::from(T) -> T
 #[non_exhaustive] pub enum primitives::BreakerEvent
 pub primitives::BreakerEvent::Call(primitives::circuitbreaker::CallOutcome)
 pub primitives::BreakerEvent::TimeoutElapsed
@@ -1135,28 +561,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::BreakerEvent
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::BreakerEvent
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::BreakerEvent
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::BreakerEvent
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::BreakerEvent where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::BreakerEvent::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::BreakerEvent where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::BreakerEvent::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::BreakerEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::BreakerEvent where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::BreakerEvent::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::BreakerEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::BreakerEvent where T: core::clone::Clone
-pub type primitives::circuitbreaker::BreakerEvent::Owned = T
-pub fn primitives::circuitbreaker::BreakerEvent::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::BreakerEvent::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::BreakerEvent where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerEvent::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::BreakerEvent where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerEvent::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::BreakerEvent where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerEvent::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::BreakerEvent where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::BreakerEvent::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::BreakerEvent
-pub fn primitives::circuitbreaker::BreakerEvent::from(T) -> T
 #[non_exhaustive] pub enum primitives::CallOutcome
 pub primitives::CallOutcome::Failure
 pub primitives::CallOutcome::Success
@@ -1176,28 +580,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::CallOutcome
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CallOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CallOutcome
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CallOutcome
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::CallOutcome where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::CallOutcome::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::CallOutcome where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::CallOutcome::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::CallOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::CallOutcome where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::CallOutcome::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::CallOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::CallOutcome where T: core::clone::Clone
-pub type primitives::circuitbreaker::CallOutcome::Owned = T
-pub fn primitives::circuitbreaker::CallOutcome::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::CallOutcome::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::CallOutcome where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::CallOutcome::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::CallOutcome where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CallOutcome::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::CallOutcome where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CallOutcome::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::CallOutcome where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::CallOutcome::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::CallOutcome
-pub fn primitives::circuitbreaker::CallOutcome::from(T) -> T
 #[non_exhaustive] pub enum primitives::CircuitState
 pub primitives::CircuitState::Closed
 pub primitives::CircuitState::HalfOpen
@@ -1220,28 +602,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::CircuitState
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CircuitState
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CircuitState
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CircuitState
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::CircuitState where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::CircuitState::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::CircuitState where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::CircuitState::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::CircuitState::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::CircuitState where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::CircuitState::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::CircuitState::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::CircuitState where T: core::clone::Clone
-pub type primitives::circuitbreaker::CircuitState::Owned = T
-pub fn primitives::circuitbreaker::CircuitState::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::CircuitState::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::CircuitState where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitState::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::CircuitState where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitState::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::CircuitState where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitState::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::CircuitState where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::CircuitState::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::CircuitState
-pub fn primitives::circuitbreaker::CircuitState::from(T) -> T
 #[non_exhaustive] pub enum primitives::DigestAlgorithm
 pub primitives::DigestAlgorithm::Sha256
 pub primitives::DigestAlgorithm::Sha384
@@ -1262,28 +622,6 @@ impl core::marker::Unpin for primitives::crypto::DigestAlgorithm
 impl core::marker::UnsafeUnpin for primitives::crypto::DigestAlgorithm
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::DigestAlgorithm
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::DigestAlgorithm
-impl<T, U> core::convert::Into<U> for primitives::crypto::DigestAlgorithm where U: core::convert::From<T>
-pub fn primitives::crypto::DigestAlgorithm::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::DigestAlgorithm where U: core::convert::Into<T>
-pub type primitives::crypto::DigestAlgorithm::Error = core::convert::Infallible
-pub fn primitives::crypto::DigestAlgorithm::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::DigestAlgorithm where U: core::convert::TryFrom<T>
-pub type primitives::crypto::DigestAlgorithm::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::DigestAlgorithm::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::DigestAlgorithm where T: core::clone::Clone
-pub type primitives::crypto::DigestAlgorithm::Owned = T
-pub fn primitives::crypto::DigestAlgorithm::clone_into(&self, &mut T)
-pub fn primitives::crypto::DigestAlgorithm::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::DigestAlgorithm where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::DigestAlgorithm::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::DigestAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::DigestAlgorithm::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::DigestAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::DigestAlgorithm::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::DigestAlgorithm where T: core::clone::Clone
-pub unsafe fn primitives::crypto::DigestAlgorithm::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::DigestAlgorithm
-pub fn primitives::crypto::DigestAlgorithm::from(T) -> T
 #[non_exhaustive] pub enum primitives::HealthStatus
 pub primitives::HealthStatus::Degraded
 pub primitives::HealthStatus::Healthy
@@ -1310,28 +648,6 @@ impl core::marker::Unpin for primitives::healthz::HealthStatus
 impl core::marker::UnsafeUnpin for primitives::healthz::HealthStatus
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::HealthStatus
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::HealthStatus
-impl<T, U> core::convert::Into<U> for primitives::healthz::HealthStatus where U: core::convert::From<T>
-pub fn primitives::healthz::HealthStatus::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::HealthStatus where U: core::convert::Into<T>
-pub type primitives::healthz::HealthStatus::Error = core::convert::Infallible
-pub fn primitives::healthz::HealthStatus::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::HealthStatus where U: core::convert::TryFrom<T>
-pub type primitives::healthz::HealthStatus::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::HealthStatus::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::HealthStatus where T: core::clone::Clone
-pub type primitives::healthz::HealthStatus::Owned = T
-pub fn primitives::healthz::HealthStatus::clone_into(&self, &mut T)
-pub fn primitives::healthz::HealthStatus::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::HealthStatus where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::HealthStatus::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::HealthStatus where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthStatus::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::HealthStatus where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthStatus::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::HealthStatus where T: core::clone::Clone
-pub unsafe fn primitives::healthz::HealthStatus::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::HealthStatus
-pub fn primitives::healthz::HealthStatus::from(T) -> T
 #[non_exhaustive] pub enum primitives::ListenerKind
 pub primitives::ListenerKind::Admin
 pub primitives::ListenerKind::Health
@@ -1353,28 +669,6 @@ impl core::marker::Unpin for primitives::authplan::ListenerKind
 impl core::marker::UnsafeUnpin for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::ListenerKind
-impl<T, U> core::convert::Into<U> for primitives::authplan::ListenerKind where U: core::convert::From<T>
-pub fn primitives::authplan::ListenerKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::ListenerKind where U: core::convert::Into<T>
-pub type primitives::authplan::ListenerKind::Error = core::convert::Infallible
-pub fn primitives::authplan::ListenerKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::ListenerKind where U: core::convert::TryFrom<T>
-pub type primitives::authplan::ListenerKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::ListenerKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::ListenerKind where T: core::clone::Clone
-pub type primitives::authplan::ListenerKind::Owned = T
-pub fn primitives::authplan::ListenerKind::clone_into(&self, &mut T)
-pub fn primitives::authplan::ListenerKind::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::ListenerKind where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::ListenerKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::ListenerKind where T: ?core::marker::Sized
-pub fn primitives::authplan::ListenerKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::ListenerKind where T: ?core::marker::Sized
-pub fn primitives::authplan::ListenerKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::ListenerKind where T: core::clone::Clone
-pub unsafe fn primitives::authplan::ListenerKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::ListenerKind
-pub fn primitives::authplan::ListenerKind::from(T) -> T
 #[non_exhaustive] pub enum primitives::MacAlgorithm
 pub primitives::MacAlgorithm::HmacSha256
 pub primitives::MacAlgorithm::HmacSha384
@@ -1395,28 +689,6 @@ impl core::marker::Unpin for primitives::crypto::MacAlgorithm
 impl core::marker::UnsafeUnpin for primitives::crypto::MacAlgorithm
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::MacAlgorithm
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::MacAlgorithm
-impl<T, U> core::convert::Into<U> for primitives::crypto::MacAlgorithm where U: core::convert::From<T>
-pub fn primitives::crypto::MacAlgorithm::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::MacAlgorithm where U: core::convert::Into<T>
-pub type primitives::crypto::MacAlgorithm::Error = core::convert::Infallible
-pub fn primitives::crypto::MacAlgorithm::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::MacAlgorithm where U: core::convert::TryFrom<T>
-pub type primitives::crypto::MacAlgorithm::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::MacAlgorithm::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::MacAlgorithm where T: core::clone::Clone
-pub type primitives::crypto::MacAlgorithm::Owned = T
-pub fn primitives::crypto::MacAlgorithm::clone_into(&self, &mut T)
-pub fn primitives::crypto::MacAlgorithm::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::MacAlgorithm where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::MacAlgorithm::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::MacAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::MacAlgorithm::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::MacAlgorithm where T: ?core::marker::Sized
-pub fn primitives::crypto::MacAlgorithm::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::MacAlgorithm where T: core::clone::Clone
-pub unsafe fn primitives::crypto::MacAlgorithm::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::MacAlgorithm
-pub fn primitives::crypto::MacAlgorithm::from(T) -> T
 #[non_exhaustive] pub enum primitives::ProbeNameError
 pub primitives::ProbeNameError::Empty
 pub primitives::ProbeNameError::Format
@@ -1432,24 +704,6 @@ impl core::marker::Unpin for primitives::healthz::ProbeNameError
 impl core::marker::UnsafeUnpin for primitives::healthz::ProbeNameError
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeNameError
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeNameError
-impl<T, U> core::convert::Into<U> for primitives::healthz::ProbeNameError where U: core::convert::From<T>
-pub fn primitives::healthz::ProbeNameError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::ProbeNameError where U: core::convert::Into<T>
-pub type primitives::healthz::ProbeNameError::Error = core::convert::Infallible
-pub fn primitives::healthz::ProbeNameError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::ProbeNameError where U: core::convert::TryFrom<T>
-pub type primitives::healthz::ProbeNameError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::ProbeNameError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for primitives::healthz::ProbeNameError where T: core::fmt::Display + ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for primitives::healthz::ProbeNameError where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::ProbeNameError where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::ProbeNameError where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeNameError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for primitives::healthz::ProbeNameError
-pub fn primitives::healthz::ProbeNameError::from(T) -> T
 #[non_exhaustive] pub enum primitives::RequiredScheme
 pub primitives::RequiredScheme::Jwt
 pub primitives::RequiredScheme::JwtFromAssembly
@@ -1471,28 +725,6 @@ impl core::marker::Unpin for primitives::authplan::RequiredScheme
 impl core::marker::UnsafeUnpin for primitives::authplan::RequiredScheme
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::RequiredScheme
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::RequiredScheme
-impl<T, U> core::convert::Into<U> for primitives::authplan::RequiredScheme where U: core::convert::From<T>
-pub fn primitives::authplan::RequiredScheme::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::RequiredScheme where U: core::convert::Into<T>
-pub type primitives::authplan::RequiredScheme::Error = core::convert::Infallible
-pub fn primitives::authplan::RequiredScheme::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::RequiredScheme where U: core::convert::TryFrom<T>
-pub type primitives::authplan::RequiredScheme::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::RequiredScheme::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::RequiredScheme where T: core::clone::Clone
-pub type primitives::authplan::RequiredScheme::Owned = T
-pub fn primitives::authplan::RequiredScheme::clone_into(&self, &mut T)
-pub fn primitives::authplan::RequiredScheme::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::RequiredScheme where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::RequiredScheme::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::RequiredScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::RequiredScheme::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::RequiredScheme where T: ?core::marker::Sized
-pub fn primitives::authplan::RequiredScheme::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::RequiredScheme where T: core::clone::Clone
-pub unsafe fn primitives::authplan::RequiredScheme::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::RequiredScheme
-pub fn primitives::authplan::RequiredScheme::from(T) -> T
 #[non_exhaustive] pub enum primitives::RouteAuthOptOut
 pub primitives::RouteAuthOptOut::PasswordResetExempt
 pub primitives::RouteAuthOptOut::Public
@@ -1512,28 +744,6 @@ impl core::marker::Unpin for primitives::authplan::RouteAuthOptOut
 impl core::marker::UnsafeUnpin for primitives::authplan::RouteAuthOptOut
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::RouteAuthOptOut
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::RouteAuthOptOut
-impl<T, U> core::convert::Into<U> for primitives::authplan::RouteAuthOptOut where U: core::convert::From<T>
-pub fn primitives::authplan::RouteAuthOptOut::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::RouteAuthOptOut where U: core::convert::Into<T>
-pub type primitives::authplan::RouteAuthOptOut::Error = core::convert::Infallible
-pub fn primitives::authplan::RouteAuthOptOut::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::RouteAuthOptOut where U: core::convert::TryFrom<T>
-pub type primitives::authplan::RouteAuthOptOut::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::RouteAuthOptOut::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::RouteAuthOptOut where T: core::clone::Clone
-pub type primitives::authplan::RouteAuthOptOut::Owned = T
-pub fn primitives::authplan::RouteAuthOptOut::clone_into(&self, &mut T)
-pub fn primitives::authplan::RouteAuthOptOut::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::RouteAuthOptOut where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::RouteAuthOptOut::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::RouteAuthOptOut where T: ?core::marker::Sized
-pub fn primitives::authplan::RouteAuthOptOut::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::RouteAuthOptOut where T: ?core::marker::Sized
-pub fn primitives::authplan::RouteAuthOptOut::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::RouteAuthOptOut where T: core::clone::Clone
-pub unsafe fn primitives::authplan::RouteAuthOptOut::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::RouteAuthOptOut
-pub fn primitives::authplan::RouteAuthOptOut::from(T) -> T
 pub struct primitives::AuthPlan
 impl primitives::authplan::AuthPlan
 pub fn primitives::authplan::AuthPlan::listener(self) -> primitives::authplan::ListenerKind
@@ -1556,28 +766,6 @@ impl core::marker::Unpin for primitives::authplan::AuthPlan
 impl core::marker::UnsafeUnpin for primitives::authplan::AuthPlan
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::AuthPlan
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::AuthPlan
-impl<T, U> core::convert::Into<U> for primitives::authplan::AuthPlan where U: core::convert::From<T>
-pub fn primitives::authplan::AuthPlan::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::authplan::AuthPlan where U: core::convert::Into<T>
-pub type primitives::authplan::AuthPlan::Error = core::convert::Infallible
-pub fn primitives::authplan::AuthPlan::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::authplan::AuthPlan where U: core::convert::TryFrom<T>
-pub type primitives::authplan::AuthPlan::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::authplan::AuthPlan::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::authplan::AuthPlan where T: core::clone::Clone
-pub type primitives::authplan::AuthPlan::Owned = T
-pub fn primitives::authplan::AuthPlan::clone_into(&self, &mut T)
-pub fn primitives::authplan::AuthPlan::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::authplan::AuthPlan where T: 'static + ?core::marker::Sized
-pub fn primitives::authplan::AuthPlan::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::authplan::AuthPlan where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlan::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::authplan::AuthPlan where T: ?core::marker::Sized
-pub fn primitives::authplan::AuthPlan::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::authplan::AuthPlan where T: core::clone::Clone
-pub unsafe fn primitives::authplan::AuthPlan::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::authplan::AuthPlan
-pub fn primitives::authplan::AuthPlan::from(T) -> T
 pub struct primitives::BreakerConfig
 impl primitives::circuitbreaker::BreakerConfig
 pub fn primitives::circuitbreaker::BreakerConfig::failure_threshold(self) -> u32
@@ -1601,28 +789,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::BreakerConfig
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::BreakerConfig
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::BreakerConfig
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::BreakerConfig
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::BreakerConfig where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::BreakerConfig::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::BreakerConfig where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::BreakerConfig::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::BreakerConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::BreakerConfig where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::BreakerConfig::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::BreakerConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::BreakerConfig where T: core::clone::Clone
-pub type primitives::circuitbreaker::BreakerConfig::Owned = T
-pub fn primitives::circuitbreaker::BreakerConfig::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::BreakerConfig::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::BreakerConfig where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfig::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::BreakerConfig where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfig::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::BreakerConfig where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::BreakerConfig::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::BreakerConfig where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::BreakerConfig::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::BreakerConfig
-pub fn primitives::circuitbreaker::BreakerConfig::from(T) -> T
 pub struct primitives::CircuitCounts
 impl primitives::circuitbreaker::CircuitCounts
 pub fn primitives::circuitbreaker::CircuitCounts::consecutive_failures(self) -> u32
@@ -1651,28 +817,6 @@ impl core::marker::Unpin for primitives::circuitbreaker::CircuitCounts
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CircuitCounts
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CircuitCounts
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CircuitCounts
-impl<T, U> core::convert::Into<U> for primitives::circuitbreaker::CircuitCounts where U: core::convert::From<T>
-pub fn primitives::circuitbreaker::CircuitCounts::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::circuitbreaker::CircuitCounts where U: core::convert::Into<T>
-pub type primitives::circuitbreaker::CircuitCounts::Error = core::convert::Infallible
-pub fn primitives::circuitbreaker::CircuitCounts::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::circuitbreaker::CircuitCounts where U: core::convert::TryFrom<T>
-pub type primitives::circuitbreaker::CircuitCounts::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::circuitbreaker::CircuitCounts::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::circuitbreaker::CircuitCounts where T: core::clone::Clone
-pub type primitives::circuitbreaker::CircuitCounts::Owned = T
-pub fn primitives::circuitbreaker::CircuitCounts::clone_into(&self, &mut T)
-pub fn primitives::circuitbreaker::CircuitCounts::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::circuitbreaker::CircuitCounts where T: 'static + ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitCounts::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::circuitbreaker::CircuitCounts where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitCounts::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::circuitbreaker::CircuitCounts where T: ?core::marker::Sized
-pub fn primitives::circuitbreaker::CircuitCounts::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::circuitbreaker::CircuitCounts where T: core::clone::Clone
-pub unsafe fn primitives::circuitbreaker::CircuitCounts::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::circuitbreaker::CircuitCounts
-pub fn primitives::circuitbreaker::CircuitCounts::from(T) -> T
 pub struct primitives::Digest(_)
 impl primitives::crypto::Digest
 pub fn primitives::crypto::Digest::as_bytes(&self) -> &[u8]
@@ -1692,28 +836,6 @@ impl core::marker::Unpin for primitives::crypto::Digest
 impl core::marker::UnsafeUnpin for primitives::crypto::Digest
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::Digest
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::Digest
-impl<T, U> core::convert::Into<U> for primitives::crypto::Digest where U: core::convert::From<T>
-pub fn primitives::crypto::Digest::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::Digest where U: core::convert::Into<T>
-pub type primitives::crypto::Digest::Error = core::convert::Infallible
-pub fn primitives::crypto::Digest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::Digest where U: core::convert::TryFrom<T>
-pub type primitives::crypto::Digest::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::Digest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::Digest where T: core::clone::Clone
-pub type primitives::crypto::Digest::Owned = T
-pub fn primitives::crypto::Digest::clone_into(&self, &mut T)
-pub fn primitives::crypto::Digest::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::Digest where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::Digest::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::Digest where T: ?core::marker::Sized
-pub fn primitives::crypto::Digest::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::Digest where T: ?core::marker::Sized
-pub fn primitives::crypto::Digest::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::Digest where T: core::clone::Clone
-pub unsafe fn primitives::crypto::Digest::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::Digest
-pub fn primitives::crypto::Digest::from(T) -> T
 pub struct primitives::HealthCheck
 impl primitives::healthz::HealthCheck
 pub fn primitives::healthz::HealthCheck::detail(&self) -> &'static str
@@ -1735,28 +857,6 @@ impl core::marker::Unpin for primitives::healthz::HealthCheck
 impl core::marker::UnsafeUnpin for primitives::healthz::HealthCheck
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::HealthCheck
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::HealthCheck
-impl<T, U> core::convert::Into<U> for primitives::healthz::HealthCheck where U: core::convert::From<T>
-pub fn primitives::healthz::HealthCheck::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::HealthCheck where U: core::convert::Into<T>
-pub type primitives::healthz::HealthCheck::Error = core::convert::Infallible
-pub fn primitives::healthz::HealthCheck::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::HealthCheck where U: core::convert::TryFrom<T>
-pub type primitives::healthz::HealthCheck::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::HealthCheck::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::HealthCheck where T: core::clone::Clone
-pub type primitives::healthz::HealthCheck::Owned = T
-pub fn primitives::healthz::HealthCheck::clone_into(&self, &mut T)
-pub fn primitives::healthz::HealthCheck::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::HealthCheck where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::HealthCheck::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::HealthCheck where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthCheck::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::HealthCheck where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthCheck::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::HealthCheck where T: core::clone::Clone
-pub unsafe fn primitives::healthz::HealthCheck::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::HealthCheck
-pub fn primitives::healthz::HealthCheck::from(T) -> T
 pub struct primitives::HealthReport
 impl primitives::healthz::HealthReport
 pub fn primitives::healthz::HealthReport::aggregate(alloc::vec::Vec<primitives::healthz::HealthCheck>) -> Self
@@ -1777,28 +877,6 @@ impl core::marker::Unpin for primitives::healthz::HealthReport
 impl core::marker::UnsafeUnpin for primitives::healthz::HealthReport
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::HealthReport
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::HealthReport
-impl<T, U> core::convert::Into<U> for primitives::healthz::HealthReport where U: core::convert::From<T>
-pub fn primitives::healthz::HealthReport::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::HealthReport where U: core::convert::Into<T>
-pub type primitives::healthz::HealthReport::Error = core::convert::Infallible
-pub fn primitives::healthz::HealthReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::HealthReport where U: core::convert::TryFrom<T>
-pub type primitives::healthz::HealthReport::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::HealthReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::HealthReport where T: core::clone::Clone
-pub type primitives::healthz::HealthReport::Owned = T
-pub fn primitives::healthz::HealthReport::clone_into(&self, &mut T)
-pub fn primitives::healthz::HealthReport::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::HealthReport where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::HealthReport::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::HealthReport where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthReport::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::HealthReport where T: ?core::marker::Sized
-pub fn primitives::healthz::HealthReport::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::HealthReport where T: core::clone::Clone
-pub unsafe fn primitives::healthz::HealthReport::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::HealthReport
-pub fn primitives::healthz::HealthReport::from(T) -> T
 pub struct primitives::Mac(_)
 impl primitives::crypto::Mac
 pub fn primitives::crypto::Mac::as_bytes(&self) -> &[u8]
@@ -1814,28 +892,6 @@ impl core::marker::Unpin for primitives::crypto::Mac
 impl core::marker::UnsafeUnpin for primitives::crypto::Mac
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::Mac
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::Mac
-impl<T, U> core::convert::Into<U> for primitives::crypto::Mac where U: core::convert::From<T>
-pub fn primitives::crypto::Mac::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::Mac where U: core::convert::Into<T>
-pub type primitives::crypto::Mac::Error = core::convert::Infallible
-pub fn primitives::crypto::Mac::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::Mac where U: core::convert::TryFrom<T>
-pub type primitives::crypto::Mac::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::Mac::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::Mac where T: core::clone::Clone
-pub type primitives::crypto::Mac::Owned = T
-pub fn primitives::crypto::Mac::clone_into(&self, &mut T)
-pub fn primitives::crypto::Mac::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::Mac where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::Mac::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::Mac where T: ?core::marker::Sized
-pub fn primitives::crypto::Mac::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::Mac where T: ?core::marker::Sized
-pub fn primitives::crypto::Mac::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::Mac where T: core::clone::Clone
-pub unsafe fn primitives::crypto::Mac::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::Mac
-pub fn primitives::crypto::Mac::from(T) -> T
 pub struct primitives::MacKey(_)
 impl primitives::crypto::MacKey
 pub fn primitives::crypto::MacKey::as_bytes(&self) -> &[u8]
@@ -1851,28 +907,6 @@ impl core::marker::Unpin for primitives::crypto::MacKey
 impl core::marker::UnsafeUnpin for primitives::crypto::MacKey
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::MacKey
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::MacKey
-impl<T, U> core::convert::Into<U> for primitives::crypto::MacKey where U: core::convert::From<T>
-pub fn primitives::crypto::MacKey::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::crypto::MacKey where U: core::convert::Into<T>
-pub type primitives::crypto::MacKey::Error = core::convert::Infallible
-pub fn primitives::crypto::MacKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::crypto::MacKey where U: core::convert::TryFrom<T>
-pub type primitives::crypto::MacKey::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::crypto::MacKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::crypto::MacKey where T: core::clone::Clone
-pub type primitives::crypto::MacKey::Owned = T
-pub fn primitives::crypto::MacKey::clone_into(&self, &mut T)
-pub fn primitives::crypto::MacKey::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::crypto::MacKey where T: 'static + ?core::marker::Sized
-pub fn primitives::crypto::MacKey::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::crypto::MacKey where T: ?core::marker::Sized
-pub fn primitives::crypto::MacKey::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::crypto::MacKey where T: ?core::marker::Sized
-pub fn primitives::crypto::MacKey::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::crypto::MacKey where T: core::clone::Clone
-pub unsafe fn primitives::crypto::MacKey::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::crypto::MacKey
-pub fn primitives::crypto::MacKey::from(T) -> T
 pub struct primitives::ProbeName(_)
 impl primitives::healthz::ProbeName
 pub fn primitives::healthz::ProbeName::as_str(&self) -> &str
@@ -1894,28 +928,6 @@ impl core::marker::Unpin for primitives::healthz::ProbeName
 impl core::marker::UnsafeUnpin for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeName
-impl<T, U> core::convert::Into<U> for primitives::healthz::ProbeName where U: core::convert::From<T>
-pub fn primitives::healthz::ProbeName::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for primitives::healthz::ProbeName where U: core::convert::Into<T>
-pub type primitives::healthz::ProbeName::Error = core::convert::Infallible
-pub fn primitives::healthz::ProbeName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for primitives::healthz::ProbeName where U: core::convert::TryFrom<T>
-pub type primitives::healthz::ProbeName::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn primitives::healthz::ProbeName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for primitives::healthz::ProbeName where T: core::clone::Clone
-pub type primitives::healthz::ProbeName::Owned = T
-pub fn primitives::healthz::ProbeName::clone_into(&self, &mut T)
-pub fn primitives::healthz::ProbeName::to_owned(&self) -> T
-impl<T> core::any::Any for primitives::healthz::ProbeName where T: 'static + ?core::marker::Sized
-pub fn primitives::healthz::ProbeName::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for primitives::healthz::ProbeName where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeName::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for primitives::healthz::ProbeName where T: ?core::marker::Sized
-pub fn primitives::healthz::ProbeName::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for primitives::healthz::ProbeName where T: core::clone::Clone
-pub unsafe fn primitives::healthz::ProbeName::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for primitives::healthz::ProbeName
-pub fn primitives::healthz::ProbeName::from(T) -> T
 pub trait primitives::Digester
 pub fn primitives::Digester::digest(&self, primitives::crypto::DigestAlgorithm, &[u8]) -> primitives::crypto::Digest
 pub trait primitives::MacVerifier

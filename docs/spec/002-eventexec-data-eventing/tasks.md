@@ -18,10 +18,10 @@
 ### T001 [P] [US1] P1 · consistency body L0–L2
 **触及**: `crates/consistency/src/{error,idempotency,outbox}.rs` · **等级**: L0/L1/L2 · **blocked-by**: 无 · **并行**: 与 T003 并行（不同 crate）；T002 依赖本 PR。
 
-- [ ] T001.1 [US1] 先写表驱动测试（rstest）：`IdemKey/Topic::parse` 正常/空/非 canonical；`Disposition::as_label`、`PermanentErrorKind/EngineErrorKind::message` const；`Entry/HandleResult/PermanentError` funnel 构造+访问；`EngineError::is_transient/is_permanent` —— 全 FAIL
+- [ ] T001.1 [US1] 先写表驱动测试（rstest）：`IdemKey/EventTopic::parse` 正常/空/非 canonical；`Disposition::as_label`、`PermanentErrorKind/EngineErrorKind::message` const；`EventEntry/StoredOutboxEntry/HandleResult/PermanentError` funnel 构造+访问；`EngineError::is_transient/is_permanent` —— 全 FAIL
 - [ ] T001.2 [US1] 兑现 `crates/consistency/src/error.rs` body（EngineError new/kind/is_*、message const literal，无 format!）
 - [ ] T001.3 [US1] 兑现 `crates/consistency/src/idempotency.rs` body（IdemKey parse/as_str；SeenState 已穷尽）
-- [ ] T001.4 [US1] 兑现 `crates/consistency/src/outbox.rs` body（Topic parse/as_str、Disposition::as_label、PermanentError new/kind、HandleResult ack/requeue/reject/disposition、Entry new/topic/idem_key/payload）
+- [ ] T001.4 [US1] 兑现 `crates/consistency/src/outbox.rs` body（EventTopic parse/as_str、Disposition::as_label、PermanentError new/kind、HandleResult ack/requeue/reject/disposition、EventEntry/StoredOutboxEntry funnel）
 - [ ] T001.5 [US1] 覆盖率 ≥90%；`cargo nextest run -p consistency`、`clippy -D warnings`、`fmt --check` 绿；移除已读字段的 `#[allow(dead_code)]`
 
 ### T002 [US1] P2 · consistency body L3–L4
@@ -92,7 +92,7 @@
 **触及**: `crates/identity/src/application.rs` · `crates/audit/src/application.rs` · `journeys/` · `contracts/event/identity/v1/contract.toml`(graduate) · **等级**: L2 · **blocked-by**: T004,T005,T007（T006 可选）· **并行**: 否。
 
 - [ ] T008.1 [US6] 先写测试：会话创建+outbox 同事务原子性；relay 重投 session.created→audit 仅 append 一次（幂等）；replay+投影重建；journey demo+durable 双拓扑 —— FAIL
-- [ ] T008.2 [US6] 重写 `LoginService::login`：直接 publish → 构造 `outbox::Entry`（envelope 注入）+ 事务内 append durable outbox
+- [ ] T008.2 [US6] 重写 `LoginService::login`：直接 publish → 构造 `EventEntry`（envelope 注入）+ 事务内 append durable outbox
 - [ ] T008.3 [US6] `audit` 消费侧以 EventId `InboxStore::try_claim` 幂等去重后 append
 - [ ] T008.4 [US6] journey 升级（in-mem 替身 → 可选 durable 拓扑）；contract lifecycle draft→active（subscriber+route group 经 bootstrap 验证）
 - [ ] T008.5 [US6] L2 原子性+幂等治理 #[test]；扇出闭环（contract→generated→metadata→journey→docs）；clippy/fmt 绿
@@ -134,10 +134,10 @@
 ### T012 [P] [US10] P12 · command dispatch + codegen
 **触及**: `crates/eventexec/src/command.rs` · `contracts/command/` · `generated/`(codegen) · `xtask`(codegen 完整性+双侧对称) · **等级**: L2/L3 · **blocked-by**: T004,T007 · **并行**: 与 T009/T011 并行。
 
-- [ ] T012.1 [US10] 先写测试：command 契约→codegen 产 emit/register wrapper；同 DispatchId 二次→claimer 拒；忘注册 handler→双侧对称治理失败；无裸 emit 出口 —— FAIL
+- [x] T012.1 [US10] 测试：command policy→codegen 产互斥 producer/register wrapper；私有 spec/reviewed DTO 不可外部构造；同 DispatchId 二次→claimer 拒
 - [ ] T012.2 [US10] `contracts/command/` kind + schema（consistencyLevel=OutboxFact/L3，topic=`<domain>.commands.<name>`）
-- [ ] T012.3 [US10] `eventexec/command.rs` runtime `command::emit_async`（→ `outbox::Entry::new`）
-- [ ] T012.4 [US10] generated codegen：`<cmd>::emit_async` + `register_handler` wrapper（triple funnel，禁裸调）
+- [x] T012.3 [US10] `eventexec/command.rs` typed `DirectCommandDispatcher` / `JournaledCommandDispatcher` + reviewed DTO
+- [x] T012.4 [US10] generated codegen：policy-exclusive `emit_async` / `journal_async` + `register_handler`
 - [ ] T012.5 [US10] xtask COMMAND-SYMMETRY-01 governance（codegen 完整性 + 双侧对称，Medium，anti-vacuity）；扇出闭环；clippy/fmt 绿
 
 ---

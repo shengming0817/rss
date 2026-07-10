@@ -9,7 +9,7 @@ use crate::subscriber::MessageId;
 
 /// 发布失败的处置类别——决定 relay 是有界退避重试还是首投即 DLX。
 ///
-/// 闭合 2 值（非 `#[non_exhaustive]`，对齐 `bootstrap::SubscriberErrorDisposition`）：发布失败只有
+/// 闭合 2 值（非 `#[non_exhaustive]`）：发布失败只有
 /// 「值得重试」与「重试无意义」两态；查询经 [`PublisherError::is_permanent`] / [`PublisherError::is_transient`]
 /// 全覆盖。语义对齐引擎层 [`consistency::EngineErrorKind`] 的 `Transient`/`Permanent`，但不引入对 publish
 /// disposition 无意义的 `Invariant` 臂。
@@ -23,8 +23,8 @@ pub enum PublishErrorKind {
 
 /// 发布失败（携 [`PublishErrorKind`] 决定 relay 重试 vs 首投 DLX）。
 ///
-/// 分类范式镜像 `bootstrap::SubscriberHandlerError`（subscribe 侧的 transient/permanent 处置）：构造**必经**
-/// [`PublisherError::transient`] / [`PublisherError::permanent`] 二选一显式声明 disposition——类型层杜绝「构造
+/// 构造**必经** [`PublisherError::transient`] / [`PublisherError::permanent`] 二选一显式声明
+/// disposition——类型层杜绝「构造
 /// 发布失败却不分类」（typed function choice，Hard）。
 ///
 /// PII 边界（与 [`crate::ShutdownError`] 同范式）：`Display` 仅安全摘要常量；source 经 [`RedactedSource`]

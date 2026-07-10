@@ -1,6 +1,7 @@
 //! Outbox 接缝（L1 原子写 + L2 OutboxFact 投递）—— 纯类型 disposition + relay/source/sweep 策略。
 //!
-//! `Disposition`/`HandleResult`/`PermanentError`/`Entry`/`Topic` 是 **纯态机类型**（sync，穷尽闭值集）；
+//! `Disposition`/`HandleResult`/`PermanentError`/`EventEntry`/`StoredOutboxEntry` 是
+//! **纯态机类型**（sync，穷尽闭值集）；
 //! `OutboxRelay`/`OutboxSource` 是 L2 OutboxFact 引擎策略 trait（native AFIT：把已持久化 entry 中继到
 //! broker / 扫描待发）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
 //! inbox_receipts / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
@@ -9,7 +10,7 @@
 //!
 //! # INVARIANT: OUTBOX-ENGINE-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
-//! `OutboxRelay`/`OutboxSource`/`RetentionSweeper`/`OutboxBacklog` 是**引擎策略接缝**（签名引 `Entry`/
+//! `OutboxRelay`/`OutboxSource`/`RetentionSweeper`/`OutboxBacklog` 是**引擎策略接缝**（签名引持久化 entry/
 //! `Disposition`/`BacklogSample`/`EngineError` 等 consistency 内部类型），按 ADR-005 category line **不能**在
 //! `diport` 内编译（否则 diport 反依赖引擎），故正确归属本引擎 crate——非 provider-agnostic 的 diport DI
 //! port。native AFIT、不引 dynosaur。
@@ -138,33 +139,62 @@ impl HandleResult {
     }
 }
 
-/// 事件 topic newtype（私有字段；稳定 dotted 名称 —— eventbus.md §命名）。
+/// 事件 producer topic（私有字段；稳定 dotted 名称且排除 command namespace）。
+///
+/// `EventTopic` 只存在于事件写路径。命令必须经 `eventexec` 的 reviewed command capability
+/// 落库，因而 canonical `<domain>.commands.<name>` 在类型构造边界即被拒绝。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Topic(String);
+pub struct EventTopic(String);
 
-/// `Topic` 解析错误。
-#[derive(Debug, thiserror::Error)]
+/// `EventTopic` 解析错误。
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum TopicError {
+pub enum EventTopicError {
     #[error("topic name is empty")]
     Empty,
     #[error("topic name is not a canonical dotted name")]
     Format,
+    /// Canonical command namespace is not an event authoring surface.
+    #[error("command topic cannot be authored as an event")]
+    CommandNamespace,
 }
 
-impl Topic {
-    /// 解析稳定 dotted topic 名；拒绝空/非 canonical（fail-closed）。
-    pub fn parse(raw: &str) -> Result<Self, TopicError> {
+impl EventTopic {
+    /// 解析稳定事件 topic；拒绝空、非 canonical 和 `<domain>.commands.<name>`。
+    pub fn parse(raw: &str) -> Result<Self, EventTopicError> {
         if raw.is_empty() {
-            return Err(TopicError::Empty);
+            return Err(EventTopicError::Empty);
         }
-        if !is_canonical_dotted(raw) {
-            return Err(TopicError::Format);
+        if !is_canonical_topic_name(raw) {
+            return Err(EventTopicError::Format);
+        }
+        if is_command_topic(raw) {
+            return Err(EventTopicError::CommandNamespace);
         }
         Ok(Self(raw.to_string()))
     }
 
     /// 借出底层字符串视图。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn is_command_topic(raw: &str) -> bool {
+    let mut segments = raw.split('.');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some(_), Some("commands"), Some(_))
+    )
+}
+
+/// Topic rehydrated from durable storage. It has no public constructor and therefore cannot be
+/// used as an event authoring capability.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoredOutboxTopic(String);
+
+impl StoredOutboxTopic {
+    /// Borrow the persisted routing key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -185,12 +215,12 @@ pub enum OutboxContractIdError {
 }
 
 impl OutboxContractId {
-    /// 解析 outbox metric contract id；语法同 contract `id` / [`Topic`] dotted grammar。
+    /// 解析 outbox metric contract id；语法同 contract `id` dotted grammar。
     pub fn parse(raw: &str) -> Result<Self, OutboxContractIdError> {
         if raw.is_empty() {
             return Err(OutboxContractIdError::Empty);
         }
-        if !is_canonical_dotted(raw) {
+        if !is_canonical_topic_name(raw) {
             return Err(OutboxContractIdError::Format);
         }
         Ok(Self(raw.to_string()))
@@ -202,13 +232,12 @@ impl OutboxContractId {
     }
 }
 
-/// canonical dotted 文法：非空、每 `.` 段首字节 `[a-z]`、整段 `[a-z0-9-]`。
+/// Canonical dotted topic/contract name predicate.
 ///
-/// 本谓词（经 `Topic::parse`）是 dotted-id / topic 文法的**单一事实源**——topic 是 wire routing key，
-/// contract 声明面与运行期 `Topic` 构造面文法必须同形，否则会出现「contract 能声明但运行期构造拒」的分歧。
-/// xtask 组合根的 contract 校验器 `is_dotted_id`（R7 IdentSyntax，`xtask/src/contract/validate.rs`）已反向
-/// delegate `Topic::parse`（#1126 兑现），两侧不再镜像；漂移结构性不可表达。
-fn is_canonical_dotted(s: &str) -> bool {
+/// Non-empty; every dot-separated segment starts with `[a-z]` and contains only
+/// `[a-z0-9-]`. This syntax predicate intentionally does not classify event versus command;
+/// [`EventTopic::parse`] adds the event-only namespace rule.
+pub fn is_canonical_topic_name(s: &str) -> bool {
     !s.is_empty()
         && s.split('.').all(|seg| {
             matches!(seg.bytes().next(), Some(b) if b.is_ascii_lowercase())
@@ -231,7 +260,7 @@ fn is_canonical_dotted(s: &str) -> bool {
 /// `partition_key`。
 ///
 /// 携带在 **write 路径**（`diport::OutboxEnvelopeParts` → adapter `OutboxEnvelope` → INSERT），**不**进
-/// [`Entry`]（与 `domain` 同——分区键是投递路由属性，relay 读侧无需透传：顺序由 SQL gating 承载）。
+/// [`EventEntry`]（与 `domain` 同——分区键是投递路由属性，relay 读侧无需透传：顺序由 SQL gating 承载）。
 ///
 /// **PII / 凭据边界**：业务选择的 partition key（如 sessionId）可能含**凭据级** bearer 标识
 ///（sessionId 即 bearer token），故 `PartitionKey` 的 `Debug` **脱敏为 `<redacted>`**（同
@@ -286,7 +315,7 @@ impl PartitionKey {
 
 /// 已审查可持久化的 outbox payload 字节。
 ///
-/// 私有字段 + 命名构造器把「裸 `Vec<u8>`」从 [`Entry::new`] 公共边界移走；调用方必须在 generated DTO /
+/// 私有字段 + 命名构造器把「裸 `Vec<u8>`」从 [`EventEntry::new`] 公共边界移走；调用方必须在 generated DTO /
 /// 领域事件编码完成后显式标记这些字节已过事件 payload 边界审查。`Debug` 恒脱敏，避免 outbox entry
 /// 断言 / 日志把 payload 原文带出。
 #[derive(Clone, PartialEq, Eq)]
@@ -318,20 +347,20 @@ impl std::fmt::Debug for OutboxPayload {
     }
 }
 
-/// 持久化 outbox 条目（私有字段；payload 是已编码字节，由 emit 期写入 —— eventbus.md §命名与 payload）。
+/// 事件 producer 可写 outbox 条目。
 ///
-/// engine 类型——**不** derive serde（ADR-004 C6）；wire 编解码在 generated/eventexec 边界完成。
+/// topic 已由 [`EventTopic`] 在类型层排除 command namespace。engine 类型不 derive serde。
 #[derive(Debug, Clone)]
-pub struct Entry {
-    topic: Topic,
+pub struct EventEntry {
+    topic: EventTopic,
     idem_key: crate::idempotency::IdemKey,
     payload: OutboxPayload,
 }
 
-impl Entry {
-    /// 由 topic + 幂等 key + 已编码 payload 构造（受控 funnel；命令 topic 构造收口于此 —— eventbus.md）。
+impl EventEntry {
+    /// 由事件 topic + 幂等 key + 已编码 payload 构造。
     pub fn new(
-        topic: Topic,
+        topic: EventTopic,
         idem_key: crate::idempotency::IdemKey,
         payload: OutboxPayload,
     ) -> Self {
@@ -343,7 +372,7 @@ impl Entry {
     }
 
     /// 目标 topic。
-    pub fn topic(&self) -> &Topic {
+    pub fn topic(&self) -> &EventTopic {
         &self.topic
     }
 
@@ -353,6 +382,62 @@ impl Entry {
     }
 
     /// 已编码 payload。
+    pub fn payload(&self) -> &[u8] {
+        self.payload.as_bytes()
+    }
+}
+
+/// Durable outbox row reconstructed by an adapter for relay/readback.
+///
+/// This type is intentionally separate from [`EventEntry`]. There is no conversion from stored
+/// data back into the event producer capability, so a command row read from storage cannot be
+/// replayed through [`crate::outbox::EventEntry::new`].
+#[derive(Debug, Clone)]
+pub struct StoredOutboxEntry {
+    topic: StoredOutboxTopic,
+    idem_key: crate::idempotency::IdemKey,
+    payload: OutboxPayload,
+}
+
+/// Persisted outbox row failed structural hydration.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StoredOutboxEntryError {
+    /// Persisted routing key is empty or not canonical.
+    #[error("stored outbox topic is invalid")]
+    Topic,
+}
+
+impl StoredOutboxEntry {
+    /// Rehydrate a durable row. Command topics are accepted on the read side, but the returned
+    /// type cannot enter the event producer port.
+    pub fn hydrate(
+        topic: impl Into<String>,
+        idem_key: crate::idempotency::IdemKey,
+        payload: OutboxPayload,
+    ) -> Result<Self, StoredOutboxEntryError> {
+        let topic = topic.into();
+        if !is_canonical_topic_name(&topic) {
+            return Err(StoredOutboxEntryError::Topic);
+        }
+        Ok(Self {
+            topic: StoredOutboxTopic(topic),
+            idem_key,
+            payload,
+        })
+    }
+
+    /// Borrow the persisted topic.
+    pub fn topic(&self) -> &StoredOutboxTopic {
+        &self.topic
+    }
+
+    /// Borrow the persisted idempotency key.
+    pub fn idem_key(&self) -> &crate::idempotency::IdemKey {
+        &self.idem_key
+    }
+
+    /// Borrow the persisted payload.
     pub fn payload(&self) -> &[u8] {
         self.payload.as_bytes()
     }
@@ -388,23 +473,23 @@ impl OutboxMetricSubject {
 /// 已持久化、可中继的 outbox entry，携带 metric subject。
 #[derive(Debug, Clone)]
 pub struct PendingEntry {
-    entry: Entry,
+    entry: StoredOutboxEntry,
     subject: OutboxMetricSubject,
 }
 
 impl PendingEntry {
     /// 由业务 entry + metric subject 构造 pending entry。
-    pub fn new(entry: Entry, subject: OutboxMetricSubject) -> Self {
+    pub fn new(entry: StoredOutboxEntry, subject: OutboxMetricSubject) -> Self {
         Self { entry, subject }
     }
 
     /// 借出业务 entry。
-    pub fn entry(&self) -> &Entry {
+    pub fn entry(&self) -> &StoredOutboxEntry {
         &self.entry
     }
 
     /// 借出目标 topic。
-    pub fn topic(&self) -> &Topic {
+    pub fn topic(&self) -> &StoredOutboxTopic {
         self.entry.topic()
     }
 
@@ -480,11 +565,11 @@ pub trait RetentionSweeper {
     async fn sweep(&self, retain_seconds: u64) -> Result<u64, crate::error::EngineError>;
 }
 
-/// 单采样对象的 backlog 快照（纯标量值类型，sync 构造；不携 [`Entry`]）。
+/// 单采样对象的 backlog 快照（纯标量值类型，sync 构造；不携 outbox entry）。
 ///
 /// 供 outbox / inbox backlog 采样端口复用；具体统计集合由 [`OutboxBacklog`] /
 /// [`crate::inbox::InboxBacklog`] 各自定义。engine 类型——**不** derive serde（ADR-004 C6）；
-/// 私有字段 + accessor，仿 [`Entry`]。
+/// 私有字段 + accessor。
 ///
 /// backlog **drain/clear 后**（无可采样积压行）规范零值是 [`BacklogSample::empty`]（depth=0, age=0）——
 /// 采样器据此把 gauge 置 0（而非缺失），否则 Prometheus 无法区分「积压清空」与「采样器死亡」。
@@ -596,9 +681,10 @@ pub trait OutboxBacklog {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogMetricSample, BacklogSample, Disposition, Entry, HandleResult, OutboxContractId,
-        OutboxContractIdError, OutboxMetricSubject, OutboxPayload, PartitionKey, PartitionKeyError,
-        PendingEntry, PermanentError, PermanentErrorKind, Topic, TopicError,
+        BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
+        HandleResult, OutboxContractId, OutboxContractIdError, OutboxMetricSubject, OutboxPayload,
+        PartitionKey, PartitionKeyError, PendingEntry, PermanentError, PermanentErrorKind,
+        StoredOutboxEntry,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -725,8 +811,11 @@ mod tests {
             "domain1.event-2.v3",
         ];
         for &raw in cases {
-            assert!(Topic::parse(raw).is_ok(), "expected Ok for raw={raw:?}");
-            let topic = Topic::parse(raw).unwrap();
+            assert!(
+                EventTopic::parse(raw).is_ok(),
+                "expected Ok for raw={raw:?}"
+            );
+            let topic = EventTopic::parse(raw).unwrap();
             assert_eq!(topic.as_str(), raw, "raw={raw:?}");
         }
     }
@@ -734,7 +823,7 @@ mod tests {
     // 空 → Empty。
     #[test]
     fn topic_parse_rejects_empty() {
-        assert!(matches!(Topic::parse(""), Err(TopicError::Empty)));
+        assert!(matches!(EventTopic::parse(""), Err(EventTopicError::Empty)));
     }
 
     // 非 canonical dotted → Format（文法单源拒绝集，xtask is_dotted_id 同源：空段/大写/段首数字-连字符/下划线/空格）。
@@ -754,10 +843,43 @@ mod tests {
         ];
         for &raw in cases {
             assert!(
-                matches!(Topic::parse(raw), Err(TopicError::Format)),
+                matches!(EventTopic::parse(raw), Err(EventTopicError::Format)),
                 "expected Format for raw={raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn event_topic_rejects_command_namespace() {
+        assert!(EventTopic::parse("identity.session-created").is_ok());
+        assert!(matches!(
+            EventTopic::parse("seed.commands.do-thing"),
+            Err(EventTopicError::CommandNamespace)
+        ));
+        assert!(EventTopic::parse("commands.seed.do-thing").is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: known canonical persisted row fixtures.
+    fn stored_entry_hydrates_commands_without_event_authoring_conversion() {
+        let key = IdemKey::parse("command-1").expect("key");
+        let stored = StoredOutboxEntry::hydrate(
+            "seed.commands.do-thing",
+            key,
+            OutboxPayload::from_reviewed_event_bytes(vec![1, 2]),
+        )
+        .expect("canonical persisted command");
+        assert_eq!(stored.topic().as_str(), "seed.commands.do-thing");
+        assert_eq!(stored.payload(), &[1, 2]);
+        assert!(
+            StoredOutboxEntry::hydrate(
+                "not canonical",
+                IdemKey::parse("command-2").expect("key"),
+                OutboxPayload::from_reviewed_event_bytes(Vec::new()),
+            )
+            .is_err()
+        );
     }
 
     // OutboxContractId 复用 canonical dotted grammar：接受 contract id 常见形态并往返。
@@ -811,21 +933,21 @@ mod tests {
     // 文法分支全覆盖；本谓词是 xtask `is_dotted_id` 反向 delegate 的单源被委托方）。
     #[test]
     fn is_canonical_dotted_standalone() {
-        assert!(!super::is_canonical_dotted(""));
-        assert!(super::is_canonical_dotted("a.b"));
-        assert!(super::is_canonical_dotted("foo"));
-        assert!(!super::is_canonical_dotted("a..b"));
+        assert!(!super::is_canonical_topic_name(""));
+        assert!(super::is_canonical_topic_name("a.b"));
+        assert!(super::is_canonical_topic_name("foo"));
+        assert!(!super::is_canonical_topic_name("a..b"));
     }
 
-    // Entry::new funnel + 三访问器借出。
+    // EventEntry::new funnel + 三访问器借出。
     #[test]
     #[allow(clippy::unwrap_used)]
     // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
     fn entry_new_exposes_fields() {
-        let topic = Topic::parse("session.created").unwrap();
+        let topic = EventTopic::parse("session.created").unwrap();
         let key = IdemKey::parse("evt-1").unwrap();
         let payload = vec![1u8, 2, 3];
-        let entry = Entry::new(
+        let entry = EventEntry::new(
             topic.clone(),
             key.clone(),
             OutboxPayload::from_reviewed_event_bytes(payload.clone()),
@@ -845,11 +967,12 @@ mod tests {
         assert_eq!(subject.tenant_id(), tenant);
         assert_eq!(subject.contract_id(), &contract_id);
 
-        let entry = Entry::new(
-            Topic::parse("session.created").unwrap(),
+        let entry = StoredOutboxEntry::hydrate(
+            "session.created",
             IdemKey::parse("evt-scoped").unwrap(),
             OutboxPayload::from_reviewed_event_bytes(vec![1, 2, 3]),
-        );
+        )
+        .unwrap();
         let pending = PendingEntry::new(entry.clone(), subject.clone());
         assert_eq!(pending.entry().idem_key(), entry.idem_key());
         assert_eq!(pending.subject(), &subject);
@@ -863,9 +986,9 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     // reason: 测试 happy-path 断言已 is_ok 的 parse 结果，item-level carve-out（error-handling.md §Carve-out）。
     fn entry_debug_redacts_payload_marker() {
-        let topic = Topic::parse("session.created").unwrap();
+        let topic = EventTopic::parse("session.created").unwrap();
         let key = IdemKey::parse("evt-redact").unwrap();
-        let entry = Entry::new(
+        let entry = EventEntry::new(
             topic,
             key,
             OutboxPayload::from_reviewed_event_bytes(b"SECRET_PAYLOAD_MARKER".to_vec()),
@@ -873,7 +996,7 @@ mod tests {
         let dbg = format!("{entry:?}");
         assert!(
             !dbg.contains("SECRET_PAYLOAD_MARKER"),
-            "Entry Debug must not leak payload bytes: {dbg}"
+            "EventEntry Debug must not leak payload bytes: {dbg}"
         );
         assert!(
             dbg.contains("<redacted>"),

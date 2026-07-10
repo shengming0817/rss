@@ -6,7 +6,7 @@
 
 ## Content Quality
 
-- [~] No implementation details (languages, frameworks, APIs)（部分满足：本 feature 为内部框架规格，保留 G0/#997 冻结接缝名词（IdemKey::parse / outbox::Entry::new / sqlx / lapin 等）作为追踪锚；纯用户侧行为仍以验收场景表达）
+- [~] No implementation details (languages, frameworks, APIs)（部分满足：本 feature 为内部框架规格，保留 typed dispatcher / reviewed DTO / sqlx / lapin 等接缝名词作为追踪锚；纯用户侧行为仍以验收场景表达）
 - [x] Focused on user value and business needs
 - [x] Written for non-technical stakeholders
 - [x] All mandatory sections completed

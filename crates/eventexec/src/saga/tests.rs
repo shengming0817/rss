@@ -382,7 +382,7 @@ impl OwnerCheckpointStore for FakeCheckpointStore {
 
 // ── FakeDeadLetterStore ───────────────────────────────────────────────────────
 
-/// 捕获的 DLX 记录字段：(tenant_id, message_id, domain, contract_id, topic, payload, error_summary, num_attempts)。
+/// 捕获的 DLX 记录字段：(tenant_id, message_id, producer_domain, contract_id, topic, payload, error_summary, num_attempts)。
 type DlxRecord = (String, String, String, String, String, String, String, u32);
 
 #[derive(Default)]
@@ -416,7 +416,7 @@ impl DeadLetterStore for FakeDeadLetterStore {
         self.written.lock().unwrap().push((
             record.tenant().to_string(),
             record.message_id().to_string(),
-            record.domain().to_string(),
+            record.producer_domain().to_string(),
             record.contract_id().to_string(),
             record.topic().to_string(),
             String::from_utf8_lossy(record.original_payload()).to_string(),

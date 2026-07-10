@@ -11,16 +11,16 @@
 **codegen 产物**（generated/）：
 - producer wrapper `pub async fn emit_async<E: CommandEmit>(emitter: &E, request: <Cmd>Request, tenant: vocab::TenantId, subject_id: E::SubjectId, actor: E::Actor, idempotency_key: Option<String>) -> Result<(), E::Error>`。baked `CONTRACT_ID`/`TOPIC`；`tenant` = typed RLS scope（**runtime 必填**，落 reserved `tenantId` envelope）；`subject_id` = bridge 绑定的 typed opaque subject（生产 impl 绑定 `diport::EnvelopeSubjectId`）；`actor` = bridge 绑定的 typed actor（生产 impl 绑定 `diport::OutboxActor`）；`idempotency_key` = 可选业务幂等键（`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被 claimer 拒；`None` ⇒ bridge mint 随机 `DispatchId`）。subject / actor 写入 outbox persisted metadata，不进 broker header / MQTT user property。返回 `Result<()>` 而非 `DispatchId`（`DispatchId` 由 runtime 层 `eventexec::command` mint + seal，不返回给业务）。无 `ctx` 参数。
 - consumer wrapper `pub fn register_handler<Reg: CommandRegister, H, Fut>(registrar: &mut Reg, handler: H) -> Reg::Output`。baked `CONTRACT_ID`/`TOPIC`（无显式 group-name 绑定参数；group 由 registrar 内部携带）。无 `ctx` 参数。
-- **triple funnel**：业务 → 生成 wrapper → 组合根 bridge impl `CommandEmit`/`CommandRegister` → runtime `command::emit_async` / `register_command_handler` → `outbox::Entry::new`。禁裸调 runtime emit（codegen 锁出口）。
+- **typed authoring funnel**：业务 → policy-exclusive generated wrapper → `DirectCommandDispatcher` / `JournaledCommandDispatcher` → 不可外部构造的 reviewed DTO → provider store。event `EventEntry` 与 storage `StoredOutboxEntry` 均不能构造 command authoring DTO。
 
 > **bridge 延迟落地**：`CommandEmit` / `CommandRegister` trait 定义在 `generated::command`，由组合根（bin / assembly crate）提供唯一 sanctioned impl（serde 编码 payload、mint `DispatchId`、转发到 `eventexec::command`）。该 bridge impl **随第一个真实命令消费域**一并接线，不在本 PR 的 mechanism-landing 阶段包含。首个域作者需实现的 bridge 接线细节见 `docs/rules/eventbus.md` §Command dispatch。
 
 **治理**（xtask，Medium）：
-- `COMMAND-SYMMETRY-01`：每 command schema 有对应 emit + register wrapper（双侧对称）；`syn` AST 扫生产/组合根 src 无裸 `command::emit_async` 出口（含 use-import / whitespace 形态；AST 级无字符串/注释盲区）。
+- `COMMAND-JOURNAL-GENERATED-01#manifest-policy`：每 command schema 显式 required/none 且只生成对应 producer wrapper（Hard codegen）；`COMMAND-IMPL-ALLOWLIST-01#provider-set` 只扫描生产 provider impl/callsite 集合（Medium AST）。
 - `COMMAND-IMPL-ALLOWLIST-01`：`impl CommandEmit`/`impl CommandRegister` 仅允许在组合根 `bins/`/`assemblies/`（sanctioned bridge/registrar）；非组合根 impl 即红（对齐 `DIPORT-IMPL-ALLOWLIST-01`）。
 - `R15 CommandConsistency`：`kind=command ⇒ consistencyLevel=OutboxFact`（contract validate）。
 
-> 真 Hard 化（base crate sealed `CommandTopic` 阻裸 `Entry::new` 构造 command topic，覆盖 rename-alias 残留盲区）见 follow-up（generated `CommandEmit` 是 public trait、无法 seal，故 impl-site 收口当前为 Medium AST 扫描）。
+> authoring Hard seal 由私有 `CommandSpec`、eventexec reviewed DTO 构造器与 event/command 分离类型共同提供；provider 集合事实保留 Medium，并具有 alias/glob red case。
 
 ## 2. saga 契约 kind（P9）
 

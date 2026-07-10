@@ -1,5 +1,6 @@
 //! compile-pass：durable scheduler API + AttemptScope command seam 可由 provider fake 实现。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use consistency::{Context, ConvergeAction, EngineErrorKind, Outcome, ReconcileError};
@@ -7,9 +8,9 @@ use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::reconcile::{
     AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, DurableReconciler,
     ReconcileAttempt, ReconcileScheduleError, ReconcileScheduleStore, ReconcileSchedulerBuilder,
-    ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome, StableDispatchKey, Tenancy,
-    Trigger,
+    ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
 };
+use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 
 #[derive(Clone)]
 struct NoopStore;
@@ -104,21 +105,16 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
         target: &ClaimedTarget,
         attempt: &AttemptScope<'_, NoopStore>,
     ) -> Result<Outcome, ReconcileError> {
-        let command = ReviewedCommand::new(
-            StableDispatchKey::parse("device-1-create").expect("stable key"),
-            "test.command",
-            vocab::ContractBinding::from_static(
-                "test",
-                "test.command",
-                "v1",
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            ),
+        let command = generated::command::_seed_v1::reconcile_command(
+            generated::command::_seed_v1::SeedDoThingRequest {
+                amount: 1,
+                target_id: target.resource_id().to_string(),
+            },
             target.tenant(),
-            b"{}".to_vec(),
             EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
             OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
-        )
-        .expect("reviewed command");
+            "device-1-create".to_string(),
+        );
         match attempt
             .record_action_and_enqueue_command(ConvergeAction::Create, command)
             .await
@@ -134,12 +130,15 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
 }
 
 fn main() {
-    let tenant =
-        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant");
+    let tenant = vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant");
     let trigger = Trigger::interval(Duration::from_secs(30)).expect("non-zero trigger");
     let worker = ReconcileSchedulerBuilder::new(
         NoopStore,
         NoopDurableReconciler,
+        Arc::new(CommandIdempotencyKeyring::new(
+            CommandAliasKey::new("current", vec![0x42; 32]).expect("key"),
+            Vec::new(),
+        ).expect("keyring")),
         tenant,
         "test-reconciler",
         "holder-a",

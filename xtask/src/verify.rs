@@ -104,7 +104,7 @@ enum InternalCheck {
     RuntimeBaseline,
     /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
     RuntimeDepsGuard,
-    /// ArchRules 派生索引：真实 carrier 的 INVARIANT 锚点 + fixture/gate 反向索引。
+    /// ArchRules 派生索引 + 11 行持久化 funnel matrix 文档漂移门。
     ArchRules,
     CodegenCheck,
     /// active LocalOnly HTTP contracts effect profile allowlist（LOCAL-ONLY-EFFECTS-01）。
@@ -125,7 +125,7 @@ enum InternalCheck {
     TenancyCloseout,
     /// migration 文件序号唯一性 + 连续性守卫（MIGRATION-SERIAL-UNIQUE-01；内容扫描文件名，no-compile）。
     MigrationsSerial,
-    /// generated command module 双侧对称 + 裸 emit 出口封堵（COMMAND-SYMMETRY-01）。
+    /// generated command policy 与生产 provider impl/callsite 集合守卫（COMMAND-IMPL-ALLOWLIST-01）。
     CommandSymmetry,
     /// reconcile scheduler transactional command outbox seam guard（RECONCILE-COMMAND-OUTBOX-SEAM-01）。
     ReconcileOutboxCommandGuard,
@@ -638,7 +638,13 @@ fn step_integration_run() -> Step {
             probe: "nextest",
             install_hint: INSTALL_HINT_INTEGRATION,
         },
-        env: &[],
+        // Production ConsumerTx wiring fail-closes without an audit chain key. The integration
+        // lane gives each nextest-isolated process a deterministic 32-byte test key instead of
+        // mutating ambient env from a multi-threaded Rust test.
+        env: &[(
+            "RSS_AUDIT_CHAIN_KEY_B64URL",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )],
         needs_compile: true,
     }
 }
@@ -1489,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn archrules_is_no_compile_internal_gate_in_fast_and_ci() -> anyhow::Result<()> {
+    fn archrules_matrix_is_no_compile_internal_gate_in_fast_and_ci() -> anyhow::Result<()> {
         for (name, plan) in [("fast", verify_plan(&opts(true, false))), ("ci", ci_plan())] {
             let step = plan
                 .iter()
@@ -1917,6 +1923,11 @@ mod tests {
         ] {
             assert!(step.args.contains(&p), "integration 实跑须覆盖 {p}");
         }
+        assert!(
+            step.env
+                .iter()
+                .any(|(key, value)| { *key == "RSS_AUDIT_CHAIN_KEY_B64URL" && value.len() == 43 })
+        );
     }
 
     /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey

@@ -20,34 +20,6 @@ impl core::marker::Unpin for authn::AuthnError
 impl core::marker::UnsafeUnpin for authn::AuthnError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthnError
 impl core::panic::unwind_safe::UnwindSafe for authn::AuthnError
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::AuthnError where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::AuthnError where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::AuthnError
-pub fn authn::AuthnError::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::AuthnError where U: core::convert::From<T>
-pub fn authn::AuthnError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::AuthnError where U: core::convert::Into<T>
-pub type authn::AuthnError::Error = core::convert::Infallible
-pub fn authn::AuthnError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::AuthnError where U: core::convert::TryFrom<T>
-pub type authn::AuthnError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::AuthnError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for authn::AuthnError where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::AuthnError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::AuthnError where T: 'static + ?core::marker::Sized
-pub fn authn::AuthnError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::AuthnError where T: ?core::marker::Sized
-pub fn authn::AuthnError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::AuthnError where T: ?core::marker::Sized
-pub fn authn::AuthnError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::AuthnError
-pub fn authn::AuthnError::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::AuthnError
-pub fn authn::AuthnError::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::AuthnError
-impl<T> tracing::instrument::WithSubscriber for authn::AuthnError
-impl<T> typenum::type_operators::Same for authn::AuthnError
-pub type authn::AuthnError::Output = T
 #[non_exhaustive] pub enum authn::CrossTenantAuditError
 pub authn::CrossTenantAuditError::EmptyField
 impl core::error::Error for authn::CrossTenantAuditError
@@ -62,34 +34,6 @@ impl core::marker::Unpin for authn::CrossTenantAuditError
 impl core::marker::UnsafeUnpin for authn::CrossTenantAuditError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditError
 impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditError
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::CrossTenantAuditError where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::CrossTenantAuditError where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::CrossTenantAuditError
-pub fn authn::CrossTenantAuditError::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::CrossTenantAuditError where U: core::convert::From<T>
-pub fn authn::CrossTenantAuditError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::CrossTenantAuditError where U: core::convert::Into<T>
-pub type authn::CrossTenantAuditError::Error = core::convert::Infallible
-pub fn authn::CrossTenantAuditError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::CrossTenantAuditError where U: core::convert::TryFrom<T>
-pub type authn::CrossTenantAuditError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::CrossTenantAuditError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for authn::CrossTenantAuditError where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::CrossTenantAuditError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::CrossTenantAuditError where T: 'static + ?core::marker::Sized
-pub fn authn::CrossTenantAuditError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::CrossTenantAuditError where T: ?core::marker::Sized
-pub fn authn::CrossTenantAuditError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::CrossTenantAuditError where T: ?core::marker::Sized
-pub fn authn::CrossTenantAuditError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::CrossTenantAuditError
-pub fn authn::CrossTenantAuditError::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::CrossTenantAuditError
-pub fn authn::CrossTenantAuditError::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::CrossTenantAuditError
-impl<T> tracing::instrument::WithSubscriber for authn::CrossTenantAuditError
-impl<T> typenum::type_operators::Same for authn::CrossTenantAuditError
-pub type authn::CrossTenantAuditError::Output = T
 #[non_exhaustive] pub enum authn::CrossTenantError
 pub authn::CrossTenantError::Audit(diport::audit_sink::AuditSinkError)
 pub authn::CrossTenantError::NotSuperAdmin
@@ -106,34 +50,6 @@ impl core::marker::Unpin for authn::CrossTenantError
 impl core::marker::UnsafeUnpin for authn::CrossTenantError
 impl !core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantError
 impl !core::panic::unwind_safe::UnwindSafe for authn::CrossTenantError
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::CrossTenantError where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::CrossTenantError where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::CrossTenantError
-pub fn authn::CrossTenantError::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::CrossTenantError where U: core::convert::From<T>
-pub fn authn::CrossTenantError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::CrossTenantError where U: core::convert::Into<T>
-pub type authn::CrossTenantError::Error = core::convert::Infallible
-pub fn authn::CrossTenantError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::CrossTenantError where U: core::convert::TryFrom<T>
-pub type authn::CrossTenantError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::CrossTenantError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for authn::CrossTenantError where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::CrossTenantError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::CrossTenantError where T: 'static + ?core::marker::Sized
-pub fn authn::CrossTenantError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::CrossTenantError where T: ?core::marker::Sized
-pub fn authn::CrossTenantError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::CrossTenantError where T: ?core::marker::Sized
-pub fn authn::CrossTenantError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::CrossTenantError
-pub fn authn::CrossTenantError::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::CrossTenantError
-pub fn authn::CrossTenantError::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::CrossTenantError
-impl<T> tracing::instrument::WithSubscriber for authn::CrossTenantError
-impl<T> typenum::type_operators::Same for authn::CrossTenantError
-pub type authn::CrossTenantError::Output = T
 pub enum authn::JwtAccessPrincipal<'a>
 pub authn::JwtAccessPrincipal::Admin
 pub authn::JwtAccessPrincipal::Admin::subject: &'a str
@@ -162,42 +78,6 @@ impl<'a> core::marker::Unpin for authn::JwtAccessPrincipal<'a>
 impl<'a> core::marker::UnsafeUnpin for authn::JwtAccessPrincipal<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for authn::JwtAccessPrincipal<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for authn::JwtAccessPrincipal<'a>
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::JwtAccessPrincipal<'a> where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::JwtAccessPrincipal<'a> where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::JwtAccessPrincipal<'a>
-pub fn authn::JwtAccessPrincipal<'a>::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<Q, K> equivalent::Equivalent<K> for authn::JwtAccessPrincipal<'a> where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::JwtAccessPrincipal<'a>::equivalent(&self, &K) -> bool
-impl<Q, K> hashbrown::Equivalent<K> for authn::JwtAccessPrincipal<'a> where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::JwtAccessPrincipal<'a>::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for authn::JwtAccessPrincipal<'a> where U: core::convert::From<T>
-pub fn authn::JwtAccessPrincipal<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::JwtAccessPrincipal<'a> where U: core::convert::Into<T>
-pub type authn::JwtAccessPrincipal<'a>::Error = core::convert::Infallible
-pub fn authn::JwtAccessPrincipal<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::JwtAccessPrincipal<'a> where U: core::convert::TryFrom<T>
-pub type authn::JwtAccessPrincipal<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::JwtAccessPrincipal<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::JwtAccessPrincipal<'a> where T: core::clone::Clone
-pub type authn::JwtAccessPrincipal<'a>::Owned = T
-pub fn authn::JwtAccessPrincipal<'a>::clone_into(&self, &mut T)
-pub fn authn::JwtAccessPrincipal<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for authn::JwtAccessPrincipal<'a> where T: 'static + ?core::marker::Sized
-pub fn authn::JwtAccessPrincipal<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::JwtAccessPrincipal<'a> where T: ?core::marker::Sized
-pub fn authn::JwtAccessPrincipal<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::JwtAccessPrincipal<'a> where T: ?core::marker::Sized
-pub fn authn::JwtAccessPrincipal<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::JwtAccessPrincipal<'a> where T: core::clone::Clone
-pub unsafe fn authn::JwtAccessPrincipal<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::JwtAccessPrincipal<'a>
-pub fn authn::JwtAccessPrincipal<'a>::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::JwtAccessPrincipal<'a>
-pub fn authn::JwtAccessPrincipal<'a>::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::JwtAccessPrincipal<'a>
-impl<T> tracing::instrument::WithSubscriber for authn::JwtAccessPrincipal<'a>
-impl<T> typenum::type_operators::Same for authn::JwtAccessPrincipal<'a>
-pub type authn::JwtAccessPrincipal<'a>::Output = T
 pub enum authn::JwtAlg
 pub authn::JwtAlg::Es256
 pub authn::JwtAlg::Hs256
@@ -217,42 +97,6 @@ impl core::marker::Unpin for authn::JwtAlg
 impl core::marker::UnsafeUnpin for authn::JwtAlg
 impl core::panic::unwind_safe::RefUnwindSafe for authn::JwtAlg
 impl core::panic::unwind_safe::UnwindSafe for authn::JwtAlg
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::JwtAlg where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::JwtAlg where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::JwtAlg
-pub fn authn::JwtAlg::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<Q, K> equivalent::Equivalent<K> for authn::JwtAlg where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::JwtAlg::equivalent(&self, &K) -> bool
-impl<Q, K> hashbrown::Equivalent<K> for authn::JwtAlg where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::JwtAlg::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for authn::JwtAlg where U: core::convert::From<T>
-pub fn authn::JwtAlg::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::JwtAlg where U: core::convert::Into<T>
-pub type authn::JwtAlg::Error = core::convert::Infallible
-pub fn authn::JwtAlg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::JwtAlg where U: core::convert::TryFrom<T>
-pub type authn::JwtAlg::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::JwtAlg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::JwtAlg where T: core::clone::Clone
-pub type authn::JwtAlg::Owned = T
-pub fn authn::JwtAlg::clone_into(&self, &mut T)
-pub fn authn::JwtAlg::to_owned(&self) -> T
-impl<T> core::any::Any for authn::JwtAlg where T: 'static + ?core::marker::Sized
-pub fn authn::JwtAlg::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::JwtAlg where T: ?core::marker::Sized
-pub fn authn::JwtAlg::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::JwtAlg where T: ?core::marker::Sized
-pub fn authn::JwtAlg::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::JwtAlg where T: core::clone::Clone
-pub unsafe fn authn::JwtAlg::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::JwtAlg
-pub fn authn::JwtAlg::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::JwtAlg
-pub fn authn::JwtAlg::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::JwtAlg
-impl<T> tracing::instrument::WithSubscriber for authn::JwtAlg
-impl<T> typenum::type_operators::Same for authn::JwtAlg
-pub type authn::JwtAlg::Output = T
 #[non_exhaustive] pub enum authn::JwtIssueError
 pub authn::JwtIssueError::AlgKindMismatch
 pub authn::JwtIssueError::ClaimsEncode(serde_json::error::Error)
@@ -276,34 +120,6 @@ impl core::marker::Unpin for authn::JwtIssueError
 impl core::marker::UnsafeUnpin for authn::JwtIssueError
 impl !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssueError
 impl !core::panic::unwind_safe::UnwindSafe for authn::JwtIssueError
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::JwtIssueError where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::JwtIssueError where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::JwtIssueError
-pub fn authn::JwtIssueError::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::JwtIssueError where U: core::convert::From<T>
-pub fn authn::JwtIssueError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::JwtIssueError where U: core::convert::Into<T>
-pub type authn::JwtIssueError::Error = core::convert::Infallible
-pub fn authn::JwtIssueError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::JwtIssueError where U: core::convert::TryFrom<T>
-pub type authn::JwtIssueError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::JwtIssueError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for authn::JwtIssueError where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::JwtIssueError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::JwtIssueError where T: 'static + ?core::marker::Sized
-pub fn authn::JwtIssueError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::JwtIssueError where T: ?core::marker::Sized
-pub fn authn::JwtIssueError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::JwtIssueError where T: ?core::marker::Sized
-pub fn authn::JwtIssueError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::JwtIssueError
-pub fn authn::JwtIssueError::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::JwtIssueError
-pub fn authn::JwtIssueError::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::JwtIssueError
-impl<T> tracing::instrument::WithSubscriber for authn::JwtIssueError
-impl<T> typenum::type_operators::Same for authn::JwtIssueError
-pub type authn::JwtIssueError::Output = T
 #[non_exhaustive] pub enum authn::MtlsIdentityError
 pub authn::MtlsIdentityError::EmptyAllowSet
 pub authn::MtlsIdentityError::EmptyPath
@@ -330,38 +146,43 @@ impl core::marker::Unpin for authn::MtlsIdentityError
 impl core::marker::UnsafeUnpin for authn::MtlsIdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for authn::MtlsIdentityError
 impl core::panic::unwind_safe::UnwindSafe for authn::MtlsIdentityError
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MtlsIdentityError where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MtlsIdentityError where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::MtlsIdentityError
-pub fn authn::MtlsIdentityError::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<Q, K> equivalent::Equivalent<K> for authn::MtlsIdentityError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::MtlsIdentityError::equivalent(&self, &K) -> bool
-impl<Q, K> hashbrown::Equivalent<K> for authn::MtlsIdentityError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::MtlsIdentityError::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for authn::MtlsIdentityError where U: core::convert::From<T>
-pub fn authn::MtlsIdentityError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::MtlsIdentityError where U: core::convert::Into<T>
-pub type authn::MtlsIdentityError::Error = core::convert::Infallible
-pub fn authn::MtlsIdentityError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::MtlsIdentityError where U: core::convert::TryFrom<T>
-pub type authn::MtlsIdentityError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::MtlsIdentityError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for authn::MtlsIdentityError where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::MtlsIdentityError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::MtlsIdentityError where T: 'static + ?core::marker::Sized
-pub fn authn::MtlsIdentityError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::MtlsIdentityError where T: ?core::marker::Sized
-pub fn authn::MtlsIdentityError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::MtlsIdentityError where T: ?core::marker::Sized
-pub fn authn::MtlsIdentityError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::MtlsIdentityError
-pub fn authn::MtlsIdentityError::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::MtlsIdentityError
-pub fn authn::MtlsIdentityError::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::MtlsIdentityError
-impl<T> tracing::instrument::WithSubscriber for authn::MtlsIdentityError
-impl<T> typenum::type_operators::Same for authn::MtlsIdentityError
-pub type authn::MtlsIdentityError::Output = T
+pub enum authn::ProjectionMaintenanceAction
+pub authn::ProjectionMaintenanceAction::Replay
+pub authn::ProjectionMaintenanceAction::Status
+pub authn::ProjectionMaintenanceAction::Swap
+impl core::clone::Clone for authn::ProjectionMaintenanceAction
+pub fn authn::ProjectionMaintenanceAction::clone(&self) -> authn::ProjectionMaintenanceAction
+impl core::cmp::Eq for authn::ProjectionMaintenanceAction
+impl core::cmp::PartialEq for authn::ProjectionMaintenanceAction
+pub fn authn::ProjectionMaintenanceAction::eq(&self, &authn::ProjectionMaintenanceAction) -> bool
+impl core::fmt::Debug for authn::ProjectionMaintenanceAction
+pub fn authn::ProjectionMaintenanceAction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authn::ProjectionMaintenanceAction
+impl core::marker::StructuralPartialEq for authn::ProjectionMaintenanceAction
+impl core::marker::Freeze for authn::ProjectionMaintenanceAction
+impl core::marker::Send for authn::ProjectionMaintenanceAction
+impl core::marker::Sync for authn::ProjectionMaintenanceAction
+impl core::marker::Unpin for authn::ProjectionMaintenanceAction
+impl core::marker::UnsafeUnpin for authn::ProjectionMaintenanceAction
+impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceAction
+impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceAction
+#[non_exhaustive] pub enum authn::ProjectionMaintenanceGrantError
+pub authn::ProjectionMaintenanceGrantError::EmptyProjection
+pub authn::ProjectionMaintenanceGrantError::EmptySet
+pub authn::ProjectionMaintenanceGrantError::EmptySubject
+pub authn::ProjectionMaintenanceGrantError::Forbidden
+impl core::error::Error for authn::ProjectionMaintenanceGrantError
+impl core::fmt::Debug for authn::ProjectionMaintenanceGrantError
+pub fn authn::ProjectionMaintenanceGrantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for authn::ProjectionMaintenanceGrantError
+pub fn authn::ProjectionMaintenanceGrantError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::ProjectionMaintenanceGrantError
+impl core::marker::Send for authn::ProjectionMaintenanceGrantError
+impl core::marker::Sync for authn::ProjectionMaintenanceGrantError
+impl core::marker::Unpin for authn::ProjectionMaintenanceGrantError
+impl core::marker::UnsafeUnpin for authn::ProjectionMaintenanceGrantError
+impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceGrantError
+impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrantError
 pub struct authn::AccessToken(_)
 impl authn::AccessToken
 pub fn authn::AccessToken::as_str(&self) -> &str
@@ -375,32 +196,6 @@ impl core::marker::Unpin for authn::AccessToken
 impl core::marker::UnsafeUnpin for authn::AccessToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::AccessToken
 impl core::panic::unwind_safe::UnwindSafe for authn::AccessToken
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::AccessToken where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::AccessToken where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::AccessToken
-pub fn authn::AccessToken::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::AccessToken where U: core::convert::From<T>
-pub fn authn::AccessToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::AccessToken where U: core::convert::Into<T>
-pub type authn::AccessToken::Error = core::convert::Infallible
-pub fn authn::AccessToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::AccessToken where U: core::convert::TryFrom<T>
-pub type authn::AccessToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::AccessToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::AccessToken where T: 'static + ?core::marker::Sized
-pub fn authn::AccessToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::AccessToken where T: ?core::marker::Sized
-pub fn authn::AccessToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::AccessToken where T: ?core::marker::Sized
-pub fn authn::AccessToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::AccessToken
-pub fn authn::AccessToken::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::AccessToken
-pub fn authn::AccessToken::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::AccessToken
-impl<T> tracing::instrument::WithSubscriber for authn::AccessToken
-impl<T> typenum::type_operators::Same for authn::AccessToken
-pub type authn::AccessToken::Output = T
 pub struct authn::AuditedCrossTenantVisibility
 impl authn::AuditedCrossTenantVisibility
 pub fn authn::AuditedCrossTenantVisibility::target(&self) -> vocab::tenant::TenantId
@@ -412,32 +207,6 @@ impl core::marker::Unpin for authn::AuditedCrossTenantVisibility
 impl core::marker::UnsafeUnpin for authn::AuditedCrossTenantVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for authn::AuditedCrossTenantVisibility
 impl core::panic::unwind_safe::UnwindSafe for authn::AuditedCrossTenantVisibility
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::AuditedCrossTenantVisibility where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::AuditedCrossTenantVisibility where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::AuditedCrossTenantVisibility
-pub fn authn::AuditedCrossTenantVisibility::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::AuditedCrossTenantVisibility where U: core::convert::From<T>
-pub fn authn::AuditedCrossTenantVisibility::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::AuditedCrossTenantVisibility where U: core::convert::Into<T>
-pub type authn::AuditedCrossTenantVisibility::Error = core::convert::Infallible
-pub fn authn::AuditedCrossTenantVisibility::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::AuditedCrossTenantVisibility where U: core::convert::TryFrom<T>
-pub type authn::AuditedCrossTenantVisibility::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::AuditedCrossTenantVisibility::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::AuditedCrossTenantVisibility where T: 'static + ?core::marker::Sized
-pub fn authn::AuditedCrossTenantVisibility::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::AuditedCrossTenantVisibility where T: ?core::marker::Sized
-pub fn authn::AuditedCrossTenantVisibility::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::AuditedCrossTenantVisibility where T: ?core::marker::Sized
-pub fn authn::AuditedCrossTenantVisibility::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::AuditedCrossTenantVisibility
-pub fn authn::AuditedCrossTenantVisibility::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::AuditedCrossTenantVisibility
-pub fn authn::AuditedCrossTenantVisibility::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::AuditedCrossTenantVisibility
-impl<T> tracing::instrument::WithSubscriber for authn::AuditedCrossTenantVisibility
-impl<T> typenum::type_operators::Same for authn::AuditedCrossTenantVisibility
-pub type authn::AuditedCrossTenantVisibility::Output = T
 pub struct authn::CrossTenantAuditContext
 impl authn::CrossTenantAuditContext
 pub fn authn::CrossTenantAuditContext::new(&'static str, impl core::convert::Into<alloc::string::String>, &'static str, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::CrossTenantAuditError>
@@ -450,32 +219,6 @@ impl core::marker::Unpin for authn::CrossTenantAuditContext
 impl core::marker::UnsafeUnpin for authn::CrossTenantAuditContext
 impl core::panic::unwind_safe::RefUnwindSafe for authn::CrossTenantAuditContext
 impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditContext
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::CrossTenantAuditContext where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::CrossTenantAuditContext where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::CrossTenantAuditContext
-pub fn authn::CrossTenantAuditContext::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::CrossTenantAuditContext where U: core::convert::From<T>
-pub fn authn::CrossTenantAuditContext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::CrossTenantAuditContext where U: core::convert::Into<T>
-pub type authn::CrossTenantAuditContext::Error = core::convert::Infallible
-pub fn authn::CrossTenantAuditContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::CrossTenantAuditContext where U: core::convert::TryFrom<T>
-pub type authn::CrossTenantAuditContext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::CrossTenantAuditContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::CrossTenantAuditContext where T: 'static + ?core::marker::Sized
-pub fn authn::CrossTenantAuditContext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::CrossTenantAuditContext where T: ?core::marker::Sized
-pub fn authn::CrossTenantAuditContext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::CrossTenantAuditContext where T: ?core::marker::Sized
-pub fn authn::CrossTenantAuditContext::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::CrossTenantAuditContext
-pub fn authn::CrossTenantAuditContext::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::CrossTenantAuditContext
-pub fn authn::CrossTenantAuditContext::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::CrossTenantAuditContext
-impl<T> tracing::instrument::WithSubscriber for authn::CrossTenantAuditContext
-impl<T> typenum::type_operators::Same for authn::CrossTenantAuditContext
-pub type authn::CrossTenantAuditContext::Output = T
 pub struct authn::Jwt
 impl authn::Jwt
 pub fn authn::Jwt::as_str(&self) -> &str
@@ -489,32 +232,6 @@ impl core::marker::Unpin for authn::Jwt
 impl core::marker::UnsafeUnpin for authn::Jwt
 impl core::panic::unwind_safe::RefUnwindSafe for authn::Jwt
 impl core::panic::unwind_safe::UnwindSafe for authn::Jwt
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::Jwt where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::Jwt where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::Jwt
-pub fn authn::Jwt::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::Jwt where U: core::convert::From<T>
-pub fn authn::Jwt::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::Jwt where U: core::convert::Into<T>
-pub type authn::Jwt::Error = core::convert::Infallible
-pub fn authn::Jwt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::Jwt where U: core::convert::TryFrom<T>
-pub type authn::Jwt::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::Jwt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::Jwt where T: 'static + ?core::marker::Sized
-pub fn authn::Jwt::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::Jwt where T: ?core::marker::Sized
-pub fn authn::Jwt::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::Jwt where T: ?core::marker::Sized
-pub fn authn::Jwt::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::Jwt
-pub fn authn::Jwt::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::Jwt
-pub fn authn::Jwt::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::Jwt
-impl<T> tracing::instrument::WithSubscriber for authn::Jwt
-impl<T> typenum::type_operators::Same for authn::Jwt
-pub type authn::Jwt::Output = T
 pub struct authn::JwtIssuer<S>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<S>
 pub async fn authn::JwtIssuer<S>::issue_access(&self, authn::JwtAccessPrincipal<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
@@ -527,32 +244,6 @@ impl<S> core::marker::Unpin for authn::JwtIssuer<S>
 impl<S> core::marker::UnsafeUnpin for authn::JwtIssuer<S>
 impl<S> !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuer<S>
 impl<S> !core::panic::unwind_safe::UnwindSafe for authn::JwtIssuer<S>
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::JwtIssuer<S> where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::JwtIssuer<S> where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::JwtIssuer<S>
-pub fn authn::JwtIssuer<S>::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::JwtIssuer<S> where U: core::convert::From<T>
-pub fn authn::JwtIssuer<S>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::JwtIssuer<S> where U: core::convert::Into<T>
-pub type authn::JwtIssuer<S>::Error = core::convert::Infallible
-pub fn authn::JwtIssuer<S>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::JwtIssuer<S> where U: core::convert::TryFrom<T>
-pub type authn::JwtIssuer<S>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::JwtIssuer<S>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::JwtIssuer<S> where T: 'static + ?core::marker::Sized
-pub fn authn::JwtIssuer<S>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::JwtIssuer<S> where T: ?core::marker::Sized
-pub fn authn::JwtIssuer<S>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::JwtIssuer<S> where T: ?core::marker::Sized
-pub fn authn::JwtIssuer<S>::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::JwtIssuer<S>
-pub fn authn::JwtIssuer<S>::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::JwtIssuer<S>
-pub fn authn::JwtIssuer<S>::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::JwtIssuer<S>
-impl<T> tracing::instrument::WithSubscriber for authn::JwtIssuer<S>
-impl<T> typenum::type_operators::Same for authn::JwtIssuer<S>
-pub type authn::JwtIssuer<S>::Output = T
 pub struct authn::JwtIssuerConfig
 pub authn::JwtIssuerConfig::alg: authn::JwtAlg
 pub authn::JwtIssuerConfig::audience: alloc::string::String
@@ -567,32 +258,6 @@ impl core::marker::Unpin for authn::JwtIssuerConfig
 impl core::marker::UnsafeUnpin for authn::JwtIssuerConfig
 impl core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuerConfig
 impl core::panic::unwind_safe::UnwindSafe for authn::JwtIssuerConfig
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::JwtIssuerConfig where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::JwtIssuerConfig where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::JwtIssuerConfig
-pub fn authn::JwtIssuerConfig::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::JwtIssuerConfig where U: core::convert::From<T>
-pub fn authn::JwtIssuerConfig::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::JwtIssuerConfig where U: core::convert::Into<T>
-pub type authn::JwtIssuerConfig::Error = core::convert::Infallible
-pub fn authn::JwtIssuerConfig::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::JwtIssuerConfig where U: core::convert::TryFrom<T>
-pub type authn::JwtIssuerConfig::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::JwtIssuerConfig::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::JwtIssuerConfig where T: 'static + ?core::marker::Sized
-pub fn authn::JwtIssuerConfig::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::JwtIssuerConfig where T: ?core::marker::Sized
-pub fn authn::JwtIssuerConfig::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::JwtIssuerConfig where T: ?core::marker::Sized
-pub fn authn::JwtIssuerConfig::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::JwtIssuerConfig
-pub fn authn::JwtIssuerConfig::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::JwtIssuerConfig
-pub fn authn::JwtIssuerConfig::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::JwtIssuerConfig
-impl<T> tracing::instrument::WithSubscriber for authn::JwtIssuerConfig
-impl<T> typenum::type_operators::Same for authn::JwtIssuerConfig
-pub type authn::JwtIssuerConfig::Output = T
 pub struct authn::MintedJwt
 impl authn::MintedJwt
 pub fn authn::MintedJwt::as_str(&self) -> &str
@@ -606,32 +271,6 @@ impl core::marker::Unpin for authn::MintedJwt
 impl core::marker::UnsafeUnpin for authn::MintedJwt
 impl core::panic::unwind_safe::RefUnwindSafe for authn::MintedJwt
 impl core::panic::unwind_safe::UnwindSafe for authn::MintedJwt
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MintedJwt where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MintedJwt where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::MintedJwt
-pub fn authn::MintedJwt::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::MintedJwt where U: core::convert::From<T>
-pub fn authn::MintedJwt::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::MintedJwt where U: core::convert::Into<T>
-pub type authn::MintedJwt::Error = core::convert::Infallible
-pub fn authn::MintedJwt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::MintedJwt where U: core::convert::TryFrom<T>
-pub type authn::MintedJwt::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::MintedJwt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::MintedJwt where T: 'static + ?core::marker::Sized
-pub fn authn::MintedJwt::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::MintedJwt where T: ?core::marker::Sized
-pub fn authn::MintedJwt::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::MintedJwt where T: ?core::marker::Sized
-pub fn authn::MintedJwt::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::MintedJwt
-pub fn authn::MintedJwt::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::MintedJwt
-pub fn authn::MintedJwt::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::MintedJwt
-impl<T> tracing::instrument::WithSubscriber for authn::MintedJwt
-impl<T> typenum::type_operators::Same for authn::MintedJwt
-pub type authn::MintedJwt::Output = T
 pub struct authn::MtlsAllowSet
 impl authn::MtlsAllowSet
 pub fn authn::MtlsAllowSet::allows(&self, &authn::SpiffeId) -> bool
@@ -648,38 +287,6 @@ impl core::marker::Unpin for authn::MtlsAllowSet
 impl core::marker::UnsafeUnpin for authn::MtlsAllowSet
 impl core::panic::unwind_safe::RefUnwindSafe for authn::MtlsAllowSet
 impl core::panic::unwind_safe::UnwindSafe for authn::MtlsAllowSet
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MtlsAllowSet where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MtlsAllowSet where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::MtlsAllowSet
-pub fn authn::MtlsAllowSet::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::MtlsAllowSet where U: core::convert::From<T>
-pub fn authn::MtlsAllowSet::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::MtlsAllowSet where U: core::convert::Into<T>
-pub type authn::MtlsAllowSet::Error = core::convert::Infallible
-pub fn authn::MtlsAllowSet::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::MtlsAllowSet where U: core::convert::TryFrom<T>
-pub type authn::MtlsAllowSet::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::MtlsAllowSet::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::MtlsAllowSet where T: core::clone::Clone
-pub type authn::MtlsAllowSet::Owned = T
-pub fn authn::MtlsAllowSet::clone_into(&self, &mut T)
-pub fn authn::MtlsAllowSet::to_owned(&self) -> T
-impl<T> core::any::Any for authn::MtlsAllowSet where T: 'static + ?core::marker::Sized
-pub fn authn::MtlsAllowSet::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::MtlsAllowSet where T: ?core::marker::Sized
-pub fn authn::MtlsAllowSet::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::MtlsAllowSet where T: ?core::marker::Sized
-pub fn authn::MtlsAllowSet::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::MtlsAllowSet where T: core::clone::Clone
-pub unsafe fn authn::MtlsAllowSet::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::MtlsAllowSet
-pub fn authn::MtlsAllowSet::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::MtlsAllowSet
-pub fn authn::MtlsAllowSet::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::MtlsAllowSet
-impl<T> tracing::instrument::WithSubscriber for authn::MtlsAllowSet
-impl<T> typenum::type_operators::Same for authn::MtlsAllowSet
-pub type authn::MtlsAllowSet::Output = T
 pub struct authn::MtlsTrustDomain
 impl authn::MtlsTrustDomain
 pub fn authn::MtlsTrustDomain::as_str(&self) -> &str
@@ -713,46 +320,6 @@ impl core::marker::Unpin for authn::MtlsTrustDomain
 impl core::marker::UnsafeUnpin for authn::MtlsTrustDomain
 impl core::panic::unwind_safe::RefUnwindSafe for authn::MtlsTrustDomain
 impl core::panic::unwind_safe::UnwindSafe for authn::MtlsTrustDomain
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MtlsTrustDomain where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MtlsTrustDomain where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::MtlsTrustDomain
-pub fn authn::MtlsTrustDomain::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<Q, K> equivalent::Comparable<K> for authn::MtlsTrustDomain where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::compare(&self, &K) -> core::cmp::Ordering
-impl<Q, K> equivalent::Equivalent<K> for authn::MtlsTrustDomain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::equivalent(&self, &K) -> bool
-impl<Q, K> hashbrown::Equivalent<K> for authn::MtlsTrustDomain where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for authn::MtlsTrustDomain where U: core::convert::From<T>
-pub fn authn::MtlsTrustDomain::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::MtlsTrustDomain where U: core::convert::Into<T>
-pub type authn::MtlsTrustDomain::Error = core::convert::Infallible
-pub fn authn::MtlsTrustDomain::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::MtlsTrustDomain where U: core::convert::TryFrom<T>
-pub type authn::MtlsTrustDomain::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::MtlsTrustDomain::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::MtlsTrustDomain where T: core::clone::Clone
-pub type authn::MtlsTrustDomain::Owned = T
-pub fn authn::MtlsTrustDomain::clone_into(&self, &mut T)
-pub fn authn::MtlsTrustDomain::to_owned(&self) -> T
-impl<T> alloc::string::ToString for authn::MtlsTrustDomain where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::MtlsTrustDomain where T: 'static + ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::MtlsTrustDomain where T: ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::MtlsTrustDomain where T: ?core::marker::Sized
-pub fn authn::MtlsTrustDomain::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::MtlsTrustDomain where T: core::clone::Clone
-pub unsafe fn authn::MtlsTrustDomain::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::MtlsTrustDomain
-pub fn authn::MtlsTrustDomain::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::MtlsTrustDomain
-pub fn authn::MtlsTrustDomain::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::MtlsTrustDomain
-impl<T> tracing::instrument::WithSubscriber for authn::MtlsTrustDomain
-impl<T> typenum::type_operators::Same for authn::MtlsTrustDomain
-pub type authn::MtlsTrustDomain::Output = T
 pub struct authn::MtlsTrustDomainAllowSet
 impl authn::MtlsTrustDomainAllowSet
 pub fn authn::MtlsTrustDomainAllowSet::allows(&self, &authn::MtlsTrustDomain) -> bool
@@ -769,38 +336,6 @@ impl core::marker::Unpin for authn::MtlsTrustDomainAllowSet
 impl core::marker::UnsafeUnpin for authn::MtlsTrustDomainAllowSet
 impl core::panic::unwind_safe::RefUnwindSafe for authn::MtlsTrustDomainAllowSet
 impl core::panic::unwind_safe::UnwindSafe for authn::MtlsTrustDomainAllowSet
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::MtlsTrustDomainAllowSet where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::MtlsTrustDomainAllowSet where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::MtlsTrustDomainAllowSet
-pub fn authn::MtlsTrustDomainAllowSet::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::MtlsTrustDomainAllowSet where U: core::convert::From<T>
-pub fn authn::MtlsTrustDomainAllowSet::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::MtlsTrustDomainAllowSet where U: core::convert::Into<T>
-pub type authn::MtlsTrustDomainAllowSet::Error = core::convert::Infallible
-pub fn authn::MtlsTrustDomainAllowSet::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::MtlsTrustDomainAllowSet where U: core::convert::TryFrom<T>
-pub type authn::MtlsTrustDomainAllowSet::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::MtlsTrustDomainAllowSet::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::MtlsTrustDomainAllowSet where T: core::clone::Clone
-pub type authn::MtlsTrustDomainAllowSet::Owned = T
-pub fn authn::MtlsTrustDomainAllowSet::clone_into(&self, &mut T)
-pub fn authn::MtlsTrustDomainAllowSet::to_owned(&self) -> T
-impl<T> core::any::Any for authn::MtlsTrustDomainAllowSet where T: 'static + ?core::marker::Sized
-pub fn authn::MtlsTrustDomainAllowSet::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::MtlsTrustDomainAllowSet where T: ?core::marker::Sized
-pub fn authn::MtlsTrustDomainAllowSet::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::MtlsTrustDomainAllowSet where T: ?core::marker::Sized
-pub fn authn::MtlsTrustDomainAllowSet::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::MtlsTrustDomainAllowSet where T: core::clone::Clone
-pub unsafe fn authn::MtlsTrustDomainAllowSet::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::MtlsTrustDomainAllowSet
-pub fn authn::MtlsTrustDomainAllowSet::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::MtlsTrustDomainAllowSet
-pub fn authn::MtlsTrustDomainAllowSet::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::MtlsTrustDomainAllowSet
-impl<T> tracing::instrument::WithSubscriber for authn::MtlsTrustDomainAllowSet
-impl<T> typenum::type_operators::Same for authn::MtlsTrustDomainAllowSet
-pub type authn::MtlsTrustDomainAllowSet::Output = T
 pub struct authn::OutboundMtlsPolicy
 impl authn::OutboundMtlsPolicy
 pub fn authn::OutboundMtlsPolicy::local_identity(&self) -> &authn::SpiffeId
@@ -818,38 +353,6 @@ impl core::marker::Unpin for authn::OutboundMtlsPolicy
 impl core::marker::UnsafeUnpin for authn::OutboundMtlsPolicy
 impl core::panic::unwind_safe::RefUnwindSafe for authn::OutboundMtlsPolicy
 impl core::panic::unwind_safe::UnwindSafe for authn::OutboundMtlsPolicy
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::OutboundMtlsPolicy where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::OutboundMtlsPolicy where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::OutboundMtlsPolicy
-pub fn authn::OutboundMtlsPolicy::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::OutboundMtlsPolicy where U: core::convert::From<T>
-pub fn authn::OutboundMtlsPolicy::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::OutboundMtlsPolicy where U: core::convert::Into<T>
-pub type authn::OutboundMtlsPolicy::Error = core::convert::Infallible
-pub fn authn::OutboundMtlsPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::OutboundMtlsPolicy where U: core::convert::TryFrom<T>
-pub type authn::OutboundMtlsPolicy::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::OutboundMtlsPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::OutboundMtlsPolicy where T: core::clone::Clone
-pub type authn::OutboundMtlsPolicy::Owned = T
-pub fn authn::OutboundMtlsPolicy::clone_into(&self, &mut T)
-pub fn authn::OutboundMtlsPolicy::to_owned(&self) -> T
-impl<T> core::any::Any for authn::OutboundMtlsPolicy where T: 'static + ?core::marker::Sized
-pub fn authn::OutboundMtlsPolicy::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::OutboundMtlsPolicy where T: ?core::marker::Sized
-pub fn authn::OutboundMtlsPolicy::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::OutboundMtlsPolicy where T: ?core::marker::Sized
-pub fn authn::OutboundMtlsPolicy::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::OutboundMtlsPolicy where T: core::clone::Clone
-pub unsafe fn authn::OutboundMtlsPolicy::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::OutboundMtlsPolicy
-pub fn authn::OutboundMtlsPolicy::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::OutboundMtlsPolicy
-pub fn authn::OutboundMtlsPolicy::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::OutboundMtlsPolicy
-impl<T> tracing::instrument::WithSubscriber for authn::OutboundMtlsPolicy
-impl<T> typenum::type_operators::Same for authn::OutboundMtlsPolicy
-pub type authn::OutboundMtlsPolicy::Output = T
 pub struct authn::Principal
 impl authn::Principal
 pub fn authn::Principal::audit_subject(&self) -> &str
@@ -871,32 +374,46 @@ impl core::marker::Unpin for authn::Principal
 impl core::marker::UnsafeUnpin for authn::Principal
 impl core::panic::unwind_safe::RefUnwindSafe for authn::Principal
 impl core::panic::unwind_safe::UnwindSafe for authn::Principal
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::Principal where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::Principal where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::Principal
-pub fn authn::Principal::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::Principal where U: core::convert::From<T>
-pub fn authn::Principal::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::Principal where U: core::convert::Into<T>
-pub type authn::Principal::Error = core::convert::Infallible
-pub fn authn::Principal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::Principal where U: core::convert::TryFrom<T>
-pub type authn::Principal::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::Principal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::Principal where T: 'static + ?core::marker::Sized
-pub fn authn::Principal::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::Principal where T: ?core::marker::Sized
-pub fn authn::Principal::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::Principal where T: ?core::marker::Sized
-pub fn authn::Principal::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::Principal
-pub fn authn::Principal::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::Principal
-pub fn authn::Principal::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::Principal
-impl<T> tracing::instrument::WithSubscriber for authn::Principal
-impl<T> typenum::type_operators::Same for authn::Principal
-pub type authn::Principal::Output = T
+pub struct authn::ProjectionMaintenanceGrant
+impl authn::ProjectionMaintenanceGrant
+pub fn authn::ProjectionMaintenanceGrant::new(impl core::convert::Into<alloc::string::String>, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
+impl core::cmp::Eq for authn::ProjectionMaintenanceGrant
+impl core::cmp::PartialEq for authn::ProjectionMaintenanceGrant
+pub fn authn::ProjectionMaintenanceGrant::eq(&self, &authn::ProjectionMaintenanceGrant) -> bool
+impl core::fmt::Debug for authn::ProjectionMaintenanceGrant
+pub fn authn::ProjectionMaintenanceGrant::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for authn::ProjectionMaintenanceGrant
+impl core::marker::Freeze for authn::ProjectionMaintenanceGrant
+impl core::marker::Send for authn::ProjectionMaintenanceGrant
+impl core::marker::Sync for authn::ProjectionMaintenanceGrant
+impl core::marker::Unpin for authn::ProjectionMaintenanceGrant
+impl core::marker::UnsafeUnpin for authn::ProjectionMaintenanceGrant
+impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceGrant
+impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrant
+pub struct authn::ProjectionMaintenanceGrantSet
+impl authn::ProjectionMaintenanceGrantSet
+pub fn authn::ProjectionMaintenanceGrantSet::authorize(&self, &authn::Principal, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, &str) -> core::result::Result<authn::ProjectionMaintenanceReceipt, authn::ProjectionMaintenanceGrantError>
+pub fn authn::ProjectionMaintenanceGrantSet::new(alloc::vec::Vec<authn::ProjectionMaintenanceGrant>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
+impl core::marker::Freeze for authn::ProjectionMaintenanceGrantSet
+impl core::marker::Send for authn::ProjectionMaintenanceGrantSet
+impl core::marker::Sync for authn::ProjectionMaintenanceGrantSet
+impl core::marker::Unpin for authn::ProjectionMaintenanceGrantSet
+impl core::marker::UnsafeUnpin for authn::ProjectionMaintenanceGrantSet
+impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceGrantSet
+impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrantSet
+pub struct authn::ProjectionMaintenanceReceipt
+impl authn::ProjectionMaintenanceReceipt
+pub fn authn::ProjectionMaintenanceReceipt::authorizes(&self, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, &str) -> bool
+pub fn authn::ProjectionMaintenanceReceipt::operator_subject(&self) -> &str
+impl core::fmt::Debug for authn::ProjectionMaintenanceReceipt
+pub fn authn::ProjectionMaintenanceReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::ProjectionMaintenanceReceipt
+impl core::marker::Send for authn::ProjectionMaintenanceReceipt
+impl core::marker::Sync for authn::ProjectionMaintenanceReceipt
+impl core::marker::Unpin for authn::ProjectionMaintenanceReceipt
+impl core::marker::UnsafeUnpin for authn::ProjectionMaintenanceReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceReceipt
+impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceReceipt
 pub struct authn::RefreshToken(_)
 impl authn::RefreshToken
 pub fn authn::RefreshToken::as_str(&self) -> &str
@@ -910,32 +427,6 @@ impl core::marker::Unpin for authn::RefreshToken
 impl core::marker::UnsafeUnpin for authn::RefreshToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::RefreshToken
 impl core::panic::unwind_safe::UnwindSafe for authn::RefreshToken
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::RefreshToken where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::RefreshToken where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::RefreshToken
-pub fn authn::RefreshToken::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::RefreshToken where U: core::convert::From<T>
-pub fn authn::RefreshToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::RefreshToken where U: core::convert::Into<T>
-pub type authn::RefreshToken::Error = core::convert::Infallible
-pub fn authn::RefreshToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::RefreshToken where U: core::convert::TryFrom<T>
-pub type authn::RefreshToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::RefreshToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::RefreshToken where T: 'static + ?core::marker::Sized
-pub fn authn::RefreshToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::RefreshToken where T: ?core::marker::Sized
-pub fn authn::RefreshToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::RefreshToken where T: ?core::marker::Sized
-pub fn authn::RefreshToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::RefreshToken
-pub fn authn::RefreshToken::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::RefreshToken
-pub fn authn::RefreshToken::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::RefreshToken
-impl<T> tracing::instrument::WithSubscriber for authn::RefreshToken
-impl<T> typenum::type_operators::Same for authn::RefreshToken
-pub type authn::RefreshToken::Output = T
 pub struct authn::Session
 impl authn::Session
 pub fn authn::Session::expires_at(&self) -> std::time::SystemTime
@@ -949,32 +440,6 @@ impl core::marker::Unpin for authn::Session
 impl core::marker::UnsafeUnpin for authn::Session
 impl core::panic::unwind_safe::RefUnwindSafe for authn::Session
 impl core::panic::unwind_safe::UnwindSafe for authn::Session
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::Session where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::Session where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::Session
-pub fn authn::Session::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::Session where U: core::convert::From<T>
-pub fn authn::Session::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::Session where U: core::convert::Into<T>
-pub type authn::Session::Error = core::convert::Infallible
-pub fn authn::Session::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::Session where U: core::convert::TryFrom<T>
-pub type authn::Session::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::Session::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::Session where T: 'static + ?core::marker::Sized
-pub fn authn::Session::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::Session where T: ?core::marker::Sized
-pub fn authn::Session::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::Session where T: ?core::marker::Sized
-pub fn authn::Session::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::Session
-pub fn authn::Session::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::Session
-pub fn authn::Session::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::Session
-impl<T> tracing::instrument::WithSubscriber for authn::Session
-impl<T> typenum::type_operators::Same for authn::Session
-pub type authn::Session::Output = T
 pub struct authn::SessionId(_)
 impl authn::SessionId
 pub fn authn::SessionId::as_str(&self) -> &str
@@ -986,32 +451,6 @@ impl core::marker::Unpin for authn::SessionId
 impl core::marker::UnsafeUnpin for authn::SessionId
 impl core::panic::unwind_safe::RefUnwindSafe for authn::SessionId
 impl core::panic::unwind_safe::UnwindSafe for authn::SessionId
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::SessionId where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::SessionId where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::SessionId
-pub fn authn::SessionId::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::SessionId where U: core::convert::From<T>
-pub fn authn::SessionId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::SessionId where U: core::convert::Into<T>
-pub type authn::SessionId::Error = core::convert::Infallible
-pub fn authn::SessionId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::SessionId where U: core::convert::TryFrom<T>
-pub type authn::SessionId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::SessionId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::SessionId where T: 'static + ?core::marker::Sized
-pub fn authn::SessionId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::SessionId where T: ?core::marker::Sized
-pub fn authn::SessionId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::SessionId where T: ?core::marker::Sized
-pub fn authn::SessionId::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::SessionId
-pub fn authn::SessionId::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::SessionId
-pub fn authn::SessionId::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::SessionId
-impl<T> tracing::instrument::WithSubscriber for authn::SessionId
-impl<T> typenum::type_operators::Same for authn::SessionId
-pub type authn::SessionId::Output = T
 pub struct authn::SpiffeId
 impl authn::SpiffeId
 pub fn authn::SpiffeId::as_str(&self) -> &str
@@ -1046,46 +485,6 @@ impl core::marker::Unpin for authn::SpiffeId
 impl core::marker::UnsafeUnpin for authn::SpiffeId
 impl core::panic::unwind_safe::RefUnwindSafe for authn::SpiffeId
 impl core::panic::unwind_safe::UnwindSafe for authn::SpiffeId
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::SpiffeId where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::SpiffeId where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::SpiffeId
-pub fn authn::SpiffeId::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<Q, K> equivalent::Comparable<K> for authn::SpiffeId where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::SpiffeId::compare(&self, &K) -> core::cmp::Ordering
-impl<Q, K> equivalent::Equivalent<K> for authn::SpiffeId where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::SpiffeId::equivalent(&self, &K) -> bool
-impl<Q, K> hashbrown::Equivalent<K> for authn::SpiffeId where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
-pub fn authn::SpiffeId::equivalent(&self, &K) -> bool
-impl<T, U> core::convert::Into<U> for authn::SpiffeId where U: core::convert::From<T>
-pub fn authn::SpiffeId::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::SpiffeId where U: core::convert::Into<T>
-pub type authn::SpiffeId::Error = core::convert::Infallible
-pub fn authn::SpiffeId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::SpiffeId where U: core::convert::TryFrom<T>
-pub type authn::SpiffeId::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::SpiffeId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::SpiffeId where T: core::clone::Clone
-pub type authn::SpiffeId::Owned = T
-pub fn authn::SpiffeId::clone_into(&self, &mut T)
-pub fn authn::SpiffeId::to_owned(&self) -> T
-impl<T> alloc::string::ToString for authn::SpiffeId where T: core::fmt::Display + ?core::marker::Sized
-pub fn authn::SpiffeId::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for authn::SpiffeId where T: 'static + ?core::marker::Sized
-pub fn authn::SpiffeId::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::SpiffeId where T: ?core::marker::Sized
-pub fn authn::SpiffeId::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::SpiffeId where T: ?core::marker::Sized
-pub fn authn::SpiffeId::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::SpiffeId where T: core::clone::Clone
-pub unsafe fn authn::SpiffeId::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::SpiffeId
-pub fn authn::SpiffeId::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::SpiffeId
-pub fn authn::SpiffeId::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::SpiffeId
-impl<T> tracing::instrument::WithSubscriber for authn::SpiffeId
-impl<T> typenum::type_operators::Same for authn::SpiffeId
-pub type authn::SpiffeId::Output = T
 pub struct authn::VerifiedJwt
 impl authn::VerifiedJwt
 pub fn authn::VerifiedJwt::raw(&self) -> &str
@@ -1098,32 +497,6 @@ impl core::marker::Unpin for authn::VerifiedJwt
 impl core::marker::UnsafeUnpin for authn::VerifiedJwt
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedJwt
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedJwt
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::VerifiedJwt where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::VerifiedJwt where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::VerifiedJwt
-pub fn authn::VerifiedJwt::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::VerifiedJwt where U: core::convert::From<T>
-pub fn authn::VerifiedJwt::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::VerifiedJwt where U: core::convert::Into<T>
-pub type authn::VerifiedJwt::Error = core::convert::Infallible
-pub fn authn::VerifiedJwt::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::VerifiedJwt where U: core::convert::TryFrom<T>
-pub type authn::VerifiedJwt::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::VerifiedJwt::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::VerifiedJwt where T: 'static + ?core::marker::Sized
-pub fn authn::VerifiedJwt::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::VerifiedJwt where T: ?core::marker::Sized
-pub fn authn::VerifiedJwt::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::VerifiedJwt where T: ?core::marker::Sized
-pub fn authn::VerifiedJwt::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::VerifiedJwt
-pub fn authn::VerifiedJwt::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::VerifiedJwt
-pub fn authn::VerifiedJwt::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::VerifiedJwt
-impl<T> tracing::instrument::WithSubscriber for authn::VerifiedJwt
-impl<T> typenum::type_operators::Same for authn::VerifiedJwt
-pub type authn::VerifiedJwt::Output = T
 pub struct authn::VerifiedMtlsPeer
 impl authn::VerifiedMtlsPeer
 pub fn authn::VerifiedMtlsPeer::spiffe_id(&self) -> &authn::SpiffeId
@@ -1138,38 +511,6 @@ impl core::marker::Unpin for authn::VerifiedMtlsPeer
 impl core::marker::UnsafeUnpin for authn::VerifiedMtlsPeer
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedMtlsPeer
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedMtlsPeer
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::VerifiedMtlsPeer where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::VerifiedMtlsPeer where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::VerifiedMtlsPeer
-pub fn authn::VerifiedMtlsPeer::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::VerifiedMtlsPeer where U: core::convert::From<T>
-pub fn authn::VerifiedMtlsPeer::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::VerifiedMtlsPeer where U: core::convert::Into<T>
-pub type authn::VerifiedMtlsPeer::Error = core::convert::Infallible
-pub fn authn::VerifiedMtlsPeer::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::VerifiedMtlsPeer where U: core::convert::TryFrom<T>
-pub type authn::VerifiedMtlsPeer::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::VerifiedMtlsPeer::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for authn::VerifiedMtlsPeer where T: core::clone::Clone
-pub type authn::VerifiedMtlsPeer::Owned = T
-pub fn authn::VerifiedMtlsPeer::clone_into(&self, &mut T)
-pub fn authn::VerifiedMtlsPeer::to_owned(&self) -> T
-impl<T> core::any::Any for authn::VerifiedMtlsPeer where T: 'static + ?core::marker::Sized
-pub fn authn::VerifiedMtlsPeer::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::VerifiedMtlsPeer where T: ?core::marker::Sized
-pub fn authn::VerifiedMtlsPeer::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::VerifiedMtlsPeer where T: ?core::marker::Sized
-pub fn authn::VerifiedMtlsPeer::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for authn::VerifiedMtlsPeer where T: core::clone::Clone
-pub unsafe fn authn::VerifiedMtlsPeer::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for authn::VerifiedMtlsPeer
-pub fn authn::VerifiedMtlsPeer::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::VerifiedMtlsPeer
-pub fn authn::VerifiedMtlsPeer::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::VerifiedMtlsPeer
-impl<T> tracing::instrument::WithSubscriber for authn::VerifiedMtlsPeer
-impl<T> typenum::type_operators::Same for authn::VerifiedMtlsPeer
-pub type authn::VerifiedMtlsPeer::Output = T
 pub struct authn::VerifiedServiceToken
 impl authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::raw(&self) -> &str
@@ -1182,32 +523,6 @@ impl core::marker::Unpin for authn::VerifiedServiceToken
 impl core::marker::UnsafeUnpin for authn::VerifiedServiceToken
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedServiceToken
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedServiceToken
-impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for authn::VerifiedServiceToken where T: 'a
-impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for authn::VerifiedServiceToken where T: 'a
-impl<L> tonic::service::layered::LayerExt<L> for authn::VerifiedServiceToken
-pub fn authn::VerifiedServiceToken::named_layer<S>(&self, S) -> tonic::service::layered::Layered<<L as tower_layer::Layer<S>>::Service, S> where L: tower_layer::Layer<S>
-impl<T, U> core::convert::Into<U> for authn::VerifiedServiceToken where U: core::convert::From<T>
-pub fn authn::VerifiedServiceToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for authn::VerifiedServiceToken where U: core::convert::Into<T>
-pub type authn::VerifiedServiceToken::Error = core::convert::Infallible
-pub fn authn::VerifiedServiceToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for authn::VerifiedServiceToken where U: core::convert::TryFrom<T>
-pub type authn::VerifiedServiceToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn authn::VerifiedServiceToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for authn::VerifiedServiceToken where T: 'static + ?core::marker::Sized
-pub fn authn::VerifiedServiceToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for authn::VerifiedServiceToken where T: ?core::marker::Sized
-pub fn authn::VerifiedServiceToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for authn::VerifiedServiceToken where T: ?core::marker::Sized
-pub fn authn::VerifiedServiceToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for authn::VerifiedServiceToken
-pub fn authn::VerifiedServiceToken::from(T) -> T
-impl<T> tonic::request::IntoRequest<T> for authn::VerifiedServiceToken
-pub fn authn::VerifiedServiceToken::into_request(self) -> tonic::request::Request<T>
-impl<T> tracing::instrument::Instrument for authn::VerifiedServiceToken
-impl<T> tracing::instrument::WithSubscriber for authn::VerifiedServiceToken
-impl<T> typenum::type_operators::Same for authn::VerifiedServiceToken
-pub type authn::VerifiedServiceToken::Output = T
 pub fn authn::app_ctx(alloc::sync::Arc<authn::Principal>) -> core::option::Option<runctx::ctx::AppCtx>
 pub async fn authn::verify_jwt(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
 pub fn authn::verify_mtls_peer(authn::SpiffeId, &authn::MtlsAllowSet) -> core::result::Result<authn::VerifiedMtlsPeer, authn::MtlsIdentityError>

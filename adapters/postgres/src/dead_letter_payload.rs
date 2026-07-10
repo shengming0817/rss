@@ -9,9 +9,9 @@ use diport::{
 use secure::{Plaintext, ProtectionContext};
 use tokio::sync::Mutex;
 
-pub(crate) const DLX_ORIGINAL_ENTRY_ENCODING: &str = "key-provider-v1";
+pub(crate) const DLX_ORIGINAL_ENTRY_ENCODING: &str = "key-provider-v2";
 const DLX_ORIGINAL_ENTRY_FIELD: &str = "original_entry";
-const DLX_ORIGINAL_ENTRY_SCHEMA_VERSION: u32 = 1;
+const DLX_ORIGINAL_ENTRY_SCHEMA_VERSION: u32 = 2;
 
 /// Explicit DLX payload protector. There is no plaintext production constructor.
 #[derive(Clone)]
@@ -98,7 +98,8 @@ impl ProtectedDlxPayload {
 pub(crate) struct DlxPayloadContext<'a> {
     tenant: vocab::TenantId,
     source_kind: &'a str,
-    domain: &'a str,
+    producer_domain: &'a str,
+    consumer_domain: Option<&'a str>,
     contract_id: &'a str,
     topic: &'a str,
     consumer_group: Option<&'a str>,
@@ -106,10 +107,14 @@ pub(crate) struct DlxPayloadContext<'a> {
 }
 
 impl<'a> DlxPayloadContext<'a> {
+    #[allow(clippy::too_many_arguments)]
+    // reason: AAD v2 authenticates all eight coordinates as one complete security context;
+    // a partial builder would introduce representable but unauthenticated intermediate states.
     pub(crate) fn new(
         tenant: vocab::TenantId,
         source_kind: &'a str,
-        domain: &'a str,
+        producer_domain: &'a str,
+        consumer_domain: Option<&'a str>,
         contract_id: &'a str,
         topic: &'a str,
         consumer_group: Option<&'a str>,
@@ -118,7 +123,8 @@ impl<'a> DlxPayloadContext<'a> {
         Self {
             tenant,
             source_kind,
-            domain,
+            producer_domain,
+            consumer_domain,
             contract_id,
             topic,
             consumer_group,
@@ -128,9 +134,10 @@ impl<'a> DlxPayloadContext<'a> {
 
     fn record_key(&self) -> String {
         format!(
-            "dead_letter/{}/{}/{}/{}/{}/{}",
+            "dead_letter/v2/{}/{}/{}/{}/{}/{}/{}",
             self.source_kind,
-            self.domain,
+            self.producer_domain,
+            self.consumer_domain.unwrap_or("_none"),
             self.contract_id,
             self.topic,
             self.consumer_group.unwrap_or("_none"),
@@ -260,7 +267,16 @@ pub(crate) mod tests {
         let protector = test_protector();
         let tenant =
             vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
-        let ctx = DlxPayloadContext::new(tenant, "consumer", "d", "c", "t", Some("g"), "m");
+        let ctx = DlxPayloadContext::new(
+            tenant,
+            "consumer",
+            "producer",
+            Some("consumer-domain"),
+            "c",
+            "t",
+            Some("g"),
+            "m",
+        );
         let err = protector
             .decrypt(ctx, &serde_json::json!({"bytes":[1,2,3]}), "dlx-test:1")
             .await
@@ -270,19 +286,35 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn aad_binds_contract_id_and_consumer_group() {
+    async fn aad_v2_binds_both_domains_contract_id_and_consumer_group() {
         let protector = test_protector();
         let tenant =
             vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
-        let ctx =
-            DlxPayloadContext::new(tenant, "consumer", "d", "contract-a", "t", Some("g-a"), "m");
+        let ctx = DlxPayloadContext::new(
+            tenant,
+            "consumer",
+            "identity",
+            Some("audit"),
+            "contract-a",
+            "t",
+            Some("g-a"),
+            "m",
+        );
         let protected = protector
             .encrypt(ctx, b"payload")
             .await
             .expect("encrypt with original aad");
 
-        let contract_tampered =
-            DlxPayloadContext::new(tenant, "consumer", "d", "contract-b", "t", Some("g-a"), "m");
+        let contract_tampered = DlxPayloadContext::new(
+            tenant,
+            "consumer",
+            "identity",
+            Some("audit"),
+            "contract-b",
+            "t",
+            Some("g-a"),
+            "m",
+        );
         let err = protector
             .decrypt(
                 contract_tampered,
@@ -293,8 +325,16 @@ pub(crate) mod tests {
             .expect_err("contract id tamper must fail");
         assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
 
-        let group_tampered =
-            DlxPayloadContext::new(tenant, "consumer", "d", "contract-a", "t", Some("g-b"), "m");
+        let group_tampered = DlxPayloadContext::new(
+            tenant,
+            "consumer",
+            "identity",
+            Some("audit"),
+            "contract-a",
+            "t",
+            Some("g-b"),
+            "m",
+        );
         let err = protector
             .decrypt(
                 group_tampered,
@@ -305,10 +345,62 @@ pub(crate) mod tests {
             .expect_err("consumer group tamper must fail");
         assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
 
+        let consumer_tampered = DlxPayloadContext::new(
+            tenant,
+            "consumer",
+            "identity",
+            Some("billing"),
+            "contract-a",
+            "t",
+            Some("g-a"),
+            "m",
+        );
+        let err = protector
+            .decrypt(
+                consumer_tampered,
+                protected.original_entry(),
+                protected.key_ref(),
+            )
+            .await
+            .expect_err("consumer domain tamper must fail");
+        assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
+
+        let producer_tampered = DlxPayloadContext::new(
+            tenant,
+            "consumer",
+            "billing",
+            Some("audit"),
+            "contract-a",
+            "t",
+            Some("g-a"),
+            "m",
+        );
+        let err = protector
+            .decrypt(
+                producer_tampered,
+                protected.original_entry(),
+                protected.key_ref(),
+            )
+            .await
+            .expect_err("producer domain tamper must fail");
+        assert_eq!(err.kind(), KeyProviderErrorKind::Rejected);
+
         let plaintext = protector
             .decrypt(ctx, protected.original_entry(), protected.key_ref())
             .await
             .expect("original aad decrypts");
         assert_eq!(plaintext, b"payload");
+    }
+
+    #[test]
+    fn provenance_migration_is_empty_table_only_and_has_no_v1_decoder() {
+        const MIGRATION: &str = include_str!("../migrations/0052_dead_letter_provenance_v2.sql");
+        assert!(
+            MIGRATION.contains("dead_letter must be empty before enabling provenance and AAD v2")
+        );
+        assert!(MIGRATION.contains("RENAME COLUMN domain TO producer_domain"));
+        assert!(MIGRATION.contains("ADD COLUMN consumer_domain"));
+        assert!(MIGRATION.contains("original_entry_encoding = 'key-provider-v2'"));
+        assert_eq!(super::DLX_ORIGINAL_ENTRY_ENCODING, "key-provider-v2");
     }
 }

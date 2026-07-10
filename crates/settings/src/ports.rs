@@ -18,12 +18,15 @@
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型：save 以 version+1 守乐观并发）
 //! ref: debezium outbox SMT / MassTransit Bus Outbox（业务写 + outbox 行同一本地事务，producer 侧 durable）
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::OutboxEnvelopeParts;
 use dynosaur::dynosaur;
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
-pub use crate::domain::{ConfigEntry, ConfigRepoError, SettingKey, SettingsError};
+pub use crate::domain::{
+    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, ConfigTombstone, SettingKey,
+    SettingsError,
+};
 pub use crate::domain::{SecretEntry, SecretKey, SecretRef, SecretRepoError, StoreId};
 pub use vocab::TenantId;
 
@@ -93,9 +96,7 @@ impl RowRepoScope {
 /// dyn-compatible wrapper（组合根经 `Box<DynConfigRepo>` 注入）。版本以 `u64` 表达（不裸传内部
 /// `ConfigVersion`），租户必经 [`TenantRepoScope`] opaque handle 做 RLS / store scope（多租隔离签名承载）。
 ///
-/// CAS 语义（etcd 版本模型）：[`ConfigRepo::save`] 要求 `entry.version()` 恰等于当前最高版本 + 1
-/// （首版要求 `1`），否则返回 [`ConfigRepoError::VersionConflict`]——乐观并发写冲突由业务层读后重写重试。
-/// 原子的「save + 同事务 outbox append」由 sibling [`ConfigUnitOfWork`] 承载（消除 emit-after-save 窗口）。
+/// 本端口只暴露读取能力；CAS mutation 与同事务 outbox append 只能由 sibling [`ConfigUnitOfWork`] 承载。
 #[trait_variant::make(ConfigRepo: Send)]
 #[dynosaur(pub DynConfigRepo = dyn(box) ConfigRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
@@ -124,30 +125,20 @@ pub trait ConfigRepoLocal: Send + Sync {
     /// 与 [`ConfigRepo::find`] 区别：`find` 返回**活跃值**（tombstone ⇒ `None`），本方法返回**版本计数器**
     /// （含 tombstone）——delete tombstone 使 version 单调不重置（#1249 F1），故 next-version 不能用 `find`
     /// （删后 `find=None` 会误判 v1、复用 event_id），须用本方法的真实最高版本。
-    async fn latest_version(
+    async fn head(
         &self,
         scope: TenantRepoScope,
         key: &SettingKey,
-    ) -> Result<Option<u64>, ConfigRepoError>;
-
-    /// CAS 追加新版本（`entry.version()` 须等于当前最高版本 + 1，否则 `VersionConflict`）。
-    async fn save(&self, scope: TenantRepoScope, entry: ConfigEntry)
-    -> Result<(), ConfigRepoError>;
-
-    /// 软删除 key（tombstone）：在 `max+1` 追加一条 tombstone 版本 → version 单调不重置（防 event_id 复用，
-    /// #1249 F1）；幂等（latest 已 tombstone / key 不存在 ⇒ no-op）。`find` 此后返回 `None`，历史值行保留可经
-    /// `find_version` 读。删除事件（`config-version-deleted`）留订阅缓存单元（#1120），tombstone 自身不发事件。
-    async fn delete(&self, scope: TenantRepoScope, key: &SettingKey)
-    -> Result<(), ConfigRepoError>;
+    ) -> Result<Option<ConfigHead>, ConfigRepoError>;
 }
 
 /// 配置写入 **co-tx** Unit-of-Work DI port（L2 OutboxFact 同事务接缝）。
 ///
-/// [`ConfigUnitOfWork::save_and_append_outbox`] 把 CAS 配置写（同 [`ConfigRepo::save`] 语义）与
+/// [`ConfigUnitOfWork::commit`] 把 CAS 配置 mutation 与
 /// `settings.config-version-changed` outbox 行 append **同一本地事务**原子落库（both-or-neither）——消除
 /// 「先 save 后 emit」的 write-without-event 窗口（#1232）。`outbox_entry` / `envelope` 由应用层内容派生
 /// 构造（topic / IdemKey / opaque subjectId），adapter 仅在事务内复用既有 `append_outbox` 落 durable outbox；
-/// relay 异步投递（at-least-once + 幂等去重）。provider 可换：prod postgres co-tx / test in-mem（非原子替身）。
+/// relay 异步投递（at-least-once + 幂等去重）。provider 可换：prod postgres co-tx / test in-mem。
 ///
 /// 与 [`ConfigRepo`] 同 native-AFIT + trait_variant Send + dynosaur 范式；组合根经 `Box<DynConfigUnitOfWork>` 注入。
 #[trait_variant::make(ConfigUnitOfWork: Send)]
@@ -159,11 +150,11 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
     /// CAS 写新配置版本 + 同事务 append outbox 行（both-or-neither）。CAS 冲突返
     /// [`ConfigRepoError::VersionConflict`]、持久化失败返 [`ConfigRepoError::Storage`]；任一步失败整事务
     /// 回滚（配置写与 outbox 行皆不落库）。
-    async fn save_and_append_outbox(
+    async fn commit(
         &self,
         scope: TenantRepoScope,
-        entry: ConfigEntry,
-        outbox_entry: Entry,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError>;
 }
@@ -176,7 +167,7 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
 /// **无 resolve**：secret 材料解析是 diport seam（`diport::SecretResolver`），不在此 port。
 /// **无 UoW**：secret 写入是 L1 本地事务，不需与 outbox 同事务（与 config 的 L2 OutboxFact 分叉）。
 ///
-/// CAS 语义（mirror [`ConfigRepo::save`]）：`save` 要求 `entry.version()` = 当前最高版本 + 1
+/// CAS 语义：`save` 要求 `entry.version()` = 当前最高版本 + 1
 /// （首版要求 `1`），否则 [`SecretRepoError::VersionConflict`]。tombstone 软删使 version 单调不重置。
 #[trait_variant::make(SecretRepo: Send)]
 #[dynosaur(pub DynSecretRepo = dyn(box) SecretRepo, bridge(dyn))]
@@ -218,12 +209,12 @@ pub trait SecretRepoLocal: Send + Sync {
 mod smoke {
     //! build smoke：域形 async repo / UoW port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
     //! `Box<DynX>` 装入（PORT-SHAPE-01/02）。不调用方法 → 不依赖具体存储语义。
-    use consistency::Entry;
+    use consistency::EventEntry;
     use diport::OutboxEnvelopeParts;
 
     use super::{
-        ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, DynConfigRepo,
-        DynConfigUnitOfWork, SettingKey, TenantRepoScope,
+        ConfigEntry, ConfigHead, ConfigMutation, ConfigRepo, ConfigRepoError, ConfigUnitOfWork,
+        DynConfigRepo, DynConfigUnitOfWork, SettingKey, TenantRepoScope,
     };
 
     struct NoopConfigRepo;
@@ -243,36 +234,22 @@ mod smoke {
         ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
             Ok(None)
         }
-        async fn latest_version(
+        async fn head(
             &self,
             _scope: TenantRepoScope,
             _key: &SettingKey,
-        ) -> Result<Option<u64>, ConfigRepoError> {
+        ) -> Result<Option<ConfigHead>, ConfigRepoError> {
             Ok(None)
-        }
-        async fn save(
-            &self,
-            _scope: TenantRepoScope,
-            _entry: ConfigEntry,
-        ) -> Result<(), ConfigRepoError> {
-            Ok(())
-        }
-        async fn delete(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SettingKey,
-        ) -> Result<(), ConfigRepoError> {
-            Ok(())
         }
     }
 
     struct NoopConfigUow;
     impl ConfigUnitOfWork for NoopConfigUow {
-        async fn save_and_append_outbox(
+        async fn commit(
             &self,
             _scope: TenantRepoScope,
-            _entry: ConfigEntry,
-            _outbox_entry: Entry,
+            _mutation: ConfigMutation,
+            _outbox_entry: EventEntry,
             _envelope: OutboxEnvelopeParts,
         ) -> Result<(), ConfigRepoError> {
             Ok(())
@@ -348,24 +325,22 @@ mod smoke {
                 key: &SettingKey,
                 version: u64,
             ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
-            async fn latest_version(
+            async fn head(
                 &self,
                 scope: TenantRepoScope,
                 key: &SettingKey,
-            ) -> Result<Option<u64>, ConfigRepoError>;
-            async fn save(&self, scope: TenantRepoScope, entry: ConfigEntry) -> Result<(), ConfigRepoError>;
-            async fn delete(&self, scope: TenantRepoScope, key: &SettingKey) -> Result<(), ConfigRepoError>;
+            ) -> Result<Option<ConfigHead>, ConfigRepoError>;
         }
     }
 
     mockall::mock! {
         TestConfigUow {}
         impl ConfigUnitOfWork for TestConfigUow {
-            async fn save_and_append_outbox(
+            async fn commit(
                 &self,
                 scope: TenantRepoScope,
-                entry: ConfigEntry,
-                outbox_entry: Entry,
+                mutation: ConfigMutation,
+                outbox_entry: EventEntry,
                 envelope: OutboxEnvelopeParts,
             ) -> Result<(), ConfigRepoError>;
         }

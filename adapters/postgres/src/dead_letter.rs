@@ -77,7 +77,8 @@ impl DeadLetterStore for PgDeadLetterStore {
                 DlxPayloadContext::new(
                     record.tenant(),
                     source_kind,
-                    record.domain(),
+                    record.producer_domain(),
+                    record.consumer_domain(),
                     record.contract_id(),
                     record.topic(),
                     record.consumer_group(),
@@ -97,10 +98,11 @@ impl DeadLetterStore for PgDeadLetterStore {
                         sqlx::query(
                             r#"
                             INSERT INTO dead_letter
-                                (tenant_id, message_id, domain, contract_id, topic, consumer_group,
+                                (tenant_id, message_id, producer_domain, consumer_domain,
+                                 contract_id, topic, consumer_group,
                                  original_entry, original_entry_key_ref, original_entry_payload_len,
                                  original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
-                            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                             ON CONFLICT (tenant_id, source_kind, consumer_group, message_id)
                             WHERE source_kind = 'projection'
                             DO NOTHING
@@ -108,7 +110,8 @@ impl DeadLetterStore for PgDeadLetterStore {
                         )
                         .bind(record.tenant().to_string())
                         .bind(record.message_id())
-                        .bind(record.domain())
+                        .bind(record.producer_domain())
+                        .bind(record.consumer_domain())
                         .bind(record.contract_id())
                         .bind(record.topic())
                         .bind(record.consumer_group())
@@ -291,6 +294,7 @@ mod integration_tests {
         String,
         String,
         String,
+        Option<String>,
         String,
         String,
         Option<String>,
@@ -318,14 +322,13 @@ mod integration_tests {
         let record = diport::DeadLetterRecord::new(
             tenant,
             "msg-session-created-1",
-            "identity",
+            diport::DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
             payload.clone(),
             diport::DeadLetterSummary::new("max retries exhausted after 10 attempts"),
             10,
-            diport::WritableDeadLetterSource::Consumer,
             diport::EnvelopeMetadata::empty(),
         );
 
@@ -333,11 +336,13 @@ mod integration_tests {
 
         // SELECT 最新一条（唯一写入）断言各字段。
         let row: DeadLetterRow = sqlx::query_as(
-            r#"SELECT tenant_id::text, message_id, domain, contract_id, topic, consumer_group,
+            r#"SELECT tenant_id::text, message_id, producer_domain, consumer_domain,
+                      contract_id, topic, consumer_group,
                       original_entry, original_entry_key_ref, original_entry_payload_len,
                       original_entry_encoding, error_summary, num_attempts, source_kind, metadata
                FROM dead_letter
-               WHERE domain = 'identity' AND topic = 'session.created'
+               WHERE producer_domain = 'identity' AND consumer_domain = 'audit'
+                 AND topic = 'session.created'
                ORDER BY first_attempt_at DESC
                LIMIT 1"#,
         )
@@ -349,21 +354,26 @@ mod integration_tests {
             "tenant_id should match"
         );
         assert_eq!(row.1, "msg-session-created-1", "message_id should match");
-        assert_eq!(row.2, "identity", "domain should match");
-        assert_eq!(row.3, "contract-session", "contract_id should match");
-        assert_eq!(row.4, "session.created", "topic should match");
+        assert_eq!(row.2, "identity", "producer domain should match");
         assert_eq!(
-            row.5.as_deref(),
+            row.3.as_deref(),
+            Some("audit"),
+            "consumer domain should match"
+        );
+        assert_eq!(row.4, "contract-session", "contract_id should match");
+        assert_eq!(row.5, "session.created", "topic should match");
+        assert_eq!(
+            row.6.as_deref(),
             Some("identity.session.consumer"),
             "consumer_group should match"
         );
 
         // original_entry 只允许 ciphertext shape；fake provider 会做可逆变换，避免密文字节等于原文。
         assert!(
-            row.6.get("bytes").is_none(),
+            row.7.get("bytes").is_none(),
             "plaintext shape must not be stored"
         );
-        let cipher_arr = row.6["ciphertext"].as_array().unwrap();
+        let cipher_arr = row.7["ciphertext"].as_array().unwrap();
         let stored_ciphertext: Vec<u8> = cipher_arr
             .iter()
             .map(|v| v.as_u64().unwrap() as u8)
@@ -372,24 +382,24 @@ mod integration_tests {
             stored_ciphertext, payload,
             "stored ciphertext should not equal original payload bytes"
         );
-        assert_eq!(row.7, "dlx-test:1", "key ref should match");
+        assert_eq!(row.8, "dlx-test:1", "key ref should match");
         assert_eq!(
-            row.8,
+            row.9,
             i64::try_from(payload.len()).unwrap(),
             "payload length should match"
         );
         assert_eq!(
-            row.9, DLX_ORIGINAL_ENTRY_ENCODING,
-            "encoding should be key-provider-v1"
+            row.10, DLX_ORIGINAL_ENTRY_ENCODING,
+            "encoding should be key-provider-v2"
         );
 
         assert_eq!(
-            row.10, "max retries exhausted after 10 attempts",
+            row.11, "max retries exhausted after 10 attempts",
             "error_summary should match"
         );
-        assert_eq!(row.11, 10, "num_attempts should match");
-        assert_eq!(row.12, "consumer", "source_kind should match");
-        assert_eq!(row.13, serde_json::json!({}), "metadata should match");
+        assert_eq!(row.12, 10, "num_attempts should match");
+        assert_eq!(row.13, "consumer", "source_kind should match");
+        assert_eq!(row.14, serde_json::json!({}), "metadata should match");
 
         store.shutdown().await?;
         Ok(())
@@ -416,12 +426,12 @@ mod integration_tests {
             crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
             sqlx::query(
                 r#"INSERT INTO dead_letter
-                   (tenant_id, message_id, domain, contract_id, topic,
+                   (tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic,
                     original_entry, original_entry_key_ref, original_entry_payload_len,
-                    original_entry_encoding, error_summary, num_attempts)
-                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created',
+                    original_entry_encoding, error_summary, num_attempts, source_kind)
+                   VALUES ($1::uuid, $2, 'identity', 'audit', 'contract-session', 'session.created',
                            '{"ciphertext":[]}'::jsonb, 'dlx-test:1', 0,
-                           $3, 'permanent error', 1)"#,
+                           $3, 'permanent error', 1, 'consumer')"#,
             )
             .bind(&tenant_a)
             .bind(&msg_id)
@@ -447,7 +457,7 @@ mod integration_tests {
         }
 
         {
-            let legacy_msg_id = format!("dlx-legacy-null-{}", uuid::Uuid::new_v4());
+            let legacy_msg_id = format!("dlx-tenantless-{}", uuid::Uuid::new_v4());
             // Simulate a pre-0020 row that existed before tenant_id was introduced. New rows cannot
             // normally do this because the NOT VALID CHECK still applies to future writes.
             sqlx::query("ALTER TABLE dead_letter DROP CONSTRAINT chk_dead_letter_tenant_required")
@@ -458,12 +468,12 @@ mod integration_tests {
                 .await?;
             sqlx::query(
                 r#"INSERT INTO dead_letter
-                   (message_id, domain, contract_id, topic,
+                   (message_id, producer_domain, consumer_domain, contract_id, topic,
                     original_entry, original_entry_key_ref, original_entry_payload_len,
-                    original_entry_encoding, error_summary, num_attempts)
-                   VALUES ($1, 'identity', 'contract-session', 'session.created',
+                    original_entry_encoding, error_summary, num_attempts, source_kind)
+                   VALUES ($1, 'identity', 'audit', 'contract-session', 'session.created',
                            '{"ciphertext":[]}'::jsonb, 'dlx-test:1', 0,
-                           $2, 'legacy row', 1)"#,
+                           $2, 'historical tenantless row', 1, 'consumer')"#,
             )
             .bind(&legacy_msg_id)
             .bind(DLX_ORIGINAL_ENTRY_ENCODING)
@@ -530,12 +540,12 @@ mod integration_tests {
             crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(&tenant_a)?).await?;
             let err = sqlx::query(
                 r#"INSERT INTO dead_letter
-                   (tenant_id, message_id, domain, contract_id, topic,
+                   (tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic,
                     original_entry, original_entry_key_ref, original_entry_payload_len,
-                    original_entry_encoding, error_summary, num_attempts)
-                   VALUES ($1::uuid, $2, 'identity', 'contract-session', 'session.created',
+                    original_entry_encoding, error_summary, num_attempts, source_kind)
+                   VALUES ($1::uuid, $2, 'identity', 'audit', 'contract-session', 'session.created',
                            '{"ciphertext":[]}'::jsonb, 'dlx-test:1', 0,
-                           $3, 'permanent error', 1)"#,
+                           $3, 'permanent error', 1, 'consumer')"#,
             )
             .bind(&tenant_b)
             .bind(format!("dlx-msg-{}", uuid::Uuid::new_v4()))

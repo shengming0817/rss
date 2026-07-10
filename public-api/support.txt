@@ -23,30 +23,6 @@ impl core::marker::Unpin for support::http::BearerParseError
 impl core::marker::UnsafeUnpin for support::http::BearerParseError
 impl core::panic::unwind_safe::RefUnwindSafe for support::http::BearerParseError
 impl core::panic::unwind_safe::UnwindSafe for support::http::BearerParseError
-impl<T, U> core::convert::Into<U> for support::http::BearerParseError where U: core::convert::From<T>
-pub fn support::http::BearerParseError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for support::http::BearerParseError where U: core::convert::Into<T>
-pub type support::http::BearerParseError::Error = core::convert::Infallible
-pub fn support::http::BearerParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for support::http::BearerParseError where U: core::convert::TryFrom<T>
-pub type support::http::BearerParseError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn support::http::BearerParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for support::http::BearerParseError where T: core::clone::Clone
-pub type support::http::BearerParseError::Owned = T
-pub fn support::http::BearerParseError::clone_into(&self, &mut T)
-pub fn support::http::BearerParseError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for support::http::BearerParseError where T: core::fmt::Display + ?core::marker::Sized
-pub fn support::http::BearerParseError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for support::http::BearerParseError where T: 'static + ?core::marker::Sized
-pub fn support::http::BearerParseError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for support::http::BearerParseError where T: ?core::marker::Sized
-pub fn support::http::BearerParseError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for support::http::BearerParseError where T: ?core::marker::Sized
-pub fn support::http::BearerParseError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for support::http::BearerParseError where T: core::clone::Clone
-pub unsafe fn support::http::BearerParseError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for support::http::BearerParseError
-pub fn support::http::BearerParseError::from(T) -> T
 pub fn support::http::parse_bearer(&str) -> core::result::Result<&str, support::http::BearerParseError>
 pub mod support::pg
 pub fn support::pg::quote_ident(&str) -> core::result::Result<alloc::string::String, support::validation::ValidationError>
@@ -67,24 +43,6 @@ impl core::marker::Unpin for support::validation::ValidationError
 impl core::marker::UnsafeUnpin for support::validation::ValidationError
 impl core::panic::unwind_safe::RefUnwindSafe for support::validation::ValidationError
 impl core::panic::unwind_safe::UnwindSafe for support::validation::ValidationError
-impl<T, U> core::convert::Into<U> for support::validation::ValidationError where U: core::convert::From<T>
-pub fn support::validation::ValidationError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for support::validation::ValidationError where U: core::convert::Into<T>
-pub type support::validation::ValidationError::Error = core::convert::Infallible
-pub fn support::validation::ValidationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for support::validation::ValidationError where U: core::convert::TryFrom<T>
-pub type support::validation::ValidationError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn support::validation::ValidationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for support::validation::ValidationError where T: core::fmt::Display + ?core::marker::Sized
-pub fn support::validation::ValidationError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for support::validation::ValidationError where T: 'static + ?core::marker::Sized
-pub fn support::validation::ValidationError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for support::validation::ValidationError where T: ?core::marker::Sized
-pub fn support::validation::ValidationError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for support::validation::ValidationError where T: ?core::marker::Sized
-pub fn support::validation::ValidationError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for support::validation::ValidationError
-pub fn support::validation::ValidationError::from(T) -> T
 pub fn support::validation::max_len(&str, usize) -> core::result::Result<(), support::validation::ValidationError>
 pub fn support::validation::non_empty(&str) -> core::result::Result<(), support::validation::ValidationError>
 #[non_exhaustive] pub enum support::BearerParseError
@@ -110,30 +68,6 @@ impl core::marker::Unpin for support::http::BearerParseError
 impl core::marker::UnsafeUnpin for support::http::BearerParseError
 impl core::panic::unwind_safe::RefUnwindSafe for support::http::BearerParseError
 impl core::panic::unwind_safe::UnwindSafe for support::http::BearerParseError
-impl<T, U> core::convert::Into<U> for support::http::BearerParseError where U: core::convert::From<T>
-pub fn support::http::BearerParseError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for support::http::BearerParseError where U: core::convert::Into<T>
-pub type support::http::BearerParseError::Error = core::convert::Infallible
-pub fn support::http::BearerParseError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for support::http::BearerParseError where U: core::convert::TryFrom<T>
-pub type support::http::BearerParseError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn support::http::BearerParseError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for support::http::BearerParseError where T: core::clone::Clone
-pub type support::http::BearerParseError::Owned = T
-pub fn support::http::BearerParseError::clone_into(&self, &mut T)
-pub fn support::http::BearerParseError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for support::http::BearerParseError where T: core::fmt::Display + ?core::marker::Sized
-pub fn support::http::BearerParseError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for support::http::BearerParseError where T: 'static + ?core::marker::Sized
-pub fn support::http::BearerParseError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for support::http::BearerParseError where T: ?core::marker::Sized
-pub fn support::http::BearerParseError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for support::http::BearerParseError where T: ?core::marker::Sized
-pub fn support::http::BearerParseError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for support::http::BearerParseError where T: core::clone::Clone
-pub unsafe fn support::http::BearerParseError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for support::http::BearerParseError
-pub fn support::http::BearerParseError::from(T) -> T
 #[non_exhaustive] pub enum support::ValidationError
 pub support::ValidationError::Empty
 pub support::ValidationError::Format
@@ -150,22 +84,4 @@ impl core::marker::Unpin for support::validation::ValidationError
 impl core::marker::UnsafeUnpin for support::validation::ValidationError
 impl core::panic::unwind_safe::RefUnwindSafe for support::validation::ValidationError
 impl core::panic::unwind_safe::UnwindSafe for support::validation::ValidationError
-impl<T, U> core::convert::Into<U> for support::validation::ValidationError where U: core::convert::From<T>
-pub fn support::validation::ValidationError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for support::validation::ValidationError where U: core::convert::Into<T>
-pub type support::validation::ValidationError::Error = core::convert::Infallible
-pub fn support::validation::ValidationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for support::validation::ValidationError where U: core::convert::TryFrom<T>
-pub type support::validation::ValidationError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn support::validation::ValidationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for support::validation::ValidationError where T: core::fmt::Display + ?core::marker::Sized
-pub fn support::validation::ValidationError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for support::validation::ValidationError where T: 'static + ?core::marker::Sized
-pub fn support::validation::ValidationError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for support::validation::ValidationError where T: ?core::marker::Sized
-pub fn support::validation::ValidationError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for support::validation::ValidationError where T: ?core::marker::Sized
-pub fn support::validation::ValidationError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for support::validation::ValidationError
-pub fn support::validation::ValidationError::from(T) -> T
 pub fn support::parse_bearer(&str) -> core::result::Result<&str, support::http::BearerParseError>

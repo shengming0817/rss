@@ -11,16 +11,17 @@
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 use consistency::{
-    CommandErrorSummary, CommandIdempotencyKey, CommandJournalOutcome,
-    CommandJournalTerminalSummary, CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey,
-    InboxBacklog, InboxBacklogScope, InboxReceiptContext, InboxStore, LeaseToken, OutboxPayload,
-    Outcome, SeenState,
+    CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
+    CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope,
+    InboxReceiptContext, InboxStore, LeaseToken, OutboxPayload, Outcome, SeenState,
 };
 use diport::ManagedResource;
-use eventexec::command::{CommandJournalError, CommandJournalStore, ReviewedCommandJournal};
+use eventexec::command::{
+    CommandAliasKey, CommandIdempotencyKeyring, CommandJournalStore, CommandStoreError,
+    JournaledCommandDispatcher, ReviewedCommandJournal,
+};
 use eventexec::{
     AttemptResult, AttemptTrigger, ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome,
-    StableDispatchKey,
 };
 use futures::future::BoxFuture;
 
@@ -103,6 +104,10 @@ fn audit_scope(tenant: vocab::TenantId) -> audit::ports::TenantRepoScope {
 const TEST_OCCURRED_SECS: u64 = 1_700_000_000;
 const TEST_SCHEMA_HASH: &str =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const EMPTY_PROJECTION_INPUT_GENERATION: &str =
+    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const TEST_PROJECTION_INPUT_GENERATION: &str =
+    "sha256:d2f216c0cc464fc7dfb74706795762c31ef39443528ceb2f988b33beb70c5175";
 static TEST_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
     &[vocab::ProjectionInputBinding::from_static(
         "test-projection",
@@ -117,13 +122,44 @@ fn test_contract() -> vocab::ContractBinding {
     vocab::ContractBinding::from_static("test", "test.contract", "v1", TEST_SCHEMA_HASH)
 }
 
-fn scoped_reconcile_dispatch_id(tenant: vocab::TenantId, topic: &str, stable_key: &str) -> String {
-    let tenant = tenant.to_string();
-    format!(
-        "reconcile:v1:t{}:{tenant}:p{}:{topic}:k{}:{stable_key}",
-        tenant.len(),
-        topic.len(),
-        stable_key.len()
+fn reviewed_reconcile_command(
+    tenant: vocab::TenantId,
+    idempotency_key: &str,
+    subject: &str,
+    target_id: impl Into<String>,
+    amount: i64,
+) -> Result<ReviewedCommand, eventexec::command::CommandEmitError> {
+    ReviewedCommand::from_spec(
+        generated::command::_seed_v1::reconcile_command(
+            generated::command::_seed_v1::SeedDoThingRequest {
+                amount,
+                target_id: target_id.into(),
+            },
+            tenant,
+            subject_id(subject),
+            actor_for(tenant),
+            idempotency_key.to_string(),
+        ),
+        command_keyring().as_ref(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn command_keyring() -> std::sync::Arc<CommandIdempotencyKeyring> {
+    std::sync::Arc::new(
+        CommandIdempotencyKeyring::new(
+            CommandAliasKey::new("k2", vec![0x42; 32]).unwrap(),
+            vec![CommandAliasKey::new("k1", vec![0x24; 32]).unwrap()],
+        )
+        .unwrap(),
+    )
+}
+
+#[allow(clippy::unwrap_used)]
+fn command_keyring_k1_only() -> std::sync::Arc<CommandIdempotencyKeyring> {
+    std::sync::Arc::new(
+        CommandIdempotencyKeyring::new(CommandAliasKey::new("k1", vec![0x24; 32]).unwrap(), vec![])
+            .unwrap(),
     )
 }
 
@@ -150,6 +186,24 @@ fn projection_control_selector(
         eventexec::ProjectionId::parse(raw_projection).unwrap(),
         eventexec::ProjectionVersion::parse(version).unwrap(),
     )
+}
+
+#[allow(clippy::unwrap_used)]
+fn projection_maintenance_receipt(
+    action: authn::ProjectionMaintenanceAction,
+    tenant: vocab::TenantId,
+    projection: &str,
+) -> authn::ProjectionMaintenanceReceipt {
+    let principal =
+        authn::test_support::principal(vocab::PrincipalKind::Service, "test-operator", None);
+    let grants = authn::ProjectionMaintenanceGrantSet::new(vec![
+        authn::ProjectionMaintenanceGrant::new("test-operator", action, tenant, projection)
+            .unwrap(),
+    ])
+    .unwrap();
+    grants
+        .authorize(&principal, action, tenant, projection)
+        .unwrap()
 }
 
 async fn insert_projection_shadow_checkpoint(
@@ -260,6 +314,7 @@ async fn provision_runtime_rss_app_login(p: &testkit::PgConnParams) -> TestResul
 }
 
 async fn setup_runtime_deps_with_projection_inputs(
+    projection_input_generation: &'static str,
     projection_inputs: &'static [vocab::ProjectionInputBinding],
 ) -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
@@ -269,6 +324,7 @@ async fn setup_runtime_deps_with_projection_inputs(
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        projection_input_generation,
         projection_inputs,
     )
     .await?;
@@ -500,14 +556,17 @@ async fn verify_rls_capability_ok_after_migrations() -> TestResult {
 async fn service_token_replay_guard_rejects_duplicate_nonce_after_migrations() -> TestResult {
     use diport::{ServiceTokenReplayError, ServiceTokenReplayGuard as _};
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, UNIX_EPOCH};
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let store = Arc::new(store);
     let guard = crate::PgServiceTokenReplayGuard::new(Arc::clone(&store));
     let nonce = format!("nonce-{}", uuid::Uuid::new_v4().simple());
-    let expires_at = SystemTime::now() + Duration::from_secs(60);
+    let now_epoch: i64 = sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::bigint")
+        .fetch_one(&store.pool)
+        .await?;
+    let expires_at = UNIX_EPOCH + Duration::from_secs(u64::try_from(now_epoch)?.saturating_add(60));
 
     guard.check_and_record(&nonce, expires_at)?;
     assert!(
@@ -681,8 +740,8 @@ async fn verify_rls_capability_rejects_tenant_table_without_rls() -> TestResult 
     Ok(())
 }
 
-/// RLS 能力门反例（policy 内容校验 + OR-widening）：tenant 表 FORCE RLS 但 policy 为 `USING (true)`（不引用
-/// `rss.tenant_id` GUC）→ 仍 `Err(RlsNotEnforced)`。守「policy 存在但表达式错误 / allow-all permissive 放宽」
+/// RLS 能力门反例（policy 内容校验 + OR-widening）：tenant 表有 canonical policy，但第二条 permissive
+/// policy 为 `USING/WITH CHECK (true)` → 仍 `Err(RlsNotEnforced)`。守「至少一条正确但另一条放宽」
 /// 的运行时隔离静默失效路径（能力门校验 policy 内容、非仅存在性；与 xtask schema-rls 静态扫描互补）。
 /// 经**非绕过角色**判定；throwaway 表隔离 + DROP 还原。
 #[tokio::test(flavor = "multi_thread")]
@@ -693,7 +752,8 @@ async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
         "CREATE TABLE IF NOT EXISTS _rls_probe_permissive (tenant_id uuid NOT NULL, x int)",
         "ALTER TABLE _rls_probe_permissive ENABLE ROW LEVEL SECURITY",
         "ALTER TABLE _rls_probe_permissive FORCE ROW LEVEL SECURITY",
-        "CREATE POLICY allow_all ON _rls_probe_permissive USING (true)",
+        "CREATE POLICY tenant_isolation ON _rls_probe_permissive USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid) WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)",
+        "CREATE POLICY allow_all ON _rls_probe_permissive USING (true) WITH CHECK (true)",
     ] {
         sqlx::query(stmt).execute(&store.pool).await?;
     }
@@ -704,7 +764,61 @@ async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
         .await?;
     assert!(
         matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
-        "FORCE RLS 但 policy 为 USING(true)（不引用 rss.tenant_id）应 fail-closed，实得: {verdict:?}"
+        "canonical policy 加第二条 allow-all permissive policy 应 fail-closed，实得: {verdict:?}"
+    );
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 写侧缺 WITH CHECK 必须被运行时 capability gate 拒绝。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_missing_with_check() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    for stmt in [
+        "CREATE TABLE IF NOT EXISTS _rls_probe_missing_check (tenant_id uuid NOT NULL, x int)",
+        "ALTER TABLE _rls_probe_missing_check ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE _rls_probe_missing_check FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_isolation ON _rls_probe_missing_check USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)",
+    ] {
+        sqlx::query(stmt).execute(&store.pool).await?;
+    }
+    let app = connect_pg_rss_app_role(&_pg, &store).await?;
+    let verdict = app.verify_rls_capability().await;
+    sqlx::query("DROP TABLE IF EXISTS _rls_probe_missing_check")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        "缺 WITH CHECK 应 fail-closed，实得: {verdict:?}"
+    );
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 仅含 tenant/GUC token、但没有等值绑定的 policy 必须被 runtime gate 拒绝。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_token_stuffing_without_tenant_equality() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    for stmt in [
+        "CREATE TABLE IF NOT EXISTS _rls_probe_token_stuffing (tenant_id uuid NOT NULL, x int)",
+        "ALTER TABLE _rls_probe_token_stuffing ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE _rls_probe_token_stuffing FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_isolation ON _rls_probe_token_stuffing USING (tenant_id IS NOT NULL AND current_setting('rss.tenant_id', true) IS NOT NULL) WITH CHECK (tenant_id IS NOT NULL AND current_setting('rss.tenant_id', true) IS NOT NULL)",
+    ] {
+        sqlx::query(stmt).execute(&store.pool).await?;
+    }
+    let app = connect_pg_rss_app_role(&_pg, &store).await?;
+    let verdict = app.verify_rls_capability().await;
+    sqlx::query("DROP TABLE IF EXISTS _rls_probe_token_stuffing")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        "token stuffing without tenant equality must fail closed, got: {verdict:?}"
     );
     app.shutdown().await?;
     store.shutdown().await?;
@@ -1167,31 +1281,94 @@ async fn inbox_receipts_rls_grants_and_tenant_isolation() -> TestResult {
 
 // ── command_journal foundation (#1441) ───────────────────────────────────────
 
-const COMMAND_JOURNAL_TOPIC: &str = "test.commands.journal";
-
 fn command_journal_fingerprint(nibble: char) -> String {
     format!("sha256:{}", nibble.to_string().repeat(64))
 }
 
 fn command_journal_command_id(nibble: char) -> String {
-    format!("command:v1:sha256:{}", nibble.to_string().repeat(64))
+    format!(
+        "command:v2:{}-{}-4{}-8{}-{}",
+        nibble.to_string().repeat(8),
+        nibble.to_string().repeat(4),
+        nibble.to_string().repeat(3),
+        nibble.to_string().repeat(3),
+        nibble.to_string().repeat(12),
+    )
 }
 
-fn command_journal_command(
+#[derive(Clone, Default)]
+struct CaptureReviewedCommand {
+    command: std::sync::Arc<std::sync::Mutex<Option<ReviewedCommandJournal>>>,
+}
+
+impl CommandJournalStore for CaptureReviewedCommand {
+    async fn record_command(
+        &self,
+        command: ReviewedCommandJournal,
+        _result_summary: CommandResultSummary,
+    ) -> Result<CommandJournalOutcome, CommandStoreError> {
+        *self
+            .command
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(command);
+        Ok(CommandJournalOutcome::Recorded)
+    }
+}
+
+async fn command_journal_command(
     tenant: vocab::TenantId,
     key: &str,
     payload: &[u8],
 ) -> Result<ReviewedCommandJournal, TestError> {
-    let command = ReviewedCommandJournal::new(
-        CommandIdempotencyKey::parse(key)?,
-        COMMAND_JOURNAL_TOPIC,
-        test_contract(),
+    command_journal_command_with_keyring(tenant, key, payload, command_keyring()).await
+}
+
+async fn command_journal_command_with_keyring(
+    tenant: vocab::TenantId,
+    key: &str,
+    payload: &[u8],
+    keyring: std::sync::Arc<CommandIdempotencyKeyring>,
+) -> Result<ReviewedCommandJournal, TestError> {
+    let capture = CaptureReviewedCommand::default();
+    let dispatcher = JournaledCommandDispatcher::new(capture.clone(), keyring);
+    generated::command::_seed_v1::journal_async(
+        &dispatcher,
+        generated::command::_seed_v1::SeedDoThingRequest {
+            amount: i64::try_from(payload.len()).unwrap_or(i64::MAX),
+            target_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload),
+        },
         tenant,
-        payload.to_vec(),
         subject_id("command-journal-subject"),
         actor_for(tenant),
-    )?;
-    Ok(command)
+        key.to_string(),
+    )
+    .await?;
+    capture
+        .command
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .ok_or_else(|| "generated journal dispatcher did not submit a reviewed command".into())
+}
+
+fn reviewed_command_fingerprint(command: &ReviewedCommandJournal) -> String {
+    command.intent().request_fingerprint().as_str().to_owned()
+}
+
+async fn persisted_command_id(
+    pool: &sqlx::PgPool,
+    tenant: vocab::TenantId,
+    fingerprint: &str,
+) -> Result<String, TestError> {
+    let (command_id,): (String,) = sqlx::query_as(
+        "SELECT command_id FROM command_journal \
+         WHERE tenant_id=$1::uuid AND request_fingerprint=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(fingerprint)
+    .fetch_one(pool)
+    .await?;
+    Ok(command_id)
 }
 
 async fn prepare_command_journal_markers(store: &PgStore) -> Result<(), sqlx::Error> {
@@ -1231,6 +1408,99 @@ async fn command_journal_row_count(store: &PgStore, command_id: &str) -> Result<
             .fetch_one(&store.pool)
             .await?;
     Ok(count.0)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_outbox_semantic_match_ignores_only_volatile_metadata() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let tenant = test_tenant();
+    let event_id = unique_event_id("direct-command-stable-replay");
+    let payload = br#"{"amount":7,"targetId":"target-1"}"#;
+    let persisted_metadata = serde_json::json!({
+        "tenantId": tenant.to_string(),
+        "schemaVersion": generated::command::_seed_v1::CONTRACT.version(),
+        "schemaHash": generated::command::_seed_v1::CONTRACT.schema_hash(),
+        "subjectId": "command-subject",
+        "actor": {
+            "kind": "admin",
+            "id": "command-actor",
+            "tenantId": tenant.to_string(),
+            "scope": "tenant"
+        },
+        "occurredAt": 1,
+        "trace": "00-old",
+        "correlation": "corr-old"
+    });
+    sqlx::query(
+        "INSERT INTO outbox (
+             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+             payload, metadata, status, partition_key, causation_id
+         ) VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10, $11)",
+    )
+    .bind(&event_id)
+    .bind(tenant.to_string())
+    .bind(generated::command::_seed_v1::CONTRACT.domain())
+    .bind(generated::command::_seed_v1::TOPIC)
+    .bind(generated::command::_seed_v1::CONTRACT_ID)
+    .bind(generated::command::_seed_v1::CONTRACT.version())
+    .bind(generated::command::_seed_v1::CONTRACT.schema_hash())
+    .bind(payload.as_slice())
+    .bind(persisted_metadata.to_string())
+    .bind("partition-a")
+    .bind("cause-a")
+    .execute(&store.pool)
+    .await?;
+
+    let mut replay_metadata = persisted_metadata.clone();
+    replay_metadata["occurredAt"] = serde_json::json!(2);
+    replay_metadata["trace"] = serde_json::json!("00-new");
+    replay_metadata["correlation"] = serde_json::json!("corr-new");
+    let matches: (bool,) =
+        sqlx::query_as(crate::command_journal::ENSURE_EXISTING_OUTBOX_MATCHES_SQL)
+            .bind(&event_id)
+            .bind(tenant.to_string())
+            .bind(generated::command::_seed_v1::TOPIC)
+            .bind(generated::command::_seed_v1::CONTRACT.domain())
+            .bind(generated::command::_seed_v1::CONTRACT_ID)
+            .bind(generated::command::_seed_v1::CONTRACT.version())
+            .bind(generated::command::_seed_v1::CONTRACT.schema_hash())
+            .bind(payload.as_slice())
+            .bind(replay_metadata.to_string())
+            .bind("partition-a")
+            .bind("cause-a")
+            .bind(crate::command_journal::VOLATILE_METADATA_KEYS.as_slice())
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        matches.0,
+        "volatile metadata must not turn a retry into conflict"
+    );
+
+    replay_metadata["actor"]["id"] = serde_json::json!("different-actor");
+    let changed_actor: (bool,) =
+        sqlx::query_as(crate::command_journal::ENSURE_EXISTING_OUTBOX_MATCHES_SQL)
+            .bind(&event_id)
+            .bind(tenant.to_string())
+            .bind(generated::command::_seed_v1::TOPIC)
+            .bind(generated::command::_seed_v1::CONTRACT.domain())
+            .bind(generated::command::_seed_v1::CONTRACT_ID)
+            .bind(generated::command::_seed_v1::CONTRACT.version())
+            .bind(generated::command::_seed_v1::CONTRACT.schema_hash())
+            .bind(payload.as_slice())
+            .bind(replay_metadata.to_string())
+            .bind("partition-a")
+            .bind("cause-a")
+            .bind(crate::command_journal::VOLATILE_METADATA_KEYS.as_slice())
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        !changed_actor.0,
+        "stable actor identity changes must conflict"
+    );
+
+    store.shutdown().await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1292,9 +1562,7 @@ async fn command_journal_schema_rls_grants_after_migrations() -> TestResult {
         .collect::<Vec<_>>()
         .join("\n");
     for name in [
-        "command_journal_idempotency_unique",
         "command_journal_command_id_valid",
-        "command_journal_idempotency_key_valid",
         "command_journal_fingerprint_valid",
         "command_journal_outbox_event_id_valid",
         "command_journal_status_valid",
@@ -1306,6 +1574,50 @@ async fn command_journal_schema_rls_grants_after_migrations() -> TestResult {
             "missing command_journal constraint `{name}` in:\n{constraint_text}"
         );
     }
+    let legacy_key_column: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'command_journal' \
+           AND column_name = 'idempotency_key'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        legacy_key_column.0, 0,
+        "raw idempotency keys must not be persisted"
+    );
+
+    let alias_constraints: Vec<(String,)> = sqlx::query_as(
+        "SELECT conname FROM pg_constraint \
+         WHERE conrelid = 'command_idempotency_aliases'::regclass ORDER BY conname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let alias_constraints = alias_constraints
+        .into_iter()
+        .map(|(name,)| name)
+        .collect::<Vec<_>>();
+    for name in [
+        "command_idempotency_aliases_pkey",
+        "command_alias_topic_nonempty",
+        "command_alias_key_id_valid",
+        "command_alias_digest_256bit",
+        "command_alias_command_id_valid",
+    ] {
+        assert!(
+            alias_constraints.iter().any(|actual| actual == name),
+            "missing command alias constraint `{name}` in {alias_constraints:?}"
+        );
+    }
+    let alias_pk: (String,) = sqlx::query_as(
+        "SELECT string_agg(a.attname, ',' ORDER BY k.ord) \
+         FROM pg_constraint c \
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+         WHERE c.conrelid = 'command_idempotency_aliases'::regclass AND c.contype = 'p'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(alias_pk.0, "tenant_id,topic,key_id,alias_digest");
 
     let (qual, with_check): (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT qual, with_check \
@@ -1347,14 +1659,13 @@ async fn command_journal_schema_rls_grants_after_migrations() -> TestResult {
             .await?;
         sqlx::query(
             "INSERT INTO command_journal \
-             (tenant_id, command_id, idempotency_key, topic, contract_id, contract_version, \
+             (tenant_id, command_id, topic, contract_id, contract_version, \
               schema_hash, request_fingerprint, outbox_event_id) \
-             VALUES ($1::uuid, $2, $3, $4, 'test.contract', 'v1', $5, $6, $2)",
+             VALUES ($1::uuid, $2, $3, 'test.contract', 'v1', $4, $5, $2)",
         )
         .bind(&tenant_a)
         .bind(&command_id)
-        .bind(command_journal_fingerprint('b'))
-        .bind(COMMAND_JOURNAL_TOPIC)
+        .bind(generated::command::_seed_v1::TOPIC)
         .bind(TEST_SCHEMA_HASH)
         .bind(command_journal_fingerprint('1'))
         .execute(&mut *tx)
@@ -1394,14 +1705,13 @@ async fn command_journal_schema_rls_grants_after_migrations() -> TestResult {
             .await?;
         let denied = sqlx::query(
             "INSERT INTO command_journal \
-             (tenant_id, command_id, idempotency_key, topic, contract_id, contract_version, \
+             (tenant_id, command_id, topic, contract_id, contract_version, \
               schema_hash, request_fingerprint, outbox_event_id) \
-             VALUES ($1::uuid, $2, $3, $4, 'test.contract', 'v1', $5, $6, $2)",
+             VALUES ($1::uuid, $2, $3, 'test.contract', 'v1', $4, $5, $2)",
         )
         .bind(&tenant_a)
         .bind(command_journal_command_id('c'))
-        .bind(command_journal_fingerprint('2'))
-        .bind(COMMAND_JOURNAL_TOPIC)
+        .bind(generated::command::_seed_v1::TOPIC)
         .bind(TEST_SCHEMA_HASH)
         .bind(command_journal_fingerprint('3'))
         .execute(&mut *tx)
@@ -1428,8 +1738,9 @@ async fn command_journal_records_business_marker_and_outbox_atomically() -> Test
         tenant,
         &unique_event_id("command-journal-key"),
         br#"{"op":"recorded"}"#,
-    )?;
-    let command_id = command.journal().command_id().as_str().to_string();
+    )
+    .await?;
+    let fingerprint = reviewed_command_fingerprint(&command);
     let marker = unique_event_id("command-journal-marker");
     let marker_for_write = marker.clone();
 
@@ -1441,16 +1752,17 @@ async fn command_journal_records_business_marker_and_outbox_atomically() -> Test
                     .bind(marker_for_write)
                     .execute(tx.conn())
                     .await
-                    .map_err(CommandJournalError::new)?;
+                    .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
                     CommandResultSummary::ENQUEUED,
                 ))
             })
-                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
         })
         .await?;
 
     assert_eq!(outcome, CommandJournalOutcome::Recorded);
+    let command_id = persisted_command_id(&store.pool, tenant, &fingerprint).await?;
     assert_eq!(command_journal_marker_count(&store, &marker).await?, 1);
     assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 1);
     let row: (String, Option<String>, i32) = sqlx::query_as(
@@ -1486,13 +1798,14 @@ async fn command_journal_records_business_marker_and_outbox_atomically() -> Test
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_journal_runtime_deps_serving_role_records_and_replays() -> TestResult {
-    let (pg, deps) = setup_runtime_deps_with_projection_inputs(&[]).await?;
+    let (pg, deps) =
+        setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
     let owner_pool = runtime_assertion_pool(pg.params()).await?;
 
     let tenant = test_tenant();
     let idempotency_key = unique_event_id("command-journal-serving-key");
-    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#)?;
-    let command_id = first.journal().command_id().as_str().to_string();
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#).await?;
+    let fingerprint = reviewed_command_fingerprint(&first);
     let journal = deps.infra().command_journal(fixed_clock());
 
     assert_eq!(
@@ -1500,8 +1813,9 @@ async fn command_journal_runtime_deps_serving_role_records_and_replays() -> Test
             .await?,
         CommandJournalOutcome::Recorded
     );
+    let command_id = persisted_command_id(&owner_pool, tenant, &fingerprint).await?;
 
-    let replay = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#)?;
+    let replay = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#).await?;
     assert_eq!(
         CommandJournalStore::record_command(&journal, replay, CommandResultSummary::ENQUEUED)
             .await?,
@@ -1532,8 +1846,9 @@ async fn command_journal_business_error_rolls_back_journal_marker_and_outbox() -
         tenant,
         &unique_event_id("command-journal-rollback-key"),
         br#"{"op":"rollback"}"#,
-    )?;
-    let command_id = command.journal().command_id().as_str().to_string();
+    )
+    .await?;
+    let fingerprint = reviewed_command_fingerprint(&command);
     let marker = unique_event_id("command-journal-rollback-marker");
     let marker_for_write = marker.clone();
 
@@ -1545,19 +1860,35 @@ async fn command_journal_business_error_rolls_back_journal_marker_and_outbox() -
                     .bind(marker_for_write)
                     .execute(tx.conn())
                     .await
-                    .map_err(CommandJournalError::new)?;
-                Err(CommandJournalError::new(std::io::Error::other(
+                    .map_err(CommandStoreError::internal)?;
+                Err(CommandStoreError::internal(std::io::Error::other(
                     "forced command journal rollback",
                 )))
             })
-                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
         })
         .await;
 
     assert!(result.is_err(), "business error must surface to caller");
     assert_eq!(command_journal_marker_count(&store, &marker).await?, 0);
-    assert_eq!(command_journal_row_count(&store, &command_id).await?, 0);
-    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 0);
+    let journal_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM command_journal \
+         WHERE tenant_id=$1::uuid AND request_fingerprint=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&fingerprint)
+    .fetch_one(&store.pool)
+    .await?;
+    let alias_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM command_idempotency_aliases WHERE tenant_id=$1::uuid")
+            .bind(tenant.to_string())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(journal_count.0, 0);
+    assert_eq!(
+        alias_count.0, 0,
+        "alias claim must roll back with business failure"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -1574,8 +1905,25 @@ async fn command_journal_outbox_conflict_rolls_back_journal_and_marker() -> Test
         tenant,
         &unique_event_id("command-journal-outbox-conflict-key"),
         br#"{"op":"outbox-conflict"}"#,
-    )?;
-    let command_id = command.journal().command_id().as_str().to_string();
+    )
+    .await?;
+    let command_id = format!("command:v2:{}", uuid::Uuid::new_v4());
+    let current_alias = command
+        .intent()
+        .aliases()
+        .current()
+        .ok_or("journal command must carry current alias")?;
+    sqlx::query(
+        "INSERT INTO command_idempotency_aliases \
+         (tenant_id,topic,key_id,alias_digest,command_id) VALUES ($1::uuid,$2,$3,$4,$5)",
+    )
+    .bind(tenant.to_string())
+    .bind(generated::command::_seed_v1::TOPIC)
+    .bind(current_alias.key_id())
+    .bind(current_alias.digest())
+    .bind(&command_id)
+    .execute(&store.pool)
+    .await?;
     let marker = unique_event_id("command-journal-outbox-conflict-marker");
     let marker_for_write = marker.clone();
 
@@ -1587,7 +1935,7 @@ async fn command_journal_outbox_conflict_rolls_back_journal_and_marker() -> Test
     )
     .bind(&command_id)
     .bind(tenant.to_string())
-    .bind(COMMAND_JOURNAL_TOPIC)
+    .bind(generated::command::_seed_v1::TOPIC)
     .bind(TEST_SCHEMA_HASH)
     .bind(b"conflicting-payload".as_slice())
     .bind(serde_json::json!({ "tenantId": tenant.to_string() }).to_string())
@@ -1602,12 +1950,12 @@ async fn command_journal_outbox_conflict_rolls_back_journal_and_marker() -> Test
                     .bind(marker_for_write)
                     .execute(tx.conn())
                     .await
-                    .map_err(CommandJournalError::new)?;
+                    .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
                     CommandResultSummary::ENQUEUED,
                 ))
             })
-                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
         })
         .await;
 
@@ -1636,8 +1984,8 @@ async fn command_journal_duplicate_replays_completed_summary_without_business_wr
 
     let tenant = test_tenant();
     let idempotency_key = unique_event_id("command-journal-replay-key");
-    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"replay"}"#)?;
-    let command_id = first.journal().command_id().as_str().to_string();
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"replay"}"#).await?;
+    let fingerprint = reviewed_command_fingerprint(&first);
     let first_marker = unique_event_id("command-journal-replay-first");
     let first_marker_for_write = first_marker.clone();
     assert_eq!(
@@ -1649,18 +1997,19 @@ async fn command_journal_duplicate_replays_completed_summary_without_business_wr
                         .bind(first_marker_for_write)
                         .execute(tx.conn())
                         .await
-                        .map_err(CommandJournalError::new)?;
+                        .map_err(CommandStoreError::internal)?;
                     Ok(CommandJournalTerminalSummary::Completed(
                         CommandResultSummary::ENQUEUED,
                     ))
                 })
-                    as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                    as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
             },)
             .await?,
         CommandJournalOutcome::Recorded
     );
+    let command_id = persisted_command_id(&store.pool, tenant, &fingerprint).await?;
 
-    let second = command_journal_command(tenant, &idempotency_key, br#"{"op":"replay"}"#)?;
+    let second = command_journal_command(tenant, &idempotency_key, br#"{"op":"replay"}"#).await?;
     let second_marker = unique_event_id("command-journal-replay-second");
     let second_marker_for_write = second_marker.clone();
     let replay = store
@@ -1671,12 +2020,12 @@ async fn command_journal_duplicate_replays_completed_summary_without_business_wr
                     .bind(second_marker_for_write)
                     .execute(tx.conn())
                     .await
-                    .map_err(CommandJournalError::new)?;
+                    .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
                     CommandResultSummary::ENQUEUED,
                 ))
             })
-                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
         })
         .await?;
 
@@ -1700,6 +2049,98 @@ async fn command_journal_duplicate_replays_completed_summary_without_business_wr
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn command_journal_key_rotation_backfills_current_alias_without_changing_command_id()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = test_tenant();
+    let raw_key = unique_event_id("command-journal-rotation-key");
+    let payload = br#"{"op":"rotate"}"#;
+    let first =
+        command_journal_command_with_keyring(tenant, &raw_key, payload, command_keyring_k1_only())
+            .await?;
+    let fingerprint = reviewed_command_fingerprint(&first);
+    let journal = store.command_journal(fixed_clock());
+    assert_eq!(
+        CommandJournalStore::record_command(&journal, first, CommandResultSummary::ENQUEUED)
+            .await?,
+        CommandJournalOutcome::Recorded
+    );
+    let command_id = persisted_command_id(&store.pool, tenant, &fingerprint).await?;
+
+    let rotated =
+        command_journal_command_with_keyring(tenant, &raw_key, payload, command_keyring()).await?;
+    assert_eq!(
+        CommandJournalStore::record_command(&journal, rotated, CommandResultSummary::ENQUEUED)
+            .await?,
+        CommandJournalOutcome::AlreadyCompleted(CommandResultSummary::ENQUEUED)
+    );
+    let aliases: Vec<(String, String)> = sqlx::query_as(
+        "SELECT key_id, command_id FROM command_idempotency_aliases \
+         WHERE tenant_id = $1::uuid ORDER BY key_id",
+    )
+    .bind(tenant.to_string())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        aliases,
+        vec![
+            ("k1".to_string(), command_id.clone()),
+            ("k2".to_string(), command_id.clone()),
+        ],
+        "the rotation window must converge both aliases on the original random canonical id"
+    );
+    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_journal_concurrent_same_request_writes_once() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = test_tenant();
+    let raw_key = unique_event_id("command-journal-concurrent-key");
+    let payload = br#"{"op":"concurrent"}"#;
+    let first = command_journal_command(tenant, &raw_key, payload).await?;
+    let fingerprint = reviewed_command_fingerprint(&first);
+    let second = command_journal_command(tenant, &raw_key, payload).await?;
+    let journal_a = store.command_journal(fixed_clock());
+    let journal_b = store.command_journal(fixed_clock());
+    let (outcome_a, outcome_b) = tokio::join!(
+        CommandJournalStore::record_command(&journal_a, first, CommandResultSummary::ENQUEUED,),
+        CommandJournalStore::record_command(&journal_b, second, CommandResultSummary::ENQUEUED,),
+    );
+    let outcomes = [outcome_a?, outcome_b?];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, CommandJournalOutcome::Recorded))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                CommandJournalOutcome::AlreadyCompleted(CommandResultSummary::ENQUEUED)
+            ))
+            .count(),
+        1
+    );
+    let command_id = persisted_command_id(&store.pool, tenant, &fingerprint).await?;
+    assert_eq!(command_journal_row_count(&store, &command_id).await?, 1);
+    assert_eq!(command_journal_outbox_count(&store, &command_id).await?, 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_journal_duplicate_replays_failed_summary_without_business_write() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -1707,8 +2148,9 @@ async fn command_journal_duplicate_replays_failed_summary_without_business_write
 
     let tenant = test_tenant();
     let idempotency_key = unique_event_id("command-journal-failed-replay-key");
-    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"failed-replay"}"#)?;
-    let command_id = first.journal().command_id().as_str().to_string();
+    let first =
+        command_journal_command(tenant, &idempotency_key, br#"{"op":"failed-replay"}"#).await?;
+    let fingerprint = reviewed_command_fingerprint(&first);
     assert_eq!(
         store
             .command_journal(fixed_clock())
@@ -1718,11 +2160,12 @@ async fn command_journal_duplicate_replays_failed_summary_without_business_write
                         CommandErrorSummary::FAILED,
                     ))
                 })
-                    as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                    as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
             },)
             .await?,
         CommandJournalOutcome::Recorded
     );
+    let command_id = persisted_command_id(&store.pool, tenant, &fingerprint).await?;
 
     let row: (String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT status, result_summary, error_summary \
@@ -1746,7 +2189,8 @@ async fn command_journal_duplicate_replays_failed_summary_without_business_write
         "failed terminal command must not enqueue outbox"
     );
 
-    let second = command_journal_command(tenant, &idempotency_key, br#"{"op":"failed-replay"}"#)?;
+    let second =
+        command_journal_command(tenant, &idempotency_key, br#"{"op":"failed-replay"}"#).await?;
     let marker = unique_event_id("command-journal-failed-replay-marker");
     let marker_for_write = marker.clone();
     let replay = store
@@ -1757,12 +2201,12 @@ async fn command_journal_duplicate_replays_failed_summary_without_business_write
                     .bind(marker_for_write)
                     .execute(tx.conn())
                     .await
-                    .map_err(CommandJournalError::new)?;
+                    .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
                     CommandResultSummary::ENQUEUED,
                 ))
             })
-                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
         })
         .await?;
 
@@ -1788,8 +2232,8 @@ async fn command_journal_same_key_different_fingerprint_conflicts() -> TestResul
 
     let tenant = test_tenant();
     let idempotency_key = unique_event_id("command-journal-conflict-key");
-    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"a"}"#)?;
-    let command_id = first.journal().command_id().as_str().to_string();
+    let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"a"}"#).await?;
+    let fingerprint = reviewed_command_fingerprint(&first);
     assert_eq!(
         CommandJournalStore::record_command(
             &store.command_journal(fixed_clock()),
@@ -1799,8 +2243,9 @@ async fn command_journal_same_key_different_fingerprint_conflicts() -> TestResul
         .await?,
         CommandJournalOutcome::Recorded
     );
+    let command_id = persisted_command_id(&store.pool, tenant, &fingerprint).await?;
 
-    let conflicting = command_journal_command(tenant, &idempotency_key, br#"{"op":"b"}"#)?;
+    let conflicting = command_journal_command(tenant, &idempotency_key, br#"{"op":"b"}"#).await?;
     let marker = unique_event_id("command-journal-conflict-marker");
     let marker_for_write = marker.clone();
     let outcome = store
@@ -1811,12 +2256,12 @@ async fn command_journal_same_key_different_fingerprint_conflicts() -> TestResul
                     .bind(marker_for_write)
                     .execute(tx.conn())
                     .await
-                    .map_err(CommandJournalError::new)?;
+                    .map_err(CommandStoreError::internal)?;
                 Ok(CommandJournalTerminalSummary::Completed(
                     CommandResultSummary::ENQUEUED,
                 ))
             })
-                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandJournalError>>
+                as BoxFuture<'_, Result<CommandJournalTerminalSummary, CommandStoreError>>
         })
         .await?;
 
@@ -1837,15 +2282,12 @@ async fn command_journal_same_key_isolated_by_tenant() -> TestResult {
     let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let idempotency_key = unique_event_id("command-journal-cross-tenant-key");
 
-    let first = command_journal_command(tenant_a, &idempotency_key, br#"{"op":"tenant-a"}"#)?;
-    let first_id = first.journal().command_id().as_str().to_string();
-    let second = command_journal_command(tenant_b, &idempotency_key, br#"{"op":"tenant-b"}"#)?;
-    let second_id = second.journal().command_id().as_str().to_string();
-
-    assert_ne!(
-        first_id, second_id,
-        "scoped command id must include tenant identity"
-    );
+    let first =
+        command_journal_command(tenant_a, &idempotency_key, br#"{"op":"tenant-a"}"#).await?;
+    let first_fingerprint = reviewed_command_fingerprint(&first);
+    let second =
+        command_journal_command(tenant_b, &idempotency_key, br#"{"op":"tenant-b"}"#).await?;
+    let second_fingerprint = reviewed_command_fingerprint(&second);
     assert_eq!(
         CommandJournalStore::record_command(
             &store.command_journal(fixed_clock()),
@@ -1855,6 +2297,7 @@ async fn command_journal_same_key_isolated_by_tenant() -> TestResult {
         .await?,
         CommandJournalOutcome::Recorded
     );
+    let first_id = persisted_command_id(&store.pool, tenant_a, &first_fingerprint).await?;
     assert_eq!(
         CommandJournalStore::record_command(
             &store.command_journal(fixed_clock()),
@@ -1863,6 +2306,11 @@ async fn command_journal_same_key_isolated_by_tenant() -> TestResult {
         )
         .await?,
         CommandJournalOutcome::Recorded
+    );
+    let second_id = persisted_command_id(&store.pool, tenant_b, &second_fingerprint).await?;
+    assert_ne!(
+        first_id, second_id,
+        "canonical command ids must be random per tenant"
     );
     assert_eq!(command_journal_outbox_count(&store, &first_id).await?, 1);
     assert_eq!(command_journal_outbox_count(&store, &second_id).await?, 1);
@@ -2120,14 +2568,22 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
             }),
         ),
     ] {
-        let err = insert_outbox_log_with_metadata(
+        let err = match insert_outbox_log_with_metadata(
             &store,
             &unique_event_id("outbox-log-bad-schema"),
             tenant,
             metadata,
         )
         .await
-        .expect_err(label);
+        {
+            Err(err) => err,
+            Ok(()) => {
+                return Err(std::io::Error::other(format!(
+                    "{label} unexpectedly satisfied schema metadata CHECK"
+                ))
+                .into());
+            }
+        };
         assert!(
             err.as_database_error().is_some_and(|db| db
                 .message()
@@ -2155,14 +2611,22 @@ async fn outbox_log_rejects_missing_or_mismatched_schema_metadata() -> TestResul
             }),
         ),
     ] {
-        let err = insert_outbox_log_with_metadata(
+        let err = match insert_outbox_log_with_metadata(
             &store,
             &unique_event_id("outbox-log-bad-occurred-at"),
             tenant,
             metadata,
         )
         .await
-        .expect_err(label);
+        {
+            Err(err) => err,
+            Ok(()) => {
+                return Err(std::io::Error::other(format!(
+                    "{label} unexpectedly satisfied occurredAt metadata CHECK"
+                ))
+                .into());
+            }
+        };
         assert!(
             err.as_database_error().is_some_and(|db| db
                 .message()
@@ -2950,16 +3414,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         }
     };
     let dispatch_key = format!("reconcile-command-{}", uuid::Uuid::new_v4());
-    let scoped_dispatch_key = scoped_reconcile_dispatch_id(tenant, "test.command", &dispatch_key);
-    let command = ReviewedCommand::new(
-        StableDispatchKey::parse(&dispatch_key)?,
-        "test.command",
-        test_contract(),
-        tenant,
-        b"{\"op\":\"create\"}".to_vec(),
-        subject_id("scheduler-device"),
-        actor_for(tenant),
-    )?;
+    let command = reviewed_reconcile_command(tenant, &dispatch_key, &dispatch_key, "create", 1)?;
     assert_eq!(
         ReconcileScheduleStore::record_action_and_enqueue_command(
             &reconcile,
@@ -3018,12 +3473,13 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
     let outbox_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM outbox \
          WHERE tenant_id = $1::uuid \
-           AND event_id = $2 \
-           AND topic = 'test.command' \
+           AND topic = $2 \
+           AND metadata->>'subjectId' = $3 \
            AND status = 'pending'",
     )
     .bind(tenant.to_string())
-    .bind(&scoped_dispatch_key)
+    .bind(generated::command::_seed_v1::TOPIC)
+    .bind(&dispatch_key)
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(
@@ -3042,6 +3498,7 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
 
     let reconcile = store.reconcile();
     let raw_key = format!("shared-reconcile-command-{}", uuid::Uuid::new_v4());
+    let mut dispatched = Vec::new();
     for (tenant, resource) in [
         (
             vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?,
@@ -3073,14 +3530,12 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
                     return Err(std::io::Error::other("fresh claim should append attempt").into());
                 }
             };
-        let command = ReviewedCommand::new(
-            StableDispatchKey::parse(&raw_key)?,
-            "test.command",
-            test_contract(),
+        let command = reviewed_reconcile_command(
             tenant,
-            format!(r#"{{"resource":"{}"}}"#, target.target_id()).into_bytes(),
-            subject_id(target.target_id()),
-            actor_for(tenant),
+            &raw_key,
+            target.target_id(),
+            target.target_id(),
+            1,
         )?;
         assert_eq!(
             ReconcileScheduleStore::record_action_and_enqueue_command(
@@ -3092,26 +3547,30 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
             .await?,
             eventexec::ScheduleLeaseOutcome::Held
         );
+        dispatched.push((tenant, target.target_id().to_string()));
     }
 
-    for tenant in [
-        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?,
-        vocab::TenantId::parse("22222222-2222-2222-2222-222222222222")?,
-    ] {
-        let scoped_key = scoped_reconcile_dispatch_id(tenant, "test.command", &raw_key);
-        let count: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM outbox \
-             WHERE tenant_id = $1::uuid AND event_id = $2 AND topic = 'test.command'",
+    let mut event_ids = Vec::new();
+    for (tenant, subject_id) in dispatched {
+        let event_id: (String,) = sqlx::query_as(
+            "SELECT event_id FROM outbox \
+             WHERE tenant_id = $1::uuid AND topic = $2 AND metadata->>'subjectId' = $3",
         )
         .bind(tenant.to_string())
-        .bind(scoped_key)
+        .bind(generated::command::_seed_v1::TOPIC)
+        .bind(subject_id)
         .fetch_one(&store.pool)
         .await?;
-        assert_eq!(
-            count.0, 1,
-            "same raw reconcile command key must enqueue once per tenant"
+        assert!(
+            !event_id.0.contains(&raw_key),
+            "raw idempotency key must not be persisted as the dispatch identity"
         );
+        event_ids.push(event_id.0);
     }
+    assert_ne!(
+        event_ids[0], event_ids[1],
+        "same raw key must derive distinct dispatch ids across tenants"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -3146,19 +3605,8 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         };
     let raw_key = format!("conflicting-command-{}", uuid::Uuid::new_v4());
 
-    for (payload, expected_ok) in [
-        (br#"{"op":"first"}"#.as_slice(), true),
-        (br#"{"op":"second"}"#, false),
-    ] {
-        let command = ReviewedCommand::new(
-            StableDispatchKey::parse(&raw_key)?,
-            "test.command",
-            test_contract(),
-            tenant,
-            payload.to_vec(),
-            subject_id("conflict-device"),
-            actor_for(tenant),
-        )?;
+    for (target_id, expected_ok) in [("first", true), ("second", false)] {
+        let command = reviewed_reconcile_command(tenant, &raw_key, &raw_key, target_id, 1)?;
         let result = ReconcileScheduleStore::record_action_and_enqueue_command(
             &reconcile,
             &attempt,
@@ -3186,14 +3634,16 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         "failed command conflict must roll back the action insert"
     );
 
-    let scoped_key = scoped_reconcile_dispatch_id(tenant, "test.command", &raw_key);
-    let outbox: (Vec<u8>,) =
-        sqlx::query_as("SELECT payload FROM outbox WHERE tenant_id = $1::uuid AND event_id = $2")
-            .bind(tenant.to_string())
-            .bind(scoped_key)
-            .fetch_one(&store.pool)
-            .await?;
-    assert_eq!(outbox.0, br#"{"op":"first"}"#);
+    let outbox: (Vec<u8>,) = sqlx::query_as(
+        "SELECT payload FROM outbox \
+             WHERE tenant_id = $1::uuid AND topic = $2 AND metadata->>'subjectId' = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(generated::command::_seed_v1::TOPIC)
+    .bind(&raw_key)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(outbox.0, br#"{"amount":1,"targetId":"first"}"#);
 
     store.shutdown().await?;
     Ok(())
@@ -3231,7 +3681,7 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
 
     sqlx::query(
         "UPDATE reconcile_leases \
-         SET expires_at = now() - interval '1 second' \
+         SET expires_at = acquired_at + interval '1 microsecond' \
          WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
     )
     .bind(tenant.to_string())
@@ -3256,16 +3706,8 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
     );
 
     let dispatch_key = format!("stale-reconcile-command-{}", uuid::Uuid::new_v4());
-    let scoped_dispatch_key = scoped_reconcile_dispatch_id(tenant, "test.command", &dispatch_key);
-    let stale_command = ReviewedCommand::new(
-        StableDispatchKey::parse(&dispatch_key)?,
-        "test.command",
-        test_contract(),
-        tenant,
-        b"{\"op\":\"stale\"}".to_vec(),
-        subject_id("stale-device"),
-        actor_for(tenant),
-    )?;
+    let stale_command =
+        reviewed_reconcile_command(tenant, &dispatch_key, &dispatch_key, "stale", 1)?;
 
     assert_eq!(
         ReconcileScheduleStore::record_action_and_enqueue_command(
@@ -3310,10 +3752,11 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
     .await?;
     let outbox_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM outbox \
-         WHERE tenant_id = $1::uuid AND event_id = $2",
+         WHERE tenant_id = $1::uuid AND topic = $2 AND metadata->>'subjectId' = $3",
     )
     .bind(tenant.to_string())
-    .bind(&scoped_dispatch_key)
+    .bind(generated::command::_seed_v1::TOPIC)
+    .bind(&dispatch_key)
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(action_count.0, 0);
@@ -3455,9 +3898,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use consistency::{
-    BacklogMetricSample, BacklogSample, Disposition, EngineErrorKind, Entry, HandleResult,
-    OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay, OutboxSource, PendingEntry,
-    RetentionSweeper, Topic,
+    BacklogMetricSample, BacklogSample, Disposition, EngineErrorKind, EventEntry, EventTopic,
+    HandleResult, OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay, OutboxSource,
+    PendingEntry, RetentionSweeper,
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
@@ -3491,7 +3934,10 @@ static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 async fn setup_outbox(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     store.run_migrations().await?;
     store
-        .replace_projection_input_bindings(TEST_PROJECTION_INPUTS)
+        .register_projection_input_bindings(
+            TEST_PROJECTION_INPUT_GENERATION,
+            TEST_PROJECTION_INPUTS,
+        )
         .await?;
     Ok(())
 }
@@ -3525,22 +3971,31 @@ fn unique_domain(prefix: &str) -> String {
     unique_event_id(prefix)
 }
 
-/// 构造测试用 Entry + Envelope。
-fn make_entry(event_id: &str) -> Entry {
+/// 构造测试用 EventEntry + Envelope。
+fn make_entry(event_id: &str) -> EventEntry {
     #[allow(clippy::unwrap_used)]
     // reason: 测试 happy-path 构造已知合法值，item-level carve-out（error-handling.md §Carve-out）。
-    Entry::new(
-        Topic::parse("test.event").unwrap(),
+    EventEntry::new(
+        EventTopic::parse("test.event").unwrap(),
         IdemKey::parse(event_id).unwrap(),
         reviewed_payload(b"payload"),
     )
 }
 
-fn make_pending_entry(entry: Entry, tenant: vocab::TenantId, contract_id: &str) -> PendingEntry {
+fn make_pending_entry(
+    entry: EventEntry,
+    tenant: vocab::TenantId,
+    contract_id: &str,
+) -> PendingEntry {
     #[allow(clippy::unwrap_used)]
     // reason: integration fixture uses known-valid contract ids.
     PendingEntry::new(
-        entry,
+        consistency::StoredOutboxEntry::hydrate(
+            entry.topic().as_str(),
+            entry.idem_key().clone(),
+            OutboxPayload::from_reviewed_event_bytes(entry.payload().to_vec()),
+        )
+        .unwrap(),
         OutboxMetricSubject::new(tenant, OutboxContractId::parse(contract_id).unwrap()),
     )
 }
@@ -3560,9 +4015,9 @@ async fn pending_entry_for_event(store: &PgStore, event_id: &str) -> Result<Pend
 
     let (tenant_id, contract_id, topic, payload) = row;
     let tenant = vocab::TenantId::parse(&tenant_id).map_err(|e| format!("{e:?}"))?;
-    let topic = Topic::parse(&topic).map_err(|e| format!("{e:?}"))?;
+    let topic = EventTopic::parse(&topic).map_err(|e| format!("{e:?}"))?;
     let idem_key = IdemKey::parse(event_id).map_err(|e| format!("{e:?}"))?;
-    let entry = Entry::new(
+    let entry = EventEntry::new(
         topic,
         idem_key,
         OutboxPayload::from_reviewed_event_bytes(payload),
@@ -3716,7 +4171,11 @@ async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> 
 async fn projection_writer_funnel_runtime_setup_mirrors_generated_bound_emit() -> TestResult {
     use diport::{OutboxEmitter, OutboxEnvelopeParts};
 
-    let (pg, deps) = setup_runtime_deps_with_projection_inputs(TEST_PROJECTION_INPUTS).await?;
+    let (pg, deps) = setup_runtime_deps_with_projection_inputs(
+        TEST_PROJECTION_INPUT_GENERATION,
+        TEST_PROJECTION_INPUTS,
+    )
+    .await?;
     let emitter = deps.infra().emitter(fixed_clock());
     let event_id = unique_event_id("projection-runtime-bound");
 
@@ -4068,9 +4527,21 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
     let v2 = projection_control_selector(&raw_projection, "v2");
 
     let store = std::sync::Arc::new(store);
-    let capability = crate::ProjectionMaintenanceCapability::new("test-operator")?;
-    let control = crate::PgStore::projection_control(std::sync::Arc::clone(&store), capability);
-    let source_high_water = control
+    let status_receipt = projection_maintenance_receipt(
+        authn::ProjectionMaintenanceAction::Status,
+        v1.tenant(),
+        v1.projection().as_str(),
+    );
+    let swap_receipt = projection_maintenance_receipt(
+        authn::ProjectionMaintenanceAction::Swap,
+        v1.tenant(),
+        v1.projection().as_str(),
+    );
+    let status_control =
+        crate::PgStore::projection_control(std::sync::Arc::clone(&store), &status_receipt);
+    let swap_control =
+        crate::PgStore::projection_control(std::sync::Arc::clone(&store), &swap_receipt);
+    let source_high_water = status_control
         .status(&v1)
         .await?
         .source_high_water_lsn()
@@ -4080,9 +4551,9 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
     let v2_high_water = source_high_water.max(20);
     insert_projection_shadow_checkpoint(&store, &v1, v1_high_water).await?;
     insert_projection_shadow_checkpoint(&store, &v2, v2_high_water).await?;
-    assert!(control.status(&v1).await?.pointer().is_none());
+    assert!(status_control.status(&v1).await?.pointer().is_none());
 
-    let first = control
+    let first = swap_control
         .promote(&v1, crate::ProjectionPointerPrecondition::ExpectUnset)
         .await?;
     assert!(first.previous().is_none());
@@ -4092,7 +4563,7 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         Some(consistency::Lsn::new(v1_high_water))
     );
 
-    let stale = control
+    let stale = swap_control
         .promote(&v2, crate::ProjectionPointerPrecondition::ExpectUnset)
         .await;
     assert!(matches!(
@@ -4100,7 +4571,7 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         Err(crate::ProjectionControlError::PreconditionFailed)
     ));
 
-    let second = control
+    let second = swap_control
         .promote(
             &v2,
             crate::ProjectionPointerPrecondition::ExpectedActiveVersion(
@@ -4115,7 +4586,7 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         Some(consistency::Lsn::new(v2_high_water))
     );
 
-    let rollback = control
+    let rollback = swap_control
         .promote(
             &v1,
             crate::ProjectionPointerPrecondition::ExpectedActiveVersion(
@@ -4125,7 +4596,7 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         .await?;
     assert_eq!(rollback.active().version().as_str(), "v1");
     assert_eq!(
-        control
+        status_control
             .status(&v1)
             .await?
             .pointer()
@@ -4680,8 +5151,8 @@ async fn outbox_relay_and_cdc_envelope_parity_conformance() -> TestResult {
     let event_id = unique_event_id("relay-cdc-parity");
     let tenant = test_tenant();
     let subject = "parity-subject-opaque";
-    let entry = Entry::new(
-        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+    let entry = EventEntry::new(
+        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
         reviewed_payload(br#"{"sessionId":"parity"}"#),
     );
@@ -5129,7 +5600,7 @@ fn conf_settle_action(acker: &ConformanceAcker) -> Result<eventconf::SettleActio
 fn conf_dlx_fields_from_record(record: &DeadLetterRecord) -> eventconf::DlxFields {
     eventconf::DlxFields {
         source_kind: record.source().as_str().to_string(),
-        domain: record.domain().to_string(),
+        domain: record.producer_domain().to_string(),
         contract_id: record.contract_id().to_string(),
         topic: record.topic().to_string(),
         num_attempts: record.num_attempts(),
@@ -5159,7 +5630,7 @@ async fn conf_dlx_fields(
     event_id: &str,
 ) -> Result<(u64, eventconf::DlxFields), String> {
     let row: Option<(String, String, String, String, i32)> = sqlx::query_as(
-        "SELECT source_kind, domain, contract_id, topic, num_attempts \
+        "SELECT source_kind, producer_domain, contract_id, topic, num_attempts \
          FROM dead_letter WHERE message_id = $1 ORDER BY last_attempt_at DESC LIMIT 1",
     )
     .bind(event_id)
@@ -6420,8 +6891,8 @@ async fn t_inbox_sweeper_rss_app_direct_call_rejects_retain_below_floor() -> Tes
 // reason: 集成测试断言 fail-loud；item-level carve-out（error-handling.md §Carve-out）。
 async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     use diport::{
-        DeadLetterRecord, DeadLetterStore, DeadLetterSummary, EnvelopeMetadata,
-        WritableDeadLetterSource,
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
+        EnvelopeMetadata,
     };
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -6460,20 +6931,19 @@ async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     dl.write_dead_letter(DeadLetterRecord::new(
         vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
         "msg-dl-old",
-        domain.as_str(),
+        DeadLetterProvenance::consumer(domain.as_str(), "dl-sweep-consumer"),
         "contract-x",
         "dl.old",
         Some("dl-sweep-consumer".to_string()),
         b"payload".to_vec(),
         DeadLetterSummary::new("aged dead letter"),
         10,
-        WritableDeadLetterSource::Consumer,
         EnvelopeMetadata::empty(),
     ))
     .await?;
     sqlx::query(
         "UPDATE dead_letter SET last_attempt_at = now() - make_interval(secs => $1) \
-         WHERE domain = $2 AND topic = $3",
+         WHERE producer_domain = $2 AND topic = $3",
     )
     .bind((crate::DEAD_LETTER_RETENTION_SECONDS + 3600) as i64)
     .bind(&domain)
@@ -6485,14 +6955,13 @@ async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     dl.write_dead_letter(DeadLetterRecord::new(
         vocab::TenantId::parse(COTX_TENANT_A).unwrap(),
         "msg-dl-recent",
-        domain.as_str(),
+        DeadLetterProvenance::consumer(domain.as_str(), "dl-sweep-consumer"),
         "contract-x",
         "dl.recent",
         Some("dl-sweep-consumer".to_string()),
         b"payload".to_vec(),
         DeadLetterSummary::new("recent dead letter"),
         10,
-        WritableDeadLetterSource::Consumer,
         EnvelopeMetadata::empty(),
     ))
     .await?;
@@ -6501,20 +6970,22 @@ async fn t_dead_letter_sweep_rss_app_removes_old_keeps_recent() -> TestResult {
     let deleted = dl.sweep(crate::DEAD_LETTER_RETENTION_SECONDS).await?;
     assert!(deleted >= 1, "至少删除老死信: deleted={deleted}");
 
-    let cnt_old: (i64,) =
-        sqlx::query_as("SELECT count(*) FROM dead_letter WHERE domain = $1 AND topic = $2")
-            .bind(&domain)
-            .bind("dl.old")
-            .fetch_one(&store.pool)
-            .await?;
+    let cnt_old: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM dead_letter WHERE producer_domain = $1 AND topic = $2",
+    )
+    .bind(&domain)
+    .bind("dl.old")
+    .fetch_one(&store.pool)
+    .await?;
     assert_eq!(cnt_old.0, 0, "超保留期死信必须被 sweep 删");
 
-    let cnt_recent: (i64,) =
-        sqlx::query_as("SELECT count(*) FROM dead_letter WHERE domain = $1 AND topic = $2")
-            .bind(&domain)
-            .bind("dl.recent")
-            .fetch_one(&store.pool)
-            .await?;
+    let cnt_recent: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM dead_letter WHERE producer_domain = $1 AND topic = $2",
+    )
+    .bind(&domain)
+    .bind("dl.recent")
+    .fetch_one(&store.pool)
+    .await?;
     assert_eq!(cnt_recent.0, 1, "保留期内死信不应被 sweep 删");
 
     app.shutdown().await?;
@@ -6769,14 +7240,13 @@ async fn dead_letter_tenant_conformance() -> TestResult {
                 dl.write_dead_letter(DeadLetterRecord::new(
                     tenant,
                     &message_id,
-                    domain.as_str(),
+                    diport::DeadLetterProvenance::consumer(domain.as_str(), "tenant-conf-consumer"),
                     "contract-conf",
                     "test.event",
                     Some("tenant-conf-consumer".to_string()),
                     b"payload".to_vec(),
                     diport::DeadLetterSummary::new("tenant conformance"),
                     1,
-                    diport::WritableDeadLetterSource::Consumer,
                     EnvelopeMetadata::empty(),
                 ))
                 .await?;
@@ -6813,9 +7283,9 @@ async fn dead_letter_tenant_conformance() -> TestResult {
 // reason: integration test fixtures use known-valid ids; assertions should fail loud.
 async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     use diport::{
-        DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterSummary, EnvelopeMetadata,
-        KEY_CORRELATION, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_ID,
-        WritableDeadLetterSource,
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterStore,
+        DeadLetterSummary, EnvelopeMetadata, KEY_CORRELATION, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_ID,
     };
     use eventexec::{
         DeadLetterId, DlqCursor, DlqEntryKind, DlqError, DlqListQuery, DlqReplayOutcome,
@@ -6842,14 +7312,13 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     dl.write_dead_letter(DeadLetterRecord::new(
         tenant,
         &message_id,
-        domain.as_str(),
+        DeadLetterProvenance::consumer(domain.as_str(), "dlq-replay-consumer"),
         replay_contract_id,
         "test.event",
         Some("dlq-replay-consumer".to_string()),
         b"consumer-payload".to_vec(),
         DeadLetterSummary::new("consumer exhausted"),
         3,
-        WritableDeadLetterSource::Consumer,
         metadata,
     ))
     .await?;
@@ -7046,14 +7515,13 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     dl.write_dead_letter(DeadLetterRecord::new(
         tenant,
         &saga_message_id,
-        domain.as_str(),
+        DeadLetterProvenance::saga(domain.as_str()),
         "contract-dlq",
         "test.saga",
         None,
         b"saga-payload".to_vec(),
         DeadLetterSummary::new("saga compensation failed"),
         2,
-        WritableDeadLetterSource::Saga,
         EnvelopeMetadata::empty(),
     ))
     .await?;
@@ -7099,14 +7567,13 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         dl.write_dead_letter(DeadLetterRecord::new(
             tenant,
             &projection_message_id,
-            domain.as_str(),
+            DeadLetterProvenance::projection(domain.as_str(), "test-proj"),
             "contract-dlq",
             "test.projection",
             Some("test-proj".to_string()),
             b"projection-payload".to_vec(),
             DeadLetterSummary::new("projection apply permanent"),
             1,
-            WritableDeadLetterSource::Projection,
             projection_metadata.clone(),
         ))
         .await?;
@@ -7150,7 +7617,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let projection_list = dlq
         .list_dlq(
             DlqListQuery::new(tenant)
-                .with_domain(domain.as_str())
+                .with_producer_domain(domain.as_str())
                 .with_source(DeadLetterSource::Projection),
         )
         .await?;
@@ -7176,12 +7643,11 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let (invalid_dead_letter_id,): (String,) = sqlx::query_as(
         r#"
         INSERT INTO dead_letter
-            (tenant_id, message_id, domain, contract_id, topic,
+            (tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic,
              original_entry, original_entry_key_ref, original_entry_payload_len,
              original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
-        VALUES ($1::uuid, $2, $3, $4, $5,
-                $6, 'dlx-test:1', 3,
-                $7, $8, $9, 'consumer', '{}'::jsonb)
+        VALUES ($1::uuid, $2, $3, 'dlq-replay-consumer', $4, $5,
+                $6, 'dlx-test:1', 3, $7, $8, $9, 'consumer', '{}'::jsonb)
         RETURNING id::text
         "#,
     )
@@ -7213,7 +7679,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let first_page = dlq
         .list_dlq(
             DlqListQuery::new(tenant)
-                .with_domain(domain.as_str())
+                .with_producer_domain(domain.as_str())
                 .with_source(DeadLetterSource::Consumer)
                 .with_limit(1),
         )
@@ -7226,7 +7692,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let second_page = dlq
         .list_dlq(
             DlqListQuery::new(tenant)
-                .with_domain(domain.as_str())
+                .with_producer_domain(domain.as_str())
                 .with_source(DeadLetterSource::Consumer)
                 .with_limit(1)
                 .with_cursor(DlqCursor::parse(cursor)?),
@@ -7236,49 +7702,6 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         second_page.data().len(),
         1,
         "cursor must advance to next row"
-    );
-
-    let legacy_id = unique_event_id("legacy-dl");
-    let legacy_entry = serde_json::json!({"ciphertext": []});
-    let mut tx = store.pool.begin().await?;
-    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
-    let (legacy_dead_letter_id,): (String,) = sqlx::query_as(
-        r#"
-        INSERT INTO dead_letter
-            (tenant_id, message_id, domain, contract_id, topic,
-             original_entry, original_entry_key_ref, original_entry_payload_len,
-             original_entry_encoding, error_summary, num_attempts, source_kind, metadata)
-        VALUES ($1::uuid, $2, $3, $4, $5,
-                $6, 'dlx-test:1', 0,
-                $7, $8, $9, 'legacy', '{}'::jsonb)
-        RETURNING id::text
-        "#,
-    )
-    .bind(COTX_TENANT_A)
-    .bind(&legacy_id)
-    .bind(domain.as_str())
-    .bind("contract-dlq")
-    .bind("test.event")
-    .bind(sqlx::types::Json(&legacy_entry))
-    .bind(crate::dead_letter_payload::DLX_ORIGINAL_ENTRY_ENCODING)
-    .bind("legacy row")
-    .bind(1_i32)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    let legacy_replay_id = IdemKey::parse(&unique_event_id("legacy-replay")).unwrap();
-    let legacy_replay = dlq
-        .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
-            DeadLetterId::parse(&legacy_dead_letter_id)?,
-            legacy_replay_id,
-            cap,
-        ))
-        .await;
-    assert!(
-        matches!(legacy_replay, Err(DlqError::NotReplayable)),
-        "legacy rows are audit-only and must not be replayable"
     );
 
     store.shutdown().await?;
@@ -7357,7 +7780,10 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     .execute(&store.pool)
     .await?;
 
-    let dlq = app.dlq(test_dlx_payload_protector());
+    let dlq = app.dlq_with_projection_registry(
+        test_dlx_payload_protector(),
+        crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS),
+    );
     let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
@@ -7376,7 +7802,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .list_dlq(
             DlqListQuery::new(tenant)
                 .with_source(diport::DeadLetterSource::OutboxRelay)
-                .with_domain(domain.as_str()),
+                .with_producer_domain(domain.as_str()),
         )
         .await?;
     assert_eq!(
@@ -7443,7 +7869,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
             })
         })?;
     assert_eq!(redriven, DlqRedriveOutcome::Redriven);
-    let status_after_redrive: (
+    type RedrivenOutboxState = (
         String,
         i32,
         bool,
@@ -7454,7 +7880,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         serde_json::Value,
         String,
         String,
-    ) = sqlx::query_as(
+    );
+    let status_after_redrive: RedrivenOutboxState = sqlx::query_as(
         "SELECT status, retry_count, retry_after IS NULL, lease_token::text, payload, seq, partition_key, metadata, contract_version, schema_hash \
          FROM outbox WHERE event_id = $1",
     )
@@ -7493,7 +7920,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .list_dlq(
             DlqListQuery::new(tenant)
                 .with_source(diport::DeadLetterSource::OutboxRelay)
-                .with_domain(domain.as_str()),
+                .with_producer_domain(domain.as_str()),
         )
         .await?;
     assert!(
@@ -7601,7 +8028,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 /// metadata 含标准 header + opaque subjectId（无完整 PII，FR-020）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path——Topic/IdemKey parse 已知合法值；函数级 item-level carve-out（error-handling.md §Carve-out）。
+// reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；函数级 item-level carve-out（error-handling.md §Carve-out）。
 async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestResult {
     use diport::{OutboxEmitter, OutboxEnvelopeParts};
 
@@ -7612,8 +8039,8 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
     store.run_migrations().await?;
 
     let event_id = unique_event_id("t10-emit");
-    let entry = Entry::new(
-        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+    let entry = EventEntry::new(
+        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
         reviewed_payload(br#"{"sessionId":"s"}"#),
     );
@@ -7756,8 +8183,8 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
     let event_id = unique_event_id("outbox-cdc-emit");
     let tenant = test_tenant();
     let make_entry = || {
-        Entry::new(
-            Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+        EventEntry::new(
+            EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
             IdemKey::parse(&event_id).unwrap(),
             reviewed_payload(br#"{"sessionId":"cdc"}"#),
         )
@@ -7856,8 +8283,8 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
     let event_id = unique_event_id("outbox-cdc-conflict");
     let tenant = test_tenant();
     let make_entry = |payload: &'static [u8]| {
-        Entry::new(
-            Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+        EventEntry::new(
+            EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
             IdemKey::parse(&event_id).unwrap(),
             reviewed_payload(payload),
         )
@@ -7907,8 +8334,8 @@ async fn t10_pg_emitter_persists_nonempty_causation_id() -> TestResult {
     store.run_migrations().await?;
 
     let event_id = unique_event_id("t10-causation");
-    let entry = Entry::new(
-        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+    let entry = EventEntry::new(
+        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
         reviewed_payload(br#"{"sessionId":"s-cause"}"#),
     );
@@ -7961,12 +8388,12 @@ const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 /// 避免同义字面量重复——review #244 F4）。
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
 
-/// 构造 session-created Entry（topic/event_id/payload）。
+/// 构造 session-created EventEntry（topic/event_id/payload）。
 #[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path——Topic/IdemKey parse 已知合法值；item-level carve-out（error-handling.md §Carve-out）。
-fn session_entry(event_id: &str) -> Entry {
-    Entry::new(
-        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+// reason: 集成测试 happy-path——EventTopic/IdemKey parse 已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+fn session_entry(event_id: &str) -> EventEntry {
+    EventEntry::new(
+        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(event_id).unwrap(),
         reviewed_payload(br#"{"sessionId":"s"}"#),
     )
@@ -9007,7 +9434,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     );
 
     // re-drive H：经 DLQ store 固定函数把 H 从 dlx 重置回 pending。
-    let dlq = store.dlq(test_dlx_payload_protector());
+    let dlq = store.dlq_without_payload_replay();
     let redrive = dlq
         .redrive_outbox(DlqRedriveRequest::new(
             test_tenant(),
@@ -9844,7 +10271,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         "t29: DLX 队头必须阻塞同 partition 后继投递"
     );
 
-    let dlq = store.dlq(test_dlx_payload_protector());
+    let dlq = store.dlq_without_payload_replay();
     let redrive = dlq
         .redrive_outbox(DlqRedriveRequest::new(
             test_tenant(),
@@ -9887,8 +10314,8 @@ async fn t30_with_partition_key_persists_via_real_emit_port() -> TestResult {
     store.run_migrations().await?;
 
     let event_id = unique_event_id("t30-pk-port");
-    let entry = Entry::new(
-        Topic::parse(SESSION_CREATED_TOPIC).unwrap(),
+    let entry = EventEntry::new(
+        EventTopic::parse(SESSION_CREATED_TOPIC).unwrap(),
         IdemKey::parse(&event_id).unwrap(),
         reviewed_payload(br#"{"sessionId":"s"}"#),
     );
@@ -10356,10 +10783,13 @@ async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
 // ── PgConfigRepo / PgConfigUnitOfWork：配置仓储 + co-tx 集成测试（#1249）─────────────
 //
 // OUTBOX-COTX-CONFIG-01 anti-vacuity：正向 `tc5` 证真实 method commit 两行皆在 ↔ 负向双覆盖——`tc6` 经真实
-// `co_tx_with_outbox`（业务写真插一行后强制 Err）证两写共回滚，`tc7` 驱动真实 `save_and_append_outbox` 的 CAS
+// `co_tx_with_outbox`（业务写真插一行后强制 Err）证两写共回滚，`tc7` 驱动真实 `commit` 的 CAS
 // 冲突分支证「冲突 → 无 outbox 行」（write-without-event 不发生）。
 
-use settings::ports::{ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey};
+use settings::ports::{
+    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepo, ConfigRepoError, ConfigTombstone,
+    ConfigUnitOfWork, SettingKey, TenantRepoScope,
+};
 
 use crate::config_repo::{arm_config_retry_failpoint, config_retry_failpoint_hits};
 use crate::cotx::PgTenantPool;
@@ -10675,24 +11105,107 @@ fn mutating_backfill_config_protection(pool: sqlx::PgPool) -> ConfigValueProtect
     )
 }
 
-/// 构造 config-version-changed outbox Entry。
+/// 构造 config-version-changed outbox EventEntry。
 #[allow(clippy::unwrap_used)]
-fn config_outbox_entry(event_id: &str) -> Entry {
-    Entry::new(
-        Topic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
+fn config_outbox_entry(event_id: &str) -> EventEntry {
+    EventEntry::new(
+        EventTopic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
         IdemKey::parse(event_id).unwrap(),
         reviewed_payload(br#"{"key":"app.k","version":1}"#),
     )
 }
 
+#[allow(clippy::unwrap_used)]
+fn config_deleted_outbox_entry(event_id: &str, key: &str, version: u64) -> EventEntry {
+    EventEntry::new(
+        EventTopic::parse(CONFIG_VERSION_CHANGED_TOPIC).unwrap(),
+        IdemKey::parse(event_id).unwrap(),
+        reviewed_payload(
+            &serde_json::to_vec(&serde_json::json!({
+                "key": key,
+                "version": version,
+                "changeKind": "deleted"
+            }))
+            .unwrap(),
+        ),
+    )
+}
+
 /// 构造 config-version-changed envelope（opaque subject = 配置 key）。
 fn config_envelope(subject: &str) -> OutboxEnvelopeParts {
+    config_envelope_for(config_tenant(), subject)
+}
+
+fn config_envelope_for(tenant: TenantId, subject: &str) -> OutboxEnvelopeParts {
     OutboxEnvelopeParts::new(
         config_contract(),
-        config_tenant(),
+        tenant,
         subject_id(subject),
-        actor_for(config_tenant()),
+        actor_for(tenant),
     )
+}
+
+trait ConfigTestWrite {
+    async fn test_put(
+        &self,
+        scope: TenantRepoScope,
+        entry: ConfigEntry,
+    ) -> Result<(), ConfigRepoError>;
+
+    async fn test_delete(
+        &self,
+        scope: TenantRepoScope,
+        key: &SettingKey,
+    ) -> Result<(), ConfigRepoError>;
+}
+
+impl ConfigTestWrite for PgConfigRepo {
+    async fn test_put(
+        &self,
+        scope: TenantRepoScope,
+        entry: ConfigEntry,
+    ) -> Result<(), ConfigRepoError> {
+        let tenant = entry.tenant();
+        let subject = entry.key().as_str().to_string();
+        self.commit(
+            scope,
+            ConfigMutation::Put(entry),
+            config_outbox_entry(&unique_event_id("config-test-put")),
+            config_envelope_for(tenant, &subject),
+        )
+        .await
+    }
+
+    async fn test_delete(
+        &self,
+        scope: TenantRepoScope,
+        key: &SettingKey,
+    ) -> Result<(), ConfigRepoError> {
+        let tenant = scope.tenant();
+        let Some(ConfigHead::Active(version)) = self.head(scope, key).await? else {
+            return Ok(());
+        };
+        let result = self
+            .commit(
+                scope,
+                ConfigMutation::Delete(ConfigTombstone::hydrate(
+                    key.clone(),
+                    tenant,
+                    version.saturating_add(1),
+                )),
+                config_outbox_entry(&unique_event_id("config-test-delete")),
+                config_envelope_for(tenant, key.as_str()),
+            )
+            .await;
+        match result {
+            Err(ConfigRepoError::VersionConflict)
+                if matches!(self.head(scope, key).await?, Some(ConfigHead::Deleted(_))) =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
 }
 
 /// setup：应用 migration（含 config_entries 表），清空 config_entries（防测试间污染）。outbox 用唯一
@@ -10721,7 +11234,7 @@ async fn tc1_config_save_find_roundtrip() -> TestResult {
         "未写入 → None"
     );
 
-    repo.save(
+    repo.test_put(
         settings_scope(tenant),
         config_entry("app.timeout", "30s", 1),
     )
@@ -10821,7 +11334,7 @@ async fn tc1d_config_encrypted_row_cross_tenant_copy_rejected() -> TestResult {
     let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
     let key = SettingKey::parse("app.aad").unwrap();
 
-    repo.save(
+    repo.test_put(
         settings_scope(tenant_a),
         config_entry("app.aad", "tenant-a-value", 1),
     )
@@ -10862,7 +11375,7 @@ async fn tc1e_config_encrypted_read_provider_unavailable() -> TestResult {
     let key = SettingKey::parse("app.kms").unwrap();
 
     writer
-        .save(
+        .test_put(
             settings_scope(tenant),
             config_entry("app.kms", "encrypted-value", 1),
         )
@@ -11036,7 +11549,7 @@ async fn tc1i_config_maintenance_rewrap_updates_key_ref() -> TestResult {
     setup_config(&store).await?;
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(
+        .test_put(
             settings_scope(config_tenant()),
             config_entry("encrypted.rewrap", "v1", 1),
         )
@@ -11187,7 +11700,7 @@ async fn tc1m_config_maintenance_rewrap_failure_preserves_row() -> TestResult {
     setup_config(&store).await?;
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(
+        .test_put(
             settings_scope(config_tenant()),
             config_entry("encrypted.rewrap_failure", "v1", 1),
         )
@@ -11245,7 +11758,7 @@ async fn tc1o_config_maintenance_rewrap_invalid_key_ref_counts_as_failed_selecte
     .await?;
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(
+        .test_put(
             settings_scope(config_tenant()),
             config_entry("encrypted.valid_after_invalid", "v1", 1),
         )
@@ -11359,7 +11872,7 @@ async fn tc1n_config_maintenance_both_max_rows_is_shared() -> TestResult {
     .await?;
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(
+        .test_put(
             settings_scope(config_tenant()),
             config_entry("encrypted.both_budget", "v1", 1),
         )
@@ -11398,7 +11911,7 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     setup_config(&store).await?;
     // 经 funnel：PgRuntimeDeps → for_domain::<Settings> → settings_bundle → into_parts（取 read config box）。
     let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
-    let (configs, _writer, _secrets) = deps
+    let (configs, writer, _secrets) = deps
         .for_domain::<crate::caps::Settings>()
         .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();
@@ -11409,10 +11922,12 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
         configs.find(settings_scope(tenant), &key).await?.is_none(),
         "未写入 → None"
     );
-    configs
-        .save(
+    writer
+        .commit(
             settings_scope(tenant),
-            config_entry("bundle.timeout", "30s", 1),
+            ConfigMutation::Put(config_entry("bundle.timeout", "30s", 1)),
+            config_outbox_entry(&unique_event_id("bundle-read-write")),
+            config_envelope("bundle.timeout"),
         )
         .await?;
     let found = configs.find(settings_scope(tenant), &key).await?.unwrap();
@@ -11421,7 +11936,7 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     Ok(())
 }
 
-/// tc1c：经 `settings_bundle` funnel 解包的 `writer`（`DynConfigUnitOfWork`）在真实 DB 上 `save_and_append_outbox`
+/// tc1c：经 `settings_bundle` funnel 解包的 `writer`（`DynConfigUnitOfWork`）在真实 DB 上 `commit`
 /// co-tx 落 config 行 + outbox 行 + 构造期注入 occurred_at——证 bundle write lane 与 direct co-tx（tc5）语义等价
 /// （F2，#1424；补 tc1b 只覆盖 read lane 的缺口）。
 #[tokio::test(flavor = "multi_thread")]
@@ -11440,9 +11955,9 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
     let event_id = unique_event_id("cfg-tc1c-evt");
 
     writer
-        .save_and_append_outbox(
+        .commit(
             settings_scope(tenant),
-            config_entry("bundle.cotx", "v1", 1),
+            ConfigMutation::Put(config_entry("bundle.cotx", "v1", 1)),
             config_outbox_entry(&event_id),
             config_envelope("bundle.cotx"),
         )
@@ -11465,7 +11980,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
         ob_cnt.0, 1,
         "bundle writer：outbox 行应写入（co-tx 两行皆在）"
     );
-    // occurred_at 来自 bundle 构造期注入的 Arc clock（write lane 经 save_and_append_outbox 用）。
+    // occurred_at 来自 bundle 构造期注入的 Arc clock（write lane 经 commit 用）。
     let cfg_meta: (String,) =
         sqlx::query_as("SELECT metadata::text FROM outbox WHERE event_id = $1")
             .bind(&event_id)
@@ -11493,9 +12008,9 @@ async fn tc2_config_find_version_returns_history() -> TestResult {
     let tenant = config_tenant();
     let key = SettingKey::parse("app.k").unwrap();
 
-    repo.save(settings_scope(tenant), config_entry("app.k", "v1", 1))
+    repo.test_put(settings_scope(tenant), config_entry("app.k", "v1", 1))
         .await?;
-    repo.save(settings_scope(tenant), config_entry("app.k", "v2", 2))
+    repo.test_put(settings_scope(tenant), config_entry("app.k", "v2", 2))
         .await?;
 
     assert_eq!(
@@ -11550,7 +12065,7 @@ async fn tc3_config_save_cas_conflict() -> TestResult {
         |version, marker| {
             let repo = &repo;
             async move {
-                repo.save(
+                repo.test_put(
                     settings_scope(tenant),
                     config_entry("app.k", &marker, version),
                 )
@@ -11584,7 +12099,7 @@ async fn tc3b_config_save_provider_unavailable_persists_nothing() -> TestResult 
     let tenant = config_tenant();
 
     let result = repo
-        .save(
+        .test_put(
             settings_scope(tenant),
             config_entry("app.kms-down", "no-write", 1),
         )
@@ -11620,7 +12135,7 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
         |version, marker| {
             let repo = &repo;
             async move {
-                repo.save(
+                repo.test_put(
                     settings_scope(tenant),
                     config_entry("app.k", &marker, version),
                 )
@@ -11630,7 +12145,7 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
         || {
             let repo = &repo;
             let key = &key;
-            async move { repo.delete(settings_scope(tenant), key).await }
+            async move { repo.test_delete(settings_scope(tenant), key).await }
         },
         || {
             let repo = &repo;
@@ -11653,7 +12168,11 @@ async fn tc4_config_delete_tombstones_and_is_idempotent() -> TestResult {
         || {
             let repo = &repo;
             let key = &key;
-            async move { repo.latest_version(settings_scope(tenant), key).await }
+            async move {
+                repo.head(settings_scope(tenant), key)
+                    .await
+                    .map(|head| head.map(ConfigHead::version))
+            }
         },
     )
     .await?;
@@ -11675,7 +12194,7 @@ async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestRes
     let unavailable_repo =
         PgConfigRepo::new(&store, fixed_clock_arc(), unavailable_config_protection());
     unavailable_repo
-        .delete(settings_scope(tenant), &missing)
+        .test_delete(settings_scope(tenant), &missing)
         .await?;
     let missing_cnt: (i64,) =
         sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
@@ -11686,11 +12205,11 @@ async fn tc4b_config_delete_noop_does_not_call_unavailable_provider() -> TestRes
 
     let writer = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     writer
-        .save(settings_scope(tenant), config_entry("app.deleted", "v1", 1))
+        .test_put(settings_scope(tenant), config_entry("app.deleted", "v1", 1))
         .await?;
-    writer.delete(settings_scope(tenant), &key).await?;
+    writer.test_delete(settings_scope(tenant), &key).await?;
     unavailable_repo
-        .delete(settings_scope(tenant), &key)
+        .test_delete(settings_scope(tenant), &key)
         .await?;
 
     let latest: (Option<i64>,) =
@@ -11723,7 +12242,7 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
     let tenant = config_tenant();
     let key = Arc::new(SettingKey::parse("app.concurrent-delete")?);
 
-    repo.save(
+    repo.test_put(
         settings_scope(tenant),
         config_entry("app.concurrent-delete", "v1", 1),
     )
@@ -11738,7 +12257,7 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            repo.delete(settings_scope(tenant), &key).await
+            repo.test_delete(settings_scope(tenant), &key).await
         }));
     }
     for handle in handles {
@@ -11750,8 +12269,8 @@ async fn tc4c_config_concurrent_delete_is_idempotent() -> TestResult {
         "concurrent delete leaves key deleted"
     );
     assert_eq!(
-        repo.latest_version(settings_scope(tenant), &key).await?,
-        Some(2),
+        repo.head(settings_scope(tenant), &key).await?,
+        Some(ConfigHead::Deleted(2)),
         "only one tombstone version is appended"
     );
     let tombstones: (i64,) = sqlx::query_as(
@@ -11778,9 +12297,9 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     let event_id = unique_event_id("cfg-tc5-evt");
     let plain_value = "settings-value-must-not-leak";
 
-    repo.save_and_append_outbox(
+    repo.commit(
         settings_scope(tenant),
-        config_entry("app.k", plain_value, 1),
+        ConfigMutation::Put(config_entry("app.k", plain_value, 1)),
         config_outbox_entry(&event_id),
         config_envelope("app.k").with_causation_id(
             diport::EnvelopeCausationId::from_opaque("config-upstream-event").unwrap(),
@@ -11864,6 +12383,76 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     Ok(())
 }
 
+/// Delete 分支同样必须原子提交 tombstone 与唯一 deletion fact；CAS 失败时两者皆不落库。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let tenant = config_tenant();
+    let key = SettingKey::parse("app.delete-cotx").unwrap();
+    repo.test_put(
+        settings_scope(tenant),
+        config_entry("app.delete-cotx", "v1", 1),
+    )
+    .await?;
+
+    let deleted_event = unique_event_id("cfg-tc5d-deleted");
+    repo.commit(
+        settings_scope(tenant),
+        ConfigMutation::Delete(ConfigTombstone::hydrate(key.clone(), tenant, 2)),
+        config_deleted_outbox_entry(&deleted_event, key.as_str(), 2),
+        config_envelope(key.as_str()),
+    )
+    .await?;
+    assert_eq!(
+        repo.head(settings_scope(tenant), &key).await?,
+        Some(ConfigHead::Deleted(2))
+    );
+    let deleted_rows: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 AND version = 2 AND deleted",
+    )
+    .bind(CONFIG_TENANT)
+    .bind(key.as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(deleted_rows.0, 1, "delete commit writes one tombstone");
+    let deletion_fact: (Vec<u8>,) =
+        sqlx::query_as("SELECT payload FROM outbox WHERE event_id = $1")
+            .bind(&deleted_event)
+            .fetch_one(&store.pool)
+            .await?;
+    let payload: serde_json::Value = serde_json::from_slice(&deletion_fact.0)?;
+    assert_eq!(payload["changeKind"], "deleted");
+    assert_eq!(payload["key"], key.as_str());
+    assert_eq!(payload["version"], 2);
+
+    let conflict_event = unique_event_id("cfg-tc5d-conflict");
+    let conflict = repo
+        .commit(
+            settings_scope(tenant),
+            ConfigMutation::Delete(ConfigTombstone::hydrate(key.clone(), tenant, 3)),
+            config_deleted_outbox_entry(&conflict_event, key.as_str(), 3),
+            config_envelope(key.as_str()),
+        )
+        .await;
+    assert!(matches!(conflict, Err(ConfigRepoError::VersionConflict)));
+    let conflict_rows: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+        .bind(&conflict_event)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(conflict_rows.0, 0, "failed delete writes no outbox fact");
+    assert_eq!(
+        repo.head(settings_scope(tenant), &key).await?,
+        Some(ConfigHead::Deleted(2)),
+        "failed delete appends no tombstone"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc5b：config 事务 tenant 与 envelope tenant 不一致 → fail-closed，config / outbox 均不落库。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -11881,9 +12470,9 @@ async fn tc5b_config_cotx_rejects_envelope_tenant_mismatch() -> TestResult {
     );
 
     let result = repo
-        .save_and_append_outbox(
+        .commit(
             settings_scope(tenant),
-            config_entry("app.mismatch", "v1", 1),
+            ConfigMutation::Put(config_entry("app.mismatch", "v1", 1)),
             config_outbox_entry(&event_id),
             envelope,
         )
@@ -11922,9 +12511,9 @@ async fn tc5c_config_cotx_rejects_scope_entry_tenant_mismatch() -> TestResult {
     let key = "app.scope-entry-mismatch";
 
     let result = repo
-        .save_and_append_outbox(
+        .commit(
             settings_scope(scope_tenant),
-            config_entry_for(entry_tenant, key, "v1", 1),
+            ConfigMutation::Put(config_entry_for(entry_tenant, key, "v1", 1)),
             config_outbox_entry(&event_id),
             config_envelope(key),
         )
@@ -12015,7 +12604,7 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     Ok(())
 }
 
-/// tc7：**真实 method** `save_and_append_outbox` 的 CAS 冲突分支 → VersionConflict 且**无 outbox 行**
+/// tc7：**真实 method** `commit` 的 CAS 冲突分支 → VersionConflict 且**无 outbox 行**
 /// （write-without-event 不发生）；原版本不被覆盖。
 ///
 /// 与 tc6（直测 `co_tx_with_outbox` 骨架的业务写失败回滚）互补：tc7 驱动**真实 method** 的 rollback 路径
@@ -12029,15 +12618,15 @@ async fn tc7_config_cotx_cas_conflict_emits_no_outbox() -> TestResult {
     let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
     let tenant = config_tenant();
 
-    repo.save(settings_scope(tenant), config_entry("app.k", "v1", 1))
+    repo.test_put(settings_scope(tenant), config_entry("app.k", "v1", 1))
         .await?;
 
     // 以陈旧 v1 走 co-tx → CAS 冲突 → 整事务回滚（无 outbox 行）。
     let event_id = unique_event_id("cfg-tc7-evt");
     let result = repo
-        .save_and_append_outbox(
+        .commit(
             settings_scope(tenant),
-            config_entry("app.k", "v1-stale", 1),
+            ConfigMutation::Put(config_entry("app.k", "v1-stale", 1)),
             config_outbox_entry(&event_id),
             config_envelope("app.k"),
         )
@@ -12079,7 +12668,7 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     let conflict_event = unique_event_id("cfg-tc7b-conflict");
     let tenant_pool = PgTenantPool::new(&store);
 
-    repo.save(
+    repo.test_put(
         settings_scope(tenant),
         config_entry("app.cotx-conflict", "v1", 1),
     )
@@ -12088,8 +12677,8 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
     testkit::repo_conformance::assert_cotx_both_or_neither(
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.save_and_append_outbox(settings_scope(tenant),
-                    config_entry("app.cotx-ok", "v1", 1),
+                repo.commit(settings_scope(tenant),
+                    ConfigMutation::Put(config_entry("app.cotx-ok", "v1", 1)),
                     config_outbox_entry(&ok_event),
                     config_envelope("app.cotx-ok"),
                 )
@@ -12168,8 +12757,8 @@ async fn tc7b_config_cotx_conformance() -> TestResult {
         },
         testkit::repo_conformance::CotxCase {
             action: || async {
-                repo.save_and_append_outbox(settings_scope(tenant),
-                    config_entry("app.cotx-conflict", "stale", 1),
+                repo.commit(settings_scope(tenant),
+                    ConfigMutation::Put(config_entry("app.cotx-conflict", "stale", 1)),
                     config_outbox_entry(&conflict_event),
                     config_envelope("app.cotx-conflict"),
                 )
@@ -12215,7 +12804,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
     let conflict_event = unique_event_id("cfg-tc7c-conflict");
     let permanent_event = unique_event_id("cfg-tc7c-permanent");
 
-    repo.save(
+    repo.test_put(
         settings_scope(tenant),
         config_entry("app.retry-conflict", "v1", 1),
     )
@@ -12228,9 +12817,9 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                 let transient_event = transient_event.clone();
                 arm_config_retry_failpoint("app.retry-transient", 1);
                 async move {
-                    repo.save_and_append_outbox(
+                    repo.commit(
                         settings_scope(tenant),
-                        config_entry("app.retry-transient", "v1", 1),
+                        ConfigMutation::Put(config_entry("app.retry-transient", "v1", 1)),
                         config_outbox_entry(&transient_event),
                         config_envelope("app.retry-transient"),
                     )
@@ -12257,9 +12846,9 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                 )
             },
             conflict_action: || async {
-                repo.save_and_append_outbox(
+                repo.commit(
                     settings_scope(tenant),
-                    config_entry("app.retry-conflict", "stale", 1),
+                    ConfigMutation::Put(config_entry("app.retry-conflict", "stale", 1)),
                     config_outbox_entry(&conflict_event),
                     config_envelope("app.retry-conflict"),
                 )
@@ -12283,9 +12872,9 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
                 Ok::<bool, ConfigRepoError>(cfg.0 != 0 || outbox.0 != 0)
             },
             permanent_action: || async {
-                repo.save_and_append_outbox(
+                repo.commit(
                     settings_scope(tenant),
-                    config_entry("app.retry-permanent", "v1", 1),
+                    ConfigMutation::Put(config_entry("app.retry-permanent", "v1", 1)),
                     config_outbox_entry(&permanent_event),
                     OutboxEnvelopeParts::new(
                         config_contract(),
@@ -12375,7 +12964,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
             save: |tenant, version, marker: String| {
                 let repo = &repo;
                 async move {
-                    repo.save(
+                    repo.test_put(
                         settings_scope(tenant),
                         ConfigEntry::hydrate(
                             SettingKey::parse("app.k").unwrap(),
@@ -12390,7 +12979,7 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
             delete: |tenant| {
                 let repo = &repo;
                 let key = &key;
-                async move { repo.delete(settings_scope(tenant), key).await }
+                async move { repo.test_delete(settings_scope(tenant), key).await }
             },
             current: |tenant| {
                 let repo = &repo;
@@ -12413,7 +13002,11 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
             latest_version: |tenant| {
                 let repo = &repo;
                 let key = &key;
-                async move { repo.latest_version(settings_scope(tenant), key).await }
+                async move {
+                    repo.head(settings_scope(tenant), key)
+                        .await
+                        .map(|head| head.map(ConfigHead::version))
+                }
             },
         },
     )
@@ -12444,7 +13037,7 @@ async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
             async move {
                 let entry =
                     ConfigEntry::hydrate(SettingKey::parse("app.conformance").unwrap(), "v1", t, 1);
-                repo.save(settings_scope(t), entry).await
+                repo.test_put(settings_scope(t), entry).await
             }
         },
         |t| {
@@ -12481,28 +13074,28 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
 
     // publish v1 经 co-tx（content-派生 event_id ...:v1）。
     let ev1 = config_event_id(tenant, "app.k", 1);
-    repo.save_and_append_outbox(
+    repo.commit(
         settings_scope(tenant),
-        config_entry("app.k", "v1", 1),
+        ConfigMutation::Put(config_entry("app.k", "v1", 1)),
         config_outbox_entry(&ev1),
         config_envelope("app.k"),
     )
     .await?;
 
     // delete → tombstone v2（version 不重置）。
-    repo.delete(settings_scope(tenant), &key).await?;
+    repo.test_delete(settings_scope(tenant), &key).await?;
 
     // republish：下一版本 = latest_version(含 tombstone) + 1 = 3（**非**重置回 1，旧 bug 的根因）。
     let next = repo
-        .latest_version(settings_scope(tenant), &key)
+        .head(settings_scope(tenant), &key)
         .await?
-        .map_or(1, |v| v + 1);
+        .map_or(1, |head| head.version().saturating_add(1));
     assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
     let ev3 = config_event_id(tenant, "app.k", next);
     assert_ne!(ev1, ev3, "republish event_id 不复用（v1 ≠ v3）");
-    repo.save_and_append_outbox(
+    repo.commit(
         settings_scope(tenant),
-        config_entry("app.k", "v1-again", next),
+        ConfigMutation::Put(config_entry("app.k", "v1-again", next)),
         config_outbox_entry(&ev3),
         config_envelope("app.k"),
     )
@@ -13195,7 +13788,7 @@ fn policy_lifecycle_event(
     policy_id: &str,
     change_kind: &'static str,
     version: PolicyVersion,
-) -> Result<(Entry, diport::OutboxEnvelopeParts), IdentityError> {
+) -> Result<(EventEntry, diport::OutboxEnvelopeParts), IdentityError> {
     policy_lifecycle_event_with_id(
         tenant,
         policy_id,
@@ -13211,7 +13804,7 @@ fn policy_lifecycle_event_with_id(
     change_kind: &'static str,
     version: PolicyVersion,
     event_id: &str,
-) -> Result<(Entry, diport::OutboxEnvelopeParts), IdentityError> {
+) -> Result<(EventEntry, diport::OutboxEnvelopeParts), IdentityError> {
     let actor = uuid::Uuid::from_u128(0xA11CE);
     let payload = serde_json::json!({
         "policyId": policy_id,
@@ -13225,8 +13818,8 @@ fn policy_lifecycle_event_with_id(
         "occurredAt": expected_occurred_at(),
     });
     let payload = serde_json::to_vec(&payload).map_err(|e| IdentityError::Storage(Box::new(e)))?;
-    let entry = Entry::new(
-        Topic::parse(POLICY_UPDATED_TOPIC).map_err(|_| IdentityError::InvalidPolicy)?,
+    let entry = EventEntry::new(
+        EventTopic::parse(POLICY_UPDATED_TOPIC).map_err(|_| IdentityError::InvalidPolicy)?,
         IdemKey::parse(event_id).map_err(|_| IdentityError::InvalidPolicy)?,
         OutboxPayload::from_reviewed_event_bytes(payload),
     );
@@ -14158,13 +14751,14 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
             policy_time(20),
         )
         .await?;
-    match known {
-        ResourceAttributeResolution::Known(attrs) => {
-            assert_eq!(attrs.len(), 1);
-            assert_eq!(attrs[0].value().as_str(), "owner-a");
-        }
-        other => panic!("expected known resource attribute, got {other:?}"),
-    }
+    let ResourceAttributeResolution::Known(attrs) = known else {
+        return Err(std::io::Error::other(format!(
+            "expected known resource attribute, got {known:?}"
+        ))
+        .into());
+    };
+    assert_eq!(attrs.len(), 1);
+    assert_eq!(attrs[0].value().as_str(), "owner-a");
 
     let missing = repo
         .resolve_effective(
@@ -14991,8 +15585,8 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
         "v1",
         "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
     );
-    let entry = Entry::new(
-        Topic::parse("identity.role-assigned").unwrap(),
+    let entry = EventEntry::new(
+        EventTopic::parse("identity.role-assigned").unwrap(),
         IdemKey::parse(&event_id).unwrap(),
         reviewed_payload(br#"{"subject":"target-user","roleId":"role-causation"}"#),
     );

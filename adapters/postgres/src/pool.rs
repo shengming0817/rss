@@ -366,30 +366,32 @@ const EXPECTED_AUDIT_ADMIN_ROLE: &str = "rss_audit_admin";
 
 /// 不达标 tenant 表查询：动态派生（含 `tenant_id` 列的 public 表）后逐表判不达标——
 /// (a) 缺 `relrowsecurity AND relforcerowsecurity`（ENABLE+FORCE）；或
-/// (b) **无**任一 policy 的 `qual` 形如规范谓词 `tenant_id … current_setting … rss.tenant_id`
-///     （`LIKE '%tenant_id%current_setting%rss.tenant_id%'` 要求 tenant_id 与 GUC 在谓词内同现、
-///     非仅 "提到 GUC"——`USING (true)` 之类宽泛 policy 不满足）；或
-/// (c) **存在** allow-all 的 **PERMISSIVE** policy（`qual` normalize 后 ∈ {`true`,`(true)`}）——PostgreSQL
-///     permissive policy 默认 OR 合并，额外 allow-all 会放宽 SELECT（F3：拒 OR-widening）。
-/// 返回不达标表名。不硬编码表清单。pg_policies.qual 渲染含 `(tenant_id = (current_setting('rss.tenant_id'::text,
-/// ..))::uuid)`，与上述 LIKE 对齐（经真实 PG 直证）。**分工**：本 runtime 门守"实际 DB 有规范 tenant policy +
-/// 无 widening"；policy DDL 全文规范性（含 `WITH CHECK` 写侧）由静态 `cargo xtask schema-rls`（TENANCY-RLS-FORCE-01）
-/// 守，纵深互补（runtime 不重复全量 normalizer——抽共享 normalizer 是 refactor 档 follow-up）。
-const OFFENDING_TENANT_TABLES_SQL: &str = "\
-SELECT c.relname \
-FROM pg_class c \
-JOIN pg_namespace n ON n.oid = c.relnamespace \
-WHERE n.nspname = 'public' AND c.relkind = 'r' \
-  AND EXISTS (SELECT 1 FROM pg_attribute a \
-              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped) \
-  AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity \
-       OR NOT EXISTS (SELECT 1 FROM pg_policies p \
-                      WHERE p.schemaname = 'public' AND p.tablename = c.relname \
-                        AND p.qual LIKE '%tenant_id%current_setting%rss.tenant_id%') \
-       OR EXISTS (SELECT 1 FROM pg_policies p \
-                  WHERE p.schemaname = 'public' AND p.tablename = c.relname \
-                    AND p.permissive = 'PERMISSIVE' \
-                    AND btrim(lower(coalesce(p.qual, 'true'))) IN ('true', '(true)')))";
+/// (b) 无 permissive policy；或
+/// (c) 任一 permissive policy 的 `qual` / `with_check` 未同时绑定
+///     `tenant_id … current_setting … rss.tenant_id`，或任一表达式含 OR widening。PostgreSQL 会把 permissive
+///     policies 以 OR 合并，因此不是“至少一个正确”即可，而是每条 permissive policy 都必须不放宽。
+/// 返回不达标表名。不硬编码表清单。每条 permissive policy 的 USING / WITH CHECK 都必须含
+/// `tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid` 等值绑定；仅把三个 token 塞进
+/// `IS NOT NULL` 等表达式不能通过。额外 AND 限制允许，任何 OR 仍 fail-closed。
+const OFFENDING_TENANT_TABLES_SQL: &str = r#"
+SELECT c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind = 'r'
+  AND EXISTS (SELECT 1 FROM pg_attribute a
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)
+  AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity
+       OR NOT EXISTS (SELECT 1 FROM pg_policies p
+                      WHERE p.schemaname = 'public' AND p.tablename = c.relname
+                        AND p.permissive = 'PERMISSIVE')
+       OR EXISTS (SELECT 1 FROM pg_policies p
+                  WHERE p.schemaname = 'public' AND p.tablename = c.relname
+                    AND p.permissive = 'PERMISSIVE'
+                    AND (coalesce(p.qual, '') !~* 'tenant_id[[:space:]]*=[[:space:]]*\(*[[:space:]]*nullif[[:space:]]*\([[:space:]]*current_setting[[:space:]]*\([[:space:]]*''rss[.]tenant_id''(::text)?[[:space:]]*,[[:space:]]*true[[:space:]]*\)[[:space:]]*,[[:space:]]*''''(::text)?[[:space:]]*\)[[:space:]]*\)*[[:space:]]*::uuid'
+                         OR coalesce(p.with_check, '') !~* 'tenant_id[[:space:]]*=[[:space:]]*\(*[[:space:]]*nullif[[:space:]]*\([[:space:]]*current_setting[[:space:]]*\([[:space:]]*''rss[.]tenant_id''(::text)?[[:space:]]*,[[:space:]]*true[[:space:]]*\)[[:space:]]*,[[:space:]]*''''(::text)?[[:space:]]*\)[[:space:]]*\)*[[:space:]]*::uuid'
+                         OR coalesce(p.qual, '') ~* '\mOR\M'
+                         OR coalesce(p.with_check, '') ~* '\mOR\M')))
+"#;
 
 /// 当前连接角色及其 RLS 绕过属性。serving pool 必须直连固定 `rss_app`，且不得 superuser/BYPASSRLS。
 const CONNECTION_ROLE_SQL: &str = "\

@@ -75,29 +75,81 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "seed.commands.do-thing";
 
-/// Producer wrapper（triple funnel 顶层）：把 typed [`SeedDoThingRequest`] 经注入的 [`super::CommandEmit`] 落
-/// durable outbox。baked `CONTRACT` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
-/// `tenant` 是 typed RLS scope（必填）；`subject_id` 与 `actor` 是 bridge 绑定的 typed envelope identity；`idempotency_key` 是可选业务幂等键
-/// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
-/// 由 `cargo xtask codegen` 派生；勿手改。
-pub async fn emit_async<E: super::CommandEmit>(
-    emitter: &E,
+/// command manifest 的 sealed generated 表示；构造器仅 generated crate 可见。
+pub const SPEC: super::CommandSpec =
+    super::CommandSpec::new(CONTRACT, TOPIC, super::CommandJournalPolicy::Required);
+
+/// Zero-sized generated carrier that binds this command's request schema, routing metadata and policy.
+pub struct Contract;
+
+impl super::private::Sealed for Contract {}
+
+impl super::CommandContract for Contract {
+    type Request = SeedDoThingRequest;
+    const SPEC: super::CommandSpec = SPEC;
+}
+
+impl super::JournaledCommandContract for Contract {}
+
+/// Typed reconcile input for this command. Fields are private and routing is baked into [`SPEC`].
+pub struct ReconcileCommand<S, A> {
     request: SeedDoThingRequest,
     tenant: ::vocab::TenantId,
-    subject_id: E::SubjectId,
-    actor: E::Actor,
-    idempotency_key: ::core::option::Option<::std::string::String>,
-) -> ::core::result::Result<(), E::Error> {
-    emitter
-        .emit(
-            CONTRACT,
-            TOPIC,
-            &request,
-            tenant,
-            subject_id,
-            actor,
-            idempotency_key.as_deref(),
-        )
+    subject_id: S,
+    actor: A,
+    idempotency_key: ::std::string::String,
+}
+
+impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
+
+impl<S, A> super::TypedCommandSpec for ReconcileCommand<S, A> {
+    type Contract = Contract;
+    type SubjectId = S;
+    type Actor = A;
+
+    fn request(&self) -> &<Self::Contract as super::CommandContract>::Request {
+        &self.request
+    }
+    fn tenant(&self) -> ::vocab::TenantId {
+        self.tenant
+    }
+    fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+    fn into_identity(self) -> (Self::SubjectId, Self::Actor) {
+        (self.subject_id, self.actor)
+    }
+}
+
+/// Build the only reconcile-authoring input for this command. Topic, contract, and payload type are
+/// generated facts rather than caller-supplied strings/bytes.
+pub fn reconcile_command<S, A>(
+    request: SeedDoThingRequest,
+    tenant: ::vocab::TenantId,
+    subject_id: S,
+    actor: A,
+    idempotency_key: ::std::string::String,
+) -> ReconcileCommand<S, A> {
+    ReconcileCommand {
+        request,
+        tenant,
+        subject_id,
+        actor,
+        idempotency_key,
+    }
+}
+
+/// Journal-required producer wrapper；idempotency key 不提供随机降级路径。
+pub async fn journal_async<J: super::CommandJournal>(
+    journal: &J,
+    request: SeedDoThingRequest,
+    tenant: ::vocab::TenantId,
+    subject_id: J::SubjectId,
+    actor: J::Actor,
+    idempotency_key: ::std::string::String,
+) -> ::core::result::Result<J::Outcome, J::Error> {
+    journal
+        .journal::<Contract>(&request, tenant, subject_id, actor, &idempotency_key)
         .await
 }
 
@@ -109,5 +161,5 @@ where
     H: Fn(SeedDoThingRequest) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
     Fut: ::core::future::Future<Output = Reg::Outcome> + ::core::marker::Send + 'static,
 {
-    registrar.register::<SeedDoThingRequest, H, Fut>(CONTRACT, TOPIC, handler)
+    registrar.register::<Contract, H, Fut>(handler)
 }

@@ -145,17 +145,17 @@ ConsumerTx**：Fresh claim 后在同一 tenant-scoped PG transaction 内完成�
 旧 non-tx ackable spawn 不是 durable runtime 受支持路径。
 
 ```rust
-async fn handle(ctx: &Context, entry: outbox::Entry) -> outbox::HandleResult {
+async fn handle(ctx: &Context, message: diport::Message) -> consistency::HandleResult {
     if permanent {
         // reject 接 PermanentError（kind: Permanent | Invariant，排除 Transient）
-        return outbox::HandleResult::reject(outbox::PermanentError::new(perm_kind));
+        return consistency::HandleResult::reject(consistency::PermanentError::new(perm_kind));
     }
     if transient {
         // requeue 接 EngineError（不同类型；kind message 进 error_summary 落 DLX）
         let engine_err: consistency::error::EngineError = /* 瞬态因由 */;
-        return outbox::HandleResult::requeue(engine_err);
+        return consistency::HandleResult::requeue(engine_err);
     }
-    outbox::HandleResult::ack()
+    consistency::HandleResult::ack()
 }
 ```
 
@@ -179,9 +179,10 @@ broker `Requeue`，不写 app DLX、不提交 inbox `done`、不 `Ack`；`commit
 `Requeue`；只有永久 `Reject` 可写 app DLX、提交 inbox `done` 后 broker `Ack`。
 
 durable runtime 对 generated subscription fail closed：新增订阅如果没有 ConsumerTx kind mapping，测试与启动都失败。
-生产代码禁止回退到 `adapt_subscriber_handler` + old non-tx ackable spawn。payload decode / wire DTO 归属域
-crate（域可依赖 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter
-维护第二套 event schema。
+`Domain::init` 的 Registry 只声明 generated subscription identity（contract/topic/consumer/group），不携带
+handler；runtime 唯一执行路径是按该 identity 选择 `ConsumerTx`。payload decode / wire DTO 归属域 crate
+（域可依赖 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter 维护第二套
+event schema。
 
 `settings.config-version-changed` 的 ConsumerTx 成功路径必须先刷新同一 `SettingsService` cache，再提交 inbox
 `done`；refresh transient 不提交 inbox、走 `Requeue`，permanent payload 错误走 `Reject`。否则 inbox done
@@ -227,7 +228,7 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
   **head-of-partition gating**——同 partition 仅放行 `min(seq)` 且尚未 `published` 的队头行（`NOT EXISTS`
   更早未结清 sibling），即使多 worker + `SKIP LOCKED` 也**永不乱序、至多一条 in-flight**。`partition_key` 是
   不透明聚合根路由键（= Debezium `aggregateid`），经 write 路径 `diport::OutboxEnvelopeParts::with_partition_key`
-  → adapter 落库，不进 `consistency::Entry`（relay 读侧无需透传，顺序由 SQL gating 承载）。
+  → adapter 落库，不进 `consistency::StoredOutboxEntry`（relay 读侧无需透传，顺序由 SQL gating 承载）。
   tenant 是 outbox envelope 的必填 typed 输入，adapter 将其落为列；同一 business key 在不同 tenant 下不共享
   head-of-partition gate。
 
@@ -299,10 +300,10 @@ webhook、grpc serve、event subscribe 遵循同一范式：声明在 metadata�
 
 event consumer 运行时接线分两段：
 
-- 域 crate 的 `Domain::init` 只从 per-contract generated `SUBSCRIPTIONS` 读取声明并注册 handler。
+- 域 crate 的 `Domain::init` 只从 per-contract generated `SPEC.subscriptions()` 读取声明并注册 handler。
 - 组合根必须把 drained runtime bindings 交给 `runtime::event_transport::bridge_generated_subscriptions`
   桥接为 `BridgedSubscription`，再传给 consumer bundle；bridge 内部固定消费
-  `generated::event::SUBSCRIPTIONS` 根级 registry，不接受调用方传入平行 spec。bridge 必须双向校验
+  `generated::event::EVENTS` 根级 registry，不接受调用方传入平行 spec。bridge 必须双向校验
   generated spec 与 runtime binding 一对一精确匹配，任一侧缺项、重复消费或 group drift 都 fail-fast；
   `wire_event_transport` 不接受 raw `SubscriberBinding`。
 
@@ -364,58 +365,59 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
 命令 dispatch 通过 generated typed API 和 Claimer 两阶段去重。producer 侧 key、
 consumer 侧 claim、组合根 wiring 必须同源；不得新增裸字符串 dispatch。
 
-producer 与 consumer **双侧**都收口到 codegen typed API。五层 funnel：
+producer 与 consumer **双侧**都收口到 codegen typed API。command manifest 必须显式声明且仅声明
+`[command] journal = "required" | "none"`；缺失、未知值或非 command 携带该段均拒绝。两条互斥 funnel：
 
 ```
-业务/组合根
-  → generated::command::<cmd>::emit_async(emitter, request, tenant, subject_id, actor, idempotency_key)
-      // per-command wrapper（codegen 生成）；bake CONTRACT/TOPIC + 锁 typed Request
-      // CONTRACT 必填（落 domain/contract_id 路由列 + contract_version/schema_hash 物理列）
-      // tenant 必填（typed RLS scope，落 reserved tenantId envelope）
-      // subject_id + actor 必填（typed envelope identity，persisted-only，不进 broker header）
-      // idempotency_key 可选（Some→稳定 DispatchId / None→随机）
-      // generic over generated::command::CommandEmit seam
-  → 组合根 bridge impl CommandEmit
-      // 组合根唯一 sanctioned impl；serde_json 编码 payload；idempotency_key→DispatchId（Some 经
-      // from_idempotency_key、None mint 随机）；透传 tenant / subject_id / actor；不在 generated 内实现
-  → eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, payload, subject_id, actor)
-      // RUNTIME 层；调 OutboxPayload::from_reviewed_event_bytes + outbox::Entry::new
-  → consistency::outbox::Entry::new(..)
-      // command-topic Entry 构造收口于此；payload 必须是 OutboxPayload，裸 Vec<u8> 不可编译。
-      // 当前 `Entry::new` 仍 public；裸构造由 COMMAND-SYMMETRY-01（AST 扫 BareEmitExit）+
-      // COMMAND-IMPL-ALLOWLIST-01（Medium）守；Hard 化（sealed CommandTopic）见 follow-up。
-  → diport::OutboxEmitter（注入的 Box<DynOutboxEmitter>）
+journal="none"
+  → generated::command::<cmd>::emit_async(DirectCommandDispatcher, typed Request, tenant, identity, key)
+  → eventexec::DirectCommandDispatcher<CommandDispatchStore>
+  → crate-private constructor → ReviewedCommandDispatch
+  → provider `CommandDispatchStore::dispatch`
+
+journal="required"
+  → generated::command::<cmd>::journal_async(JournaledCommandDispatcher, typed Request, tenant, identity, key)
+  → eventexec::JournaledCommandDispatcher<CommandJournalStore>
+  → crate-private constructor → ReviewedCommandJournal
+  → provider `CommandJournalStore::record_command`
 ```
 
 **分层关键点**：`generated` 只可依赖基础 crate，不得依赖 `eventexec`（引擎/服务层）。
-`CommandEmit`/`CommandRegister` seam trait 定义在 `generated` 内，使 generated wrapper 可
-funneling 而无需依赖 runtime——组合根 bridge impl 是唯一衔接点。
+`CommandEmit` / `CommandJournal` / `CommandRegister` / sealed `TypedCommandSpec` seam 定义在 `generated` 内，使 wrapper 可
+funneling 而无需反向依赖 runtime。每个 command module 只生成一个 sealed `Contract` marker；
+`CommandContract::Request + SPEC` 把 payload schema 与 routing metadata 绑定，`DirectCommandContract` /
+`JournaledCommandContract` 再在类型层固定 policy。公开 seam 只接受 carrier，不接受独立 `CommandSpec + R`；required
+只生成 `journal_async`，none 只生成 `emit_async`。外部无法构造 marker 或 reviewed DTO，因此不能进入 RSS command outbox。
 
-**DispatchId** 是封装 `consistency::idempotency::IdemKey` 的 sealed newtype，由 RUNTIME 层
-（`eventexec::command`）mint + seal，**不**在 generated wrapper 内构造——因为 `IdemKey` 是引擎层
-类型，`generated` 依赖图禁止命名它。wrapper 锁 topic + contract + typed Request + tenant +
-subject_id + actor + idempotency_key（后者经组合根 bridge mint DispatchId：`Some`→`from_idempotency_key`、
-`None`→随机）。`tenant` 是 `vocab::TenantId` typed scope，由 runtime 写入 reserved `tenantId`
+业务幂等键只在 `eventexec` 的独立 `CommandIdempotencyKeyring` 内使用：keyring 由 current + previous generations
+组成，每把 key 至少 256 bit、drop zeroize，且不得复用 tenant-authority/audit key。runtime 用 keyed
+`secure::BlindIndex` 对 `(tenant, topic, raw key)` 生成 sealed `CommandAliasProbeSet` 后立即丢弃 raw key；provider
+只能看到 `(key_id, 256-bit digest)` probes。事务 provider 原子 claim current/previous aliases，并生成随机
+`command:v2:<uuid>` canonical id；无业务 key 的 direct dispatch 直接生成随机 canonical id，不写 alias。
+wrapper 锁 topic + contract + typed Request + tenant + subject_id + actor + idempotency key。`tenant` 是
+`vocab::TenantId` typed scope，由 runtime 写入 reserved `tenantId`
 envelope；`contract` 是 generated `vocab::ContractBinding`，由 runtime 写入 reserved
 `schemaVersion` / `schemaHash` metadata 并同源落 outbox `contract_version` / `schema_hash` 列；`subject_id` 是 `diport::EnvelopeSubjectId`，`actor` 是
 `diport::OutboxActor`。`subject_id` / `actor` 由 runtime
-写入 persisted metadata，broker header / MQTT user property 不可见；组合根 bridge 只透传，不从 payload 重新派生。
-command-topic `Entry::new` 是设计上的构造收口点，但 `Entry::new` 仍 public（类型层未 sealed，见 funnel
-图注；裸构造由 AST 治理门 + follow-up Hard 化守）。
+写入 persisted metadata，broker header / MQTT user property 不可见；dispatcher 只透传，不从 payload 重新派生。
+
+event authoring 与 command authoring 完全分离：公开 event 写面只接受 `EventTopic` + `EventEntry`，
+`EventTopic::parse` 拒绝 `*.commands.*` namespace；relay/readback 只得到 `StoredOutboxEntry`，其 hydration
+类型不能转换回 event producer API。command provider 只消费 `ReviewedCommandDispatch` 或
+`ReviewedCommandJournal` 的只读 accessor / `into_parts`，不存在公开 raw command entry 构造面。
 
 consumer 侧对称：`generated::command::<cmd>::register_handler`（generic over
 `CommandRegister` seam）→ runtime `eventexec::command::register_command_handler`，复用
 `eventexec::run_consumer` + `consistency::InboxStore` claimer 做两阶段
-去重（同 DispatchId 再入 → `SeenState::Duplicate` → 拒绝）。
+去重（同 canonical command id 再入 → `SeenState::Duplicate` → 拒绝）。
 
-**Guards**：wrapper 存在性由 codegen + golden（Hard，CODEGEN-DRIFT-01）守；DispatchId 不可
-伪造（sealed newtype，Hard）；双侧对称 + 无裸 emit 出口由 `COMMAND-SYMMETRY-01`（Medium，`cargo
-xtask` `syn` AST 扫描——含 `command::emit_async` 路径 / use-import / whitespace 形态；残留盲区
-`use … as alias` 重命名导入，见 rustdoc）守；`impl CommandEmit`/`impl CommandRegister` 仅限组合根
-`bins`/`assemblies` 由 `COMMAND-IMPL-ALLOWLIST-01`（Medium AST，对齐 `DIPORT-IMPL-ALLOWLIST-01`）守；
-`kind=command ⇒ OutboxFact` 由 contract validate R15（Medium）守。`Entry::new` Hard 化（sealed
-`CommandTopic`，覆盖 alias 残留）见 follow-up（generated seam 是 public trait、无法 seal，故 impl-site
-当前 Medium）。符号/盲区见对应 rustdoc。
+**Guards**：manifest policy 与互斥 wrapper 由 `COMMAND-JOURNAL-GENERATED-01#manifest-policy`
+codegen + golden + synthetic red/anti-vacuity（Hard）守；per-command carrier、reviewed DTO 与 alias probes 均不可伪造
+（可见性/类型 Hard）。`COMMAND-IMPL-ALLOWLIST-01#provider-set` 只检查类型无法表达的生产 provider impl 与
+callsite 集合（Medium AST，覆盖 alias/glob red case）；不再把 AST 扫描描述为 command authoring seal。
+`kind=command ⇒ OutboxFact` 仍由 contract validate R15（Medium）守。符号、证据与 residual 见
+[`Persistence Funnel AI-Robust Matrix`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)
+及 [ADR-016](../architecture/202607091830-016-command-outbox-authoring-seal.md)。
 
 `consistencyLevel = OutboxFact`（R15 机器锁定）；command topic = `<domain>.commands.<name>`（稳定
 dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx）。
@@ -424,8 +426,8 @@ dotted，broker routing key）。命令 emit 是 emit-only 单事实（非 co-tx
 
 durable command（调用方需要幂等 claim、稳定结果回放、业务写与 command outbox append 同事务提交的命令）
 必须走 command journal seam：`ReviewedCommandJournal`（eventexec provider-neutral reviewed DTO）负责
-review tenant/topic/contract/fingerprint/payload，并以 tenant + topic + raw idempotency key 派生
-storage-safe digest scoped command id；Postgres `PgCommandJournal` 负责持久化 journal 与 outbox。public
+review tenant/topic/contract/fingerprint/payload 并携 keyed alias probes；request fingerprint 明确排除 raw key。
+Postgres `PgCommandJournal` 在同一事务 claim aliases、生成 canonical id，并持久化 journal 与 outbox。public
 `CommandJournalStore::record_command` 只表示 foundation 级 “journal + outbox enqueue” seam；需要本地业务写
 共提交时，必须由 Postgres/domain-shaped UoW 在 crate 内经 `PgTenantPool` + crate-private `TxCapability`
 封装业务写、journal claim、`append_outbox` 和终态更新，外部 handler/domain 不得拿 raw
@@ -442,9 +444,12 @@ Temporal scheduler 塞进本 seam。
 ### Reconcile transactional command seam
 
 durable reconcile scheduler 有一条专用 sanctioned path：domain reconciler 不拿 `OutboxEmitter` / publisher，
-只拿 `AttemptScope`，并通过 `AttemptScope::record_action_and_enqueue_command(action, ReviewedCommand)` 请求
-同事务写入。`ReviewedCommand` 必须由 `StableDispatchKey` 构造，没有随机 dispatch key fallback；最终 outbox
-`event_id` 由 `tenant + topic + StableDispatchKey` 规范编码，避免跨租户 raw key 共享 durable identity。Postgres
+只拿 `AttemptScope`，并通过 generated per-command `reconcile_command(typed Request, tenant, subject, actor, key)`
+构造 sealed `TypedCommandSpec`，再调用 `record_action_and_enqueue_command(action, typed_command)` 请求同事务写入。
+`ReviewedCommand` 只保留 typed `from_spec` 与 provider accessor/`into_parts`，没有 raw topic/contract/payload
+构造器或 `StableDispatchKey` 公共模型。durable scheduler 必填同一 `CommandIdempotencyKeyring`，只把 sealed
+alias probes 交给 provider；最终 outbox `event_id` 是 provider 事务内生成的随机 canonical id，避免跨租户/topic
+alias 碰撞并防 raw key 落库。Postgres
 adapter 是唯一持久化实现：在同一 tenant-scoped transaction 内用 target-local `lease_token + epoch` CAS，
 append action-local `reconcile_actions(result_label='recorded')`，再 append outbox row；outbox conflict 只在同
 tenant/topic/contract/payload 一致时视为幂等。terminal attempt outcome 只写 `reconcile_attempt_results`。该路径不经过

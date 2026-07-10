@@ -41,11 +41,12 @@ tracing = { workspace = true }
 # feature-flag rollout operator 求值（SemVer / 日期）。详见 workspace.dependencies 注释。
 semver = { workspace = true }
 time = { workspace = true }
+# seed-data UoW 串行化 mutation + emit，emit 失败时安全撤销，维持 both-or-neither 终态。
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 # 应用层 / port 异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
 # ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynConfigRepo（PORT-SHAPE-01/02）。
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 mockall = { workspace = true }
 # 域纯逻辑表驱动参数化测试（rust-standards §一致性级别 L0）。
 rstest = { workspace = true }

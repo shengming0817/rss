@@ -22,7 +22,8 @@
 //! INVARIANT: LAYER-DEPS-01 { level = "Medium", exec = "verify", source = "code" }—— back-path 反向边（上行 / 横向同层 / 跨界依赖）。
 //! INVARIANT: LAYER-DEPS-02 { level = "Medium", exec = "verify", source = "code" }—— 兄弟域互斥（跨域只经 contract）。
 //! INVARIANT: LAYER-DEPS-03 { level = "Medium", exec = "verify", source = "code" }—— adapter 仅组合根注入（不被域 / 服务依赖）。
-//! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "verify", source = "code" }—— generated 仅域 + 组合根依赖。
+//! INVARIANT: LAYER-DEPS-04 { level = "Medium", exec = "verify", source = "code" }—— generated 仅域 + 组合根，以及精确 `eventexec → generated`
+//!   command seam 依赖；其它 Service→Generated 仍禁。
 //! INVARIANT: LAYER-DEPS-05 { level = "Medium", exec = "verify", source = "code" }—— 每个 workspace 成员必落唯一分层（anti-drift：新增 crate 须登记层）。
 //! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "verify", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "verify", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
@@ -178,9 +179,11 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
         };
         // 基础同层横向默认禁，唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）；
         // Service 同层横向默认禁，唯一例外 = 受控 bootstrap → httpserve 路由类型边（LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
+        // Service→Generated 默认禁；唯一例外 = eventexec 实现 generated command sealed seam。
         if !layers::allows(from, to)
             && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
             && !layers::route_funnel_allows(&edge.from, &edge.to)
+            && !layers::command_generated_seam_allows(&edge.from, &edge.to)
         {
             findings.push(finding(
                 violation_rule(from, to),
@@ -239,6 +242,7 @@ fn required_consumers<'a>(
     name: &str,
     roots: &[&'a str],
     domains: &[&'a str],
+    services: &[&'a str],
 ) -> Option<Vec<&'a str>> {
     match layer {
         Some(Layer::Adapter) if layers::is_dev_adapter(name) => Some(
@@ -249,7 +253,19 @@ fn required_consumers<'a>(
                 .collect(),
         ),
         Some(Layer::Domain | Layer::Adapter) => Some(roots.to_vec()),
-        Some(Layer::Generated) => Some(domains.iter().chain(roots).copied().collect()),
+        Some(Layer::Generated) => Some(
+            domains
+                .iter()
+                .chain(roots)
+                .copied()
+                .chain(
+                    services
+                        .iter()
+                        .copied()
+                        .filter(|service| layers::command_generated_seam_allows(service, name)),
+                )
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -294,6 +310,7 @@ pub(crate) fn check_wrappers(
     };
     let roots = names_in(Layer::Root);
     let domains = names_in(Layer::Domain);
+    let services = names_in(Layer::Service);
     let ban_of: BTreeMap<&str, &[String]> = bans
         .iter()
         .map(|b| (b.crate_name.as_str(), b.wrappers.as_slice()))
@@ -301,7 +318,8 @@ pub(crate) fn check_wrappers(
 
     let mut findings = Vec::new();
     for m in members {
-        let Some(required) = required_consumers(m.layer, &m.name, &roots, &domains) else {
+        let Some(required) = required_consumers(m.layer, &m.name, &roots, &domains, &services)
+        else {
             continue;
         };
         match ban_of.get(m.name.as_str()) {
@@ -359,7 +377,11 @@ pub(crate) fn check_wrappers(
         findings.extend(dev_adapter_exclusions(b, banned));
         for w in &b.wrappers {
             match layer_of.get(w.as_str()) {
-                Some(&wl) if layers::allows(wl, banned) => {
+                Some(&wl)
+                    if layers::allows(wl, banned)
+                        || layers::command_generated_seam_allows(w, &b.crate_name)
+                        || layers::generated_dev_wrapper_allows(w, &b.crate_name) =>
+                {
                     // ②补强（ADR-005）：adapter→域 wrapper 须有真实 source edge（adapter 实际依赖该域），
                     // 否则空泛放过任意 adapter。仅对 Adapter→Domain 这条 DIP 内向边校验（其它放行边不变）。
                     if wl == Layer::Adapter
@@ -1117,6 +1139,26 @@ mod tests {
     }
 
     #[test]
+    fn check_layers_green_eventexec_to_generated_command_seam() {
+        let members = vec![
+            m("eventexec", "crates/eventexec", Some(Layer::Service)),
+            m("generated", "generated", Some(Layer::Generated)),
+        ];
+        assert!(check_layers(&members, &[e("eventexec", "generated")]).is_empty());
+    }
+
+    #[test]
+    fn check_layers_red_other_service_to_generated_remains_closed() {
+        let members = vec![
+            m("authn", "crates/authn", Some(Layer::Service)),
+            m("generated", "generated", Some(Layer::Generated)),
+        ];
+        let findings = check_layers(&members, &[e("authn", "generated")]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::GeneratedScope);
+    }
+
+    #[test]
     fn check_layers_red_back_path() {
         let members = vec![
             m("secure", "crates/secure", Some(Layer::Basis)),
@@ -1335,6 +1377,33 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "identity");
+    }
+
+    #[test]
+    fn check_wrappers_green_postgres_generated_dev_wrapper() {
+        let mut members = wrapper_fixture_members();
+        members.push(m("postgres", "adapters/postgres", Some(Layer::Adapter)));
+        let bans = vec![
+            ban("identity", &["server", "rss", "xtask"]),
+            ban("redis", &["server", "rss", "xtask"]),
+            ban("postgres", &["server", "rss", "xtask"]),
+            ban(
+                "generated",
+                &["identity", "postgres", "server", "rss", "xtask"],
+            ),
+        ];
+        assert!(check_wrappers(&members, &bans, &[]).is_empty());
+    }
+
+    #[test]
+    fn check_layers_red_postgres_generated_production_edge_remains_closed() {
+        let members = vec![
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+            m("generated", "generated", Some(Layer::Generated)),
+        ];
+        let findings = check_layers(&members, &[e("postgres", "generated")]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::GeneratedScope);
     }
 
     #[test]

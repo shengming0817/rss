@@ -1,0 +1,26 @@
+# Idempotent settings config tombstone write. Only the first delete emits a Deleted fact.
+id = "settings.config-delete"
+kind = "http"
+domain = "settings"
+version = "v5"
+owner = "settings"
+consistencyLevel = "OutboxFact"
+lifecycle = "active"
+path = "/api/v1/settings/configs/{key}"
+method = "DELETE"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[endpoints.http.auth]
+mode = "permission"
+permission = "settings.config-delete"
+
+[capabilities.outbox]
+role = "producer"
+atomicity = "same-transaction"
+emits = ["settings.config-version-changed"]
+
+[effectProfile]
+effects = ["auth", "write", "transaction", "outbox", "publish"]

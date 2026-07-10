@@ -35,7 +35,8 @@ pub mod error {
 ///  "type": "string",
 ///  "enum": [
 ///    "published",
-///    "rolledBack"
+///    "rolledBack",
+///    "deleted"
 ///  ]
 ///}
 /// ```
@@ -57,12 +58,15 @@ pub enum SettingsConfigChangeKind {
     Published,
     #[serde(rename = "rolledBack")]
     RolledBack,
+    #[serde(rename = "deleted")]
+    Deleted,
 }
 impl ::std::fmt::Display for SettingsConfigChangeKind {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         match *self {
             Self::Published => f.write_str("published"),
             Self::RolledBack => f.write_str("rolledBack"),
+            Self::Deleted => f.write_str("deleted"),
         }
     }
 }
@@ -72,6 +76,7 @@ impl ::std::str::FromStr for SettingsConfigChangeKind {
         match value {
             "published" => Ok(Self::Published),
             "rolledBack" => Ok(Self::RolledBack),
+            "deleted" => Ok(Self::Deleted),
             _ => Err("invalid value".into()),
         }
     }
@@ -119,7 +124,8 @@ impl ::std::convert::TryFrom<::std::string::String> for SettingsConfigChangeKind
 ///      "type": "string",
 ///      "enum": [
 ///        "published",
-///        "rolledBack"
+///        "rolledBack",
+///        "deleted"
 ///      ]
 ///    },
 ///    "key": {
@@ -186,21 +192,17 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
     "settings",
     "settings.config-version-changed",
     "v1",
-    "sha256:1e9ad2529beb3a274d37a734a5093847cb8418082f4d04f9cb180d3df181e864",
+    "sha256:b74288de6fd13213cb6676431f4833a7c921ec9ffe2825ad244cad49c52d17e4",
 );
 
-/// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
-/// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
-/// `SubscriptionSpec` 类型定义见父 `event/mod.rs`（经 `super::` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
-/// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[super::SubscriptionSpec {
-    contract_id: CONTRACT_ID,
-    topic: TOPIC,
-    schema_version: CONTRACT.version(),
-    schema_hash: CONTRACT.schema_hash(),
-    consumer: "settings",
-    group: "settings.config-version-changed",
-    partition_key: "none",
-    readiness: "required",
-}];
+/// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+pub const SPEC: super::EventSpec = super::EventSpec::new(
+    CONTRACT,
+    TOPIC,
+    super::PartitionKeyStrategy::None,
+    &[super::SubscriptionSpec::new(
+        "settings",
+        "settings.config-version-changed",
+        super::SubscriberReadiness::Required,
+    )],
+);

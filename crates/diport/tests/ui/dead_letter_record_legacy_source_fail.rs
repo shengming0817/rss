@@ -6,14 +6,13 @@ fn main() {
     let _ = DeadLetterRecord::new(
         tenant,
         "message-1",
-        "identity",
+        DeadLetterSource::Legacy,
         "contract-session",
         "session.created",
         None,
         b"payload".to_vec(),
         DeadLetterSummary::new("legacy rows are read-only"),
         10,
-        DeadLetterSource::Legacy,
         EnvelopeMetadata::empty(),
     );
 }

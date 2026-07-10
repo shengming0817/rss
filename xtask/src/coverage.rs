@@ -193,7 +193,7 @@ pub(crate) fn run() -> Result<()> {
 fn run_llvm_cov(root: &Path) -> Result<String> {
     // 跟随 CARGO_TARGET_DIR（clean_cmd 不清它——见 cmd.rs STRIPPED_ENV charter），否则默认 root/target；
     // 与 llvm-cov 实际写 JSON 的 target 目录一致（review #206 C6）。
-    let out = coverage_target_dir(root).join("xtask-ci-coverage.json");
+    let out = coverage_output_path(&coverage_target_dir(root), "xtask-ci-coverage.json")?;
     let out_str = out.to_str().context("覆盖率 JSON 输出路径非法 UTF-8")?;
     let status = clean_cmd(
         "cargo",
@@ -227,7 +227,7 @@ fn run_llvm_cov(root: &Path) -> Result<String> {
 /// instrumented 编译的 profdata 决定，已含全 workspace（实测 `report` 输出全 workspace crate 的 lcov）；
 /// 且 `cargo llvm-cov report` **不接受** `--workspace`（传入即报错）——勿误加。
 fn lcov_report(root: &Path) -> Result<String> {
-    let out = coverage_target_dir(root).join("xtask-ci-coverage.lcov");
+    let out = coverage_output_path(&coverage_target_dir(root), "xtask-ci-coverage.lcov")?;
     let out_str = out.to_str().context("覆盖率 lcov 输出路径非法 UTF-8")?;
     let status = clean_cmd(
         "cargo",
@@ -253,6 +253,14 @@ fn coverage_target_dir(root: &Path) -> PathBuf {
         .unwrap_or_else(|| root.join("target"))
 }
 
+/// cargo 配置可把实际编译产物重定向到别处，但 `--output-path` 的父目录仍须由调用方创建。
+/// 两种报告共用此 fail-loud funnel，避免完整测试跑完后才因目录不存在丢失结果。
+fn coverage_output_path(target_dir: &Path, filename: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(target_dir)
+        .with_context(|| format!("创建覆盖率报告目录失败: {}", target_dir.display()))?;
+    Ok(target_dir.join(filename))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +278,20 @@ mod tests {
             actual,
             floor,
         }
+    }
+
+    #[test]
+    fn coverage_output_path_creates_missing_parent() -> anyhow::Result<()> {
+        let target =
+            std::env::temp_dir().join(format!("rss-xtask-coverage-output-{}", std::process::id()));
+        if target.exists() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        let out = coverage_output_path(&target, "report.json")?;
+        assert!(target.is_dir());
+        assert_eq!(out, target.join("report.json"));
+        std::fs::remove_dir_all(target)?;
+        Ok(())
     }
 
     /// STRICT 集 = CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集（anti-drift）。

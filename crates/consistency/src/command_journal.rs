@@ -4,22 +4,10 @@
 //! consumer-side [`crate::InboxStore`]: the journal protects command request execution and local
 //! side effects, while inbox receipts protect broker delivery handling.
 
-const COMMAND_ID_PREFIX: &str = "command:v1:sha256:";
 const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_BYTES: usize = 64;
-const COMMAND_ID_BYTES: usize = COMMAND_ID_PREFIX.len() + SHA256_HEX_BYTES;
 const SHA256_LABEL_BYTES: usize = SHA256_PREFIX.len() + SHA256_HEX_BYTES;
 const IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
-
-/// Stable command identity scoped by tenant + command topic at the runtime seam.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct CommandId(String);
-
-impl std::fmt::Debug for CommandId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CommandId(<redacted>)")
-    }
-}
 
 /// Stable idempotency key supplied by the command caller or derived by the runtime.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -54,25 +42,6 @@ pub enum CommandJournalValueError {
     /// Value does not match the closed command journal format.
     #[error("command journal value has invalid format")]
     InvalidFormat,
-}
-
-impl CommandId {
-    /// Parse a stable command id.
-    pub fn parse(raw: impl Into<String>) -> Result<Self, CommandJournalValueError> {
-        let raw = parse_bounded(raw.into(), COMMAND_ID_BYTES)?;
-        if !raw
-            .strip_prefix(COMMAND_ID_PREFIX)
-            .is_some_and(is_lower_hex_64)
-        {
-            return Err(CommandJournalValueError::InvalidFormat);
-        }
-        Ok(Self(raw))
-    }
-
-    /// Borrow the command id.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl CommandIdempotencyKey {
@@ -257,70 +226,23 @@ pub enum CommandJournalTerminalSummary {
     Failed(CommandErrorSummary),
 }
 
-/// Reviewed command journal record consumed by provider implementations.
-#[derive(Debug, Clone)]
-pub struct CommandJournalRecord {
-    tenant: vocab::TenantId,
-    command_id: CommandId,
-    idempotency_key: CommandIdempotencyKey,
-    request_fingerprint: CommandRequestFingerprint,
-}
-
-impl CommandJournalRecord {
-    /// Build a reviewed command journal record.
-    pub fn new(
-        tenant: vocab::TenantId,
-        command_id: CommandId,
-        idempotency_key: CommandIdempotencyKey,
-        request_fingerprint: CommandRequestFingerprint,
-    ) -> Self {
-        Self {
-            tenant,
-            command_id,
-            idempotency_key,
-            request_fingerprint,
-        }
-    }
-
-    /// Command tenant.
-    pub fn tenant(&self) -> vocab::TenantId {
-        self.tenant
-    }
-
-    /// Scoped command id.
-    pub fn command_id(&self) -> &CommandId {
-        &self.command_id
-    }
-
-    /// Idempotency key.
-    pub fn idempotency_key(&self) -> &CommandIdempotencyKey {
-        &self.idempotency_key
-    }
-
-    /// Request fingerprint.
-    pub fn request_fingerprint(&self) -> &CommandRequestFingerprint {
-        &self.request_fingerprint
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandAttempt, CommandAttemptError, CommandErrorSummary, CommandId, CommandIdempotencyKey,
+        CommandAttempt, CommandAttemptError, CommandErrorSummary, CommandIdempotencyKey,
         CommandJournalStatus, CommandJournalValueError, CommandRequestFingerprint,
         CommandResultSummary,
     };
 
     #[test]
     fn bounded_values_reject_empty_and_too_long() {
-        assert_eq!(CommandId::parse(""), Err(CommandJournalValueError::Empty));
+        assert_eq!(
+            CommandIdempotencyKey::parse(""),
+            Err(CommandJournalValueError::Empty)
+        );
         assert_eq!(
             CommandIdempotencyKey::parse("x".repeat(257)),
             Err(CommandJournalValueError::TooLong)
-        );
-        assert_eq!(
-            CommandId::parse("cmd-1"),
-            Err(CommandJournalValueError::InvalidFormat)
         );
         assert_eq!(
             CommandRequestFingerprint::parse("sha256:abc"),
@@ -362,12 +284,9 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test uses known-valid bounded identifiers.
     fn debug_redacts_sensitive_values() {
-        let id =
-            CommandId::parse(format!("command:v1:sha256:{}", "a".repeat(64))).expect("command id");
         let key = CommandIdempotencyKey::parse("idem-1").expect("idempotency");
         let fingerprint = CommandRequestFingerprint::parse(format!("sha256:{}", "b".repeat(64)))
             .expect("fingerprint");
-        assert_eq!(format!("{id:?}"), "CommandId(<redacted>)");
         assert_eq!(format!("{key:?}"), "CommandIdempotencyKey(<redacted>)");
         assert_eq!(
             format!("{fingerprint:?}"),

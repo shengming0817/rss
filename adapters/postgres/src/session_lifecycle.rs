@@ -31,7 +31,7 @@
 //! ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable 落库）
 //! ref: MassTransit Bus Outbox（一应用方法 co-persist 实体 + outbox 经共享事务/scoped DbContext）
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantRepoScope};
 use sqlx::Row;
@@ -79,7 +79,7 @@ impl SessionLifecycle for PgSessionLifecycle {
         &self,
         scope: TenantRepoScope,
         session: Session,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         // opaque parts → sealed OutboxMetadata funnel（仅 opaque subjectId，FR-020；同 PgEmitter）。`contract` 是

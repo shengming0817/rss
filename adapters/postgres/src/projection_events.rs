@@ -26,10 +26,11 @@
 //! ref: adapters/postgres/src/saga.rs（tenant-scoped append-only journal 范式）。
 
 use consistency::{
-    EngineError, EngineErrorKind, Lsn, PartitionSerialDelivery, ProjectionBatchLimit,
-    ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource, Topic,
+    EngineError, EngineErrorKind, EventTopic, Lsn, PartitionSerialDelivery, ProjectionBatchLimit,
+    ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
 };
 use diport::RedactedSource;
+use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use vocab::ProjectionInputBinding;
 
@@ -90,29 +91,30 @@ impl PgStore {
         }
     }
 
-    /// Replace the DB-side projection input registry from generated contract metadata.
+    /// Add one deployment generation to the DB-side projection input registry.
     ///
     /// This runs during [`crate::PgRuntimeDeps::setup`] on the migrator connection. Runtime
     /// `rss_app` can execute the fixed append function, but the function only accepts rows whose
     /// outbox metadata matches this DB-side generated registry.
-    pub(crate) async fn replace_projection_input_bindings(
+    pub(crate) async fn register_projection_input_bindings(
         &self,
+        generation: &'static str,
         bindings: &'static [ProjectionInputBinding],
     ) -> Result<(), sqlx::Error> {
+        let expected = projection_input_generation(bindings);
+        if generation != expected {
+            return Err(sqlx::Error::Protocol(
+                "generated projection input generation does not match binding set".into(),
+            ));
+        }
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM projection_input_bindings")
-            .execute(&mut *tx)
-            .await?;
         for binding in bindings {
             sqlx::query(
                 r#"
-                INSERT INTO projection_input_bindings (
-                    contract_id, contract_version, schema_hash, topic
-                )
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (contract_id, contract_version, schema_hash, topic) DO NOTHING
+                SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5)
                 "#,
             )
+            .bind(generation)
             .bind(binding.contract_id())
             .bind(binding.version())
             .bind(binding.schema_hash())
@@ -124,13 +126,37 @@ impl PgStore {
     }
 }
 
+fn projection_input_generation(bindings: &[ProjectionInputBinding]) -> String {
+    let mut tuples = bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.contract_id(),
+                binding.version(),
+                binding.schema_hash(),
+                binding.topic(),
+            )
+        })
+        .collect::<Vec<_>>();
+    tuples.sort_unstable();
+
+    let mut digest = Sha256::new();
+    for tuple in tuples {
+        for value in [tuple.0, tuple.1, tuple.2, tuple.3] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
 /// Mirror an inserted outbox fact into projection_events when generated workflow metadata binds it.
 ///
 /// This function accepts only [`TxCapability`], so it can run solely inside the same transaction as
 /// the outbox insert. It intentionally returns `Ok(None)` for unbound facts.
 pub(crate) async fn append_projection_event_if_bound(
     tx: &mut TxCapability<'_>,
-    entry: &consistency::Entry,
+    entry: &consistency::EventEntry,
     env: &OutboxEnvelope,
     registry: &ProjectionWriteRegistry,
 ) -> Result<Option<Lsn>, sqlx::Error> {
@@ -300,7 +326,7 @@ impl PgProjectionEvents {
                     let lsn_u64 = u64::try_from(id)
                         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                     let lsn = Lsn::new(lsn_u64);
-                    let topic = Topic::parse(&event_type_str)
+                    let topic = EventTopic::parse(&event_type_str)
                         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
                     let tenant = metadata
                         .get(diport::KEY_TENANT_ID)
@@ -460,6 +486,68 @@ mod smoke {
         assert!(
             !MIGRATION.contains("TO rss_app"),
             "projection_events 不得授 serving role rss_app（全局 payload 表跨租读边界，对齐 outbox；#1122 F2）"
+        );
+    }
+
+    /// INVARIANT: PROJECTION-INPUT-GENERATION-01 { level = "Medium", exec = "manual/opt-in", source = "code", synthetic_red = "projection_input_registry_is_generation_bound_and_additive rejects destructive runtime replacement", anti_vacuity = "migration carrier and runtime source are both scanned" }.
+    #[test]
+    fn projection_input_registry_is_generation_bound_and_additive() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0054_generation_bound_projection_registry.sql");
+        const SOURCE: &str = include_str!("projection_events.rs");
+
+        assert!(MIGRATION.contains("ADD COLUMN generation text"));
+        assert!(MIGRATION.contains("ALTER COLUMN generation SET NOT NULL"));
+        assert!(MIGRATION.contains("rss_register_projection_input_binding"));
+        assert!(MIGRATION.contains("rss_retire_projection_input_generation"));
+        assert!(MIGRATION.contains("PRIMARY KEY (generation,"));
+        let destructive_replace = ["DELETE FROM", "projection_input_bindings"].join(" ");
+        assert!(
+            !SOURCE.contains(&destructive_replace),
+            "runtime startup must never destructively replace the projection registry"
+        );
+    }
+
+    #[test]
+    fn projection_input_generation_is_order_independent_and_tuple_complete() {
+        const HASH_A: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const HASH_B: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const A: vocab::ProjectionInputBinding = vocab::ProjectionInputBinding::from_static(
+            "projection-a",
+            "owner",
+            "owner.contract-a",
+            "v1",
+            HASH_A,
+            "owner.fact-a",
+        );
+        const B: vocab::ProjectionInputBinding = vocab::ProjectionInputBinding::from_static(
+            "projection-b",
+            "owner",
+            "owner.contract-b",
+            "v2",
+            HASH_B,
+            "owner.fact-b",
+        );
+
+        let forward = super::projection_input_generation(&[A, B]);
+        let reversed = super::projection_input_generation(&[B, A]);
+        assert_eq!(forward, reversed);
+        assert!(forward.starts_with("sha256:"));
+        assert_eq!(forward.len(), "sha256:".len() + 64);
+
+        let changed_topic = vocab::ProjectionInputBinding::from_static(
+            "projection-a",
+            "owner",
+            "owner.contract-a",
+            "v1",
+            HASH_A,
+            "owner.fact-changed",
+        );
+        assert_ne!(
+            forward,
+            super::projection_input_generation(&[changed_topic, B])
         );
     }
 }

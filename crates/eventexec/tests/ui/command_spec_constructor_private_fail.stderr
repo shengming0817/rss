@@ -1,0 +1,14 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/command_spec_constructor_private_fail.rs:2:46
+  |
+2 |       let _ = generated::command::CommandSpec::new;
+  |                                                ^^^ private associated function
+  |
+ ::: $WORKSPACE/generated/src/command/mod.rs
+  |
+  | /     pub(crate) const fn new(
+  | |         contract: ::vocab::ContractBinding,
+  | |         topic: &'static str,
+  | |         journal: CommandJournalPolicy,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here

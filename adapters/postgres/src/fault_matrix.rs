@@ -17,22 +17,21 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use consistency::{
-    CompensationOutcome, ConsumerGroup, ConvergeAction, EngineError, EngineErrorKind, IdemKey,
-    InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay, OutboxSource,
-    PartitionSerialDelivery, PendingEntry, ProjectionApplyOutcome, ProjectionEvent,
+    CompensationOutcome, ConsumerGroup, ConvergeAction, EngineError, EngineErrorKind, EventTopic,
+    IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay,
+    OutboxSource, PartitionSerialDelivery, PendingEntry, ProjectionApplyOutcome, ProjectionEvent,
     ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaId, SagaInstanceRef,
-    SagaJournalAppendRecord, SagaStep, SagaStepCtx, SeenState, SerialInOrder, StepName, Topic,
+    SagaJournalAppendRecord, SagaStep, SagaStepCtx, SeenState, SerialInOrder, StepName,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeSubjectId, KeyName,
-    KeyProvider, KeyProviderError, KeyRef, KeyVersion, LockStore, OpaqueActorId, OutboxActor,
-    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, RedactedBytes, SagaContractId,
-    SagaInstanceRegistration, SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
+    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider,
+    KeyProviderError, KeyRef, KeyVersion, LockStore, OwnerCheckpointStore, PublishRequest,
+    Publisher, PublisherError, RedactedBytes, SagaContractId, SagaInstanceRegistration,
+    SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
 use eventexec::reconcile::{
     ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
-    StableDispatchKey,
 };
 use eventexec::{
     ProjectionHarness, ProjectionStop, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
@@ -232,6 +231,7 @@ impl PgFaultMatrixHarness {
     /// Provision the least-privilege serving role, run migrations, and construct runtime deps.
     pub async fn setup(
         config: PgFaultMatrixConfig,
+        projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> FaultMatrixResult<Self> {
         let serving_password = format!("rss_app_{}", uuid::Uuid::new_v4().simple());
@@ -250,7 +250,13 @@ impl PgFaultMatrixHarness {
             RSS_APP_ROLE,
             &serving_password,
         );
-        let deps = PgRuntimeDeps::setup(&migrator, &serving, projection_inputs).await?;
+        let deps = PgRuntimeDeps::setup(
+            &migrator,
+            &serving,
+            projection_generation,
+            projection_inputs,
+        )
+        .await?;
         let owner_pool = owner_pool(&config).await?;
         Ok(Self { deps, owner_pool })
     }
@@ -627,8 +633,7 @@ impl PgFaultMatrixHarness {
         &self,
         tenant: vocab::TenantId,
         dispatch_key: &str,
-        topic: &'static str,
-        contract: vocab::ContractBinding,
+        commands: [ReviewedCommand; 2],
     ) -> FaultMatrixResult<i64> {
         let store = self.deps.infra().reconcile();
         let key = crate::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
@@ -650,8 +655,26 @@ impl PgFaultMatrixHarness {
         else {
             bail!("reconcile attempt was not started under the claimed lease");
         };
-        for _ in 0..2 {
-            let command = reconcile_command(tenant, dispatch_key, topic, contract)?;
+        let [first, retry] = commands;
+        let first_alias = first
+            .aliases()
+            .current()
+            .ok_or_else(|| anyhow!("reviewed reconcile command omitted its current alias"))?;
+        let retry_alias = retry
+            .aliases()
+            .current()
+            .ok_or_else(|| anyhow!("retry reconcile command omitted its current alias"))?;
+        if first_alias.key_id() != retry_alias.key_id()
+            || first_alias.digest() != retry_alias.digest()
+        {
+            bail!("same generated command key derived different sealed aliases");
+        }
+        if format!("{:?}", first.aliases()).contains(dispatch_key) {
+            bail!("sealed command alias debug output leaked its raw idempotency key");
+        }
+        let alias_key_id = first_alias.key_id().to_string();
+        let alias_digest = first_alias.digest().to_vec();
+        for command in [first, retry] {
             let outcome = store
                 .record_action_and_enqueue_command(&attempt, ConvergeAction::Update, command)
                 .await?;
@@ -659,11 +682,28 @@ impl PgFaultMatrixHarness {
                 bail!("reconcile action lost lease before enqueue");
             }
         }
-        outbox_contract_count(
-            &self.owner_pool,
+        let canonical_rows = sqlx::query(
+            "SELECT command_id FROM command_idempotency_aliases \
+             WHERE tenant_id = $1::uuid AND key_id = $2 AND alias_digest = $3",
+        )
+        .bind(tenant.to_string())
+        .bind(alias_key_id)
+        .bind(alias_digest)
+        .fetch_all(&self.owner_pool)
+        .await?;
+        if canonical_rows.len() != 1 {
+            bail!(
+                "sealed reconcile alias must resolve to exactly one canonical command id, got {}",
+                canonical_rows.len()
+            );
+        }
+        let opaque_dispatch_id = canonical_rows[0].get::<String, _>("command_id");
+        if opaque_dispatch_id.contains(dispatch_key) {
+            bail!("random canonical command id leaked its raw idempotency key");
+        }
+        self.outbox_count(
             tenant,
-            topic,
-            contract.contract_id(),
+            &opaque_dispatch_id,
             FaultMatrixOutboxStatus::Pending,
         )
         .await
@@ -863,26 +903,6 @@ async fn seed_outbox(
     Ok(())
 }
 
-async fn outbox_contract_count(
-    pool: &PgPool,
-    tenant: vocab::TenantId,
-    topic: &str,
-    contract_id: &str,
-    status: FaultMatrixOutboxStatus,
-) -> FaultMatrixResult<i64> {
-    let row = sqlx::query(
-        "SELECT count(*)::bigint FROM outbox \
-         WHERE tenant_id = $1::uuid AND topic = $2 AND contract_id = $3 AND status = $4",
-    )
-    .bind(tenant.to_string())
-    .bind(topic)
-    .bind(contract_id)
-    .bind(status.as_str())
-    .fetch_one(pool)
-    .await?;
-    Ok(row.get::<i64, _>(0))
-}
-
 async fn age_outbox_publishing(
     pool: &PgPool,
     tenant: vocab::TenantId,
@@ -925,11 +945,11 @@ fn pending_entry(
     topic: &str,
     contract_id: &str,
 ) -> FaultMatrixResult<PendingEntry> {
-    let entry = consistency::Entry::new(
-        consistency::Topic::parse(topic)?,
+    let entry = consistency::StoredOutboxEntry::hydrate(
+        topic,
         IdemKey::parse(event_id)?,
         consistency::OutboxPayload::from_reviewed_event_bytes(vec![0x70]),
-    );
+    )?;
     let subject = consistency::OutboxMetricSubject::new(
         tenant,
         consistency::OutboxContractId::parse(contract_id)?,
@@ -1186,7 +1206,7 @@ fn fault_matrix_projection_event(
     );
     Ok(ProjectionEventRecord::with_metadata(
         lsn,
-        Topic::parse("audit.session-projection")?,
+        EventTopic::parse("audit.session-projection")?,
         vec![0x70],
         metadata,
     ))
@@ -1199,23 +1219,6 @@ fn metadata_json(tenant: vocab::TenantId) -> String {
         "schemaHash": SCHEMA_HASH
     })
     .to_string()
-}
-
-fn reconcile_command(
-    tenant: vocab::TenantId,
-    dispatch_key: &str,
-    topic: &'static str,
-    contract: vocab::ContractBinding,
-) -> FaultMatrixResult<ReviewedCommand> {
-    Ok(ReviewedCommand::new(
-        StableDispatchKey::parse(dispatch_key)?,
-        topic,
-        contract,
-        tenant,
-        br#"{"faultMatrix":true}"#.to_vec(),
-        EnvelopeSubjectId::from_opaque(format!("resource-{dispatch_key}"))?,
-        OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix")?),
-    )?)
 }
 
 #[derive(Clone)]

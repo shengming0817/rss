@@ -28,7 +28,10 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("identity.roles-assign", HttpConsistencyLevel::OutboxFact),
     ("identity.roles-list", HttpConsistencyLevel::LocalOnly),
     ("identity.roles-revoke", HttpConsistencyLevel::OutboxFact),
+    ("settings.config-get", HttpConsistencyLevel::LocalOnly),
+    ("settings.config-delete", HttpConsistencyLevel::OutboxFact),
     ("settings.config-publish", HttpConsistencyLevel::OutboxFact),
+    ("settings.config-rollback", HttpConsistencyLevel::OutboxFact),
     ("settings.secret-publish", HttpConsistencyLevel::LocalTx),
 ];
 
@@ -195,9 +198,9 @@ fn active_http_registry_keeps_current_consistency_distribution() {
     assert_eq!(
         registry_distribution(),
         [
-            (HttpConsistencyLevel::LocalOnly, 5),
+            (HttpConsistencyLevel::LocalOnly, 6),
             (HttpConsistencyLevel::LocalTx, 5),
-            (HttpConsistencyLevel::OutboxFact, 7),
+            (HttpConsistencyLevel::OutboxFact, 9),
             (HttpConsistencyLevel::WorkflowEventual, 0),
             (HttpConsistencyLevel::DeviceLatent, 0),
         ],

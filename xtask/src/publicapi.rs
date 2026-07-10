@@ -140,18 +140,27 @@ fn ensure_tool_available() -> Result<()> {
 /// 显式重设为 `toolchain`（剥离后成该变量唯一来源，CMD-ENV-CLEAN-01）——等价 `cargo +<toolchain> public-api`，
 /// 让 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json（`is_probably_stable()`==false ⇒ 透传当前
 /// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
-fn public_api_cmd(krate: &str, toolchain: &str) -> Command {
-    crate::cmd::clean_cmd(
+fn public_api_cmd(krate: &str, toolchain: &str, target_dir: &std::path::Path) -> Command {
+    let mut cmd = crate::cmd::clean_cmd(
         "cargo",
-        &["public-api", "-p", krate],
+        &["public-api", "-p", krate, "--omit", "blanket-impls"],
         &[("RUSTUP_TOOLCHAIN", toolchain)],
         None,
-    )
+    );
+    // cargo-public-api 的 rustdoc-json 缓存不能与前序 all-features/coverage 编译共享；否则同一
+    // CI 首次 check 可能读到不同 feature 面的旧 JSON，执行刷新后立即重跑却转绿。
+    cmd.env("CARGO_TARGET_DIR", target_dir);
+    cmd
+}
+
+fn public_api_target_dir() -> Result<PathBuf> {
+    Ok(workspace_root()?.join(".cache/public-api-target"))
 }
 
 /// 运行 `cargo public-api -p <crate>`（钉版 nightly）捕获其封装面快照文本。
 fn capture_public_api(krate: &str) -> Result<String> {
-    let out = public_api_cmd(krate, PINNED_NIGHTLY)
+    let target_dir = public_api_target_dir()?;
+    let out = public_api_cmd(krate, PINNED_NIGHTLY, &target_dir)
         .output()
         .with_context(|| format!("运行 cargo public-api -p {krate} 失败"))?;
     if !out.status.success() {
@@ -419,6 +428,14 @@ mod tests {
             "pub enum generated::http::LocalTxCommitUnknown",
             "pub generated::http::LocalTxCommitUnknown::NotRetryable",
             "pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]",
+            "pub struct generated::command::CommandSpec",
+            "pub trait generated::command::CommandJournal",
+            "pub const fn generated::command::CommandSpec::journal(self) -> generated::command::CommandJournalPolicy",
+            "pub struct generated::event::EventSpec",
+            "pub enum generated::event::PartitionKeyStrategy",
+            "pub enum generated::event::SubscriberReadiness",
+            "pub const generated::event::EVENTS: &[generated::event::EventSpec]",
+            "pub const fn generated::event::EventSpec::subscriptions(self) -> &'static [generated::event::SubscriptionSpec]",
         ] {
             assert!(
                 baseline.contains(required),
@@ -439,6 +456,10 @@ mod tests {
             "generated::seal",
             "generated::open",
             "generated::rewrap",
+            "pub generated::event::SubscriptionSpec::consumer:",
+            "pub generated::event::SubscriptionSpec::group:",
+            "pub generated::event::EventSpec::topic:",
+            "pub generated::command::CommandSpec::topic:",
         ] {
             assert!(
                 !baseline.lines().any(|line| line.contains(forbidden)),
@@ -460,8 +481,8 @@ mod tests {
 
     /// `public_api_cmd` 构造 `cargo public-api -p <crate>`、cwd 为 None（与原 capture 行为一致）。
     #[test]
-    fn public_api_cmd_sets_program_and_args() {
-        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY);
+    fn public_api_cmd_sets_program_and_args() -> anyhow::Result<()> {
+        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("cargo"));
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         assert_eq!(
@@ -470,16 +491,19 @@ mod tests {
                 std::ffi::OsStr::new("public-api"),
                 std::ffi::OsStr::new("-p"),
                 std::ffi::OsStr::new("vocab"),
+                std::ffi::OsStr::new("--omit"),
+                std::ffi::OsStr::new("blanket-impls"),
             ]
         );
         assert_eq!(cmd.get_current_dir(), None);
+        Ok(())
     }
 
     /// 传 `PINNED_NIGHTLY` 时 `RUSTUP_TOOLCHAIN` 被经 clean_cmd 显式重设为钉版 nightly
     /// （等价 `cargo +nightly-2026-04-16 public-api`，使 rustdoc-json 可复现）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
     #[test]
-    fn public_api_cmd_injects_pinned_toolchain() {
-        let cmd = public_api_cmd("ids", PINNED_NIGHTLY);
+    fn public_api_cmd_injects_pinned_toolchain() -> anyhow::Result<()> {
+        let cmd = public_api_cmd("ids", PINNED_NIGHTLY, &public_api_target_dir()?);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter()
@@ -487,13 +511,30 @@ mod tests {
                     && *v == Some(std::ffi::OsStr::new(PINNED_NIGHTLY))),
             "RUSTUP_TOOLCHAIN 应被显式重设为 PINNED_NIGHTLY"
         );
+        Ok(())
+    }
+
+    /// rustdoc-json 快照必须使用独占 target，避免前序 all-features/coverage 产物令同一 CI 首次
+    /// `public-api --check` 漂移、立即重跑却转绿。
+    #[test]
+    fn public_api_cmd_isolates_rustdoc_json_target() -> anyhow::Result<()> {
+        let expected = public_api_target_dir()?;
+        let cmd = public_api_cmd("consistency", PINNED_NIGHTLY, &expected);
+        let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
+        assert!(
+            envs.iter().any(|(k, v)| {
+                *k == std::ffi::OsStr::new("CARGO_TARGET_DIR") && *v == Some(expected.as_os_str())
+            }),
+            "public-api 须使用独占 CARGO_TARGET_DIR"
+        );
+        Ok(())
     }
 
     /// 经 clean_cmd 漏斗：除 `RUSTUP_TOOLCHAIN`（本步显式重设）外，其它 ambient toolchain/flag 变量
     /// （`RUSTC`/`RUSTDOC`/`RUSTFLAGS`/…）仍被 env_remove —— 剥离后由显式 env 成唯一来源（CMD-ENV-CLEAN-01）。
     #[test]
-    fn public_api_cmd_strips_other_ambient_but_resets_toolchain() {
-        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY);
+    fn public_api_cmd_strips_other_ambient_but_resets_toolchain() -> anyhow::Result<()> {
+        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         for stripped in crate::cmd::STRIPPED_ENV
             .iter()
@@ -511,13 +552,14 @@ mod tests {
                     && *v == Some(std::ffi::OsStr::new(PINNED_NIGHTLY))),
             "RUSTUP_TOOLCHAIN 在剥离后由显式 env 重设"
         );
+        Ok(())
     }
 
     /// anti-vacuity：toolchain 入参透传（非把 `PINNED_NIGHTLY` 硬编码忽略参数）。
     #[test]
-    fn public_api_cmd_toolchain_arg_flows_through() {
+    fn public_api_cmd_toolchain_arg_flows_through() -> anyhow::Result<()> {
         let fake = "nightly-1999-01-01";
-        let cmd = public_api_cmd("vocab", fake);
+        let cmd = public_api_cmd("vocab", fake, &public_api_target_dir()?);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter()
@@ -525,6 +567,7 @@ mod tests {
                     && *v == Some(std::ffi::OsStr::new(fake))),
             "toolchain 入参应透传进 RUSTUP_TOOLCHAIN"
         );
+        Ok(())
     }
 
     // 三方 pinned-nightly SoT 解析（仅 test 用——production 无消费方读这两文件）。

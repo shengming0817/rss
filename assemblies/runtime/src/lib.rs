@@ -91,8 +91,7 @@ use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections,
     MaintenanceAuditOutcome, PgAuthAuditSink, PgDbReadiness, PgDlqStore, PgMaintenanceDeps,
-    PgRuntimeDeps, PoolReadiness, ProjectionMaintenanceCapability, ProjectionPointerPrecondition,
-    caps,
+    PgRuntimeDeps, PoolReadiness, ProjectionPointerPrecondition, caps,
 };
 use primitives::{HealthCheck, HealthStatus, MacKey, ProbeName};
 use settings::ports::DynSecretRepo;
@@ -483,6 +482,72 @@ pub fn is_projection_command(args: &[String]) -> bool {
 
 const PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV: &str =
     "RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS";
+const COMMAND_IDEMPOTENCY_KEYS_ENV: &str = "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandAliasKeyConfig {
+    id: String,
+    key: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandIdempotencyKeyringConfig {
+    current: CommandAliasKeyConfig,
+    #[serde(default)]
+    previous: Vec<CommandAliasKeyConfig>,
+}
+
+fn build_command_idempotency_keyring_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Arc<eventexec::command::CommandIdempotencyKeyring>> {
+    let raw = get(COMMAND_IDEMPOTENCY_KEYS_ENV).ok_or_else(|| {
+        anyhow::anyhow!("missing required env var: {COMMAND_IDEMPOTENCY_KEYS_ENV}")
+    })?;
+    let config: CommandIdempotencyKeyringConfig = serde_json::from_str(&raw)
+        .with_context(|| format!("{COMMAND_IDEMPOTENCY_KEYS_ENV} must be valid keyring JSON"))?;
+    let decode = |encoded: &str| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded.trim())
+            .with_context(|| {
+                format!("{COMMAND_IDEMPOTENCY_KEYS_ENV} keys must be base64url no-pad")
+            })
+    };
+    let current_bytes = decode(&config.current.key)?;
+    let previous_bytes = config
+        .previous
+        .iter()
+        .map(|key| decode(&key.key))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for reserved_env in [
+        "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL",
+        "RSS_AUDIT_CHAIN_KEY_B64URL",
+    ] {
+        let Some(reserved) = get(reserved_env) else {
+            continue;
+        };
+        let Ok(reserved) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(reserved.trim())
+        else {
+            continue;
+        };
+        anyhow::ensure!(
+            current_bytes != reserved && previous_bytes.iter().all(|key| key != &reserved),
+            "{COMMAND_IDEMPOTENCY_KEYS_ENV} must not reuse {reserved_env} key material"
+        );
+    }
+
+    let current = eventexec::command::CommandAliasKey::new(config.current.id, current_bytes)?;
+    let previous = config
+        .previous
+        .into_iter()
+        .zip(previous_bytes)
+        .map(|(config, key)| eventexec::command::CommandAliasKey::new(config.id, key))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Arc::new(
+        eventexec::command::CommandIdempotencyKeyring::new(current, previous)?,
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectionCliArgs {
@@ -539,20 +604,20 @@ impl ProjectionMaintenanceAction {
             Self::Swap => "swap",
         }
     }
+
+    fn authorized_action(self) -> authn::ProjectionMaintenanceAction {
+        match self {
+            Self::Replay => authn::ProjectionMaintenanceAction::Replay,
+            Self::Status => authn::ProjectionMaintenanceAction::Status,
+            Self::Swap => authn::ProjectionMaintenanceAction::Swap,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProjectionSwapPreconditionArg {
     ExpectUnset,
     ExpectedActiveVersion(ProjectionVersion),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectionMaintenanceGrant {
-    subject: String,
-    action: ProjectionMaintenanceAction,
-    tenant: vocab::TenantId,
-    projection: ProjectionId,
 }
 
 fn parse_projection_batch_limit(raw: &str) -> anyhow::Result<ProjectionBatchLimit> {
@@ -800,14 +865,19 @@ async fn verified_projection_maintenance_operator_subject(
     service_token: &str,
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
-) -> anyhow::Result<String> {
-    verified_service_maintenance_operator_subject(
+) -> anyhow::Result<authn::Principal> {
+    let (_token, principal) = authn::verify_service_token(
         service_token,
-        operator_tenant,
+        diport::ServiceTokenTenantBinding::new(operator_tenant),
         pdp,
-        "projection maintenance",
     )
     .await
+    .context("verify projection maintenance operator service token")?;
+    anyhow::ensure!(
+        principal.kind() == vocab::PrincipalKind::Service,
+        "projection maintenance operator must be a service principal"
+    );
+    Ok(principal)
 }
 
 async fn record_projection_maintenance_finish_audit(
@@ -826,7 +896,7 @@ const UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR: &str = "unverified-service-tok
 
 fn parse_projection_maintenance_grants(
     raw: &str,
-) -> anyhow::Result<Vec<ProjectionMaintenanceGrant>> {
+) -> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
     let raw = raw.trim();
     anyhow::ensure!(
         !raw.is_empty(),
@@ -851,57 +921,38 @@ fn parse_projection_maintenance_grants(
             !subject.is_empty(),
             "{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} subject must be non-empty"
         );
-        grants.push(ProjectionMaintenanceGrant {
-            subject: (*subject).to_owned(),
-            action: ProjectionMaintenanceAction::parse(action)?,
-            tenant: vocab::TenantId::parse(tenant).with_context(|| {
-                format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
-            })?,
-            projection: ProjectionId::parse(projection).with_context(|| {
+        let action = ProjectionMaintenanceAction::parse(action)?.authorized_action();
+        let tenant = vocab::TenantId::parse(tenant).with_context(|| {
+            format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
+        })?;
+        let projection = ProjectionId::parse(projection).with_context(|| {
                 format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} projection must be canonical: {projection}")
-            })?,
-        });
+            })?;
+        grants.push(authn::ProjectionMaintenanceGrant::new(
+            *subject,
+            action,
+            tenant,
+            projection.as_str(),
+        )?);
     }
     anyhow::ensure!(
         !grants.is_empty(),
         "{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} must contain at least one grant"
     );
-    Ok(grants)
+    authn::ProjectionMaintenanceGrantSet::new(grants).map_err(Into::into)
 }
 
-fn load_projection_maintenance_grants() -> anyhow::Result<Vec<ProjectionMaintenanceGrant>> {
+fn load_projection_maintenance_grants() -> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
     let raw = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} is required"))?;
     parse_projection_maintenance_grants(&raw)
 }
 
-fn authorize_projection_maintenance_operator(
-    operator_subject: &str,
-    parsed: &ProjectionCliArgs,
-    grants: &[ProjectionMaintenanceGrant],
-) -> anyhow::Result<()> {
-    let action = parsed.command.action();
-    let allowed = grants.iter().any(|grant| {
-        grant.subject == operator_subject
-            && grant.action == action
-            && grant.tenant == parsed.selector.tenant()
-            && &grant.projection == parsed.selector.projection()
-    });
-    anyhow::ensure!(
-        allowed,
-        "projection maintenance operator is not authorized for action={} tenant={} projection={}",
-        action.as_str(),
-        parsed.selector.tenant(),
-        parsed.selector.projection().as_str()
-    );
-    Ok(())
-}
-
-async fn projection_maintenance_operator_subject(
+async fn projection_maintenance_operator_receipt(
     pg: &PgMaintenanceDeps,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
     let operator_provider = match build_provider_with_replay_guard(pg.service_token_replay_guard())
     {
         Ok(provider) => provider,
@@ -920,14 +971,14 @@ async fn projection_maintenance_operator_subject(
         }
     };
     let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
-    let subject = match verified_projection_maintenance_operator_subject(
+    let principal = match verified_projection_maintenance_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
         operator_pdp,
     )
     .await
     {
-        Ok(subject) => subject,
+        Ok(principal) => principal,
         Err(err) => {
             record_projection_maintenance_finish_audit(
                 pg,
@@ -942,6 +993,7 @@ async fn projection_maintenance_operator_subject(
             return Err(err);
         }
     };
+    let subject = principal.audit_subject().to_owned();
     let grants = match load_projection_maintenance_grants() {
         Ok(grants) => grants,
         Err(err) => {
@@ -958,20 +1010,27 @@ async fn projection_maintenance_operator_subject(
             return Err(err);
         }
     };
-    if let Err(err) = authorize_projection_maintenance_operator(&subject, parsed, &grants) {
-        record_projection_maintenance_finish_audit(
-            pg,
-            &subject,
-            &format!("projection.{}.finish", parsed.command.action().as_str()),
-            resource_id,
-            MaintenanceAuditOutcome::Failure {
-                reason: "operator_authorization",
-            },
-        )
-        .await?;
-        return Err(err);
+    match grants.authorize(
+        &principal,
+        parsed.command.action().authorized_action(),
+        parsed.selector.tenant(),
+        parsed.selector.projection().as_str(),
+    ) {
+        Ok(receipt) => Ok(receipt),
+        Err(err) => {
+            record_projection_maintenance_finish_audit(
+                pg,
+                &subject,
+                &format!("projection.{}.finish", parsed.command.action().as_str()),
+                resource_id,
+                MaintenanceAuditOutcome::Failure {
+                    reason: "operator_authorization",
+                },
+            )
+            .await?;
+            Err(err.into())
+        }
     }
-    Ok(subject)
 }
 
 fn format_optional_lsn(lsn: Option<consistency::Lsn>) -> String {
@@ -1089,12 +1148,12 @@ async fn run_projection_status(
     pg: &PgMaintenanceDeps,
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
-    capability: ProjectionMaintenanceCapability,
+    receipt: &authn::ProjectionMaintenanceReceipt,
 ) -> anyhow::Result<()> {
     registry
         .bindings_for(selector.projection())
         .context("projection is not generated for this runtime")?;
-    let status = pg.projection_control(capability).status(selector).await?;
+    let status = pg.projection_control(receipt).status(selector).await?;
     let active_version = status
         .pointer()
         .map(|pointer| pointer.version().as_str().to_owned())
@@ -1121,13 +1180,13 @@ async fn run_projection_swap(
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
     precondition: ProjectionPointerPrecondition,
-    capability: ProjectionMaintenanceCapability,
+    receipt: &authn::ProjectionMaintenanceReceipt,
 ) -> anyhow::Result<()> {
     registry
         .target(selector.projection())
         .context("projection target is not swappable by this runtime")?;
     let outcome = pg
-        .projection_control(capability)
+        .projection_control(receipt)
         .promote(selector, precondition)
         .await
         .context("promote projection active pointer")?;
@@ -1152,6 +1211,7 @@ async fn run_projection_replay(
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
     batch_limit: ProjectionBatchLimit,
+    receipt: &authn::ProjectionMaintenanceReceipt,
 ) -> anyhow::Result<ProjectionReplayCliRun> {
     let target = registry
         .target(selector.projection())
@@ -1159,19 +1219,20 @@ async fn run_projection_replay(
     let bindings = registry
         .bindings_for(selector.projection())
         .context("projection input bindings are not generated for this runtime")?;
-    let infra = pg.infra();
-    let source = infra.projection_events();
-    let witness = SerialInOrder::from_source(&source);
-    let projector = ProjectionReplayProjector::new(selector.clone(), bindings, target);
     let dlx_payload_protector =
         event_transport::build_dlx_payload_protector_from(&|name| std::env::var(name).ok())
             .context("build projection replay DLQ payload protector")?;
+    let (source, checkpoint, dead_letter) = pg
+        .projection_replay_stores(receipt, selector, dlx_payload_protector)?
+        .into_parts()?;
+    let witness = SerialInOrder::from_source(&source);
+    let projector = ProjectionReplayProjector::new(selector.clone(), bindings, target);
     let harness = ProjectionHarness::new(
         Arc::new(projector),
-        Arc::new(infra.checkpoint()),
+        Arc::new(checkpoint),
         selector.shadow_checkpoint_owner(),
         selector.shadow_checkpoint_id(),
-        Arc::new(infra.dead_letter(dlx_payload_protector)),
+        Arc::new(dead_letter),
         witness,
     );
     let config = eventexec::ProjectionRunnerConfig::new(
@@ -1211,11 +1272,11 @@ async fn run_projection_command_inner(
     pg: &PgMaintenanceDeps,
     registry: &ProjectionTargetRegistry,
     parsed: &ProjectionCliArgs,
-    capability: &ProjectionMaintenanceCapability,
+    receipt: &authn::ProjectionMaintenanceReceipt,
 ) -> anyhow::Result<()> {
     match &parsed.command {
         ProjectionCliCommand::Status => {
-            run_projection_status(pg, registry, &parsed.selector, capability.clone()).await
+            run_projection_status(pg, registry, &parsed.selector, receipt).await
         }
         ProjectionCliCommand::Swap { precondition } => {
             run_projection_swap(
@@ -1223,12 +1284,13 @@ async fn run_projection_command_inner(
                 registry,
                 &parsed.selector,
                 precondition.clone(),
-                capability.clone(),
+                receipt,
             )
             .await
         }
         ProjectionCliCommand::Replay { batch_limit } => {
-            let run = run_projection_replay(pg, registry, &parsed.selector, *batch_limit).await?;
+            let run = run_projection_replay(pg, registry, &parsed.selector, *batch_limit, receipt)
+                .await?;
             let stop = projection_stop_cli_fields(&run.stop);
             println!(
                 "operation=replay tenant={} projection={} version={} scanned={} matched={} applied={} filtered={} skipped={} dlq={} stop={} failed_at_lsn={} skipped_at_lsn={} kind={}",
@@ -1276,19 +1338,19 @@ trait ProjectionControlRuntime {
         resource_id: &str,
     ) -> anyhow::Result<()>;
 
-    async fn operator_subject(
+    async fn operator_receipt(
         &self,
         session: &Self::Session,
         parsed: &ProjectionCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<String>;
+    ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt>;
 
     async fn run_projection_command(
         &self,
         session: &Self::Session,
         registry: &ProjectionTargetRegistry,
         parsed: &ProjectionCliArgs,
-        capability: &ProjectionMaintenanceCapability,
+        receipt: &authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()>;
 
     async fn shutdown(&self, session: Self::Session);
@@ -1323,13 +1385,13 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime {
             .context("record projection maintenance audit")
     }
 
-    async fn operator_subject(
+    async fn operator_receipt(
         &self,
         session: &Self::Session,
         parsed: &ProjectionCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<String> {
-        projection_maintenance_operator_subject(session, parsed, resource_id).await
+    ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
+        projection_maintenance_operator_receipt(session, parsed, resource_id).await
     }
 
     async fn run_projection_command(
@@ -1337,9 +1399,9 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime {
         session: &Self::Session,
         registry: &ProjectionTargetRegistry,
         parsed: &ProjectionCliArgs,
-        capability: &ProjectionMaintenanceCapability,
+        receipt: &authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()> {
-        run_projection_command_inner(session, registry, parsed, capability).await
+        run_projection_command_inner(session, registry, parsed, receipt).await
     }
 
     async fn shutdown(&self, session: Self::Session) {
@@ -1376,42 +1438,19 @@ where
     }
 
     let finish_action = format!("projection.{}.finish", parsed.command.action().as_str());
-    let operator_subject = match runtime
-        .operator_subject(&session, &parsed, &resource_id)
+    let receipt = match runtime
+        .operator_receipt(&session, &parsed, &resource_id)
         .await
     {
-        Ok(subject) => subject,
+        Ok(receipt) => receipt,
         Err(err) => {
             runtime.shutdown(session).await;
             return Err(err);
         }
     };
-    let capability = match ProjectionMaintenanceCapability::from_verified_service_subject(
-        operator_subject.clone(),
-    )
-    .context("projection maintenance operator subject")
-    {
-        Ok(capability) => capability,
-        Err(err) => {
-            let audit_result = runtime
-                .record_projection_maintenance_audit(
-                    &session,
-                    &operator_subject,
-                    &finish_action,
-                    MaintenanceAuditOutcome::Failure {
-                        reason: "operator_capability",
-                    },
-                    &resource_id,
-                )
-                .await
-                .context("record projection maintenance finish audit");
-            runtime.shutdown(session).await;
-            audit_result?;
-            return Err(err);
-        }
-    };
+    let operator_subject = receipt.operator_subject().to_owned();
     let command_result = runtime
-        .run_projection_command(&session, &registry, &parsed, &capability)
+        .run_projection_command(&session, &registry, &parsed, &receipt)
         .await;
     let finish_outcome = if command_result.is_ok() {
         MaintenanceAuditOutcome::Success
@@ -1895,7 +1934,8 @@ struct DlqCliArgs {
 enum DlqCliCommand {
     List {
         source: Option<diport::DeadLetterSource>,
-        domain: Option<String>,
+        producer_domain: Option<String>,
+        consumer_domain: Option<String>,
         contract_id: Option<String>,
         limit: u32,
         cursor: Option<DlqCursor>,
@@ -1966,7 +2006,7 @@ struct DlqMaintenanceGrant {
 }
 
 fn dlq_cli_usage() -> &'static str {
-    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> ..."
+    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> [--producer-domain <domain>] [--consumer-domain <domain>] ..."
 }
 
 fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
@@ -2001,7 +2041,8 @@ struct DlqRawArgs {
     operator_tenant: Option<vocab::TenantId>,
     tenant: Option<vocab::TenantId>,
     source: Option<diport::DeadLetterSource>,
-    domain: Option<String>,
+    producer_domain: Option<String>,
+    consumer_domain: Option<String>,
     contract_id: Option<String>,
     limit: u32,
     limit_seen: bool,
@@ -2020,7 +2061,8 @@ impl Default for DlqRawArgs {
             operator_tenant: None,
             tenant: None,
             source: None,
-            domain: None,
+            producer_domain: None,
+            consumer_domain: None,
             contract_id: None,
             limit: 100,
             limit_seen: false,
@@ -2068,10 +2110,29 @@ fn parse_dlq_raw_args(args: &[String]) -> anyhow::Result<DlqRawArgs> {
                 let value = next_cli_value(&mut it, "--source")?;
                 set_cli_arg_once(&mut parsed.source, "--source", parse_dlq_source(value)?)?;
             }
-            "--domain" => {
-                let value = next_cli_value(&mut it, "--domain")?;
-                anyhow::ensure!(!value.trim().is_empty(), "--domain must be non-empty");
-                set_cli_arg_once(&mut parsed.domain, "--domain", value.trim().to_owned())?;
+            "--producer-domain" => {
+                let value = next_cli_value(&mut it, "--producer-domain")?;
+                anyhow::ensure!(
+                    !value.trim().is_empty(),
+                    "--producer-domain must be non-empty"
+                );
+                set_cli_arg_once(
+                    &mut parsed.producer_domain,
+                    "--producer-domain",
+                    value.trim().to_owned(),
+                )?;
+            }
+            "--consumer-domain" => {
+                let value = next_cli_value(&mut it, "--consumer-domain")?;
+                anyhow::ensure!(
+                    !value.trim().is_empty(),
+                    "--consumer-domain must be non-empty"
+                );
+                set_cli_arg_once(
+                    &mut parsed.consumer_domain,
+                    "--consumer-domain",
+                    value.trim().to_owned(),
+                )?;
             }
             "--contract-id" => {
                 let value = next_cli_value(&mut it, "--contract-id")?;
@@ -2168,7 +2229,8 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
             );
             DlqCliCommand::List {
                 source: raw.source.take(),
-                domain: raw.domain.take(),
+                producer_domain: raw.producer_domain.take(),
+                consumer_domain: raw.consumer_domain.take(),
                 contract_id: raw.contract_id.take(),
                 limit: raw.limit,
                 cursor: raw.cursor.take(),
@@ -2177,7 +2239,8 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
         "inspect" => {
             anyhow::ensure!(
                 raw.source.is_none()
-                    && raw.domain.is_none()
+                    && raw.producer_domain.is_none()
+                    && raw.consumer_domain.is_none()
                     && raw.contract_id.is_none()
                     && raw.cursor.is_none()
                     && !raw.limit_seen,
@@ -2202,7 +2265,8 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
         "replay-dead-letter" => {
             anyhow::ensure!(
                 raw.source.is_none()
-                    && raw.domain.is_none()
+                    && raw.producer_domain.is_none()
+                    && raw.consumer_domain.is_none()
                     && raw.contract_id.is_none()
                     && raw.cursor.is_none()
                     && !raw.limit_seen
@@ -2225,7 +2289,8 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
         "redrive-outbox" => {
             anyhow::ensure!(
                 raw.source.is_none()
-                    && raw.domain.is_none()
+                    && raw.producer_domain.is_none()
+                    && raw.consumer_domain.is_none()
                     && raw.contract_id.is_none()
                     && raw.cursor.is_none()
                     && !raw.limit_seen
@@ -2330,13 +2395,15 @@ fn dlq_command_resource_id(parsed: &DlqCliArgs) -> String {
     let target = match &parsed.command {
         DlqCliCommand::List {
             source,
-            domain,
+            producer_domain,
+            consumer_domain,
             contract_id,
             ..
         } => format!(
-            "source={} domain={} contract_id={}",
+            "source={} producer_domain={} consumer_domain={} contract_id={}",
             source.map(|source| source.as_str()).unwrap_or("all"),
-            domain.as_deref().unwrap_or("all"),
+            producer_domain.as_deref().unwrap_or("all"),
+            consumer_domain.as_deref().unwrap_or("all"),
             contract_id.as_deref().unwrap_or("all")
         ),
         DlqCliCommand::Inspect { target } => match target {
@@ -2476,7 +2543,8 @@ fn dlq_summary_json_line(summary: &DlqEntrySummary) -> anyhow::Result<String> {
         "source": summary.source().as_str(),
         "tenant": summary.tenant().to_string(),
         "messageId": summary.message_id(),
-        "domain": summary.domain(),
+        "producerDomain": summary.producer_domain(),
+        "consumerDomain": summary.consumer_domain(),
         "contractId": summary.contract_id(),
         "topic": summary.topic(),
         "consumerGroup": summary.consumer_group(),
@@ -2501,7 +2569,8 @@ async fn run_dlq_command_inner<S: DlqStore>(
     match &parsed.command {
         DlqCliCommand::List {
             source,
-            domain,
+            producer_domain,
+            consumer_domain,
             contract_id,
             limit,
             cursor,
@@ -2510,8 +2579,11 @@ async fn run_dlq_command_inner<S: DlqStore>(
             if let Some(source) = source {
                 query = query.with_source(*source);
             }
-            if let Some(domain) = domain {
-                query = query.with_domain(domain.clone());
+            if let Some(domain) = producer_domain {
+                query = query.with_producer_domain(domain.clone());
+            }
+            if let Some(domain) = consumer_domain {
+                query = query.with_consumer_domain(domain.clone());
             }
             if let Some(contract_id) = contract_id {
                 query = query.with_contract_id(contract_id.clone());
@@ -2662,14 +2734,13 @@ impl DlqControlRuntime for ProductionDlqControlRuntime {
         session: &Self::Session,
         command: &DlqCliCommand,
     ) -> anyhow::Result<Self::Store> {
-        let infra = session.infra();
         if command.requires_payload_protector() {
             let dlx_payload_protector =
                 event_transport::build_dlx_payload_protector_from(&|name| std::env::var(name).ok())
                     .context("build DLQ payload protector")?;
-            Ok(infra.dlq(dlx_payload_protector))
+            Ok(session.dlq_store(dlx_payload_protector, generated::event::PROJECTION_INPUTS))
         } else {
-            Ok(infra.dlq_without_payload_replay())
+            Ok(session.dlq_store_without_payload_replay())
         }
     }
 
@@ -3799,7 +3870,15 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     let provider = runtime_oidc.provider();
 
     // BuildInfra phase: provider bundles, topology config, shared deps, and metrics exporter.
-    let (pg, deps, s3_canary_config, event_cfg, domain_transport, metrics_exporter) = phase_result(
+    let (
+        pg,
+        deps,
+        s3_canary_config,
+        event_cfg,
+        domain_transport,
+        metrics_exporter,
+        _command_idempotency_keyring,
+    ) = phase_result(
         RuntimePhase::BuildInfra,
         async {
             // postgres capability bundle（#1423）：集中 connect + migrations + readiness handle（生产 fail-fast，
@@ -3811,6 +3890,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 &build_pg_config()?,
                 audit_admin_config.as_ref(),
                 legacy_config_plaintext_policy()?,
+                generated::event::PROJECTION_INPUT_GENERATION,
                 generated::event::PROJECTION_INPUTS,
             )
             .await
@@ -3849,6 +3929,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 wire_domain_transport_from(event_cfg.topology, |name| std::env::var(name).ok())
                     .await
                     .context("wire outbound domain transport")?;
+            let command_idempotency_keyring =
+                build_command_idempotency_keyring_from(|name| std::env::var(name).ok())
+                    .context("build command idempotency keyring")?;
 
             // 共享基础设施依赖（infra 流入各域 wire_X；「字段仅 infra」是约定，机器门见 #1448）。
             let deps = SharedRuntimeDeps {
@@ -3878,6 +3961,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 event_cfg,
                 domain_transport,
                 metrics_exporter,
+                command_idempotency_keyring,
             ))
         }
         .await,
@@ -4430,7 +4514,7 @@ mod tests {
             &self,
             _scope: IdentityTenantRepoScope,
             _binding: identity::ports::RoleBinding,
-            _entry: consistency::Entry,
+            _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
         ) -> Result<(), diport::OutboxEmitError> {
             Err(diport::OutboxEmitError::new(std::io::Error::other(
@@ -4443,7 +4527,7 @@ mod tests {
             _scope: IdentityTenantRepoScope,
             _role_id: identity::ports::RoleId,
             _subject: String,
-            _entry: consistency::Entry,
+            _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
         ) -> Result<bool, diport::OutboxEmitError> {
             Err(diport::OutboxEmitError::new(std::io::Error::other(
@@ -4550,7 +4634,7 @@ mod tests {
             &self,
             _scope: IdentityTenantRepoScope,
             _policy: identity::ports::Policy,
-            _entry: consistency::Entry,
+            _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
         ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4563,7 +4647,7 @@ mod tests {
             _scope: IdentityTenantRepoScope,
             _policy: identity::ports::Policy,
             _expected: identity::ports::PolicyVersion,
-            _entry: consistency::Entry,
+            _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
         ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4576,7 +4660,7 @@ mod tests {
             _scope: IdentityTenantRepoScope,
             _id: identity::ports::PolicyId,
             _expected: identity::ports::PolicyVersion,
-            _entry: consistency::Entry,
+            _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
         ) -> Result<bool, identity::ports::IdentityError> {
             Err(identity_storage_error(
@@ -4646,7 +4730,7 @@ mod tests {
             &self,
             _scope: IdentityTenantRepoScope,
             _session: identity::ports::Session,
-            _entry: consistency::Entry,
+            _entry: consistency::EventEntry,
             _envelope: diport::OutboxEnvelopeParts,
         ) -> Result<(), diport::OutboxEmitError> {
             Err(diport::OutboxEmitError::new(std::io::Error::other(
@@ -5172,6 +5256,30 @@ mod tests {
         }
     }
 
+    fn fake_projection_receipt(
+        subject: &str,
+        parsed: &ProjectionCliArgs,
+    ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
+        let principal =
+            authn::test_support::principal(vocab::PrincipalKind::Service, subject, None);
+        let grants = authn::ProjectionMaintenanceGrantSet::new(vec![
+            authn::ProjectionMaintenanceGrant::new(
+                subject,
+                parsed.command.action().authorized_action(),
+                parsed.selector.tenant(),
+                parsed.selector.projection().as_str(),
+            )?,
+        ])?;
+        grants
+            .authorize(
+                &principal,
+                parsed.command.action().authorized_action(),
+                parsed.selector.tenant(),
+                parsed.selector.projection().as_str(),
+            )
+            .map_err(Into::into)
+    }
+
     impl ProjectionControlRuntime for FakeProjectionControlRuntime {
         type Session = ();
 
@@ -5224,14 +5332,16 @@ mod tests {
             Ok(())
         }
 
-        async fn operator_subject(
+        async fn operator_receipt(
             &self,
             session: &Self::Session,
             parsed: &ProjectionCliArgs,
             resource_id: &str,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
             match self.operator {
-                FakeProjectionOperator::Verified(subject) => Ok(subject.to_owned()),
+                FakeProjectionOperator::Verified(subject) => {
+                    fake_projection_receipt(subject, parsed)
+                }
                 FakeProjectionOperator::AuthFailure => {
                     let finish_action =
                         format!("projection.{}.finish", parsed.command.action().as_str());
@@ -5255,11 +5365,11 @@ mod tests {
             _session: &Self::Session,
             registry: &ProjectionTargetRegistry,
             parsed: &ProjectionCliArgs,
-            capability: &ProjectionMaintenanceCapability,
+            receipt: &authn::ProjectionMaintenanceReceipt,
         ) -> anyhow::Result<()> {
             let record = FakeProjectionCommandRecord {
                 action: parsed.command.action(),
-                operator_subject: capability.operator_subject().to_owned(),
+                operator_subject: receipt.operator_subject().to_owned(),
                 registry_has_targets: registry.has_registered_targets(),
             };
             match self.commands.lock() {
@@ -5834,6 +5944,48 @@ mod tests {
     }
 
     #[test]
+    fn command_idempotency_keyring_config_is_required_rotatable_and_independently_keyed()
+    -> anyhow::Result<()> {
+        let encode =
+            |byte: u8| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![byte; 32]);
+        let raw = serde_json::json!({
+            "current": {"id": "k2", "key": encode(0x42)},
+            "previous": [{"id": "k1", "key": encode(0x24)}]
+        })
+        .to_string();
+        let keyring = build_command_idempotency_keyring_from(|name| {
+            (name == COMMAND_IDEMPOTENCY_KEYS_ENV).then(|| raw.clone())
+        })?;
+        assert_eq!(
+            format!("{keyring:?}"),
+            "CommandIdempotencyKeyring(<redacted>)"
+        );
+
+        assert!(build_command_idempotency_keyring_from(|_| None).is_err());
+        let short = serde_json::json!({
+            "current": {"id": "k2", "key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 16])}
+        })
+        .to_string();
+        assert!(
+            build_command_idempotency_keyring_from(|name| {
+                (name == COMMAND_IDEMPOTENCY_KEYS_ENV).then(|| short.clone())
+            })
+            .is_err()
+        );
+
+        let reused = encode(0x42);
+        assert!(
+            build_command_idempotency_keyring_from(|name| match name {
+                COMMAND_IDEMPOTENCY_KEYS_ENV => Some(raw.clone()),
+                "RSS_AUDIT_CHAIN_KEY_B64URL" => Some(reused.clone()),
+                _ => None,
+            })
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn projection_maintenance_grants_authorize_exact_action_tenant_and_projection()
     -> anyhow::Result<()> {
         let parsed = parse_projection_args(&args(&[
@@ -5853,25 +6005,43 @@ mod tests {
         let grants = parse_projection_maintenance_grants(
             "verified-operator|status|00000000-0000-4000-8000-000000000002|audit.session-projection",
         )?;
-        authorize_projection_maintenance_operator("verified-operator", &parsed, &grants)?;
+        let principal = authn::test_support::principal(
+            vocab::PrincipalKind::Service,
+            "verified-operator",
+            None,
+        );
+        grants.authorize(
+            &principal,
+            parsed.command.action().authorized_action(),
+            parsed.selector.tenant(),
+            parsed.selector.projection().as_str(),
+        )?;
 
         let replay_grants = parse_projection_maintenance_grants(
             "verified-operator|replay|00000000-0000-4000-8000-000000000002|audit.session-projection",
         )?;
         assert!(
-            authorize_projection_maintenance_operator("verified-operator", &parsed, &replay_grants)
+            replay_grants
+                .authorize(
+                    &principal,
+                    parsed.command.action().authorized_action(),
+                    parsed.selector.tenant(),
+                    parsed.selector.projection().as_str(),
+                )
                 .is_err()
         );
         let wrong_tenant_grants = parse_projection_maintenance_grants(
             "verified-operator|status|00000000-0000-4000-8000-000000000003|audit.session-projection",
         )?;
         assert!(
-            authorize_projection_maintenance_operator(
-                "verified-operator",
-                &parsed,
-                &wrong_tenant_grants
-            )
-            .is_err()
+            wrong_tenant_grants
+                .authorize(
+                    &principal,
+                    parsed.command.action().authorized_action(),
+                    parsed.selector.tenant(),
+                    parsed.selector.projection().as_str(),
+                )
+                .is_err()
         );
         Ok(())
     }
@@ -6646,7 +6816,8 @@ mod tests {
         List {
             tenant: vocab::TenantId,
             source: Option<diport::DeadLetterSource>,
-            domain: Option<String>,
+            producer_domain: Option<String>,
+            consumer_domain: Option<String>,
             contract_id: Option<String>,
             limit: u32,
             cursor: Option<String>,
@@ -6713,7 +6884,8 @@ mod tests {
             self.push(FakeDlqCommandRecord::List {
                 tenant: query.tenant(),
                 source: query.source(),
-                domain: query.domain().map(ToOwned::to_owned),
+                producer_domain: query.producer_domain().map(ToOwned::to_owned),
+                consumer_domain: query.consumer_domain().map(ToOwned::to_owned),
                 contract_id: query.contract_id().map(ToOwned::to_owned),
                 limit: query.limit(),
                 cursor: query.cursor().map(DlqCursor::encode),
@@ -6917,6 +7089,7 @@ mod tests {
             tenant,
             "msg-1",
             "identity",
+            Some("audit".to_owned()),
             "identity.session-created",
             "identity.session.created",
             Some("identity.session.consumer".to_owned()),
@@ -6987,8 +7160,10 @@ mod tests {
             &[
                 "--source",
                 "consumer",
-                "--domain",
+                "--producer-domain",
                 "identity",
+                "--consumer-domain",
+                "audit",
                 "--contract-id",
                 "identity.session-created",
                 "--limit",
@@ -7007,11 +7182,13 @@ mod tests {
             list.command,
             DlqCliCommand::List {
                 source: Some(diport::DeadLetterSource::Consumer),
-                ref domain,
+                ref producer_domain,
+                ref consumer_domain,
                 ref contract_id,
                 limit: 7,
                 ref cursor,
-            } if domain.as_deref() == Some("identity")
+            } if producer_domain.as_deref() == Some("identity")
+                && consumer_domain.as_deref() == Some("audit")
                 && contract_id.as_deref() == Some("identity.session-created")
                 && cursor.as_ref().map(DlqCursor::encode).as_deref()
                     == Some("1700000000:dead_letter:row-1")
@@ -7185,8 +7362,10 @@ mod tests {
                     &[
                         "--source",
                         "consumer",
-                        "--domain",
+                        "--producer-domain",
                         "identity",
+                        "--consumer-domain",
+                        "audit",
                         "--contract-id",
                         "identity.session-created",
                         "--limit",
@@ -7195,11 +7374,12 @@ mod tests {
                         "1700000000:dead_letter:row-1",
                     ],
                 ),
-                "source=consumer domain=identity contract_id=identity.session-created",
+                "source=consumer producer_domain=identity consumer_domain=audit contract_id=identity.session-created",
                 FakeDlqCommandRecord::List {
                     tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                     source: Some(diport::DeadLetterSource::Consumer),
-                    domain: Some("identity".to_owned()),
+                    producer_domain: Some("identity".to_owned()),
+                    consumer_domain: Some("audit".to_owned()),
                     contract_id: Some("identity.session-created".to_owned()),
                     limit: 7,
                     cursor: Some("1700000000:dead_letter:row-1".to_owned()),
@@ -7323,6 +7503,7 @@ mod tests {
             tenant,
             "msg-1",
             "identity",
+            Some("audit".to_owned()),
             "identity.session-created",
             "identity.session.created",
             Some("identity.session.consumer".to_owned()),

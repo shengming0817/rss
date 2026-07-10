@@ -1,12 +1,12 @@
 //! `PgConfigRepo` —— settings 配置版本化仓储 + co-tx UoW 的 postgres adapter（#1249）。
 //!
 //! impl `settings::ports::ConfigRepo`（find / find_version / save / delete）+ `settings::ports::ConfigUnitOfWork`
-//! （`save_and_append_outbox` co-tx）。adapter→域 DIP 内向边（postgres 依赖 settings、native AFIT impl 其域形
+//! （`commit` co-tx）。adapter→域 DIP 内向边（postgres 依赖 settings、native AFIT impl 其域形
 //! port，经 deny.toml settings wrapper + `allows(Adapter,Domain)` 放行；adapter 不被域依赖）。
 //!
 //! 版本历史模型 + CAS（etcd 版本模型，settings ports.rs）：每 (tenant, key) 全版本行；`find` = max(version)、
 //! `find_version` = 精确版本、`save` = `INSERT ... WHERE $v = 1 + COALESCE(max(version),0)`（0 行 → VersionConflict；
-//! 并发同版本写经 PK unique violation 亦 → VersionConflict）。`save_and_append_outbox` 经 `co_tx_with_outbox`
+//! 并发同版本写经 PK unique violation 亦 → VersionConflict）。`commit` 经 `co_tx_with_outbox`
 //! 把同一 CAS INSERT 与 outbox append 收进单事务（both-or-neither，OUTBOX-COTX-CONFIG-01）。
 //!
 //! storage 错误经 `ConfigRepoError::Storage(Box::new(sqlx_err))` 分层冒泡（保留 source 链；域 crate 不依赖
@@ -22,7 +22,7 @@ use std::sync::Mutex;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::key_provider::KeyProviderErrorKind;
 use diport::{
     Clock, DynKeyProvider, KeyName, KeyProvider, KeyProviderError, KeyRef, OutboxEnvelopeParts,
@@ -30,8 +30,8 @@ use diport::{
 };
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
-    ConfigEntry, ConfigRepo, ConfigRepoError, ConfigUnitOfWork, SettingKey, TenantId,
-    TenantRepoScope,
+    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepo, ConfigRepoError, ConfigTombstone,
+    ConfigUnitOfWork, SettingKey, TenantId, TenantRepoScope,
 };
 use sqlx::{Executor, Postgres, Row};
 
@@ -427,16 +427,6 @@ fn maybe_fail_config_retry(key: &SettingKey) -> Result<(), ConfigRepoError> {
     }
 }
 
-fn is_unique_violation(error: &ConfigRepoError) -> bool {
-    match error {
-        ConfigRepoError::Storage(source) => source
-            .downcast_ref::<sqlx::Error>()
-            .and_then(sqlx::Error::as_database_error)
-            .is_some_and(|db| db.is_unique_violation()),
-        _ => false,
-    }
-}
-
 fn tenant_mismatch_storage_error(path: &'static str) -> ConfigRepoError {
     ConfigRepoError::Storage(Box::new(std::io::Error::other(format!(
         "{path}: outbox envelope tenant does not match transaction tenant"
@@ -616,6 +606,56 @@ where
     }
 }
 
+async fn cas_insert_tombstone<'e, E>(
+    executor: E,
+    tenant: TenantId,
+    tombstone: &ConfigTombstone,
+    encoded: &EncodedConfigValue,
+) -> Result<(), ConfigRepoError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let result = sqlx::query(
+        r#"
+        INSERT INTO config_entries (
+            tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
+        )
+        SELECT $1::uuid, $2, $3, $4, true, $5, $6, $7
+        WHERE $3 = 1 + COALESCE(
+            (SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2),
+            0
+        )
+          AND COALESCE(
+            (SELECT NOT deleted FROM config_entries
+             WHERE tenant_id = $1::uuid AND config_key = $2
+             ORDER BY version DESC LIMIT 1),
+            false
+          )
+        "#,
+    )
+    .bind(tenant_param(tenant))
+    .bind(tombstone.key().as_str())
+    .bind(version_param(tombstone.version()))
+    .bind(encoded.value.as_deref())
+    .bind(encoded.protection_scheme)
+    .bind(encoded.value_enc.as_deref())
+    .bind(encoded.key_id.as_deref())
+    .execute(executor)
+    .await;
+    match result {
+        Ok(done) if done.rows_affected() == 1 => Ok(()),
+        Ok(_) => Err(ConfigRepoError::VersionConflict),
+        Err(error)
+            if error
+                .as_database_error()
+                .is_some_and(|db| db.is_unique_violation()) =>
+        {
+            Err(ConfigRepoError::VersionConflict)
+        }
+        Err(error) => Err(storage(error)),
+    }
+}
+
 /// row（含 `deleted` 列）→ 活跃 `ConfigEntry`：tombstone（`deleted=true`）⇒ 视为已删 `None`；否则 hydrate。
 /// `find` / `find_version` 共用（活跃值语义；版本计数器经 `latest_version` 单独读，含 tombstone）。
 async fn hydrate_active(
@@ -634,37 +674,6 @@ async fn hydrate_active(
             }
         }
     }
-}
-
-async fn latest_deleted(
-    pool: &PgTenantPool,
-    scope: TenantRepoScope,
-    key: &SettingKey,
-) -> Result<bool, ConfigRepoError> {
-    let tenant = scope.tenant();
-    let tenant_uuid = tenant_param(tenant);
-    let key_str = key.as_str().to_owned();
-    let deleted = pool
-        .read(scope, move |conn| {
-            Box::pin(async move {
-                sqlx::query_scalar(
-                    r#"
-                    SELECT deleted
-                    FROM config_entries
-                    WHERE tenant_id = $1::uuid AND config_key = $2
-                    ORDER BY version DESC
-                    LIMIT 1
-                    "#,
-                )
-                .bind(tenant_uuid)
-                .bind(key_str)
-                .fetch_optional(&mut *conn)
-                .await
-            })
-        })
-        .await
-        .map_err(storage)?;
-    Ok(deleted.unwrap_or(false))
 }
 
 #[derive(Clone)]
@@ -1192,11 +1201,11 @@ impl ConfigRepo for PgConfigRepo {
         hydrate_active(self, tenant, row).await
     }
 
-    async fn latest_version(
+    async fn head(
         &self,
         scope: TenantRepoScope,
         key: &SettingKey,
-    ) -> Result<Option<u64>, ConfigRepoError> {
+    ) -> Result<Option<ConfigHead>, ConfigRepoError> {
         let tenant = scope.tenant();
         // 经 tenant_scoped_read 注入 SET LOCAL，与 0009 迁移的 RLS policy current_setting 对齐（#1298）。
         // 真实最高版本（含 tombstone）；max() 对空集返 NULL（fetch_one 恒一行）。
@@ -1206,160 +1215,40 @@ impl ConfigRepo for PgConfigRepo {
         let key_str = key.as_str().to_owned();
         let tenant_uuid_q = tenant_uuid.clone();
 
-        let (mv,): (Option<i64>,) = self
+        let row: Option<(i64, bool)> = self
             .pool
             .read(scope, move |conn| {
                 Box::pin(async move {
                     sqlx::query_as(
-                        "SELECT max(version) FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2",
+                        "SELECT version, deleted FROM config_entries WHERE tenant_id = $1::uuid AND config_key = $2 ORDER BY version DESC LIMIT 1",
                     )
                     .bind(tenant_uuid_q)
                     .bind(key_str)
-                    .fetch_one(&mut *conn)
+                    .fetch_optional(&mut *conn)
                     .await
                 })
             })
         .await
         .map_err(storage)?;
-        Ok(mv.and_then(|v| u64::try_from(v).ok()))
-    }
-
-    async fn save(
-        &self,
-        scope: TenantRepoScope,
-        entry: ConfigEntry,
-    ) -> Result<(), ConfigRepoError> {
-        let tenant = scope.tenant();
-        if entry.tenant() != tenant {
-            return Err(tenant_mismatch_storage_error("config save"));
-        }
-        // F3：plain CAS 写经 tenant-scoped 事务（SET LOCAL），与 co-tx 写路径一致。
-        let encoded = self.encode_value(tenant, &entry).await?;
-        run_pg_tx_retry(
-            SETTINGS_CONFIG_BOUNDARY,
-            |_attempt| {
-                let entry = entry.clone();
-                let encoded = encoded.clone();
-                async move {
-                    self.pool
-                        .retry_write(
-                            scope,
-                            move |conn| {
-                                Box::pin(async move {
-                                    cas_insert(conn.conn(), tenant, &entry, &encoded).await
-                                })
-                            },
-                            storage,
-                        )
-                        .await
-                }
-            },
-            classify_config_repo_error,
-        )
-        .await
-    }
-
-    async fn delete(
-        &self,
-        scope: TenantRepoScope,
-        key: &SettingKey,
-    ) -> Result<(), ConfigRepoError> {
-        let tenant = scope.tenant();
-        // F1 软删：仅当 latest 非 tombstone 时在 max+1 追加 tombstone（幂等；version 单调不重置，防 event_id
-        // 复用）。F3：经 tenant-scoped 事务（SET LOCAL）。
-        let tenant_uuid = tenant_param(tenant);
-        let key_str = key.as_str().to_string();
-        let tenant_uuid_q = tenant_uuid.clone();
-        let key_str_q = key_str.clone();
-        let latest_deleted_before: Option<bool> = self
-            .pool
-            .read(scope, move |conn| {
-                Box::pin(async move {
-                    sqlx::query_scalar(
-                        r#"
-                        SELECT deleted
-                        FROM config_entries
-                        WHERE tenant_id = $1::uuid AND config_key = $2
-                        ORDER BY version DESC
-                        LIMIT 1
-                        "#,
-                    )
-                    .bind(tenant_uuid_q)
-                    .bind(key_str_q)
-                    .fetch_optional(&mut *conn)
-                    .await
-                })
+        row.map(|(version, deleted)| {
+            let version =
+                u64::try_from(version).map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+            Ok(if deleted {
+                ConfigHead::Deleted(version)
+            } else {
+                ConfigHead::Active(version)
             })
-            .await
-            .map_err(storage)?;
-        if latest_deleted_before.unwrap_or(true) {
-            return Ok(());
-        }
-
-        let encoded = self.encode_value_bytes(tenant, key, b"").await?;
-        let result = run_pg_tx_retry(
-            SETTINGS_CONFIG_BOUNDARY,
-            |_attempt| {
-                let tenant_uuid = tenant_uuid.clone();
-                let key_str = key_str.clone();
-                let encoded = encoded.clone();
-                async move {
-                    self.pool
-                        .retry_write(
-                            scope,
-                            move |conn| {
-                                Box::pin(async move {
-                                    sqlx::query(
-                                        r#"
-                    INSERT INTO config_entries (
-                        tenant_id, config_key, version, value, deleted, protection_scheme, value_enc, key_id
-                    )
-                    SELECT $1::uuid, $2, 1 + COALESCE(max(version), 0), $3, true, $4, $5, $6
-                    FROM config_entries
-                    WHERE tenant_id = $1::uuid AND config_key = $2
-                    HAVING NOT COALESCE(
-                        (SELECT deleted FROM config_entries
-                         WHERE tenant_id = $1::uuid AND config_key = $2
-                         ORDER BY version DESC LIMIT 1),
-                        true)
-                    "#,
-                                    )
-                                    .bind(&tenant_uuid)
-                                    .bind(&key_str)
-                                    .bind(encoded.value.as_deref())
-                                    .bind(encoded.protection_scheme)
-                                    .bind(encoded.value_enc.as_deref())
-                                    .bind(encoded.key_id.as_deref())
-                                    .execute(conn.conn())
-                                    .await
-                                    .map_err(storage)
-                                    .map(|_| ())
-                                })
-                            },
-                            storage,
-                        )
-                        .await
-                }
-            },
-            classify_config_repo_error,
-        )
-        .await;
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) if is_unique_violation(&e) && latest_deleted(&self.pool, scope, key).await? => {
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+        })
+        .transpose()
     }
 }
 
 impl ConfigUnitOfWork for PgConfigRepo {
-    async fn save_and_append_outbox(
+    async fn commit(
         &self,
         scope: TenantRepoScope,
-        entry: ConfigEntry,
-        outbox_entry: Entry,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
         let tenant = scope.tenant();
@@ -1372,10 +1261,16 @@ impl ConfigUnitOfWork for PgConfigRepo {
         if env_tenant != tenant {
             return Err(tenant_mismatch_storage_error("config co-tx"));
         }
-        if entry.tenant() != tenant {
-            return Err(tenant_mismatch_storage_error("config co-tx entry"));
+        if mutation.tenant() != tenant {
+            return Err(tenant_mismatch_storage_error("config co-tx mutation"));
         }
-        let encoded = self.encode_value(tenant, &entry).await?;
+        let encoded = match &mutation {
+            ConfigMutation::Put(entry) => self.encode_value(tenant, entry).await?,
+            ConfigMutation::Delete(tombstone) => {
+                self.encode_value_bytes(tenant, tombstone.key(), b"")
+                    .await?
+            }
+        };
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
@@ -1390,7 +1285,7 @@ impl ConfigUnitOfWork for PgConfigRepo {
         run_pg_tx_retry(
             SETTINGS_CONFIG_BOUNDARY,
             |_attempt| {
-                let entry = entry.clone();
+                let mutation = mutation.clone();
                 let encoded = encoded.clone();
                 let outbox_entry = outbox_entry.clone();
                 let env = env.clone();
@@ -1402,9 +1297,23 @@ impl ConfigUnitOfWork for PgConfigRepo {
                             &env,
                             move |conn| {
                                 Box::pin(async move {
-                                    cas_insert(conn.conn(), tenant, &entry, &encoded).await?;
+                                    match &mutation {
+                                        ConfigMutation::Put(entry) => {
+                                            cas_insert(conn.conn(), tenant, entry, &encoded)
+                                                .await?;
+                                        }
+                                        ConfigMutation::Delete(tombstone) => {
+                                            cas_insert_tombstone(
+                                                conn.conn(),
+                                                tenant,
+                                                tombstone,
+                                                &encoded,
+                                            )
+                                            .await?;
+                                        }
+                                    }
                                     #[cfg(all(test, feature = "integration"))]
-                                    maybe_fail_config_retry(entry.key())?;
+                                    maybe_fail_config_retry(mutation.key())?;
                                     Ok(())
                                 })
                             },

@@ -32,6 +32,7 @@ pub(crate) const FIELD_METHOD: &str = "method";
 pub(crate) const FIELD_TOPIC: &str = "topic";
 pub(crate) const FIELD_DELIVERY: &str = "delivery";
 pub(crate) const FIELD_SAGA: &str = "[saga]";
+pub(crate) const FIELD_COMMAND: &str = "[command]";
 pub(crate) const FIELD_RECONCILE: &str = "[reconcile]";
 pub(crate) const FIELD_EFFECT_PROFILE: &str = "[effectProfile]";
 pub(crate) const FIELD_ENDPOINTS_HTTP_AUTH: &str = "[endpoints.http.auth]";
@@ -74,6 +75,9 @@ pub(crate) struct ContractManifest {
     /// saga per-kind：`[saga]` 专属 block。active saga 必填（R8）；内部良构由 R10 守。
     #[serde(default)]
     pub(crate) saga: Option<SagaBlock>,
+    /// command 专属持久化策略。command 必须声明，其他 kind 禁止（validate R24）。
+    #[serde(default)]
+    pub(crate) command: Option<CommandBlock>,
     /// L4 reconcile 结构语义：`[reconcile]` 顶层 block。DeviceLatent 必填（R22）；字段闭值由类型层守。
     #[serde(default)]
     pub(crate) reconcile: Option<ReconcileBlock>,
@@ -117,6 +121,20 @@ pub(crate) enum ContractKind {
     Event,
     Command,
     Saga,
+}
+
+/// command authoring 的闭值策略；无默认值，缺 block 由 validate fail-closed。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CommandBlock {
+    pub(crate) journal: CommandJournalPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CommandJournalPolicy {
+    Required,
+    None,
 }
 
 impl ContractKind {
@@ -686,27 +704,10 @@ pub(crate) enum PartitionKeyStrategy {
     Aggregate,
 }
 
-impl PartitionKeyStrategy {
-    pub(crate) fn as_wire(self) -> &'static str {
-        match self {
-            PartitionKeyStrategy::None => "none",
-            PartitionKeyStrategy::Aggregate => "aggregate",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum SubscriberReadiness {
     Required,
-}
-
-impl SubscriberReadiness {
-    pub(crate) fn as_wire(self) -> &'static str {
-        match self {
-            SubscriberReadiness::Required => "required",
-        }
-    }
 }
 
 #[cfg(test)]
@@ -790,6 +791,33 @@ mod tests {
         assert_eq!(m.topic.as_deref(), Some("seed.thing-happened"));
         assert_eq!(m.delivery, Some(Delivery::AtLeastOnce));
         assert_eq!(m.path, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_command_journal_policy_without_default() -> anyhow::Result<()> {
+        let required = r#"
+            id = "seed.do-thing"
+            kind = "command"
+            domain = "_seed"
+            version = "v1"
+            owner = "_framework"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "seed.commands.do-thing"
+            [schemas]
+            request = "request.schema.json"
+            [command]
+            journal = "required"
+        "#;
+        let manifest = ContractManifest::from_toml_str(required)?;
+        assert_eq!(
+            manifest.command.map(|command| command.journal),
+            Some(CommandJournalPolicy::Required)
+        );
+
+        let invalid = required.replace("journal = \"required\"", "journal = \"optional\"");
+        assert!(ContractManifest::from_toml_str(&invalid).is_err());
         Ok(())
     }
 

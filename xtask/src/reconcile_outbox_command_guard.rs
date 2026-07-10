@@ -2,7 +2,8 @@
 //!
 //! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "verify", source = "code" }——
 //! eventexec reconcile scheduler must not directly publish, depend on an emitter, or append raw outbox rows.
-//! Commands may only flow through `ReviewedCommand` + `AttemptScope::record_action_and_enqueue_command`;
+//! Commands may only flow through generated `TypedCommandSpec` → `ReviewedCommand` →
+//! `AttemptScope::record_action_and_enqueue_command`;
 //! the Postgres adapter may call `append_outbox` only inside the transactional implementation of that seam.
 
 use std::ops::Range;
@@ -19,6 +20,7 @@ pub(crate) enum Rule {
     DirectTransport,
     BareOutboxAppend,
     MissingTransactionalSeam,
+    RawCommandAuthoring,
 }
 
 pub(crate) struct ReconcileOutboxCommandGuard;
@@ -108,8 +110,8 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         }
     }
     for token in [
-        "pub struct StableDispatchKey",
         "pub struct ReviewedCommand",
+        "generated::command::TypedCommandSpec",
         "record_action_and_enqueue_command",
     ] {
         if !stripped.contains(token) {
@@ -117,6 +119,20 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 Rule::MissingTransactionalSeam,
                 path.display().to_string(),
                 format!("durable reconcile scheduler must expose `{token}`"),
+            ));
+        }
+    }
+    for token in [
+        "pub struct StableDispatchKey",
+        "dispatch_key: StableDispatchKey",
+    ] {
+        if stripped.contains(token) {
+            findings.push(finding(
+                Rule::RawCommandAuthoring,
+                path.display().to_string(),
+                format!(
+                    "durable reconcile must not expose raw command authoring token `{token}`; accept generated typed specs"
+                ),
             ));
         }
     }
@@ -322,11 +338,12 @@ mod tests {
         let findings = scan_scheduler_content(
             Path::new("crates/eventexec/src/reconcile.rs"),
             r#"
-            pub struct StableDispatchKey;
             pub struct ReviewedCommand;
+            fn from_spec<C: generated::command::TypedCommandSpec>() {}
             impl AttemptScope {
                 async fn record_action_and_enqueue_command(&self) {}
             }
+            pub struct StableDispatchKey;
             fn bad(emitter: DynOutboxEmitter, publisher: Publisher) {
                 publisher.publish(msg);
                 emitter.emit(entry, env);
@@ -343,8 +360,8 @@ mod tests {
         let scheduler_findings = scan_scheduler_content(
             Path::new("crates/eventexec/src/reconcile.rs"),
             r#"
-            pub struct StableDispatchKey(String);
             pub struct ReviewedCommand { private: () }
+            fn from_spec<C: generated::command::TypedCommandSpec>() {}
             impl AttemptScope {
                 async fn record_action_and_enqueue_command(&self) {}
             }

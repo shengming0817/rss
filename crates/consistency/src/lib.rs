@@ -37,10 +37,9 @@ pub mod saga;
 pub mod tx_retry;
 
 pub use command_journal::{
-    CommandAttempt, CommandAttemptError, CommandErrorSummary, CommandId, CommandIdempotencyKey,
-    CommandJournalOutcome, CommandJournalRecord, CommandJournalStatus,
-    CommandJournalTerminalSummary, CommandJournalValueError, CommandRequestFingerprint,
-    CommandResultSummary,
+    CommandAttempt, CommandAttemptError, CommandErrorSummary, CommandIdempotencyKey,
+    CommandJournalOutcome, CommandJournalStatus, CommandJournalTerminalSummary,
+    CommandJournalValueError, CommandRequestFingerprint, CommandResultSummary,
 };
 pub use error::{EngineError, EngineErrorKind};
 pub use idempotency::{
@@ -52,10 +51,11 @@ pub use inbox::{
     InboxReceiptContextError, InboxState, InboxStatus, InboxStatusError, InboxStore,
 };
 pub use outbox::{
-    BacklogMetricSample, BacklogSample, Disposition, Entry, HandleResult, OutboxBacklog,
-    OutboxContractId, OutboxContractIdError, OutboxMetricSubject, OutboxPayload, OutboxRelay,
-    OutboxSource, PartitionKey, PartitionKeyError, PendingEntry, PermanentError,
-    PermanentErrorKind, RetentionSweeper, Topic, TopicError,
+    BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
+    HandleResult, OutboxBacklog, OutboxContractId, OutboxContractIdError, OutboxMetricSubject,
+    OutboxPayload, OutboxRelay, OutboxSource, PartitionKey, PartitionKeyError, PendingEntry,
+    PermanentError, PermanentErrorKind, RetentionSweeper, StoredOutboxEntry,
+    StoredOutboxEntryError, StoredOutboxTopic, is_canonical_topic_name,
 };
 pub use projection::{
     Lsn, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionBatchLimit,

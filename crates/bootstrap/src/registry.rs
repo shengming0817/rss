@@ -9,8 +9,6 @@
 //! [`Domain::init`]: crate::domain::Domain::init
 
 use crate::domain::KernelError;
-use diport::{Message, RedactedSource};
-use futures::future::BoxFuture;
 use httpserve::{Listener, ListenerRouter, UnfinalizedRoutes};
 use primitives::ListenerKind;
 
@@ -36,32 +34,29 @@ pub(crate) struct RouteGroupDecl {
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
 ///
-/// contract_id、topic、consumer domain、consumer group、handler 五元组；经 [`Registry::drain_subscribers`]
+/// contract_id、topic、consumer domain、consumer group 四元组；经 [`Registry::drain_subscribers`]
 /// 转为 [`SubscriberBinding`] 交组合根接 eventexec 分发驱动。
 pub(crate) struct SubscriberDecl {
     pub(crate) contract_id: &'static str,
     pub(crate) topic: &'static str,
     pub(crate) consumer: &'static str,
     pub(crate) group: consistency::ConsumerGroup,
-    pub(crate) handler: Box<dyn SubscriberHandler>,
 }
 
 /// finalize 后交组合根的订阅绑定（从 [`SubscriberDecl`] 展开）。
 ///
-/// 组合根据此把 handler 接到 eventexec 分发驱动：`topic` 用于 broker 订阅；
+/// 组合根据此校验 generated topology identity：`topic` 用于 broker 订阅；
 /// `consumer` 用于 ConsumerMeta/DLX/metrics 归因；`group` 传 ConsumerBase；`contract_id` 提供契约来源（审计/追踪）；
-/// `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
+/// durable 执行由组合根唯一的 `ConsumerTx` registry 提供，不在声明层携带第二套 handler。
 pub struct SubscriberBinding {
     /// 契约 ID（对应 `generated` 中的 `CONTRACT_ID` 常量）。
     pub contract_id: &'static str,
     /// broker topic（对应 `generated` 中的 `TOPIC` 常量）。
     pub topic: &'static str,
-    /// 消费者域 DomainId（对应 `generated` 中 `SubscriptionSpec::consumer`）。
+    /// 消费者域 DomainId（对应 generated `EventSpec::subscriptions()` 中的 typed consumer）。
     pub consumer: &'static str,
     /// 消费者组（稳定标识，幂等去重 PK 的第二维度）。
     pub group: consistency::ConsumerGroup,
-    /// bootstrap-local 擦除 handler（由组合根 adapt 为 `eventexec::HandlerFn`）。
-    pub handler: Box<dyn SubscriberHandler>,
 }
 
 /// 健康探针声明（由 [`Registry::probe`] 收集）。
@@ -105,140 +100,6 @@ impl HealthReporter {
     pub fn probe_count(&self) -> usize {
         self.probes.len()
     }
-}
-
-/// bootstrap-local subscriber handler 擦除接缝。
-///
-/// 不引 `eventexec`（兄弟服务 crate 禁依赖）：handler 消费 [`diport::Message`]（DI-infra，服务可下行
-/// 依赖），返回 [`BoxFuture`]（手写 box——bootstrap 不用 dynosaur，dynosaur 收敛于 `diport`）。组合根
-/// （`journeys`）把本 handler 适配成 `eventexec::HandlerFn`（`Ok`→Ack / `Err`→Nack）接到 eventexec 分发
-/// 驱动——既证 subscriber 声明流到分发闭环，又不在 bootstrap↔eventexec 间建兄弟服务依赖。
-///
-/// RW-G1 追踪弹完成 G0 刻意桩住的 handler 调用接缝（freeze→tracer 序列本意）；真实 handler 注册的
-/// 服务层 finalize 驱动（替代组合根手工 adapt）留 W。
-pub trait SubscriberHandler: Send + Sync {
-    /// 消费一条订阅消息。
-    ///
-    /// 返回 future 须 `'static`（不借 `&self`）——实现者把所需依赖（如 `Arc<DynAuditSink>`）clone 进
-    /// future。`Ok` ⇒ 驱动侧 Ack；`Err` ⇒ Nack（驱动按 [`crate`] 消费方的 `Disposition` 映射收口）。
-    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>>;
-}
-
-/// subscriber handler 失败的处置类别——决定 ConsumerBase 是有界重试还是直接 DLX。
-///
-/// 类型层杜绝「瞬态失败被永久 Reject、绕过 ConsumerBase requeue 预算」（review #274 F2/C2）：handler 须经
-/// [`SubscriberHandlerError::permanent`] / [`SubscriberHandlerError::transient`] 二选一显式声明失败语义，
-/// 由 [`adapt_subscriber_handler`] 穷尽 `match` 映射到 [`consistency::HandleResult`]。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscriberErrorDisposition {
-    /// 永久失败（解码 / 校验非法等，重试无意义）→ 直接 DLX（`reject`）。
-    Permanent,
-    /// 瞬态失败（存储 / append 等可恢复）→ ConsumerBase 有界重试预算（`requeue`）。
-    Transient,
-}
-
-/// subscriber handler 处理失败（携 [`SubscriberErrorDisposition`] 决定重试 vs DLX）。
-///
-/// PII 边界（与 `diport` 各 port error 同范式）：`Display` 仅安全摘要常量；原始错误经
-/// [`SubscriberHandlerError::permanent`] / [`SubscriberHandlerError::transient`] 包成
-/// [`std::error::Error::source`] 内部保留，不进默认日志。
-#[derive(Debug, thiserror::Error)]
-#[error("subscriber handler failed")]
-pub struct SubscriberHandlerError {
-    disposition: SubscriberErrorDisposition,
-    #[source]
-    source: RedactedSource,
-}
-
-impl SubscriberHandlerError {
-    /// 永久失败（重试无意义，直接 DLX）。原始错误仅作 internal source 保留（不进 `Display`）。
-    pub fn permanent<E>(source: E) -> Self
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        Self {
-            disposition: SubscriberErrorDisposition::Permanent,
-            source: RedactedSource::new(source),
-        }
-    }
-
-    /// 瞬态失败（可恢复，ConsumerBase 有界重试）。原始错误仅作 internal source 保留（不进 `Display`）。
-    pub fn transient<E>(source: E) -> Self
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        Self {
-            disposition: SubscriberErrorDisposition::Transient,
-            source: RedactedSource::new(source),
-        }
-    }
-
-    /// 失败处置类别（[`adapt_subscriber_handler`] 据此映射 disposition）。
-    pub fn disposition(&self) -> SubscriberErrorDisposition {
-        self.disposition
-    }
-}
-
-/// 已适配的 consumer handler：`run_consumer` / `run_consumer_ackable` 的 handler 形态
-/// （`Fn(Message) -> BoxFuture<'static, consistency::HandleResult>`）。
-///
-/// 由 [`adapt_subscriber_handler`] 从 bootstrap-local [`SubscriberHandler`] 适配产出，供组合根
-/// （`journeys` / `bins`）接 `eventexec` 消费驱动——既证 subscriber 声明流到分发闭环，又不在
-/// bootstrap↔eventexec 间建兄弟服务依赖（返回 `consistency::HandleResult`，非 `eventexec` 类型）。
-///
-/// `Box<dyn Fn>` 直接 impl `Fn`（std blanket impl），无需调用方桥接即可传给 `eventexec::spawn_consumer`
-/// 的 `H: Fn` 约束（`Arc<dyn Fn>` 不 impl `Fn`，需手写桥——Box 消除该桥）。
-pub type ConsumerHandlerFn =
-    Box<dyn Fn(Message) -> BoxFuture<'static, consistency::HandleResult> + Send + Sync>;
-
-/// 把 bootstrap-local [`SubscriberHandler`] 适配成 consumer 驱动的 [`ConsumerHandlerFn`]。
-///
-/// 映射（按 [`SubscriberErrorDisposition`] 穷尽分流，review #274 F2/C2）：
-/// - `Ok(())` → [`consistency::HandleResult::ack`]。
-/// - `Err(Transient)` → [`consistency::HandleResult::requeue`]——可恢复失败（存储 / append 等）走
-///   ConsumerBase 有界重试预算，**不**首投即 DLX。
-/// - `Err(Permanent)` → [`consistency::HandleResult::reject`]——解码 / 校验非法不可重试，由 ConsumerBase
-///   收口到 DLX。
-///
-/// 返回 `Box<dyn Fn>`，直接满足 `eventexec::spawn_consumer` / `spawn_consumer_ackable` 的
-/// `H: Fn` 约束，无需调用方额外桥接。
-///
-/// # 组合根接线示例（3 步）
-///
-/// ```ignore
-/// // 1. 先订阅得 stream（subscribe-at-callsite，保证先于发布）。
-/// let stream = bus.subscriber().subscribe(Topic::new(topic), token.clone()).await?;
-/// // 2. adapt handler。
-/// let handler_fn = bootstrap::adapt_subscriber_handler(binding.handler);
-/// // 3. spawn worker + 注册关闭。
-/// let worker = eventexec::spawn_consumer(name, stream, idem, dlx, meta, handler_fn, token, health);
-/// stack.register_detached(diport::DynManagedResource::new_box(worker));
-/// ```
-pub fn adapt_subscriber_handler(handler: Box<dyn SubscriberHandler>) -> ConsumerHandlerFn {
-    // 内层保留 Arc：闭包多次调用（Fn，非 FnOnce），每次需 clone handler 进 async block。
-    let handler: std::sync::Arc<dyn SubscriberHandler> = std::sync::Arc::from(handler);
-    Box::new(move |message: Message| {
-        let handler = handler.clone();
-        Box::pin(async move {
-            match handler.handle(message).await {
-                Ok(()) => consistency::HandleResult::ack(),
-                Err(e) => match e.disposition() {
-                    SubscriberErrorDisposition::Transient => {
-                        tracing::warn!(error = %secure::redact_error(&e), "consumer: subscriber handler transient failure, requeueing");
-                        consistency::HandleResult::requeue(consistency::EngineError::new(
-                            consistency::EngineErrorKind::Transient,
-                        ))
-                    }
-                    SubscriberErrorDisposition::Permanent => {
-                        tracing::warn!(error = %secure::redact_error(&e), "consumer: subscriber handler permanent failure, rejecting (DLX)");
-                        consistency::HandleResult::reject(consistency::PermanentError::new(
-                            consistency::PermanentErrorKind::Permanent,
-                        ))
-                    }
-                },
-            }
-        }) as BoxFuture<'static, consistency::HandleResult>
-    })
 }
 
 /// bootstrap-local 健康探针擦除接缝。
@@ -319,18 +180,18 @@ impl Registry {
         Ok(())
     }
 
-    /// 声明事件订阅（ContractId + topic + ConsumerGroup + handler 四元组绑定）。
+    /// 声明事件订阅（generated topology identity 四元组）。
     ///
     /// - `contract_id`：契约 ID，取自 `generated::event::<domain_v1>::CONTRACT_ID`。
     /// - `topic`：broker routing key，取自 `generated::event::<domain_v1>::TOPIC`。
-    /// - `consumer`：消费者域 DomainId，取自 `generated::event::*::SUBSCRIPTIONS[*].consumer`；
+    /// - `consumer`：消费者域 DomainId，取自 generated event `SPEC.subscriptions()` accessor；
     ///   用于 DLX / metrics / health 归因，不得从 topic owner 反推。
     /// - `group`：消费者组（[`consistency::ConsumerGroup`]），幂等去重 PK 的第二维度；
     ///   取自消费域 const，经 `ConsumerGroup::parse(...)` 构造——失败须冒泡为 [`KernelError::Subscriber`]，
     ///   不得在 init 内 `unwrap`/`expect`。
-    /// - `handler`：bootstrap-local 擦除对象（[`SubscriberHandler`]）。
     ///
-    /// 组合根 finalize 经 [`Registry::drain_subscribers`] 取出 [`SubscriberBinding`] 接 eventexec 分发驱动。
+    /// 组合根 finalize 经 [`Registry::drain_subscribers`] 取出 [`SubscriberBinding`] 校验 generated topology，
+    /// durable handler 唯一由 `ConsumerTx` registry 派发。
     /// DomainId = 注册域，由注册时机隐式记录（不作为参数，避免与 contract owner 语义冲突）。
     pub fn subscriber(
         &mut self,
@@ -338,14 +199,12 @@ impl Registry {
         topic: &'static str,
         consumer: &'static str,
         group: consistency::ConsumerGroup,
-        handler: Box<dyn SubscriberHandler>,
     ) -> Result<(), KernelError> {
         self.subscribers.push(SubscriberDecl {
             contract_id,
             topic,
             consumer,
             group,
-            handler,
         });
         Ok(())
     }
@@ -486,14 +345,13 @@ impl Registry {
         Ok(by_listener)
     }
 
-    /// 取出订阅绑定（contract_id + topic + consumer + group + handler），交组合根接 eventexec 分发驱动。
+    /// 取出订阅声明 identity（contract_id + topic + consumer + group），交组合根校验 generated topology。
     ///
     /// 排空 `subscribers`（`&mut self`，与 [`readyz_report`](Self::readyz_report) /
     /// [`finalize_routes`](Self::finalize_routes) 不争用消费权；消费顺序由组合根定）。
     /// 幂等 drain——`subscribers` 排空后再次调用返回空 `Vec`（非错误）。
     /// 返回 [`SubscriberBinding`] 列表；组合根据 `topic` 订阅 broker，据 `consumer` 构造 ConsumerMeta，
-    /// 据 `group` 接 ConsumerBase，
-    /// 据 `handler` 经 `adapt` 转为 `eventexec::HandlerFn`。
+    /// 据 `group` 接 ConsumerBase；执行 handler 唯一来自 `ConsumerTx` registry。
     pub fn drain_subscribers(&mut self) -> Vec<SubscriberBinding> {
         std::mem::take(&mut self.subscribers)
             .into_iter()
@@ -502,7 +360,6 @@ impl Registry {
                 topic: d.topic,
                 consumer: d.consumer,
                 group: d.group,
-                handler: d.handler,
             })
             .collect()
     }
@@ -569,21 +426,10 @@ mod smoke {
 mod collect {
     //! Registry 声明收集 + 取出（RW-G1 已写实）：route_group / subscriber 收集，
     //! route_groups() / drain_subscribers() 取出，compose 跨域聚合。
-    use super::{Message, Registry, SubscriberHandler, SubscriberHandlerError};
+    use super::Registry;
     use crate::domain::{Domain, KernelError, compose};
-    use futures::future::BoxFuture;
     use httpserve::Primary;
     use primitives::ListenerKind;
-
-    struct OkHandler;
-    impl SubscriberHandler for OkHandler {
-        fn handle(
-            &self,
-            _message: Message,
-        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
 
     // 测试断言用 expect：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
     #[test]
@@ -599,7 +445,6 @@ mod collect {
             "identity.session-created",
             "audit",
             group,
-            Box::new(OkHandler),
         )
         .expect("subscriber declared");
 
@@ -623,13 +468,7 @@ mod collect {
             let group = consistency::ConsumerGroup::parse("domain-a.topic-a")
                 .map_err(|_| KernelError::Subscriber)?;
             reg.route_group::<Primary>("/api/v1/a", Ok)?;
-            reg.subscriber(
-                "contract.topic-a",
-                "topic.a",
-                "domain-a",
-                group,
-                Box::new(OkHandler),
-            )?;
+            reg.subscriber("contract.topic-a", "topic.a", "domain-a", group)?;
             Ok(())
         }
     }
@@ -638,13 +477,7 @@ mod collect {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
             let group = consistency::ConsumerGroup::parse("domain-b.topic-b")
                 .map_err(|_| KernelError::Subscriber)?;
-            reg.subscriber(
-                "contract.topic-b",
-                "topic.b",
-                "domain-b",
-                group,
-                Box::new(OkHandler),
-            )?;
+            reg.subscriber("contract.topic-b", "topic.b", "domain-b", group)?;
             Ok(())
         }
     }
@@ -728,30 +561,11 @@ mod finalize {
     #[test]
     #[allow(clippy::expect_used)]
     fn drain_subscribers_extracts_bindings_and_clears() {
-        use super::{Message, SubscriberHandler, SubscriberHandlerError};
-        use futures::future::BoxFuture;
-
-        struct StubHandler;
-        impl SubscriberHandler for StubHandler {
-            fn handle(
-                &self,
-                _message: Message,
-            ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-                Box::pin(async { Ok(()) })
-            }
-        }
-
         let group =
             consistency::ConsumerGroup::parse("test.drain-group").expect("valid consumer group");
         let mut reg = Registry::new();
-        reg.subscriber(
-            "test.drain-topic",
-            "drain.topic",
-            "test-consumer",
-            group,
-            Box::new(StubHandler),
-        )
-        .expect("subscriber declared");
+        reg.subscriber("test.drain-topic", "drain.topic", "test-consumer", group)
+            .expect("subscriber declared");
 
         let bindings = reg.drain_subscribers();
         assert_eq!(bindings.len(), 1, "drain 取出一个绑定");
@@ -1205,106 +1019,5 @@ mod finalize {
             .await
             .expect("oneshot ok");
         assert_eq!(leaked_internal.status(), StatusCode::NOT_FOUND);
-    }
-}
-
-#[cfg(test)]
-mod handler_adapt {
-    //! `adapt_subscriber_handler` 适配器：Ok→Ack / Err(Permanent)→Reject / Err(Transient)→Requeue 映射验证
-    //! （F2/C2：瞬态失败走 ConsumerBase 有界重试预算，不首投即 DLX）。
-    use super::{Message, SubscriberHandler, SubscriberHandlerError, adapt_subscriber_handler};
-    use futures::future::BoxFuture;
-
-    struct OkHandler;
-    impl SubscriberHandler for OkHandler {
-        fn handle(
-            &self,
-            _message: Message,
-        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
-
-    struct PermanentErrHandler;
-    impl SubscriberHandler for PermanentErrHandler {
-        fn handle(
-            &self,
-            _message: Message,
-        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-            Box::pin(async {
-                Err(SubscriberHandlerError::permanent(std::io::Error::other(
-                    "boom",
-                )))
-            })
-        }
-    }
-
-    struct TransientErrHandler;
-    impl SubscriberHandler for TransientErrHandler {
-        fn handle(
-            &self,
-            _message: Message,
-        ) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-            Box::pin(async {
-                Err(SubscriberHandlerError::transient(std::io::Error::other(
-                    "io",
-                )))
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn adapt_maps_ok_to_ack() {
-        let handler_fn = adapt_subscriber_handler(Box::new(OkHandler));
-        let message = diport::Message::new("test-ok", vec![]);
-        let result = handler_fn(message).await;
-        assert_eq!(result.disposition(), consistency::Disposition::Ack);
-        assert_eq!(result.error_summary(), None);
-    }
-
-    #[tokio::test]
-    async fn adapt_maps_permanent_to_reject() {
-        let handler_fn = adapt_subscriber_handler(Box::new(PermanentErrHandler));
-        let message = diport::Message::new("test-err", vec![]);
-        let result = handler_fn(message).await;
-        assert_eq!(result.disposition(), consistency::Disposition::Reject);
-        // anti-vacuity：reject 携 permanent error 摘要，与 ack 的 None 不同。
-        assert_eq!(result.error_summary(), Some("permanent error"));
-        assert_ne!(result.error_summary(), None);
-    }
-
-    #[tokio::test]
-    async fn adapt_maps_transient_to_requeue() {
-        // F2/C2：瞬态失败 → Requeue（ConsumerBase 有界重试），**非** Reject（不首投即 DLX）。
-        let handler_fn = adapt_subscriber_handler(Box::new(TransientErrHandler));
-        let message = diport::Message::new("test-transient", vec![]);
-        let result = handler_fn(message).await;
-        assert_eq!(result.disposition(), consistency::Disposition::Requeue);
-        assert_ne!(
-            result.disposition(),
-            consistency::Disposition::Reject,
-            "瞬态失败不得绕过 requeue 预算被永久 Reject"
-        );
-        assert_eq!(result.error_summary(), Some("transient engine error"));
-    }
-
-    #[test]
-    fn subscriber_handler_error_redacts_source_debug_and_chain() {
-        let err =
-            SubscriberHandlerError::permanent(std::io::Error::other("postgres://user:hunter2@db"));
-        assert_eq!(err.to_string(), "subscriber handler failed");
-        let dbg = format!("{err:?}");
-        assert!(!dbg.contains("hunter2"), "Debug 泄漏 source: {dbg}");
-        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
-        let source = std::error::Error::source(&err);
-        assert!(source.is_some(), "first source is RedactedSource");
-        let Some(source) = source else {
-            return;
-        };
-        assert_eq!(source.to_string(), "<redacted>");
-        assert!(
-            std::error::Error::source(source).is_none(),
-            "source chain must stop at RedactedSource"
-        );
     }
 }

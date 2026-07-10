@@ -14,6 +14,10 @@ fn reconcile_ui() {
     t.pass("tests/ui/reconcile_builder_pass.rs");
     // durable scheduler + command seam API 齐全 → 编译通过。
     t.pass("tests/ui/reconcile_durable_scheduler_pass.rs");
+    // raw topic/contract/payload authoring API 不得从 eventexec 对外可达。
+    t.compile_fail("tests/ui/reconcile_raw_command_authoring_fail.rs");
+    // generated typed spec trait is sealed; downstream cannot forge routing/request pairings.
+    t.compile_fail("tests/ui/reconcile_typed_command_spec_impl_fail.rs");
     // 漏 tenancy（第二参）→ 编译错。
     t.compile_fail("tests/ui/reconcile_missing_tenancy_fail.rs");
     // 漏 trigger（第三参）→ 编译错。
@@ -40,4 +44,13 @@ fn typed_saga_ui() {
     t.compile_fail("tests/ui/typed_saga_missing_compensation_fail.rs");
     // builder 必须接收 generated SagaContractBinding；漏参即编译错。
     t.compile_fail("tests/ui/typed_saga_missing_spec_fail.rs");
+}
+
+#[test]
+fn command_authoring_is_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/command_spec_constructor_private_fail.rs");
+    t.compile_fail("tests/ui/reviewed_command_constructors_private_fail.rs");
+    t.compile_fail("tests/ui/command_wrong_request_fail.rs");
+    t.compile_fail("tests/ui/command_wrong_policy_fail.rs");
 }

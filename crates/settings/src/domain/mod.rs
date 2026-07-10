@@ -148,6 +148,97 @@ pub struct ConfigEntry {
     version: ConfigVersion,
 }
 
+/// 配置仓储当前版本头；显式区分活跃值与删除墓碑，避免调用方把 tombstone 当作不存在并重用版本号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigHead {
+    /// 当前最高版本是活跃配置。
+    Active(u64),
+    /// 当前最高版本是删除墓碑。
+    Deleted(u64),
+}
+
+impl ConfigHead {
+    /// 当前最高版本号（无论活跃或已删除）。
+    pub fn version(self) -> u64 {
+        match self {
+            Self::Active(version) | Self::Deleted(version) => version,
+        }
+    }
+}
+
+/// 配置删除墓碑；不携带配置值，且版本必须由应用层从 [`ConfigHead`] 单调推进。
+#[derive(Debug, Clone)]
+pub struct ConfigTombstone {
+    key: SettingKey,
+    tenant: vocab::TenantId,
+    version: ConfigVersion,
+}
+
+impl ConfigTombstone {
+    pub(crate) fn new(key: SettingKey, tenant: vocab::TenantId, version: ConfigVersion) -> Self {
+        Self {
+            key,
+            tenant,
+            version,
+        }
+    }
+
+    /// 供持久化 adapter / conformance fixture 重建 typed tombstone。
+    pub fn hydrate(key: SettingKey, tenant: vocab::TenantId, version: u64) -> Self {
+        Self::new(key, tenant, ConfigVersion::new(version))
+    }
+
+    /// 删除目标 key。
+    pub fn key(&self) -> &SettingKey {
+        &self.key
+    }
+
+    /// 删除目标租户。
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// 墓碑版本。
+    pub fn version(&self) -> u64 {
+        self.version.get()
+    }
+}
+
+/// 唯一配置写模型；新增/回滚与删除都必须经同一个 co-transaction UoW。
+#[derive(Debug, Clone)]
+pub enum ConfigMutation {
+    /// 写入活跃配置版本。
+    Put(ConfigEntry),
+    /// 写入删除墓碑。
+    Delete(ConfigTombstone),
+}
+
+impl ConfigMutation {
+    /// mutation 所属租户。
+    pub fn tenant(&self) -> vocab::TenantId {
+        match self {
+            Self::Put(entry) => entry.tenant(),
+            Self::Delete(tombstone) => tombstone.tenant(),
+        }
+    }
+
+    /// mutation 的 key。
+    pub fn key(&self) -> &SettingKey {
+        match self {
+            Self::Put(entry) => entry.key(),
+            Self::Delete(tombstone) => tombstone.key(),
+        }
+    }
+
+    /// mutation 版本。
+    pub fn version(&self) -> u64 {
+        match self {
+            Self::Put(entry) => entry.version(),
+            Self::Delete(tombstone) => tombstone.version(),
+        }
+    }
+}
+
 impl ConfigEntry {
     /// 构造配置条目（构造器必填参数；缺失即编译错误）。`pub(crate)` funnel：外部可收发不可伪造。
     pub(crate) fn new(

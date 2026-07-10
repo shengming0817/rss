@@ -58,6 +58,9 @@ RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量
 （clippy lint 文档、cargo-deny 注释、治理 `#[test]` 模块 rustdoc）、ADR 或代码注释中。
 规则反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生；文档只能薄引用，
 不得成为 rule inventory 的事实源。
+持久化 funnel 的派生证明见
+[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../../../docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
+其内容只由 `cargo xtask archrules matrix --write` 生成。
 
 ## Hard 范本
 

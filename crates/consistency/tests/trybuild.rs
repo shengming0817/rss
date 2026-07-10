@@ -18,3 +18,9 @@ fn reconcile_model_public_api_compiles() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/reconcile_model_public_api_pass.rs");
 }
+
+#[test]
+fn legacy_outbox_authoring_api_is_absent() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/legacy_outbox_authoring_api_fail.rs");
+}

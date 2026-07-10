@@ -9,4 +9,9 @@ fn tx_capability_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/tx_capability_external_construct_fail.rs");
     t.compile_fail("tests/ui/tx_capability_external_mint_fail.rs");
+    t.compile_fail("tests/ui/pg_store_private_fail.rs");
+    t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
+    t.compile_fail("tests/ui/pg_projection_replay_fields_private_fail.rs");
+    t.compile_fail("tests/ui/pg_projection_replay_capability_required_fail.rs");
+    t.pass("tests/ui/pg_public_funnels_pass.rs");
 }

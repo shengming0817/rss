@@ -1,219 +1,579 @@
-//! 命令分发 runtime —— sealed funnel：命令 topic outbox emit + 幂等消费（P12，#1124）。
+//! 命令分发 runtime —— reviewed capability + 幂等消费（P12，#1124）。
 //!
-//! **producer**：[`emit_async`] 是命令 topic [`Entry`] 的**唯一** sanctioned 构造点（seal [`DispatchId`] →
-//! [`Entry::new`] → 注入的 [`DynOutboxEmitter`]）。generated `<cmd>::emit_async` wrapper 经组合根 bridge
-//! （impl `generated::command::CommandEmit`）委托至此；业务**不直调**本函数（无裸 emit 出口，
-//! COMMAND-SYMMETRY-01 Medium 守）。consistencyLevel = OutboxFact（emit-only 单事实，无 co-tx）。
+//! **producer**：generated wrapper 只能调用 [`DirectCommandDispatcher`] 或
+//! [`JournaledCommandDispatcher`]。两者在本 crate 内构造 reviewed DTO，再交 provider store；事件
+//! `OutboxEmitter` 的 [`consistency::EventTopic`] 会拒绝 command namespace，因此不存在 raw command
+//! event authoring 旁路。
 //!
 //! **consumer**：[`register_command_handler`] 复用 [`run_consumer`] + [`InboxStore`] claimer 两阶段
-//! 去重（同 DispatchId 二次投递 → `Message.id` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
+//! 去重（同 canonical command id 二次投递 → `Message.id` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
 //! claimer 拒）；零新去重原语。
 //!
-//! INVARIANT: COMMAND-DISPATCHID-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— [`DispatchId`] 包私有 [`IdemKey`]、无 public 裸构造（仅
-//! [`DispatchId::from_idempotency_key`] funnel），业务不可把任意裸 `IdemKey` 当 DispatchId 伪造。
+//! INVARIANT: COMMAND-ALIAS-PROBE-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "alias-probe-type" }—— raw business key 只在本模块内进入 mandatory keyed blind-index keyring；
+//! provider 只能收到私有构造的 [`CommandAliasProbeSet`]，无法取得 raw key 或伪造 alias probes。
 //!
 //! ref: debezium outbox SMT（producer 业务事实 → outbox 行 durable 落库）
 //! ref: eventuate-tram-core io.eventuate.tram.consumer.common.DuplicateMessageDetector@master
-//!      （message-id 作幂等键，对应命令 DispatchId 的 consumer 侧 claimer）
+//!      （message-id 作幂等键，对应 canonical command id 的 consumer 侧 claimer）
 
 use std::sync::Arc;
 
-use consistency::idempotency::IdemKey;
-use consistency::outbox::{Entry, OutboxPayload, PermanentError, PermanentErrorKind, Topic};
+use consistency::outbox::{EventTopic, EventTopicError, PermanentError, PermanentErrorKind};
 use consistency::{
-    CommandId, CommandIdempotencyKey, CommandJournalOutcome, CommandJournalRecord,
-    CommandJournalValueError, CommandRequestFingerprint, CommandResultSummary, HandleResult,
-    InboxStore,
+    CommandIdempotencyKey, CommandJournalOutcome, CommandRequestFingerprint, CommandResultSummary,
+    HandleResult, InboxStore,
 };
 use diport::dead_letter_store::DynDeadLetterStore;
 use diport::{
-    DynOutboxEmitter, EnvelopeSubjectId, Message, MessageStream, OutboxActor, OutboxEmitError,
-    OutboxEmitter, OutboxEnvelopeParts, RedactedSource,
+    EnvelopeSubjectId, Message, MessageStream, OutboxActor, OutboxEnvelopeParts, RedactedSource,
 };
+use secure::{BlindIndex, BlindIndexKey, FilterBits, IndexScope};
 use sha2::{Digest as _, Sha256};
 
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer};
 use crate::tenant_authority::TenantAuthority;
 
-/// 命令幂等 key（DispatchId）—— producer mint、consumer claim 同源。包私有 [`IdemKey`]；无 public 裸构造，
-/// 仅经 [`from_idempotency_key`](Self::from_idempotency_key) funnel（业务无法把任意裸 `IdemKey` 当 DispatchId
-/// 伪造绕 generated wrapper）。auto-dispatch 由组合根 bridge 传 `Uuid::new_v4().to_string()`（同 identity 范式）。
-///
-/// INVARIANT: COMMAND-DISPATCHID-SEAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchId(IdemKey);
+/// One independently keyed command-alias generation.
+pub struct CommandAliasKey {
+    key_id: String,
+    key: BlindIndexKey,
+}
 
-impl DispatchId {
-    /// 从稳定幂等 key 构造（拒空，fail-closed）。auto 场景由组合根传 fresh uuid 字符串。
-    pub fn from_idempotency_key(raw: &str) -> Result<Self, CommandEmitError> {
-        IdemKey::parse(raw)
-            .map(Self)
-            .map_err(|_| CommandEmitError::DispatchId)
-    }
-
-    /// 解封到底层 outbox 幂等 key（仅 runtime funnel 可达；consumer 侧 claimer 以同一 `IdemKey` try_claim）。
-    ///
-    /// INVARIANT: COMMAND-DISPATCHID-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 此方法 `pub(crate)` 封闭，外部 crate 无法取得裸
-    /// `IdemKey`（只有 [`emit_async`] funnel 可调用）；与 struct / module 级声明同源。
-    pub(crate) fn into_idem_key(self) -> IdemKey {
-        self.0
+impl std::fmt::Debug for CommandAliasKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommandAliasKey(<redacted>)")
     }
 }
 
-/// 命令 emit 失败。`message` 为 const literal（PII 边界，同 [`OutboxEmitError`] 范式：不拼 runtime 数据）。
+impl CommandAliasKey {
+    /// Build a key generation from a non-secret identifier and at least 256 bits of key material.
+    pub fn new(
+        key_id: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+    ) -> Result<Self, CommandIdempotencyKeyringError> {
+        let key_id = key_id.into();
+        if key_id.is_empty()
+            || key_id.len() > 64
+            || !key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(CommandIdempotencyKeyringError::InvalidKeyId);
+        }
+        let key = BlindIndexKey::from_bytes(key)
+            .map_err(|_| CommandIdempotencyKeyringError::InvalidKeyMaterial)?;
+        Ok(Self { key_id, key })
+    }
+}
+
+/// Command alias keyring configuration failure.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommandIdempotencyKeyringError {
+    /// Key identifiers must be short canonical labels.
+    #[error("command idempotency key id is invalid")]
+    InvalidKeyId,
+    /// Key material must contain at least 256 bits.
+    #[error("command idempotency key material is invalid")]
+    InvalidKeyMaterial,
+    /// Current and previous generations must have unique identifiers.
+    #[error("command idempotency key ids must be unique")]
+    DuplicateKeyId,
+}
+
+/// Required current key plus the explicit lookup window used during key rotation.
+pub struct CommandIdempotencyKeyring {
+    current: CommandAliasKey,
+    previous: Vec<CommandAliasKey>,
+}
+
+impl std::fmt::Debug for CommandIdempotencyKeyring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommandIdempotencyKeyring(<redacted>)")
+    }
+}
+
+impl CommandIdempotencyKeyring {
+    /// Build a fail-closed rotation window. Key identifiers may not repeat.
+    pub fn new(
+        current: CommandAliasKey,
+        previous: Vec<CommandAliasKey>,
+    ) -> Result<Self, CommandIdempotencyKeyringError> {
+        let mut ids = std::collections::BTreeSet::new();
+        if !ids.insert(current.key_id.as_str())
+            || previous.iter().any(|key| !ids.insert(key.key_id.as_str()))
+        {
+            return Err(CommandIdempotencyKeyringError::DuplicateKeyId);
+        }
+        Ok(Self { current, previous })
+    }
+
+    fn probes(
+        &self,
+        tenant: vocab::TenantId,
+        topic: &str,
+        raw: &CommandIdempotencyKey,
+    ) -> Result<CommandAliasProbeSet, ()> {
+        let scope = IndexScope::new(tenant, topic, "idempotency_key", "command_alias_v2")
+            .map_err(|_| ())?;
+        let index = BlindIndex::new(scope, &[], FilterBits::DEFAULT);
+        let current = command_alias_probe(&index, &self.current, raw)?;
+        let previous = self
+            .previous
+            .iter()
+            .map(|key| command_alias_probe(&index, key, raw))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CommandAliasProbeSet {
+            current: Some(current),
+            previous,
+        })
+    }
+}
+
+fn command_alias_probe(
+    index: &BlindIndex<'_>,
+    key: &CommandAliasKey,
+    raw: &CommandIdempotencyKey,
+) -> Result<CommandAliasProbe, ()> {
+    let digest = index.index(&key.key, raw.as_str()).map_err(|_| ())?;
+    Ok(CommandAliasProbe {
+        key_id: key.key_id.clone(),
+        digest: digest.as_bytes().to_vec(),
+    })
+}
+
+/// One sealed keyed lookup alias. The digest is safe for equality lookup but redacted from Debug.
+pub struct CommandAliasProbe {
+    key_id: String,
+    digest: Vec<u8>,
+}
+
+impl std::fmt::Debug for CommandAliasProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommandAliasProbe(<redacted>)")
+    }
+}
+
+impl CommandAliasProbe {
+    /// Rotation key identifier.
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// Full 256-bit keyed alias digest.
+    pub fn digest(&self) -> &[u8] {
+        &self.digest
+    }
+
+    /// Consume into provider storage values.
+    pub fn into_parts(self) -> (String, Vec<u8>) {
+        (self.key_id, self.digest)
+    }
+}
+
+/// Current and previous keyed aliases for one reviewed command intent.
+pub struct CommandAliasProbeSet {
+    current: Option<CommandAliasProbe>,
+    previous: Vec<CommandAliasProbe>,
+}
+
+impl std::fmt::Debug for CommandAliasProbeSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommandAliasProbeSet(<redacted>)")
+    }
+}
+
+impl CommandAliasProbeSet {
+    const fn none() -> Self {
+        Self {
+            current: None,
+            previous: Vec::new(),
+        }
+    }
+
+    /// Current write alias, or `None` for a direct command without a business key.
+    pub fn current(&self) -> Option<&CommandAliasProbe> {
+        self.current.as_ref()
+    }
+
+    /// Previous-key lookup aliases in configured order.
+    pub fn previous(&self) -> &[CommandAliasProbe] {
+        &self.previous
+    }
+
+    /// Consume into provider-owned alias values.
+    pub fn into_parts(self) -> (Option<CommandAliasProbe>, Vec<CommandAliasProbe>) {
+        (self.current, self.previous)
+    }
+}
+
+/// Provider storage failure shared by direct and journaled command stores.
+#[derive(Debug, thiserror::Error)]
+#[error("command store operation failed")]
+pub struct CommandStoreError {
+    kind: CommandStoreErrorKind,
+    #[source]
+    source: RedactedSource,
+}
+
+/// Caller-actionable command persistence failure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommandStoreErrorKind {
+    /// The same idempotency alias names a semantically different command.
+    Conflict,
+    /// The persistence provider is temporarily unavailable.
+    Unavailable,
+    /// The provider detected an internal or invariant failure.
+    Internal,
+}
+
+impl CommandStoreError {
+    fn with_kind<E>(kind: CommandStoreErrorKind, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            kind,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    /// Build a deterministic semantic conflict.
+    pub fn conflict<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(CommandStoreErrorKind::Conflict, source)
+    }
+
+    /// Build a transient provider availability failure.
+    pub fn unavailable<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(CommandStoreErrorKind::Unavailable, source)
+    }
+
+    /// Build an invariant or unexpected internal provider failure.
+    pub fn internal<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(CommandStoreErrorKind::Internal, source)
+    }
+
+    /// Stable failure class; provider text remains redacted.
+    pub const fn kind(&self) -> CommandStoreErrorKind {
+        self.kind
+    }
+}
+
+/// Direct command dispatch failure. All messages are stable and contain no request data.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CommandEmitError {
     /// 命令 topic 非 canonical dotted（routing key 形态非法）。
     #[error("command topic is not a canonical dotted name")]
     Topic,
-    /// dispatch id 非法（空幂等 key）。
-    #[error("command dispatch id is invalid")]
-    DispatchId,
-    /// runtime 派生请求指纹失败。
+    /// Caller supplied an invalid idempotency key.
+    #[error("command idempotency key is invalid")]
+    IdempotencyKey,
+    /// Scoped actor tenant differs from the command tenant.
+    #[error("command actor tenant does not match command tenant")]
+    ActorTenant,
+    /// Typed request serialization failed.
+    #[error("command request serialization failed")]
+    Serialization,
+    /// The same scoped key was reused for a different request.
+    #[error("command idempotency conflict")]
+    Conflict,
+    /// The persistence provider is temporarily unavailable.
+    #[error("command dispatch store is unavailable")]
+    Unavailable,
+    /// Provider rejected the reviewed command with an internal failure.
+    #[error("command dispatch store failed")]
+    Store(#[source] CommandStoreError),
+}
+
+/// Journaled command dispatch failure with stable outcome classification.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CommandJournalError {
+    /// Generated command topic is not a canonical command namespace.
+    #[error("command topic is invalid")]
+    Topic,
+    /// Caller supplied an empty or invalid idempotency key.
+    #[error("command idempotency key is invalid")]
+    IdempotencyKey,
+    /// Request fingerprint derivation failed.
     #[error("command request fingerprint is invalid")]
     Fingerprint,
-    /// 底层 durable outbox 发射失败（source 已经 [`OutboxEmitError`] 脱敏）。
-    #[error("command outbox emit failed")]
-    Emit(#[source] OutboxEmitError),
+    /// Scoped actor tenant differs from the command tenant.
+    #[error("command actor tenant does not match command tenant")]
+    ActorTenant,
+    /// Typed request serialization failed.
+    #[error("command request serialization failed")]
+    Serialization,
+    /// Provider operation failed.
+    #[error("command journal store failed")]
+    Store(#[source] CommandStoreError),
+    /// The persistence provider is temporarily unavailable.
+    #[error("command journal store is unavailable")]
+    Unavailable,
+    /// An equivalent request is currently in flight.
+    #[error("command is already in flight")]
+    InFlight,
+    /// An equivalent request previously failed.
+    #[error("command previously failed")]
+    Failed,
+    /// The same scoped key was reused for a different request.
+    #[error("command idempotency conflict")]
+    Conflict,
+    /// Provider returned a completed result other than the enqueue acknowledgement.
+    #[error("command journal returned an unexpected completed result")]
+    UnexpectedCompleted,
+    /// Provider returned an outcome unknown to this runtime version.
+    #[error("command journal returned an unexpected outcome")]
+    UnexpectedOutcome,
 }
 
-/// Command journal storage failure.
-#[derive(Debug, thiserror::Error)]
-#[error("command journal operation failed")]
-pub struct CommandJournalError {
-    #[source]
-    source: RedactedSource,
+/// Successful journal dispatch classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandJournalDispatchOutcome {
+    /// This request created the journal/outbox write.
+    Recorded,
+    /// An equivalent request had already enqueued the command.
+    AlreadyEnqueued,
 }
 
-impl CommandJournalError {
-    /// Wrap a provider/storage error without exposing its Display text to callers.
-    pub fn new<E>(source: E) -> Self
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        Self {
-            source: RedactedSource::new(source),
-        }
-    }
-}
-
-impl From<CommandEmitError> for CommandJournalError {
-    fn from(source: CommandEmitError) -> Self {
-        Self::new(source)
-    }
-}
-
-impl From<CommandJournalValueError> for CommandJournalError {
-    fn from(source: CommandJournalValueError) -> Self {
-        Self::new(source)
-    }
+/// Provider-agnostic direct command store. It never accepts an event entry.
+pub trait CommandDispatchStore: Send + Sync {
+    /// Persist one reviewed direct command.
+    fn dispatch_command(
+        &self,
+        command: ReviewedCommandDispatch,
+    ) -> impl std::future::Future<Output = Result<(), CommandStoreError>> + Send;
 }
 
 /// Provider-agnostic durable command journal seam.
-#[allow(async_fn_in_trait)]
-// reason: eventexec runtime seam uses native AFIT + static dispatch, matching reconcile store.
-pub trait CommandJournalStore {
+pub trait CommandJournalStore: Send + Sync {
     /// Record command intent and enqueue its outbox command atomically in the provider.
-    async fn record_command(
+    fn record_command(
         &self,
         command: ReviewedCommandJournal,
         result_summary: CommandResultSummary,
-    ) -> Result<CommandJournalOutcome, CommandJournalError>;
+    ) -> impl std::future::Future<Output = Result<CommandJournalOutcome, CommandStoreError>> + Send;
 }
 
-/// Reviewed command journal write. Fields are private so callers must supply tenant, topic,
-/// contract, idempotency key, payload, subject and actor through the constructor.
-pub struct ReviewedCommandJournal {
-    journal: CommandJournalRecord,
-    entry: Entry,
+/// Provider-neutral reviewed command intent. Raw idempotency keys are absent by construction.
+pub struct ReviewedCommandIntent {
+    topic: &'static str,
+    payload: Vec<u8>,
+    aliases: CommandAliasProbeSet,
+    request_fingerprint: CommandRequestFingerprint,
+}
+
+impl ReviewedCommandIntent {
+    /// Validated command topic.
+    pub const fn topic(&self) -> &'static str {
+        self.topic
+    }
+
+    /// Serialized typed request payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Keyed current/previous alias probes.
+    pub const fn aliases(&self) -> &CommandAliasProbeSet {
+        &self.aliases
+    }
+
+    /// Fingerprint of command semantics, explicitly excluding the raw idempotency key.
+    pub const fn request_fingerprint(&self) -> &CommandRequestFingerprint {
+        &self.request_fingerprint
+    }
+
+    /// Consume into provider-owned values.
+    pub fn into_parts(
+        self,
+    ) -> (
+        &'static str,
+        Vec<u8>,
+        CommandAliasProbeSet,
+        CommandRequestFingerprint,
+    ) {
+        (
+            self.topic,
+            self.payload,
+            self.aliases,
+            self.request_fingerprint,
+        )
+    }
+}
+
+/// Reviewed direct command write. External crates can consume but cannot construct it.
+pub struct ReviewedCommandDispatch {
+    intent: ReviewedCommandIntent,
     envelope: OutboxEnvelopeParts,
 }
 
-impl ReviewedCommandJournal {
-    /// Build a reviewed command journal write.
-    #[allow(clippy::too_many_arguments)]
-    // reason: reviewed command write is the hard boundary that requires all authority/routing/idempotency inputs at once.
-    pub fn new(
-        idempotency_key: CommandIdempotencyKey,
-        topic: &str,
-        contract: vocab::ContractBinding,
+impl ReviewedCommandDispatch {
+    fn new(
+        spec: generated::command::CommandSpec,
         tenant: vocab::TenantId,
         payload: Vec<u8>,
         subject_id: EnvelopeSubjectId,
         actor: OutboxActor,
+        aliases: CommandAliasProbeSet,
     ) -> Result<Self, CommandEmitError> {
-        let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
-        let request_fingerprint = command_request_fingerprint(
-            tenant,
-            &parsed_topic,
-            contract,
-            &idempotency_key,
-            &payload,
-            &subject_id,
-            &actor,
-        )?;
-        let scoped_digest = scoped_command_digest(tenant, &parsed_topic, &idempotency_key);
-        let scoped_command_id = format!("command:v1:sha256:{scoped_digest}");
-        let storage_idempotency_key = format!("sha256:{scoped_digest}");
-        let command_id = CommandId::parse(scoped_command_id.as_str())
-            .map_err(|_| CommandEmitError::DispatchId)?;
-        let storage_idempotency_key = CommandIdempotencyKey::parse(storage_idempotency_key)
-            .map_err(|_| CommandEmitError::DispatchId)?;
-        let dispatch_id = DispatchId::from_idempotency_key(&scoped_command_id)?;
-        let journal = CommandJournalRecord::new(
-            tenant,
-            command_id,
-            storage_idempotency_key,
-            request_fingerprint,
-        );
-        let entry = Entry::new(
-            parsed_topic,
-            dispatch_id.into_idem_key(),
-            OutboxPayload::from_reviewed_event_bytes(payload),
-        );
-        let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id, actor);
-        Ok(Self {
-            journal,
-            entry,
-            envelope,
-        })
+        let (intent, envelope) = reviewed_intent(spec, tenant, payload, subject_id, actor, aliases)
+            .map_err(CommandEmitError::from)?;
+        Ok(Self { intent, envelope })
     }
 
-    /// Borrow the journal record.
-    pub fn journal(&self) -> &CommandJournalRecord {
-        &self.journal
+    /// Borrow the reviewed intent.
+    pub const fn intent(&self) -> &ReviewedCommandIntent {
+        &self.intent
     }
 
-    /// Borrow the outbox entry.
-    pub fn entry(&self) -> &Entry {
-        &self.entry
+    /// Borrow the reviewed envelope.
+    pub const fn envelope(&self) -> &OutboxEnvelopeParts {
+        &self.envelope
     }
 
     /// Consume into provider-owned primitives.
-    pub fn into_parts(self) -> (CommandJournalRecord, Entry, OutboxEnvelopeParts) {
-        (self.journal, self.entry, self.envelope)
+    pub fn into_parts(self) -> (ReviewedCommandIntent, OutboxEnvelopeParts) {
+        (self.intent, self.envelope)
     }
+}
+
+/// Reviewed journal command write. External crates can consume but cannot construct it.
+pub struct ReviewedCommandJournal {
+    intent: ReviewedCommandIntent,
+    envelope: OutboxEnvelopeParts,
+}
+
+impl ReviewedCommandJournal {
+    fn new(
+        spec: generated::command::CommandSpec,
+        tenant: vocab::TenantId,
+        payload: Vec<u8>,
+        subject_id: EnvelopeSubjectId,
+        actor: OutboxActor,
+        aliases: CommandAliasProbeSet,
+    ) -> Result<Self, CommandJournalError> {
+        if aliases.current().is_none() {
+            return Err(CommandJournalError::IdempotencyKey);
+        }
+        let (intent, envelope) = reviewed_intent(spec, tenant, payload, subject_id, actor, aliases)
+            .map_err(CommandJournalError::from)?;
+        Ok(Self { intent, envelope })
+    }
+
+    /// Borrow the reviewed intent.
+    pub const fn intent(&self) -> &ReviewedCommandIntent {
+        &self.intent
+    }
+
+    /// Consume into provider-owned primitives.
+    pub fn into_parts(self) -> (ReviewedCommandIntent, OutboxEnvelopeParts) {
+        (self.intent, self.envelope)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReviewedIntentError {
+    Topic,
+    Fingerprint,
+    ActorTenant,
+}
+
+impl From<ReviewedIntentError> for CommandEmitError {
+    fn from(error: ReviewedIntentError) -> Self {
+        match error {
+            ReviewedIntentError::Topic => Self::Topic,
+            ReviewedIntentError::Fingerprint => Self::Serialization,
+            ReviewedIntentError::ActorTenant => Self::ActorTenant,
+        }
+    }
+}
+
+impl From<ReviewedIntentError> for CommandJournalError {
+    fn from(error: ReviewedIntentError) -> Self {
+        match error {
+            ReviewedIntentError::Topic => Self::Topic,
+            ReviewedIntentError::Fingerprint => Self::Fingerprint,
+            ReviewedIntentError::ActorTenant => Self::ActorTenant,
+        }
+    }
+}
+
+fn reviewed_intent(
+    spec: generated::command::CommandSpec,
+    tenant: vocab::TenantId,
+    payload: Vec<u8>,
+    subject_id: EnvelopeSubjectId,
+    actor: OutboxActor,
+    aliases: CommandAliasProbeSet,
+) -> Result<(ReviewedCommandIntent, OutboxEnvelopeParts), ReviewedIntentError> {
+    validate_command_topic(spec.topic()).map_err(|()| ReviewedIntentError::Topic)?;
+    validate_actor_tenant(tenant, &actor).map_err(|()| ReviewedIntentError::ActorTenant)?;
+    let request_fingerprint = command_request_fingerprint(
+        tenant,
+        spec.topic(),
+        spec.contract(),
+        &payload,
+        &subject_id,
+        &actor,
+    )
+    .map_err(|()| ReviewedIntentError::Fingerprint)?;
+    Ok((
+        ReviewedCommandIntent {
+            topic: spec.topic(),
+            payload,
+            aliases,
+            request_fingerprint,
+        },
+        OutboxEnvelopeParts::new(spec.contract(), tenant, subject_id, actor),
+    ))
+}
+
+pub(crate) fn reviewed_keyed_intent(
+    keyring: &CommandIdempotencyKeyring,
+    spec: generated::command::CommandSpec,
+    tenant: vocab::TenantId,
+    payload: Vec<u8>,
+    subject_id: EnvelopeSubjectId,
+    actor: OutboxActor,
+    raw_idempotency_key: &str,
+) -> Result<(ReviewedCommandIntent, OutboxEnvelopeParts), CommandEmitError> {
+    let key = CommandIdempotencyKey::parse(raw_idempotency_key)
+        .map_err(|_| CommandEmitError::IdempotencyKey)?;
+    let aliases = keyring
+        .probes(tenant, spec.topic(), &key)
+        .map_err(|()| CommandEmitError::IdempotencyKey)?;
+    reviewed_intent(spec, tenant, payload, subject_id, actor, aliases)
+        .map_err(CommandEmitError::from)
 }
 
 fn command_request_fingerprint(
     tenant: vocab::TenantId,
-    topic: &Topic,
+    topic: &str,
     contract: vocab::ContractBinding,
-    idempotency_key: &CommandIdempotencyKey,
     payload: &[u8],
     subject_id: &EnvelopeSubjectId,
     actor: &OutboxActor,
-) -> Result<CommandRequestFingerprint, CommandEmitError> {
+) -> Result<CommandRequestFingerprint, ()> {
     let mut hasher = Sha256::new();
-    hash_component(&mut hasher, "rss-command-request-v1");
+    hash_component(&mut hasher, "rss-command-request-v2");
     hash_component(&mut hasher, contract.domain());
     hash_component(&mut hasher, contract.contract_id());
     hash_component(&mut hasher, contract.version());
     hash_component(&mut hasher, contract.schema_hash());
     hash_component(&mut hasher, &tenant.to_string());
-    hash_component(&mut hasher, topic.as_str());
-    hash_component(&mut hasher, idempotency_key.as_str());
+    hash_component(&mut hasher, topic);
     hash_component(&mut hasher, subject_id.as_str());
     hash_component(&mut hasher, actor.kind().as_actor_metadata_label());
     hash_component(&mut hasher, actor.actor_id().as_str());
@@ -224,20 +584,17 @@ fn command_request_fingerprint(
     hash_component(&mut hasher, actor.scope().as_label());
     hash_bytes_component(&mut hasher, payload);
     CommandRequestFingerprint::parse(format!("sha256:{}", lower_hex(&hasher.finalize())))
-        .map_err(|_| CommandEmitError::Fingerprint)
+        .map_err(|_| ())
 }
 
-fn scoped_command_digest(
+pub(crate) fn validate_actor_tenant(
     tenant: vocab::TenantId,
-    topic: &Topic,
-    idempotency_key: &CommandIdempotencyKey,
-) -> String {
-    let mut hasher = Sha256::new();
-    hash_component(&mut hasher, "rss-command-journal-v1");
-    hash_component(&mut hasher, &tenant.to_string());
-    hash_component(&mut hasher, topic.as_str());
-    hash_component(&mut hasher, idempotency_key.as_str());
-    lower_hex(&hasher.finalize())
+    actor: &OutboxActor,
+) -> Result<(), ()> {
+    match actor.tenant() {
+        Some(actor_tenant) if actor_tenant != tenant => Err(()),
+        Some(_) | None => Ok(()),
+    }
 }
 
 fn hash_component(hasher: &mut Sha256, value: &str) {
@@ -264,48 +621,169 @@ fn lower_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Runtime 命令 emit —— 命令 topic [`Entry`] 的**唯一** sanctioned 构造点。
-///
-/// mirror 事件 emit 路径：`Topic::parse`（命令 topic 构造收口于此）→ [`Entry::new`]（seal `DispatchId`）→
-/// 注入的 [`DynOutboxEmitter`] port。`payload` 已编码（serde 在 generated wrapper / 组合根 bridge 侧；本
-/// runtime serde-free 收 `Vec<u8>`）。`subject_id` 是 opaque 主体标识（无 PII，FR-020）。
-#[allow(clippy::too_many_arguments)]
-pub async fn emit_async(
-    emitter: &DynOutboxEmitter<'_>,
-    dispatch_id: DispatchId,
-    topic: &str,
-    contract: vocab::ContractBinding,
-    tenant: vocab::TenantId,
-    payload: Vec<u8>,
-    subject_id: EnvelopeSubjectId,
-    actor: OutboxActor,
-) -> Result<(), CommandEmitError> {
-    let parsed_topic = Topic::parse(topic).map_err(|_| CommandEmitError::Topic)?;
-    let entry = Entry::new(
-        parsed_topic,
-        dispatch_id.into_idem_key(),
-        OutboxPayload::from_reviewed_event_bytes(payload),
-    );
-    let envelope = OutboxEnvelopeParts::new(contract, tenant, subject_id, actor);
-    emitter
-        .emit(entry, envelope)
+fn validate_command_topic(topic: &str) -> Result<(), ()> {
+    match EventTopic::parse(topic) {
+        Err(EventTopicError::CommandNamespace) => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// Generic direct-command bridge generated wrappers can call.
+pub struct DirectCommandDispatcher<S> {
+    store: S,
+    keyring: Arc<CommandIdempotencyKeyring>,
+}
+
+impl<S> DirectCommandDispatcher<S> {
+    /// Bind a provider store and the mandatory independent idempotency keyring.
+    pub fn new(store: S, keyring: Arc<CommandIdempotencyKeyring>) -> Self {
+        Self { store, keyring }
+    }
+}
+
+impl<S: CommandDispatchStore> DirectCommandDispatcher<S> {
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_reviewed<C>(
+        &self,
+        request: &C::Request,
+        tenant: vocab::TenantId,
+        subject_id: EnvelopeSubjectId,
+        actor: OutboxActor,
+        idempotency_key: Option<&str>,
+    ) -> Result<(), CommandEmitError>
+    where
+        C: generated::command::DirectCommandContract,
+        C::Request: Send + Sync,
+    {
+        let spec = C::SPEC;
+        let payload = serde_json::to_vec(request).map_err(|_| CommandEmitError::Serialization)?;
+        let aliases = match idempotency_key {
+            Some(raw) => {
+                let key = CommandIdempotencyKey::parse(raw)
+                    .map_err(|_| CommandEmitError::IdempotencyKey)?;
+                self.keyring
+                    .probes(tenant, spec.topic(), &key)
+                    .map_err(|()| CommandEmitError::IdempotencyKey)?
+            }
+            None => CommandAliasProbeSet::none(),
+        };
+        let command =
+            ReviewedCommandDispatch::new(spec, tenant, payload, subject_id, actor, aliases)?;
+        CommandDispatchStore::dispatch_command(&self.store, command)
+            .await
+            .map_err(map_emit_store_error)
+    }
+}
+
+impl<S: CommandDispatchStore> generated::command::CommandEmit for DirectCommandDispatcher<S> {
+    type Error = CommandEmitError;
+    type SubjectId = EnvelopeSubjectId;
+    type Actor = OutboxActor;
+
+    async fn emit<C>(
+        &self,
+        request: &C::Request,
+        tenant: vocab::TenantId,
+        subject_id: Self::SubjectId,
+        actor: Self::Actor,
+        idempotency_key: Option<&str>,
+    ) -> Result<(), Self::Error>
+    where
+        C: generated::command::DirectCommandContract,
+        C::Request: Send + Sync,
+    {
+        self.dispatch_reviewed::<C>(request, tenant, subject_id, actor, idempotency_key)
+            .await
+    }
+}
+
+/// Generic journal-required command bridge generated wrappers can call.
+pub struct JournaledCommandDispatcher<S> {
+    store: S,
+    keyring: Arc<CommandIdempotencyKeyring>,
+}
+
+impl<S> JournaledCommandDispatcher<S> {
+    /// Bind a provider journal store and the mandatory independent idempotency keyring.
+    pub fn new(store: S, keyring: Arc<CommandIdempotencyKeyring>) -> Self {
+        Self { store, keyring }
+    }
+}
+
+impl<S: CommandJournalStore> generated::command::CommandJournal for JournaledCommandDispatcher<S> {
+    type Error = CommandJournalError;
+    type Outcome = CommandJournalDispatchOutcome;
+    type SubjectId = EnvelopeSubjectId;
+    type Actor = OutboxActor;
+
+    async fn journal<C>(
+        &self,
+        request: &C::Request,
+        tenant: vocab::TenantId,
+        subject_id: Self::SubjectId,
+        actor: Self::Actor,
+        idempotency_key: &str,
+    ) -> Result<Self::Outcome, Self::Error>
+    where
+        C: generated::command::JournaledCommandContract,
+        C::Request: Send + Sync,
+    {
+        let spec = C::SPEC;
+        let key = CommandIdempotencyKey::parse(idempotency_key)
+            .map_err(|_| CommandJournalError::IdempotencyKey)?;
+        let aliases = self
+            .keyring
+            .probes(tenant, spec.topic(), &key)
+            .map_err(|()| CommandJournalError::IdempotencyKey)?;
+        let payload =
+            serde_json::to_vec(request).map_err(|_| CommandJournalError::Serialization)?;
+        let command =
+            ReviewedCommandJournal::new(spec, tenant, payload, subject_id, actor, aliases)?;
+        match CommandJournalStore::record_command(
+            &self.store,
+            command,
+            CommandResultSummary::ENQUEUED,
+        )
         .await
-        .map_err(CommandEmitError::Emit)
-        .map(|()| {
-            // 结构化 debug：domain / contract_id / topic 归因（无 payload 字节、无 subject_id，PII 边界同 DLX log）。
-            tracing::debug!(
-                domain = contract.domain(),
-                contract_id = contract.contract_id(),
-                topic,
-                "command: emit ok"
-            );
-        })
+        .map_err(map_journal_store_error)?
+        {
+            CommandJournalOutcome::Recorded => Ok(CommandJournalDispatchOutcome::Recorded),
+            CommandJournalOutcome::AlreadyCompleted(summary)
+                if summary == CommandResultSummary::ENQUEUED =>
+            {
+                Ok(CommandJournalDispatchOutcome::AlreadyEnqueued)
+            }
+            CommandJournalOutcome::AlreadyCompleted(_) => {
+                Err(CommandJournalError::UnexpectedCompleted)
+            }
+            CommandJournalOutcome::AlreadyInFlight => Err(CommandJournalError::InFlight),
+            CommandJournalOutcome::AlreadyFailed(_) => Err(CommandJournalError::Failed),
+            CommandJournalOutcome::Conflict => Err(CommandJournalError::Conflict),
+            _ => Err(CommandJournalError::UnexpectedOutcome),
+        }
+    }
+}
+
+fn map_emit_store_error(error: CommandStoreError) -> CommandEmitError {
+    match error.kind() {
+        CommandStoreErrorKind::Conflict => CommandEmitError::Conflict,
+        CommandStoreErrorKind::Unavailable => CommandEmitError::Unavailable,
+        CommandStoreErrorKind::Internal => CommandEmitError::Store(error),
+    }
+}
+
+fn map_journal_store_error(error: CommandStoreError) -> CommandJournalError {
+    match error.kind() {
+        CommandStoreErrorKind::Conflict => CommandJournalError::Conflict,
+        CommandStoreErrorKind::Unavailable => CommandJournalError::Unavailable,
+        CommandStoreErrorKind::Internal => CommandJournalError::Store(error),
+    }
 }
 
 /// Runtime 命令消费注册 —— 复用 [`run_consumer`] 驱动 + [`InboxStore`] claimer 两阶段去重。
 ///
 /// 消息 `payload` 经 `serde_json` 解码为 typed `R` 后交 `handler`；解码失败 = 永久 `reject`（坏 wire 不可
-/// 恢复 → DLX，不 Requeue 无限重投）。同 DispatchId（`Message.id` = dispatch key）二次投递 → claimer
+/// 恢复 → DLX，不 Requeue 无限重投）。同 canonical command id（`Message.id` = dispatch key）二次投递 → claimer
 /// `try_claim` 返 `Duplicate` → handler 不调、幂等短路（= claimer 拒）。claim→handle→commit/dlx 全复用
 /// `run_consumer`，零新去重原语。`contract` 同时提供 contract id 与 expected schema fingerprint，命令路径
 /// 与事件订阅路径共享同一 envelope header gate。
@@ -394,26 +872,40 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
-    use consistency::{CommandIdempotencyKey, HandleResult};
+    use consistency::{
+        CommandIdempotencyKey, CommandJournalOutcome, CommandResultSummary, HandleResult,
+    };
     use consistency::{InboxReceiptContext, InboxStore};
     use diport::dead_letter_store::{
         DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore,
     };
     use diport::{
-        DynOutboxEmitter, EnvelopeMetadata, EnvelopeSubjectId, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
-        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, OpaqueActorId, OutboxActor, OutboxEmitError,
-        OutboxEmitter, OutboxEnvelopeParts,
+        EnvelopeMetadata, EnvelopeSubjectId, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+        KEY_TENANT_AUTHORITY, KEY_TENANT_ID, Message, OpaqueActorId, OutboxActor,
     };
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
     use super::{
-        DispatchId, LeaseConfig, ReviewedCommandJournal, emit_async, register_command_handler,
+        CommandAliasKey, CommandAliasProbeSet, CommandEmitError, CommandIdempotencyKeyring,
+        CommandJournalDispatchOutcome, CommandJournalError, CommandJournalStore, CommandStoreError,
+        CommandStoreErrorKind, JournaledCommandDispatcher, LeaseConfig, ReviewedCommandDispatch,
+        ReviewedCommandJournal, map_emit_store_error, map_journal_store_error,
+        register_command_handler,
     };
     use crate::MAX_REDELIVERY;
     use crate::TenantAuthority;
     use crate::tenant_authority::TenantAuthorityBinding;
 
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn command_store_error_keeps_stable_message_and_redacts_provider_source() {
+        let error = CommandStoreError::internal(std::io::Error::other("provider-secret-marker"));
+        assert_eq!(error.to_string(), "command store operation failed");
+        assert_eq!(error.kind(), CommandStoreErrorKind::Internal);
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(!format!("{error:?}").contains("provider-secret-marker"));
+    }
 
     /// 测试用 lease 配置（续租间隔大，命令消费测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
@@ -440,8 +932,31 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
+    fn other_tenant_actor() -> OutboxActor {
+        let other = vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")
+            .expect("canonical tenant");
+        OutboxActor::scoped(
+            vocab::PrincipalKind::Admin,
+            OpaqueActorId::from_opaque("other-tenant-actor").expect("actor"),
+            other,
+            vocab::ScopedTenant::Tenant,
+        )
+    }
+
+    #[allow(clippy::expect_used)]
     fn idem(raw: &str) -> CommandIdempotencyKey {
         CommandIdempotencyKey::parse(raw).expect("idempotency key")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn command_keyring() -> Arc<CommandIdempotencyKeyring> {
+        Arc::new(
+            CommandIdempotencyKeyring::new(
+                CommandAliasKey::new("k2", vec![0x42; 32]).expect("key"),
+                vec![CommandAliasKey::new("k1", vec![0x24; 32]).expect("key")],
+            )
+            .expect("keyring"),
+        )
     }
 
     #[derive(Debug)]
@@ -461,114 +976,97 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: unit test uses known-valid reviewed command inputs.
-    fn reviewed_command_journal_scopes_command_id_by_tenant_and_topic() {
-        let first = ReviewedCommandJournal::new(
-            idem("same-key"),
-            "seed.commands.do-thing",
-            command_contract(),
-            tenant(),
-            br#"{"op":"one"}"#.to_vec(),
-            subject("subject-1"),
-            actor(),
-        )
-        .expect("reviewed command");
-        let second_tenant =
-            vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant");
-        let second = ReviewedCommandJournal::new(
-            idem("same-key"),
-            "seed.commands.do-thing",
-            command_contract(),
-            second_tenant,
-            br#"{"op":"one"}"#.to_vec(),
-            subject("subject-1"),
-            actor(),
-        )
-        .expect("reviewed command");
-
-        assert_ne!(
-            first.journal().command_id().as_str(),
-            second.journal().command_id().as_str(),
-            "same raw key must be tenant scoped"
-        );
+    // reason: fixed valid keyring fixtures must produce a complete current/previous alias set.
+    fn keyed_aliases_are_stable_rotatable_and_tenant_scoped() {
+        let keys = command_keyring();
+        let raw = idem("customer@example.test/retry-42");
+        let first = keys
+            .probes(tenant(), "seed.commands.do-thing", &raw)
+            .expect("aliases");
+        let repeated = keys
+            .probes(tenant(), "seed.commands.do-thing", &raw)
+            .expect("aliases");
+        let other = keys
+            .probes(
+                vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant"),
+                "seed.commands.do-thing",
+                &raw,
+            )
+            .expect("aliases");
+        assert_eq!(first.current().expect("current").key_id(), "k2");
+        assert_eq!(first.previous()[0].key_id(), "k1");
         assert_eq!(
-            first.entry().idem_key().as_str(),
-            first.journal().command_id().as_str(),
-            "outbox dispatch id and journal command id must share the scoped key"
+            first.current().expect("current").digest(),
+            repeated.current().expect("current").digest()
         );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    // reason: unit test uses known-valid reviewed command inputs.
-    fn reviewed_command_journal_persists_fingerprint_for_conflict_detection() {
-        let raw_key = "idem-conflict-customer@example.test";
-        let command = ReviewedCommandJournal::new(
-            idem(raw_key),
-            "seed.commands.do-thing",
-            command_contract(),
-            tenant(),
-            br#"{"op":"one"}"#.to_vec(),
-            subject("subject-1"),
-            actor(),
-        )
-        .expect("reviewed command");
-
-        assert!(!command.journal().command_id().as_str().contains(raw_key));
-        assert!(!command.entry().idem_key().as_str().contains(raw_key));
-        assert!(
-            !command
-                .journal()
-                .idempotency_key()
-                .as_str()
-                .contains(raw_key)
-        );
-        assert!(
-            command
-                .journal()
-                .idempotency_key()
-                .as_str()
-                .starts_with("sha256:")
-        );
-        assert!(
-            command
-                .journal()
-                .request_fingerprint()
-                .as_str()
-                .starts_with("sha256:")
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    // reason: unit test uses known-valid reviewed command inputs.
-    fn reviewed_command_journal_derives_fingerprint_from_payload() {
-        let first = ReviewedCommandJournal::new(
-            idem("same-key"),
-            "seed.commands.do-thing",
-            command_contract(),
-            tenant(),
-            br#"{"op":"one"}"#.to_vec(),
-            subject("subject-1"),
-            actor(),
-        )
-        .expect("reviewed command");
-        let changed_payload = ReviewedCommandJournal::new(
-            idem("same-key"),
-            "seed.commands.do-thing",
-            command_contract(),
-            tenant(),
-            br#"{"op":"two"}"#.to_vec(),
-            subject("subject-1"),
-            actor(),
-        )
-        .expect("reviewed command");
-
         assert_ne!(
-            first.journal().request_fingerprint().as_str(),
-            changed_payload.journal().request_fingerprint().as_str(),
-            "same key with different payload must not let caller-reused fingerprint bypass conflict detection"
+            first.current().expect("current").digest(),
+            other.current().expect("current").digest()
         );
+        assert_eq!(format!("{first:?}"), "CommandAliasProbeSet(<redacted>)");
+    }
+
+    #[test]
+    fn reviewed_direct_command_rejects_scoped_actor_from_other_tenant() {
+        let result = ReviewedCommandDispatch::new(
+            generated::command::_seed_v1::SPEC,
+            tenant(),
+            br#"{"op":"one"}"#.to_vec(),
+            subject("subject-1"),
+            other_tenant_actor(),
+            CommandAliasProbeSet::none(),
+        );
+        assert!(matches!(result, Err(CommandEmitError::ActorTenant)));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed valid generated inputs exercise fingerprint equality and inequality.
+    fn fingerprint_excludes_idempotency_key_but_includes_payload() {
+        let keys = command_keyring();
+        let build = |raw: &str, payload: &[u8]| {
+            ReviewedCommandJournal::new(
+                generated::command::_seed_v1::SPEC,
+                tenant(),
+                payload.to_vec(),
+                subject("subject-1"),
+                actor(),
+                keys.probes(tenant(), generated::command::_seed_v1::TOPIC, &idem(raw))
+                    .expect("aliases"),
+            )
+            .expect("reviewed")
+        };
+        let first = build("first-key", br#"{"op":"one"}"#);
+        let changed_key = build("second-key", br#"{"op":"one"}"#);
+        let changed_payload = build("first-key", br#"{"op":"two"}"#);
+        assert_eq!(
+            first.intent().request_fingerprint(),
+            changed_key.intent().request_fingerprint()
+        );
+        assert_ne!(
+            first.intent().request_fingerprint(),
+            changed_payload.intent().request_fingerprint()
+        );
+    }
+
+    #[test]
+    fn store_error_kind_maps_to_public_dispatcher_outcomes() {
+        assert!(matches!(
+            map_emit_store_error(CommandStoreError::conflict(std::io::Error::other("x"))),
+            CommandEmitError::Conflict
+        ));
+        assert!(matches!(
+            map_emit_store_error(CommandStoreError::unavailable(std::io::Error::other("x"))),
+            CommandEmitError::Unavailable
+        ));
+        assert!(matches!(
+            map_journal_store_error(CommandStoreError::conflict(std::io::Error::other("x"))),
+            CommandJournalError::Conflict
+        ));
+        assert!(matches!(
+            map_journal_store_error(CommandStoreError::unavailable(std::io::Error::other("x"))),
+            CommandJournalError::Unavailable
+        ));
     }
 
     #[allow(clippy::expect_used)]
@@ -585,134 +1083,99 @@ mod tests {
         )
     }
 
-    // ── producer 侧 fake：捕获 emit 的 Entry topic/idem_key/payload + envelope ──────
-
-    struct CapturedEmit {
-        topic: String,
-        idem_key: String,
-        payload: Vec<u8>,
-        contract_id: String,
-        tenant_id: String,
-        actor_kind: String,
+    struct FakeJournalStore {
+        outcome: Mutex<Option<CommandJournalOutcome>>,
     }
 
-    struct CapturingEmitter {
-        captured: Mutex<Vec<CapturedEmit>>,
-    }
-
-    impl CapturingEmitter {
-        fn new() -> Self {
+    impl FakeJournalStore {
+        fn new(outcome: CommandJournalOutcome) -> Self {
             Self {
-                captured: Mutex::new(Vec::new()),
+                outcome: Mutex::new(Some(outcome)),
             }
         }
     }
 
-    impl OutboxEmitter for CapturingEmitter {
-        async fn emit(
+    impl CommandJournalStore for FakeJournalStore {
+        #[allow(clippy::expect_used)]
+        // reason: generated journal wrapper must always supply a current keyed alias.
+        fn record_command(
             &self,
-            entry: consistency::Entry,
-            envelope: OutboxEnvelopeParts,
-        ) -> Result<(), diport::OutboxEmitError> {
+            command: ReviewedCommandJournal,
+            result_summary: CommandResultSummary,
+        ) -> impl std::future::Future<Output = Result<CommandJournalOutcome, CommandStoreError>> + Send
+        {
+            assert_eq!(result_summary, CommandResultSummary::ENQUEUED);
+            let (intent, envelope) = command.into_parts();
+            assert_eq!(intent.topic(), "seed.commands.do-thing");
+            assert_eq!(intent.payload(), br#"{"amount":7,"targetId":"target-1"}"#);
+            assert_eq!(*envelope.contract(), generated::command::_seed_v1::CONTRACT);
+            assert_eq!(envelope.tenant(), tenant());
+            assert_eq!(intent.aliases().current().expect("current").key_id(), "k2");
             #[allow(clippy::unwrap_used)]
-            // reason: 测试 Mutex happy-path，item-level carve-out
-            self.captured.lock().unwrap().push(CapturedEmit {
-                topic: entry.topic().as_str().to_string(),
-                idem_key: entry.idem_key().as_str().to_string(),
-                payload: entry.payload().to_vec(),
-                contract_id: envelope.contract().contract_id().to_string(),
-                tenant_id: envelope.tenant().to_string(),
-                actor_kind: envelope
-                    .actor()
-                    .kind()
-                    .as_actor_metadata_label()
-                    .to_string(),
-            });
-            Ok(())
+            let outcome = self.outcome.lock().unwrap().take().unwrap();
+            async move { Ok(outcome) }
         }
     }
 
-    /// emit_async：seal DispatchId → Entry::new（命令 topic）→ emitter.emit；直接对 fake 断言捕获的
-    /// topic / idem_key / payload / contract_id 回显一致（runtime serde-free，payload 透传）。
-    #[tokio::test]
-    #[allow(clippy::unwrap_used, clippy::expect_used)]
-    // reason: 测试 happy-path 断言，item-level carve-out
-    async fn emit_async_captures_topic_key_payload() {
-        let fake = std::sync::Arc::new(CapturingEmitter::new());
-        // ArcProxy 让 Arc<CapturingEmitter> 可经 DynOutboxEmitter::new_box 装箱（同 consumer.rs fake_dlx 范式）。
-        struct ArcProxy(std::sync::Arc<CapturingEmitter>);
-        impl OutboxEmitter for ArcProxy {
-            async fn emit(
-                &self,
-                entry: consistency::Entry,
-                envelope: OutboxEnvelopeParts,
-            ) -> Result<(), diport::OutboxEmitError> {
-                self.0.emit(entry, envelope).await
-            }
-        }
-        let emitter = DynOutboxEmitter::new_box(ArcProxy(fake.clone()));
-        let dispatch = DispatchId::from_idempotency_key("dispatch-42").expect("non-empty key");
-        emit_async(
-            &emitter,
-            dispatch,
-            "seed.commands.do-thing",
-            vocab::ContractBinding::from_static("seed", "seed.do-thing", "v1", HASH),
+    async fn journal_seed(
+        outcome: CommandJournalOutcome,
+        key: &str,
+    ) -> Result<CommandJournalDispatchOutcome, CommandJournalError> {
+        let dispatcher =
+            JournaledCommandDispatcher::new(FakeJournalStore::new(outcome), command_keyring());
+        generated::command::_seed_v1::journal_async(
+            &dispatcher,
+            generated::command::_seed_v1::SeedDoThingRequest {
+                amount: 7,
+                target_id: "target-1".to_string(),
+            },
             tenant(),
-            b"{\"amount\":7}".to_vec(),
             subject("subject-opaque"),
             actor(),
+            key.to_string(),
         )
         .await
-        .expect("emit ok");
-
-        #[allow(clippy::unwrap_used)]
-        // reason: 测试断言，item-level carve-out
-        let captured = fake.captured.lock().unwrap();
-        assert_eq!(captured.len(), 1, "应 emit 1 条");
-        let c = &captured[0];
-        assert_eq!(c.topic, "seed.commands.do-thing", "命令 topic 回显");
-        assert_eq!(c.idem_key, "dispatch-42", "DispatchId → IdemKey 回显");
-        assert_eq!(
-            c.payload, b"{\"amount\":7}",
-            "payload 回显（runtime serde-free）"
-        );
-        assert_eq!(c.contract_id, "seed.do-thing", "envelope.contract_id 回显");
-        assert_eq!(
-            c.tenant_id, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "envelope tenant 回显"
-        );
-        assert_eq!(c.actor_kind, "service", "actor kind 回显");
     }
 
-    /// 非 canonical dotted topic → CommandEmitError::Topic（fail-closed，不构造 Entry）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 构造，item-level carve-out
-    async fn emit_async_rejects_non_dotted_topic() {
-        let emitter = DynOutboxEmitter::new_box(CapturingEmitter::new());
-        let dispatch = DispatchId::from_idempotency_key("k").expect("non-empty key");
-        let err = emit_async(
-            &emitter,
-            dispatch,
-            "Not A Topic",
-            vocab::ContractBinding::from_static("seed", "seed.do-thing", "v1", HASH),
-            tenant(),
-            b"{}".to_vec(),
-            subject("s"),
-            actor(),
-        )
-        .await;
-        assert!(
-            matches!(err, Err(super::CommandEmitError::Topic)),
-            "{err:?}"
+    // reason: known provider outcomes are asserted as successful canary cases.
+    async fn seed_journal_maps_all_provider_outcomes() {
+        assert_eq!(
+            journal_seed(CommandJournalOutcome::Recorded, "stable-key")
+                .await
+                .expect("recorded"),
+            CommandJournalDispatchOutcome::Recorded
         );
-    }
-
-    /// 空 dispatch key → DispatchId::from_idempotency_key 拒（fail-closed）。
-    #[test]
-    fn dispatch_id_rejects_empty_key() {
-        assert!(DispatchId::from_idempotency_key("").is_err());
-        assert!(DispatchId::from_idempotency_key("ok").is_ok());
+        assert_eq!(
+            journal_seed(
+                CommandJournalOutcome::AlreadyCompleted(CommandResultSummary::ENQUEUED),
+                "stable-key"
+            )
+            .await
+            .expect("already enqueued"),
+            CommandJournalDispatchOutcome::AlreadyEnqueued
+        );
+        assert!(matches!(
+            journal_seed(CommandJournalOutcome::AlreadyInFlight, "stable-key").await,
+            Err(CommandJournalError::InFlight)
+        ));
+        assert!(matches!(
+            journal_seed(
+                CommandJournalOutcome::AlreadyFailed(consistency::CommandErrorSummary::FAILED),
+                "stable-key"
+            )
+            .await,
+            Err(CommandJournalError::Failed)
+        ));
+        assert!(matches!(
+            journal_seed(CommandJournalOutcome::Conflict, "stable-key").await,
+            Err(CommandJournalError::Conflict)
+        ));
+        assert!(matches!(
+            journal_seed(CommandJournalOutcome::Recorded, "").await,
+            Err(CommandJournalError::IdempotencyKey)
+        ));
     }
 
     // ── consumer 侧 fakes ───────────────────────────────────────────────────────
@@ -949,7 +1412,7 @@ mod tests {
         assert_eq!(dlx.write_count(), 0, "header gate must skip app DLX");
     }
 
-    /// 同 DispatchId 二次（claimer 返 Duplicate）→ handler 不调、不 commit（= claimer 拒，两阶段去重）。
+    /// 同 canonical command id 二次（claimer 返 Duplicate）→ handler 不调、不 commit（= claimer 拒，两阶段去重）。
     #[tokio::test]
     async fn register_duplicate_dispatch_id_rejected_by_claimer() {
         let idem = FakeStore::duplicate();
@@ -1002,45 +1465,6 @@ mod tests {
         )
         .await;
         assert_eq!(dlx.write_count(), 1, "坏 wire → 永久 reject → DLX");
-    }
-
-    // ── TC-F5a：OutboxEmitter 失败路径 ───────────────────────────────────────
-
-    /// TC-F5a：fake OutboxEmitter 返 Err → emit_async 返 CommandEmitError::Emit（底层 emitter 失败收口）。
-    struct FailEmitter;
-    impl OutboxEmitter for FailEmitter {
-        async fn emit(
-            &self,
-            _entry: consistency::Entry,
-            _envelope: OutboxEnvelopeParts,
-        ) -> Result<(), OutboxEmitError> {
-            Err(OutboxEmitError::new(std::io::Error::other(
-                "injected failure",
-            )))
-        }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    // reason: 测试 happy-path 构造，item-level carve-out
-    async fn emit_async_propagates_emitter_error() {
-        let emitter = DynOutboxEmitter::new_box(FailEmitter);
-        let dispatch = DispatchId::from_idempotency_key("dispatch-err").expect("non-empty key");
-        let result = emit_async(
-            &emitter,
-            dispatch,
-            "seed.commands.fail",
-            vocab::ContractBinding::from_static("seed", "seed.fail", "v1", HASH),
-            tenant(),
-            b"{}".to_vec(),
-            subject("subject-opaque"),
-            actor(),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(super::CommandEmitError::Emit(_))),
-            "底层 emitter 失败应映射为 CommandEmitError::Emit: {result:?}"
-        );
     }
 
     // ── TC-F5c：requeue 路径 → MAX_REDELIVERY 耗尽 → DLX ────────────────────

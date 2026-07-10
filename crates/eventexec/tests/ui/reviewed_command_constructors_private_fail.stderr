@@ -1,0 +1,33 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/reviewed_command_constructors_private_fail.rs:4:38
+  |
+4 |       let _ = ReviewedCommandDispatch::new;
+  |                                        ^^^ private associated function
+  |
+ ::: src/command.rs
+  |
+  | /     fn new(
+  | |         spec: generated::command::CommandSpec,
+  | |         tenant: vocab::TenantId,
+  | |         payload: Vec<u8>,
+... |
+  | |         aliases: CommandAliasProbeSet,
+  | |     ) -> Result<Self, CommandEmitError> {
+  | |_______________________________________- private associated function defined here
+
+error[E0624]: associated function `new` is private
+ --> tests/ui/reviewed_command_constructors_private_fail.rs:5:37
+  |
+5 |       let _ = ReviewedCommandJournal::new;
+  |                                       ^^^ private associated function
+  |
+ ::: src/command.rs
+  |
+  | /     fn new(
+  | |         spec: generated::command::CommandSpec,
+  | |         tenant: vocab::TenantId,
+  | |         payload: Vec<u8>,
+... |
+  | |         aliases: CommandAliasProbeSet,
+  | |     ) -> Result<Self, CommandJournalError> {
+  | |__________________________________________- private associated function defined here

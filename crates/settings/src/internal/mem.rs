@@ -6,19 +6,21 @@
 //! `unwrap`/`expect`（clippy deny）。`unwrap_or_else(into_inner)` 取回 guard，clippy-clean（对标 memory adapter）。
 //!
 //! 读端口 [`InMemConfigRepo`] 与写 UoW [`InMemConfigUnitOfWork`] 经 `Arc` **共享同一 store**（`with_seed`
-//! clone 注入）——保证 `find` 读得到 `save_and_append_outbox` 写入（与 postgres 同 pool 数据一致性对齐）。
+//! clone 注入）——保证 `find` 读得到 `commit` 写入（与 postgres 同 pool 数据一致性对齐）。
 //!
 //! [`InMemSecretRepo`] 为独立 store（L1 本地事务，无 outbox，`Arc<Mutex<...>>` 共享）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{OutboxEmitter, OutboxEnvelopeParts};
 use vocab::TenantId;
 
 use super::ports::FlagStore;
-use crate::domain::{ConfigEntry, ConfigRepoError, FlagKey, FlagState, SettingKey};
+use crate::domain::{
+    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, FlagKey, FlagState, SettingKey,
+};
 #[cfg(any(test, feature = "seed-data"))]
 use crate::domain::{SecretEntry, SecretKey, SecretRepoError};
 #[cfg(any(test, feature = "seed-data"))]
@@ -37,13 +39,21 @@ pub(crate) struct ConfigRow {
     deleted: bool,
 }
 
-/// in-mem 版本化配置 store：每 key 一条 append-only 版本历史（`Vec` index `i` ⇒ 版本号 `i + 1`，含 tombstone）。
-/// `Arc` 共享供读端口与写 UoW 同源（见模块头）。
-type ConfigStore = Arc<Mutex<HashMap<StoreKey, Vec<ConfigRow>>>>;
+/// in-mem 版本化配置 store：版本历史与 co-tx commit lock 必须共享同一个 `Arc`。多个 UoW 若只共享
+/// entries 而各持一把锁，失败 emit 的回滚会与另一 UoW 的后续版本交错并留下 ghost row。
+pub(crate) struct ConfigStoreInner {
+    entries: Mutex<HashMap<StoreKey, Vec<ConfigRow>>>,
+    commit_lock: tokio::sync::Mutex<()>,
+}
+
+type ConfigStore = Arc<ConfigStoreInner>;
 
 /// 新建空共享 store（`with_seed` 经此建一份、clone 进读端口与写 UoW）。
 pub(crate) fn new_config_store() -> ConfigStore {
-    Arc::new(Mutex::new(HashMap::new()))
+    Arc::new(ConfigStoreInner {
+        entries: Mutex::new(HashMap::new()),
+        commit_lock: tokio::sync::Mutex::new(()),
+    })
 }
 
 /// CAS 追加新版本到共享 store：新版本号须恰为当前最高版本 + 1（首版 = 1），否则乐观并发写冲突。
@@ -53,7 +63,7 @@ fn cas_insert(
     tenant: TenantId,
     entry: ConfigEntry,
 ) -> Result<(), ConfigRepoError> {
-    let mut entries = store.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entries = store.entries.lock().unwrap_or_else(|e| e.into_inner());
     let history = entries
         .entry((tenant, entry.key().as_str().to_string()))
         .or_default();
@@ -71,7 +81,63 @@ fn cas_insert(
     Ok(())
 }
 
-/// in-memory 版本化配置仓储（读 + plain save + delete）。共享 [`ConfigStore`]。
+fn cas_mutation(
+    store: &ConfigStore,
+    tenant: TenantId,
+    mutation: &ConfigMutation,
+) -> Result<(), ConfigRepoError> {
+    if mutation.tenant() != tenant {
+        return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
+            "config tenant mismatch",
+        ))));
+    }
+    match mutation {
+        ConfigMutation::Put(entry) => cas_insert(store, tenant, entry.clone()),
+        ConfigMutation::Delete(tombstone) => {
+            let mut entries = store.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(history) = entries.get_mut(&(tenant, tombstone.key().as_str().to_string()))
+            else {
+                return Err(ConfigRepoError::VersionConflict);
+            };
+            let expected = u64::try_from(history.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            if tombstone.version() != expected || history.last().is_none_or(|row| row.deleted) {
+                return Err(ConfigRepoError::VersionConflict);
+            }
+            history.push(ConfigRow {
+                entry: ConfigEntry::hydrate(
+                    tombstone.key().clone(),
+                    "",
+                    tenant,
+                    tombstone.version(),
+                ),
+                deleted: true,
+            });
+            Ok(())
+        }
+    }
+}
+
+/// emit 失败时撤销刚追加的 mutation。commit lock 保证同一 UoW 不会在追加与撤销之间交错写入。
+fn rollback_mutation(store: &ConfigStore, tenant: TenantId, mutation: &ConfigMutation) {
+    let store_key = (tenant, mutation.key().as_str().to_string());
+    let mut entries = store.entries.lock().unwrap_or_else(|e| e.into_inner());
+    let should_remove = entries.get_mut(&store_key).is_some_and(|history| {
+        if history
+            .last()
+            .is_some_and(|row| row.entry.version() == mutation.version())
+        {
+            history.pop();
+        }
+        history.is_empty()
+    });
+    if should_remove {
+        entries.remove(&store_key);
+    }
+}
+
+/// in-memory 版本化配置仓储（纯读）。共享 [`ConfigStore`]。
 pub(crate) struct InMemConfigRepo {
     entries: ConfigStore,
 }
@@ -90,7 +156,11 @@ impl ConfigRepo for InMemConfigRepo {
         key: &SettingKey,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
         let tenant = scope.tenant();
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = self
+            .entries
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // 活跃值 = latest 行且非 tombstone（latest 为 tombstone ⇒ 已删 None）。
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
@@ -106,7 +176,11 @@ impl ConfigRepo for InMemConfigRepo {
         version: u64,
     ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
         let tenant = scope.tenant();
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = self
+            .entries
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
             .and_then(|history| history.iter().find(|row| row.entry.version() == version))
@@ -114,56 +188,28 @@ impl ConfigRepo for InMemConfigRepo {
             .map(|row| row.entry.clone()))
     }
 
-    async fn latest_version(
+    async fn head(
         &self,
         scope: TenantRepoScope,
         key: &SettingKey,
-    ) -> Result<Option<u64>, ConfigRepoError> {
+    ) -> Result<Option<ConfigHead>, ConfigRepoError> {
         let tenant = scope.tenant();
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = self
+            .entries
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // 真实最高版本（含 tombstone）——业务层算下一版本用，delete 后不重置。
         Ok(entries
             .get(&(tenant, key.as_str().to_string()))
             .and_then(|history| history.last())
-            .map(|row| row.entry.version()))
-    }
-
-    async fn save(
-        &self,
-        scope: TenantRepoScope,
-        entry: ConfigEntry,
-    ) -> Result<(), ConfigRepoError> {
-        let tenant = scope.tenant();
-        if entry.tenant() != tenant {
-            return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
-                "config tenant mismatch",
-            ))));
-        }
-        cas_insert(&self.entries, tenant, entry)
-    }
-
-    async fn delete(
-        &self,
-        scope: TenantRepoScope,
-        key: &SettingKey,
-    ) -> Result<(), ConfigRepoError> {
-        let tenant = scope.tenant();
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        // 软删：仅当 key 存在且 latest 非 tombstone 时追加 tombstone（幂等；version 单调不重置，F1）。
-        if let Some(history) = entries.get_mut(&(tenant, key.as_str().to_string()))
-            && history.last().is_some_and(|row| !row.deleted)
-        {
-            // reason: len() 超 u64::MAX 实践不可能 → saturating MAX，fail-closed。
-            let version = u64::try_from(history.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(1);
-            let tombstone = ConfigEntry::hydrate(key.clone(), "", tenant, version);
-            history.push(ConfigRow {
-                entry: tombstone,
-                deleted: true,
-            });
-        }
-        Ok(())
+            .map(|row| {
+                if row.deleted {
+                    ConfigHead::Deleted(row.entry.version())
+                } else {
+                    ConfigHead::Active(row.entry.version())
+                }
+            }))
     }
 }
 
@@ -173,8 +219,8 @@ impl ConfigRepo for InMemConfigRepo {
 /// `&self` future 须 Send ⇒ 本类型须 `Sync`；而 `DynOutboxEmitter` dyn wrapper 仅 `Send` 非 `Sync`（持之则
 /// 非 Sync）。`E` 取具体 `Sync` 类型（`memory::MemEmitter` / 测试 `CapturingEmitter`，均 `Arc` 底座）即满足。
 ///
-/// **非原子**（in-mem 无事务）——save 后 emit；emit 失败包 [`ConfigRepoError::Storage`]。真实 both-or-neither
-/// 原子性由 postgres `PgConfigUnitOfWork`（同事务）承载（#1249），journey 闭环只验「写入 → 事件投递」语义。
+/// in-memory 没有数据库事务，因此以串行 commit + emit 失败撤销实现 both-or-neither 的可观察终态；生产
+/// `PgConfigUnitOfWork` 仍以数据库同事务提供完整隔离。
 pub(crate) struct InMemConfigUnitOfWork<E> {
     entries: ConfigStore,
     emitter: E,
@@ -188,24 +234,26 @@ impl<E> InMemConfigUnitOfWork<E> {
 }
 
 impl<E: OutboxEmitter + Send + Sync + 'static> ConfigUnitOfWork for InMemConfigUnitOfWork<E> {
-    async fn save_and_append_outbox(
+    async fn commit(
         &self,
         scope: TenantRepoScope,
-        entry: ConfigEntry,
-        outbox_entry: Entry,
+        mutation: ConfigMutation,
+        outbox_entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), ConfigRepoError> {
+        let _commit = self.entries.commit_lock.lock().await;
         let tenant = scope.tenant();
-        if entry.tenant() != tenant || envelope.tenant() != tenant {
+        if mutation.tenant() != tenant || envelope.tenant() != tenant {
             return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
                 "config tenant mismatch",
             ))));
         }
-        cas_insert(&self.entries, tenant, entry)?;
-        self.emitter
-            .emit(outbox_entry, envelope)
-            .await
-            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))
+        cas_mutation(&self.entries, tenant, &mutation)?;
+        if let Err(error) = self.emitter.emit(outbox_entry, envelope).await {
+            rollback_mutation(&self.entries, tenant, &mutation);
+            return Err(ConfigRepoError::Storage(Box::new(error)));
+        }
+        Ok(())
     }
 }
 
@@ -422,11 +470,44 @@ mod tests {
     impl OutboxEmitter for CountingEmitter {
         async fn emit(
             &self,
-            _entry: Entry,
+            _entry: EventEntry,
             _envelope: OutboxEnvelopeParts,
         ) -> Result<(), diport::OutboxEmitError> {
             *self.emits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
             Ok(())
+        }
+    }
+
+    struct FailingEmitter;
+
+    impl OutboxEmitter for FailingEmitter {
+        async fn emit(
+            &self,
+            _entry: EventEntry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<(), diport::OutboxEmitError> {
+            Err(diport::OutboxEmitError::new(std::io::Error::other(
+                "synthetic emit failure",
+            )))
+        }
+    }
+
+    struct BlockingFailingEmitter {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl OutboxEmitter for BlockingFailingEmitter {
+        async fn emit(
+            &self,
+            _entry: EventEntry,
+            _envelope: OutboxEnvelopeParts,
+        ) -> Result<(), diport::OutboxEmitError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(diport::OutboxEmitError::new(std::io::Error::other(
+                "synthetic delayed emit failure",
+            )))
         }
     }
 
@@ -451,11 +532,16 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn config_entry(raw_key: &str, tenant_raw: &str) -> ConfigEntry {
+        config_entry_version(raw_key, tenant_raw, 1)
+    }
+
+    #[allow(clippy::expect_used)]
+    fn config_entry_version(raw_key: &str, tenant_raw: &str, version: u64) -> ConfigEntry {
         ConfigEntry::new(
             setting_key(raw_key),
             ConfigValue::new("v1"),
             tenant(tenant_raw),
-            ConfigVersion::new(1),
+            ConfigVersion::new(version),
         )
     }
 
@@ -472,9 +558,9 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn entry(event_id: &str) -> Entry {
-        Entry::new(
-            consistency::Topic::parse("settings.config-version-changed").expect("topic"),
+    fn entry(event_id: &str) -> EventEntry {
+        EventEntry::new(
+            consistency::EventTopic::parse("settings.config-version-changed").expect("topic"),
             consistency::IdemKey::parse(event_id).expect("event id"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
         )
@@ -511,9 +597,9 @@ mod tests {
         let key = setting_key("app.scope");
 
         let result = uow
-            .save_and_append_outbox(
+            .commit(
                 scope(TENANT_A),
-                config_entry("app.scope", TENANT_B),
+                ConfigMutation::Put(config_entry("app.scope", TENANT_B)),
                 entry("evt-config-entry-mismatch"),
                 envelope(TENANT_A),
             )
@@ -539,9 +625,9 @@ mod tests {
         let key = setting_key("app.envelope");
 
         let result = uow
-            .save_and_append_outbox(
+            .commit(
                 scope(TENANT_A),
-                config_entry("app.envelope", TENANT_A),
+                ConfigMutation::Put(config_entry("app.envelope", TENANT_A)),
                 entry("evt-config-envelope-mismatch"),
                 envelope(TENANT_B),
             )
@@ -555,6 +641,103 @@ mod tests {
                 .is_none()
         );
         assert_eq!(emitter.emitted(), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_uow_rolls_back_mutation_when_emit_fails() {
+        let store = new_config_store();
+        let uow = InMemConfigUnitOfWork::new(store.clone(), FailingEmitter);
+        let repo = InMemConfigRepo::from_shared(store);
+        let key = setting_key("app.rollback");
+
+        let result = uow
+            .commit(
+                scope(TENANT_A),
+                ConfigMutation::Put(config_entry("app.rollback", TENANT_A)),
+                entry("evt-config-emit-failure"),
+                envelope(TENANT_A),
+            )
+            .await;
+
+        assert!(matches!(result, Err(ConfigRepoError::Storage(_))));
+        assert!(
+            repo.find(scope(TENANT_A), &key)
+                .await
+                .expect("find")
+                .is_none()
+        );
+        assert!(
+            repo.head(scope(TENANT_A), &key)
+                .await
+                .expect("head")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_uow_shared_store_serializes_rollback_across_distinct_uows() {
+        let store = new_config_store();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let failing = InMemConfigUnitOfWork::new(
+            store.clone(),
+            BlockingFailingEmitter {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            },
+        );
+        let succeeding = InMemConfigUnitOfWork::new(store.clone(), CountingEmitter::default());
+        let key = setting_key("app.concurrent-rollback");
+
+        let first = tokio::spawn(async move {
+            failing
+                .commit(
+                    scope(TENANT_A),
+                    ConfigMutation::Put(config_entry_version(
+                        "app.concurrent-rollback",
+                        TENANT_A,
+                        1,
+                    )),
+                    entry("evt-config-delayed-failure"),
+                    envelope(TENANT_A),
+                )
+                .await
+        });
+        entered.notified().await;
+        let second = tokio::spawn(async move {
+            succeeding
+                .commit(
+                    scope(TENANT_A),
+                    ConfigMutation::Put(config_entry_version(
+                        "app.concurrent-rollback",
+                        TENANT_A,
+                        2,
+                    )),
+                    entry("evt-config-concurrent-success"),
+                    envelope(TENANT_A),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        assert!(matches!(
+            first.await.expect("first task"),
+            Err(ConfigRepoError::Storage(_))
+        ));
+        assert!(matches!(
+            second.await.expect("second task"),
+            Err(ConfigRepoError::VersionConflict)
+        ));
+        let repo = InMemConfigRepo::from_shared(store);
+        assert!(
+            repo.head(scope(TENANT_A), &key)
+                .await
+                .expect("head")
+                .is_none()
+        );
     }
 
     #[tokio::test]

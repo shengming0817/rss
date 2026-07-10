@@ -20,7 +20,7 @@ use crate::redacted_bytes::RedactedBytes;
 /// error-handling.md §Message 与 PII）。[`DeadLetterRecord::new`] 只经本 newtype 接收摘要，故摘要只能是
 /// 编译期作者控制的常量、不可由运行期数据伪造（input struct field exclusion + newtype funnel）——
 /// 不再靠「调用方记得脱敏」的 rustdoc 纪律（review #216 F7）。
-/// INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（回归见 `summary` 单测；「不可传 `String`」由类型层编译期保证）。
+/// INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "summary-type" }（回归见 `summary` 单测；「不可传 `String`」由类型层编译期保证）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeadLetterSummary(&'static str);
 
@@ -81,36 +81,93 @@ impl DeadLetterSource {
     }
 }
 
-/// Writable dead-letter source.
+/// Closed provenance of a newly written dead letter.
 ///
-/// `Legacy` is intentionally absent: legacy rows may be parsed from historical storage, but new
-/// writes must identify the concrete producer that created the DLQ record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WritableDeadLetterSource {
-    /// 消费方重试预算耗尽后进入 DLQ。
-    Consumer,
-    /// outbox relay 发布失败进入 DLX，同时登记统一 DLQ 审计行。
-    OutboxRelay,
-    /// saga 补偿失败进入 DLQ。
-    Saga,
-    /// projection poison event 进入 DLQ。
-    Projection,
+/// Producer and consumer domains are separate typed fields. Replay routing always uses the
+/// producer domain; consumer attribution is present only for consumer/projection failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeadLetterProvenance {
+    Consumer {
+        producer_domain: String,
+        consumer_domain: String,
+    },
+    OutboxRelay {
+        producer_domain: String,
+    },
+    Saga {
+        producer_domain: String,
+    },
+    Projection {
+        producer_domain: String,
+        consumer_domain: String,
+    },
 }
 
-impl WritableDeadLetterSource {
-    pub const fn as_source(self) -> DeadLetterSource {
-        match self {
-            Self::Consumer => DeadLetterSource::Consumer,
-            Self::OutboxRelay => DeadLetterSource::OutboxRelay,
-            Self::Saga => DeadLetterSource::Saga,
-            Self::Projection => DeadLetterSource::Projection,
+impl DeadLetterProvenance {
+    pub fn consumer(
+        producer_domain: impl Into<String>,
+        consumer_domain: impl Into<String>,
+    ) -> Self {
+        Self::Consumer {
+            producer_domain: producer_domain.into(),
+            consumer_domain: consumer_domain.into(),
         }
     }
-}
 
-impl From<WritableDeadLetterSource> for DeadLetterSource {
-    fn from(source: WritableDeadLetterSource) -> Self {
-        source.as_source()
+    pub fn outbox_relay(producer_domain: impl Into<String>) -> Self {
+        Self::OutboxRelay {
+            producer_domain: producer_domain.into(),
+        }
+    }
+
+    pub fn saga(producer_domain: impl Into<String>) -> Self {
+        Self::Saga {
+            producer_domain: producer_domain.into(),
+        }
+    }
+
+    pub fn projection(
+        producer_domain: impl Into<String>,
+        consumer_domain: impl Into<String>,
+    ) -> Self {
+        Self::Projection {
+            producer_domain: producer_domain.into(),
+            consumer_domain: consumer_domain.into(),
+        }
+    }
+
+    pub const fn source(&self) -> DeadLetterSource {
+        match self {
+            Self::Consumer { .. } => DeadLetterSource::Consumer,
+            Self::OutboxRelay { .. } => DeadLetterSource::OutboxRelay,
+            Self::Saga { .. } => DeadLetterSource::Saga,
+            Self::Projection { .. } => DeadLetterSource::Projection,
+        }
+    }
+
+    pub fn producer_domain(&self) -> &str {
+        match self {
+            Self::Consumer {
+                producer_domain, ..
+            }
+            | Self::OutboxRelay { producer_domain }
+            | Self::Saga { producer_domain }
+            | Self::Projection {
+                producer_domain, ..
+            } => producer_domain,
+        }
+    }
+
+    pub fn consumer_domain(&self) -> Option<&str> {
+        match self {
+            Self::Consumer {
+                consumer_domain, ..
+            }
+            | Self::Projection {
+                consumer_domain, ..
+            } => Some(consumer_domain),
+            Self::OutboxRelay { .. } | Self::Saga { .. } => None,
+        }
     }
 }
 
@@ -123,17 +180,16 @@ impl From<WritableDeadLetterSource> for DeadLetterSource {
 /// 运维归因元数据，可观测。
 #[derive(Clone)]
 pub struct DeadLetterRecord {
-    domain: String,
+    provenance: DeadLetterProvenance,
     contract_id: String,
     topic: String,
     consumer_group: Option<String>,
     tenant: vocab::TenantId,
     message_id: String,
     original_payload: RedactedBytes,
-    source: DeadLetterSource,
     metadata: EnvelopeMetadata,
     /// 安全摘要——类型层强制 `&'static str` const literal（经 [`DeadLetterSummary`] funnel），
-    /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
+    /// 不含 runtime 数据 / 原始 payload / handler 错误原文（INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "content-test" }）。
     error_summary: &'static str,
     num_attempts: u32,
 }
@@ -141,14 +197,13 @@ pub struct DeadLetterRecord {
 impl std::fmt::Debug for DeadLetterRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeadLetterRecord")
-            .field("domain", &self.domain)
+            .field("provenance", &self.provenance)
             .field("contract_id", &self.contract_id)
             .field("topic", &self.topic)
             .field("consumer_group", &self.consumer_group)
             .field("tenant", &self.tenant)
             .field("message_id", &self.message_id)
             .field("original_payload", &self.original_payload)
-            .field("source", &self.source)
             .field("metadata", &"<redacted>")
             .field("error_summary", &self.error_summary)
             .field("num_attempts", &self.num_attempts)
@@ -170,34 +225,42 @@ impl DeadLetterRecord {
     pub fn new(
         tenant: vocab::TenantId,
         message_id: impl Into<String>,
-        domain: impl Into<String>,
+        provenance: DeadLetterProvenance,
         contract_id: impl Into<String>,
         topic: impl Into<String>,
         consumer_group: Option<String>,
         original_payload: Vec<u8>,
         error_summary: DeadLetterSummary,
         num_attempts: u32,
-        source: WritableDeadLetterSource,
         metadata: EnvelopeMetadata,
     ) -> Self {
         Self {
-            domain: domain.into(),
+            provenance,
             contract_id: contract_id.into(),
             topic: topic.into(),
             consumer_group,
             tenant,
             message_id: message_id.into(),
             original_payload: RedactedBytes::new(original_payload),
-            source: source.into(),
             metadata,
             error_summary: error_summary.as_str(),
             num_attempts,
         }
     }
 
-    /// 借出 domain。
-    pub fn domain(&self) -> &str {
-        &self.domain
+    /// Producer domain used for replay routing.
+    pub fn producer_domain(&self) -> &str {
+        self.provenance.producer_domain()
+    }
+
+    /// Consumer domain attribution, when this source has a downstream consumer.
+    pub fn consumer_domain(&self) -> Option<&str> {
+        self.provenance.consumer_domain()
+    }
+
+    /// Closed source/domain provenance.
+    pub fn provenance(&self) -> &DeadLetterProvenance {
+        &self.provenance
     }
 
     /// 借出 contract_id。
@@ -239,7 +302,7 @@ impl DeadLetterRecord {
 
     /// 死信来源。
     pub fn source(&self) -> DeadLetterSource {
-        self.source
+        self.provenance.source()
     }
 
     /// 原始 delivery metadata（用于重放时保留 trace/correlation/tenant 等 envelope 信息）。
@@ -319,8 +382,8 @@ pub trait DeadLetterStoreLocal {
 mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynDeadLetterStore>` 动态注入。
     use super::{
-        DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary,
-        DynDeadLetterStore, WritableDeadLetterSource,
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
+        DeadLetterSummary, DynDeadLetterStore,
     };
     use crate::EnvelopeMetadata;
 
@@ -328,14 +391,13 @@ mod smoke {
         DeadLetterRecord::new(
             tenant(),
             "message-1",
-            "identity",
+            DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            WritableDeadLetterSource::Consumer,
             EnvelopeMetadata::empty(),
         )
     }
@@ -393,7 +455,7 @@ mod smoke {
 mod pii_debug {
     //! `DeadLetterRecord.original_payload`（原始消息字节，可能含 PII）Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SignRequest.message` / `Message.payload`）。
-    use super::{DeadLetterRecord, DeadLetterSummary, WritableDeadLetterSource};
+    use super::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSummary};
     use crate::EnvelopeMetadata;
 
     #[allow(clippy::expect_used)]
@@ -411,14 +473,13 @@ mod pii_debug {
         let record = DeadLetterRecord::new(
             tenant(),
             "message-1",
-            "identity",
+            DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
             vec![0xDE, 0xAD, 0xBE, 0xEF],
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            WritableDeadLetterSource::Consumer,
             EnvelopeMetadata::empty(),
         );
         let dbg = format!("{record:?}");
@@ -451,14 +512,13 @@ mod pii_debug {
         let record = DeadLetterRecord::new(
             tenant(),
             "message-1",
-            "identity",
+            DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            WritableDeadLetterSource::Consumer,
             metadata,
         );
         let dbg = format!("{record:?}");
@@ -478,7 +538,7 @@ mod pii_debug {
 #[cfg(test)]
 mod summary {
     //! `DeadLetterSummary` 安全摘要 newtype——类型层强制 `&'static str` const literal。
-    //! INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
+    //! INVARIANT: DIPORT-DLX-SUMMARY-STATIC-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "content-test" }.
     //!
     //! 类型层「不可传 runtime `String`」由编译期保证（`DeadLetterRecord::new` 的 `error_summary`
     //! 形参类型为 `DeadLetterSummary`，无 `From<String>` / `Into` 通路）——故无运行期红用例可写；
@@ -496,7 +556,7 @@ mod summary {
 #[cfg(test)]
 mod tenant_scope {
     //! `DeadLetterRecord` 必须携 typed tenant + message_id。
-    use super::{DeadLetterRecord, DeadLetterSource, DeadLetterSummary, WritableDeadLetterSource};
+    use super::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterSummary};
     use crate::EnvelopeMetadata;
 
     #[test]
@@ -507,14 +567,13 @@ mod tenant_scope {
         let record = DeadLetterRecord::new(
             tenant,
             "msg-tenant-1",
-            "identity",
+            DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             10,
-            WritableDeadLetterSource::Consumer,
             EnvelopeMetadata::empty(),
         );
         assert_eq!(record.tenant(), tenant);

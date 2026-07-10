@@ -215,6 +215,7 @@ async fn connect_pg()
     let deps = PgRuntimeDeps::setup(
         &owner_config,
         &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        generated::event::PROJECTION_INPUT_GENERATION,
         generated::event::PROJECTION_INPUTS,
     )
     .await?;

@@ -4,12 +4,11 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::identity_v1::policy_updated::{
-    CONTRACT as POLICY_UPDATED_CONTRACT, IdentityPolicyUpdatedPayload,
-    IdentityPolicyUpdatedPayloadActorKind, IdentityPolicyUpdatedPayloadChangeKind,
-    TOPIC as POLICY_UPDATED_TOPIC,
+    IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
+    IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
 };
 use generated::http::identity_v1::{
     policies_create::{
@@ -37,7 +36,7 @@ use crate::ports::{
     DynPolicyLifecycle, DynPolicyRepo, PolicyLifecycle, PolicyPage, PolicyRepo, TenantRepoScope,
 };
 
-const POLICY_DOMAIN: &str = POLICY_UPDATED_CONTRACT.domain();
+const POLICY_DOMAIN: &str = POLICY_UPDATED_SPEC.contract().domain();
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -345,7 +344,7 @@ impl PolicyManageService {
     fn event_parts(
         &self,
         draft: PolicyEventDraft<'_>,
-    ) -> Result<(Entry, OutboxEnvelopeParts), PolicyManageError> {
+    ) -> Result<(EventEntry, OutboxEnvelopeParts), PolicyManageError> {
         let PolicyEventDraft {
             tenant,
             actor,
@@ -367,7 +366,13 @@ impl PolicyManageService {
             occurred_at: unix_secs(self.clock.now()),
         };
         let bytes = serde_json::to_vec(&payload).map_err(PolicyManageError::PayloadEncode)?;
-        let entry = build_entry(bytes)?;
+        let entry = EventEntry::new(
+            EventTopic::parse(POLICY_UPDATED_SPEC.topic())
+                .map_err(|_| PolicyManageError::EntryBuild)?,
+            IdemKey::parse(&Uuid::new_v4().to_string())
+                .map_err(|_| PolicyManageError::EntryBuild)?,
+            OutboxPayload::from_reviewed_event_bytes(bytes),
+        );
         let actor_subject = actor.as_uuid().hyphenated().to_string();
         let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
             .map_err(|_| PolicyManageError::EntryBuild)?;
@@ -377,7 +382,8 @@ impl PolicyManageService {
             tenant,
             vocab::ScopedTenant::Tenant,
         );
-        let envelope = OutboxEnvelopeParts::new(POLICY_UPDATED_CONTRACT, tenant, subject_id, actor);
+        let envelope =
+            OutboxEnvelopeParts::new(POLICY_UPDATED_SPEC.contract(), tenant, subject_id, actor);
         Ok((entry, envelope))
     }
 }
@@ -449,15 +455,6 @@ fn map_identity_error(err: IdentityError) -> PolicyManageError {
         IdentityError::VersionConflict => PolicyManageError::VersionConflict,
         other => PolicyManageError::Store(other),
     }
-}
-
-fn build_entry(bytes: Vec<u8>) -> Result<Entry, PolicyManageError> {
-    let event_id = Uuid::new_v4().to_string();
-    Ok(Entry::new(
-        Topic::parse(POLICY_UPDATED_TOPIC).map_err(|_| PolicyManageError::EntryBuild)?,
-        IdemKey::parse(&event_id).map_err(|_| PolicyManageError::EntryBuild)?,
-        OutboxPayload::from_reviewed_event_bytes(bytes),
-    ))
 }
 
 fn actor_kind_wire(

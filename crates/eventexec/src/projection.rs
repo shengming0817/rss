@@ -32,9 +32,9 @@ use consistency::{
     Projector, SerialInOrderGuarantor,
 };
 use diport::{
-    CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION, KEY_TENANT_AUTHORITY,
-    KEY_TENANT_ID, ManagedResource, OwnerCheckpointStore, SaveOutcome, WritableDeadLetterSource,
+    CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterProvenance, DeadLetterRecord,
+    DeadLetterStore, DeadLetterSummary, EnvelopeMetadata, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
+    KEY_TENANT_AUTHORITY, KEY_TENANT_ID, ManagedResource, OwnerCheckpointStore, SaveOutcome,
 };
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -583,7 +583,7 @@ pub enum ProjectionStop {
     /// 的实际顺序由此守：遇到 `lsn < 前一已处理 lsn` 即停，乱序事件**不 apply、不推进 checkpoint**
     /// 越过它（已成功前缀的 high-water 保留）。这把 witness 的「串行有序」声明从构造期延伸到 apply 期，
     /// 使非串行 source（伪造 witness 或乱序拼 slice）无法静默乱序投影（F1，#1211 review）。
-    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（运行期半段）。
+    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Medium", exec = "manual/opt-in", source = "code", facet = "runtime-fence" }（运行期半段）。
     OutOfOrder {
         /// 首个乱序事件的 lsn。
         failed_at: Lsn,
@@ -640,7 +640,7 @@ where
     ///
     /// `_guarantor` 是串行有序 witness（[`consistency::SerialInOrderGuarantor`]）：非串行投递路径拿不到
     /// 此 witness ⇒ **编译期**挂不上 projection（fail-closed by absence，
-    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }）。witness 是 ZST，不占运行期成本（不存入 struct 字段，
+    /// INVARIANT: PROJECTION-SERIAL-WITNESS-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "witness-type" }）。witness 是 ZST，不占运行期成本（不存入 struct 字段，
     /// `run()` 签名不变）。唯一获取入口是 [`consistency::SerialInOrder::from_source`]，须传一个
     /// [`consistency::PartitionSerialDelivery`] source——非串行投递路径无该 impl ⇒ 编译期拒绝。
     ///
@@ -877,14 +877,13 @@ where
         let record = DeadLetterRecord::new(
             metadata.tenant(),
             projection_dead_letter_message_id(&self.owner, &self.projection_id, event.lsn()),
-            metadata.domain(),
+            DeadLetterProvenance::projection(metadata.domain(), self.owner.as_str()),
             metadata.contract_id(),
             event.topic().as_str(),
             Some(self.projection_id.as_str().to_string()),
             event.payload().to_vec(),
             projection_dead_letter_summary(reason),
             1,
-            WritableDeadLetterSource::Projection,
             projection_dead_letter_metadata(metadata),
         );
         self.dlx.write_dead_letter(record).await.map_err(|err| {
@@ -1359,7 +1358,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use consistency::outbox::Topic;
+    use consistency::outbox::EventTopic;
     use consistency::{
         EngineError, EngineErrorKind, Lsn, ProjectionApplyOutcome, ProjectionBatchLimit,
         ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord, ProjectionEventSource,
@@ -1395,13 +1394,13 @@ mod tests {
     /// 测试用 fake 投影事件。
     struct FakeEvent {
         lsn: Lsn,
-        topic: Topic,
+        topic: EventTopic,
         payload: Vec<u8>,
         metadata: ProjectionEventMetadata,
     }
 
     impl ProjectionEvent for FakeEvent {
-        fn topic(&self) -> &Topic {
+        fn topic(&self) -> &EventTopic {
             &self.topic
         }
         fn lsn(&self) -> Lsn {
@@ -1421,7 +1420,7 @@ mod tests {
     fn ev(seq: u64) -> FakeEvent {
         FakeEvent {
             lsn: Lsn::new(seq),
-            topic: Topic::parse("proj.test").expect("proj.test is valid topic"),
+            topic: EventTopic::parse("proj.test").expect("proj.test is valid topic"),
             payload: vec![],
             metadata: projection_metadata(),
         }
@@ -1474,7 +1473,7 @@ mod tests {
     fn projection_record(seq: u64) -> ProjectionEventRecord {
         ProjectionEventRecord::with_metadata(
             Lsn::new(seq),
-            Topic::parse("proj.test").expect("proj.test is valid topic"),
+            EventTopic::parse("proj.test").expect("proj.test is valid topic"),
             vec![],
             projection_metadata(),
         )
@@ -1492,7 +1491,7 @@ mod tests {
     ) -> ProjectionEventRecord {
         ProjectionEventRecord::with_metadata(
             Lsn::new(seq),
-            Topic::parse(topic).expect("valid topic"),
+            EventTopic::parse(topic).expect("valid topic"),
             vec![],
             metadata,
         )
@@ -2120,7 +2119,8 @@ mod tests {
             format!("projection:test-owner:test-proj:{lsn}")
         );
         assert_eq!(record.consumer_group(), Some("test-proj"));
-        assert_eq!(record.domain(), "test");
+        assert_eq!(record.producer_domain(), "test");
+        assert_eq!(record.consumer_domain(), Some("test-owner"));
         assert_eq!(record.contract_id(), "test.projection-event");
         assert_eq!(record.topic(), "proj.test");
         assert_eq!(record.error_summary(), summary);
@@ -2847,7 +2847,7 @@ mod tests {
         let schema_hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
         let event = ProjectionEventRecord::with_metadata(
             Lsn::new(7),
-            Topic::parse("inventory.projected").expect("valid topic"),
+            EventTopic::parse("inventory.projected").expect("valid topic"),
             b"payload".to_vec(),
             ProjectionEventMetadata::new(
                 vocab::TenantId::parse(tenant_id).expect("canonical tenant"),

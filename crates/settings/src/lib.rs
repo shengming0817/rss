@@ -9,7 +9,8 @@
 //!
 //! 签名冻结（G0）已补真实行为：`domain` newtype 校验 / `diff` / `evaluate_flag`（全 11 operator + 百分比
 //! 分桶）；`application` 经 in-mem `Publisher`（L2 OutboxFact）打通配置发布/回滚接缝。真实持久化（postgres
-//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载（config-publish / secret-publish 认证路由）已落（#1430
+//! adapter impl [`ports::ConfigRepo`]）+ axum 挂载（config publish/get/delete/rollback / secret-publish
+//! 认证路由）已落（#1430
 //! PERSIST-009 settings 首条 durable module 闭环）。`smoke` 保留为签名冻结回归（绑函数指针锁签名）。
 //!
 //! # 对标
@@ -30,6 +31,7 @@ pub use application::{
     SettingsDomain, SettingsService, SettingsServiceError,
     config_version_changed_event_from_message,
 };
+pub use ports::ConfigEntry;
 pub use secret_application::{SecretService, SecretServiceError};
 
 /// 返回空 flag 仓储（不透明封装 [`FlagStoreBox`]）。

@@ -1,6 +1,6 @@
 //! `repo-scope-guard` —— tenant/row scoped repository port signature guard.
 //!
-//! INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01 { level = "Medium", exec = "verify", source = "code" }——
+//! INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_method_without_scope_handle_fails_even_when_other_method_has_handle", anti_vacuity = "tests::green_tenant_repo_scope_param_is_allowed" }——
 //! tenant-scoped domain repository ports in `settings` / `identity` / `audit` must accept opaque
 //! `TenantRepoScope` / `RowRepoScope` handles, not bare `TenantId`, `RowVisibility`, or `RowScope`.
 //! Admin / maintenance ports keep their own explicit entry points and are not normal repo scope
@@ -206,6 +206,10 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     (
         "adapters/postgres/src/command_journal.rs",
         "record_command_with_business_write",
+    ),
+    (
+        "adapters/postgres/src/command_journal.rs",
+        "dispatch_command",
     ),
     ("adapters/postgres/src/dead_letter.rs", "write_dead_letter"),
     ("adapters/postgres/src/dlq.rs", "inspect_dead_letter"),
@@ -703,7 +707,8 @@ mod tests {
             ),
             (
                 "adapters/postgres/src/command_journal.rs".to_string(),
-                "async fn record_command_with_business_write() { infra_tenant_scope(tenant); }"
+                "async fn record_command_with_business_write() { infra_tenant_scope(tenant); }\n\
+                 async fn dispatch_command() { infra_tenant_scope(tenant); }"
                     .to_string(),
             ),
             (

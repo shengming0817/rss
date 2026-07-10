@@ -23,11 +23,12 @@ use crate::projection_events::ProjectionWriteRegistry;
 const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 const OUTBOX_RELAY_DLX_FALLBACK_SUMMARY: &str = "outbox relay dlx";
 #[cfg(test)]
-const LIST_DEAD_LETTER_BIND_COUNT: u32 = 10;
+const LIST_DEAD_LETTER_BIND_COUNT: u32 = 11;
 const LIST_DEAD_LETTER_SQL: &str = r#"
     SELECT id::text,
            message_id,
-           domain,
+           producer_domain,
+           consumer_domain,
            contract_id,
            topic,
            consumer_group,
@@ -38,41 +39,43 @@ const LIST_DEAD_LETTER_SQL: &str = r#"
            EXTRACT(EPOCH FROM last_attempt_at)::bigint
     FROM dead_letter
     WHERE tenant_id = $1::uuid
-      AND ($2::text IS NULL OR domain = $2)
-      AND ($3::text IS NULL OR source_kind = $3)
-      AND ($4::text IS NULL OR contract_id = $4)
-      AND source_kind <> $5
+      AND ($2::text IS NULL OR producer_domain = $2)
+      AND ($3::text IS NULL OR consumer_domain = $3)
+      AND ($4::text IS NULL OR source_kind = $4)
+      AND ($5::text IS NULL OR contract_id = $5)
+      AND source_kind <> $6
       AND (
-            $6::bigint IS NULL
-         OR EXTRACT(EPOCH FROM last_attempt_at)::bigint < $6
+            $7::bigint IS NULL
+         OR EXTRACT(EPOCH FROM last_attempt_at)::bigint < $7
          OR (
-                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $6
-            AND $7::text > $8
+                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $7
+            AND $8::text > $9
             )
          OR (
-                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $6
-            AND $7::text = $8
-            AND id::text > $9
+                EXTRACT(EPOCH FROM last_attempt_at)::bigint = $7
+            AND $8::text = $9
+            AND id::text > $10
             )
       )
     ORDER BY EXTRACT(EPOCH FROM last_attempt_at)::bigint DESC, id ASC
-    LIMIT $10
+    LIMIT $11
     "#;
 
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
     tenant_pool: PgTenantPool,
-    payload_protector: Option<DlxPayloadProtector>,
-    projection_registry: ProjectionWriteRegistry,
+    replay: DlqReplayCapability,
+}
+
+enum DlqReplayCapability {
+    Enabled {
+        payload_protector: DlxPayloadProtector,
+        projection_registry: ProjectionWriteRegistry,
+    },
+    Disabled,
 }
 
 impl PgStore {
-    /// 构造 DLQ inspection/replay adapter（pool clone 自 `PgStore`，轻量）。
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
-        self.dlq_with_projection_registry(payload_protector, ProjectionWriteRegistry::empty())
-    }
-
     pub(crate) fn dlq_with_projection_registry(
         &self,
         payload_protector: DlxPayloadProtector,
@@ -80,19 +83,17 @@ impl PgStore {
     ) -> PgDlqStore {
         PgDlqStore {
             tenant_pool: PgTenantPool::new(self),
-            payload_protector: Some(payload_protector),
-            projection_registry,
+            replay: DlqReplayCapability::Enabled {
+                payload_protector,
+                projection_registry,
+            },
         }
     }
 
-    pub(crate) fn dlq_without_payload_replay(
-        &self,
-        projection_registry: ProjectionWriteRegistry,
-    ) -> PgDlqStore {
+    pub(crate) fn dlq_without_payload_replay(&self) -> PgDlqStore {
         PgDlqStore {
             tenant_pool: PgTenantPool::new(self),
-            payload_protector: None,
-            projection_registry,
+            replay: DlqReplayCapability::Disabled,
         }
     }
 }
@@ -122,12 +123,17 @@ impl DlqStore for PgDlqStore {
         request: DlqReplayRequest,
     ) -> Result<DlqReplayOutcome, DlqError> {
         let tenant = request.tenant();
-        let Some(payload_protector) = self.payload_protector.clone() else {
-            let err = DlqError::PayloadKeyUnavailable;
-            record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, &err);
-            return Err(err);
+        let (payload_protector, projection_registry) = match &self.replay {
+            DlqReplayCapability::Enabled {
+                payload_protector,
+                projection_registry,
+            } => (payload_protector.clone(), *projection_registry),
+            DlqReplayCapability::Disabled => {
+                let err = DlqError::PayloadKeyUnavailable;
+                record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, &err);
+                return Err(err);
+            }
         };
-        let projection_registry = self.projection_registry;
         let result = self
             .tenant_pool
             .write(
@@ -137,7 +143,8 @@ impl DlqStore for PgDlqStore {
                     Box::pin(async move {
                         let row: Option<ReplayDeadLetterRow> = sqlx::query_as(
                             r#"
-                            SELECT source_kind, message_id, domain, contract_id, original_entry,
+                            SELECT source_kind, message_id, producer_domain, consumer_domain,
+                                   contract_id, original_entry,
                                    original_entry_key_ref, topic, consumer_group, metadata
                             FROM dead_letter
                             WHERE id = $1::uuid
@@ -153,7 +160,8 @@ impl DlqStore for PgDlqStore {
                         let Some((
                             source,
                             message_id,
-                            domain,
+                            producer_domain,
+                            consumer_domain,
                             contract_id,
                             original_entry,
                             key_ref,
@@ -180,7 +188,8 @@ impl DlqStore for PgDlqStore {
                                 DlxPayloadContext::new(
                                     request.tenant(),
                                     &source,
-                                    &domain,
+                                    &producer_domain,
+                                    consumer_domain.as_deref(),
                                     &contract_id,
                                     &topic,
                                     consumer_group.as_deref(),
@@ -211,7 +220,7 @@ impl DlqStore for PgDlqStore {
                             ReplayedOutboxAppend {
                                 event_id: request.replay_id().as_str().to_string(),
                                 tenant: request.tenant(),
-                                domain,
+                                domain: producer_domain,
                                 topic,
                                 contract_id,
                                 contract_version,
@@ -304,7 +313,8 @@ impl PgDlqStore {
                         r#"
                         SELECT id::text,
                                message_id,
-                               domain,
+                               producer_domain,
+                               consumer_domain,
                                contract_id,
                                topic,
                                consumer_group,
@@ -399,7 +409,8 @@ impl PgDlqStore {
             .map(DeadLetterSource::as_str)
             .map(str::to_owned);
         let tenant = query.tenant();
-        let domain = query.domain().map(str::to_owned);
+        let producer_domain = query.producer_domain().map(str::to_owned);
+        let consumer_domain = query.consumer_domain().map(str::to_owned);
         let contract_id = query.contract_id().map(str::to_owned);
         let fetch_limit = query.fetch_limit();
         let cursor_epoch = query.cursor().map(|cursor| cursor.last_epoch_secs());
@@ -413,7 +424,8 @@ impl PgDlqStore {
                 Box::pin(async move {
                     sqlx::query_as(LIST_DEAD_LETTER_SQL)
                         .bind(tenant.to_string())
-                        .bind(domain)
+                        .bind(producer_domain)
+                        .bind(consumer_domain)
                         .bind(source)
                         .bind(contract_id)
                         .bind(DeadLetterSource::OutboxRelay.as_str())
@@ -445,7 +457,10 @@ impl PgDlqStore {
         }
 
         let tenant = query.tenant();
-        let domain = query.domain().map(ToString::to_string);
+        if query.consumer_domain().is_some() {
+            return Ok(Vec::new());
+        }
+        let domain = query.producer_domain().map(ToString::to_string);
         let contract_id = query.contract_id().map(ToString::to_string);
         let cursor_epoch = query.cursor().map(|cursor| cursor.last_epoch_secs());
         let cursor_kind = query
@@ -535,6 +550,7 @@ type DeadLetterRow = (
     String,
     String,
     String,
+    Option<String>,
     String,
     String,
     Option<String>,
@@ -548,6 +564,7 @@ type ReplayDeadLetterRow = (
     String,
     String,
     String,
+    Option<String>,
     String,
     serde_json::Value,
     String,
@@ -574,7 +591,8 @@ impl DeadLetterRowExt for DeadLetterRow {
         let (
             id,
             message_id,
-            domain,
+            producer_domain,
+            consumer_domain,
             contract_id,
             topic,
             consumer_group,
@@ -590,7 +608,8 @@ impl DeadLetterRowExt for DeadLetterRow {
             parse_source(&source)?,
             tenant,
             message_id,
-            domain,
+            producer_domain,
+            consumer_domain,
             contract_id,
             topic,
             consumer_group,
@@ -608,14 +627,16 @@ trait OutboxRowExt {
 
 impl OutboxRowExt for OutboxRow {
     fn into_summary(self, tenant: vocab::TenantId) -> Result<DlqEntrySummary, DlqError> {
-        let (event_id, domain, contract_id, topic, payload_len, summary, attempts, ts) = self;
+        let (event_id, producer_domain, contract_id, topic, payload_len, summary, attempts, ts) =
+            self;
         Ok(DlqEntrySummary::new(
             DlqEntryKind::OutboxDlx,
             event_id.clone(),
             DeadLetterSource::OutboxRelay,
             tenant,
             event_id,
-            domain,
+            producer_domain,
+            None,
             contract_id,
             topic,
             None,

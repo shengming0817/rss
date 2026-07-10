@@ -1052,10 +1052,14 @@ mod tests {
                 SeenState::Fresh
             );
             let before = receipt_snapshot(&store, &original, &key).await?;
-            let err = inbox
-                .try_claim(&mismatched, &key, &lease())
-                .await
-                .expect_err("schema identity mismatch must fail closed");
+            let err = match inbox.try_claim(&mismatched, &key, &lease()).await {
+                Err(err) => err,
+                Ok(_) => {
+                    return Err(
+                        std::io::Error::other("schema identity mismatch must fail closed").into(),
+                    );
+                }
+            };
             assert_eq!(err.kind(), EngineErrorKind::Invariant);
             let after = receipt_snapshot(&store, &original, &key).await?;
             assert_eq!(

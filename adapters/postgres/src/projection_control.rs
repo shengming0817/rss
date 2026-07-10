@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 use consistency::ProjectionBatchLimit;
 use diport::{CasStore as _, CasStoreKey, CasStoreOutcome, CasStoreRequest, RedactedBytes};
 use eventexec::{ProjectionActivePointer, ProjectionSelector, ProjectionVersion};
@@ -67,57 +68,22 @@ impl ProjectionPromoteOutcome {
     }
 }
 
-/// 已授权的 projection replay / shadow-swap 维护能力。
-///
-/// 该类型由 runtime 在 durable start audit 与 service-token/grant 校验后 mint。Postgres active pointer
-/// control 只能经该 capability 构造，避免普通 infra 句柄旁路 CLI 授权边界。
-#[derive(Debug, Clone)]
-pub struct ProjectionMaintenanceCapability {
-    operator_subject: Box<str>,
-}
-
-impl ProjectionMaintenanceCapability {
-    pub fn from_verified_service_subject(
-        operator_subject: impl Into<String>,
-    ) -> Result<Self, ProjectionControlError> {
-        Self::new(operator_subject)
-    }
-
-    pub(crate) fn new(operator_subject: impl Into<String>) -> Result<Self, ProjectionControlError> {
-        let operator_subject = operator_subject.into();
-        let operator_subject = operator_subject.trim();
-        if operator_subject.is_empty() {
-            return Err(ProjectionControlError::InvalidCapabilitySubject);
-        }
-        Ok(Self {
-            operator_subject: operator_subject.into(),
-        })
-    }
-
-    #[must_use]
-    pub fn operator_subject(&self) -> &str {
-        &self.operator_subject
-    }
-}
-
 /// Projection control store backed by Postgres.
-pub struct PgProjectionControl {
+pub struct PgProjectionControl<'a> {
     store: Arc<PgStore>,
-    _capability: ProjectionMaintenanceCapability,
+    receipt: &'a ProjectionMaintenanceReceipt,
 }
 
-impl PgProjectionControl {
-    pub(crate) fn new(store: Arc<PgStore>, capability: ProjectionMaintenanceCapability) -> Self {
-        Self {
-            store,
-            _capability: capability,
-        }
+impl<'a> PgProjectionControl<'a> {
+    pub(crate) fn new(store: Arc<PgStore>, receipt: &'a ProjectionMaintenanceReceipt) -> Self {
+        Self { store, receipt }
     }
 
     pub async fn status(
         &self,
         selector: &ProjectionSelector,
     ) -> Result<ProjectionPointerStatus, ProjectionControlError> {
+        authorize_receipt(self.receipt, ProjectionMaintenanceAction::Status, selector)?;
         let raw = self.read_pointer(selector).await?;
         let selected_shadow_high_water_lsn = self.read_shadow_checkpoint_optional(selector).await?;
         let source_high_water_lsn = self.read_projection_source_high_water().await?;
@@ -129,6 +95,7 @@ impl PgProjectionControl {
         selector: &ProjectionSelector,
         precondition: ProjectionPointerPrecondition,
     ) -> Result<ProjectionPromoteOutcome, ProjectionControlError> {
+        authorize_receipt(self.receipt, ProjectionMaintenanceAction::Swap, selector)?;
         let high_water = self.read_shadow_checkpoint(selector).await?;
         let source_high_water = self.read_projection_source_high_water().await?;
         verify_shadow_caught_up(high_water, source_high_water)?;
@@ -246,9 +213,21 @@ impl PgProjectionControl {
 impl PgStore {
     pub(crate) fn projection_control(
         store: Arc<PgStore>,
-        capability: ProjectionMaintenanceCapability,
-    ) -> PgProjectionControl {
-        PgProjectionControl::new(store, capability)
+        receipt: &ProjectionMaintenanceReceipt,
+    ) -> PgProjectionControl<'_> {
+        PgProjectionControl::new(store, receipt)
+    }
+}
+
+pub(crate) fn authorize_receipt(
+    receipt: &ProjectionMaintenanceReceipt,
+    action: ProjectionMaintenanceAction,
+    selector: &ProjectionSelector,
+) -> Result<(), ProjectionControlError> {
+    if receipt.authorizes(action, selector.tenant(), selector.projection().as_str()) {
+        Ok(())
+    } else {
+        Err(ProjectionControlError::ReceiptTargetMismatch)
     }
 }
 
@@ -327,8 +306,8 @@ fn map_promote_cas_outcome(
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProjectionControlError {
-    #[error("projection maintenance capability subject must be non-empty")]
-    InvalidCapabilitySubject,
+    #[error("projection maintenance receipt does not authorize the requested action and target")]
+    ReceiptTargetMismatch,
     #[error("projection shadow checkpoint is missing")]
     ShadowCheckpointMissing,
     #[error(
@@ -410,15 +389,6 @@ mod tests {
             active,
         );
         assert!(matches!(fenced, Err(ProjectionControlError::CasConflict)));
-        Ok(())
-    }
-
-    #[test]
-    fn projection_maintenance_capability_requires_non_empty_subject()
-    -> Result<(), ProjectionControlError> {
-        let capability = ProjectionMaintenanceCapability::new("operator@example.com")?;
-        assert_eq!(capability.operator_subject(), "operator@example.com");
-        assert!(ProjectionMaintenanceCapability::new("  ").is_err());
         Ok(())
     }
 

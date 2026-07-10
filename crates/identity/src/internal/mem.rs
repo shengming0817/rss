@@ -20,7 +20,7 @@ use crate::domain::{Session, SessionId};
 #[cfg(test)]
 use crate::ports::SessionLifecycle;
 #[cfg(test)]
-use consistency::Entry;
+use consistency::EventEntry;
 #[cfg(test)]
 use diport::{OutboxEmitError, OutboxEnvelopeParts};
 // Arc 供 InMemSessionLifecycle（test）与 InMemRefreshTokenStore（test/seed-login）共享 store 句柄。
@@ -258,7 +258,7 @@ impl SessionLifecycle for InMemSessionLifecycle {
         &self,
         scope: TenantRepoScope,
         session: Session,
-        _entry: Entry,
+        _entry: EventEntry,
         _envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         if scope.tenant() != session.tenant() {
@@ -451,7 +451,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
         &self,
         scope: TenantRepoScope,
         policy: Policy,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
         let tenant = scope.tenant();
@@ -481,7 +481,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
         scope: TenantRepoScope,
         policy: Policy,
         expected: PolicyVersion,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<Policy, IdentityError> {
         let tenant = scope.tenant();
@@ -516,7 +516,7 @@ impl PolicyLifecycle for InMemPolicyRepo {
         scope: TenantRepoScope,
         id: PolicyId,
         expected: PolicyVersion,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, IdentityError> {
         let tenant = scope.tenant();
@@ -849,7 +849,7 @@ pub(crate) struct CapturedEvent {
 
 #[cfg(test)]
 impl CapturedEvent {
-    fn of(entry: &Entry, envelope: &OutboxEnvelopeParts) -> Self {
+    fn of(entry: &EventEntry, envelope: &OutboxEnvelopeParts) -> Self {
         Self {
             topic: entry.topic().as_str().to_string(),
             idem_key: entry.idem_key().as_str().to_string(),
@@ -917,7 +917,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         &self,
         scope: TenantRepoScope,
         binding: RoleBinding,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         if scope.tenant() != binding.tenant() {
@@ -950,7 +950,7 @@ impl RoleBindingLifecycle for InMemRoleBindingLifecycle {
         scope: TenantRepoScope,
         role_id: RoleId,
         subject: String,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<bool, OutboxEmitError> {
         let tenant = scope.tenant();
@@ -1117,7 +1117,7 @@ mod tests {
         CredentialRepo, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo, RoleBindingLifecycle,
         SessionLifecycle, TenantRepoScope,
     };
-    use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+    use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
     use std::time::{Duration, SystemTime};
 
@@ -1210,9 +1210,9 @@ mod tests {
     }
 
     // co-tx 创建入参占位（InMemSessionLifecycle::persist_session_and_emit 忽略 entry/envelope，仅存 session）。
-    fn dummy_entry() -> Entry {
-        Entry::new(
-            Topic::parse("identity.session-created").expect("topic parses"),
+    fn dummy_entry() -> EventEntry {
+        EventEntry::new(
+            EventTopic::parse("identity.session-created").expect("topic parses"),
             IdemKey::parse("evt-1").expect("idem key parses"),
             OutboxPayload::from_reviewed_event_bytes(b"{}".to_vec()),
         )

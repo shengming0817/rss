@@ -26,10 +26,7 @@ primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 # DI-infra：ManagedResource port trait + DynManagedResource（Send dyn wrapper）+ ShutdownError 单源。
 # 服务→DI-infra 下行依赖（layers.rs allows）。dynosaur 派发统一替代原 async-trait（ADR-003）。
-# SubscriberHandler::handle 消费 diport::Message（不引兄弟服务 eventexec）。
 diport = { path = "../diport" }
-# SubscriberHandler::handle 返回 BoxFuture（手写 box——bootstrap 不用 dynosaur，dynosaur 收敛于 diport）。
-futures = { workspace = true }
 # 关闭逆序编排范式（无 async Drop）。tokio::time 做有界超时、spawn 做 panic 隔离，
 # tokio-util::CancellationToken 做关闭取消广播；ManagedResource 的 dyn 分发由 diport（dynosaur）承载。
 # 关闭聚合错误（ShutdownFailureKind / ResourceShutdownError）用 thiserror，不在公共 port 暴露 anyhow。

@@ -5,7 +5,7 @@
 //! ordered runtime wiring anchors. It intentionally keeps field-inventory drift separate from
 //! `SharedRuntimeDeps` infra-only semantics, which are enforced by `runtime-deps-guard`.
 //!
-//! INVARIANT: RUNTIME-BASELINE-DRIFT-01 { level = "Medium", exec = "verify", source = "code" } -- `cargo xtask runtime-baseline verify`
+//! INVARIANT: RUNTIME-BASELINE-DRIFT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_baseline_drift_fails", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `cargo xtask runtime-baseline verify`
 //! compares the generated runtime assembly baseline with the committed `runtime-baseline/runtime.txt`
 //! and fails on missing baseline, content drift, empty dependency/provider inventories, or missing
 //! required wiring anchors. Synthetic red/green tests cover every failure class.

@@ -102,6 +102,7 @@ integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
 # runtime 单元/e2e 测试需要显式构造 domain-local TenantRepoScope；生产依赖不启用 test-support。
+authn = { path = "../../crates/authn", features = ["test-support"] }
 audit = { path = "../../crates/audit", features = ["test-support"] }
 identity = { path = "../../crates/identity", features = ["test-support"] }
 # dev-only 虚拟时间（JWKS poll 测试）；生产 tokio feature set 不引 `test-util`。

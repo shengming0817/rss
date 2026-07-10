@@ -2,6 +2,9 @@
 //!
 //! INVARIANT: CODEGEN-DRIFT-01 { level = "Medium", exec = "verify", source = "code" }— committed `generated/src/**` 与 `contracts/` 的派生结果字节一致、
 //! 且无孤儿文件（删契约残留）。Medium（CI 门，`cargo xtask codegen --check`）。
+//! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
+//! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "verify", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
+//! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
 //!
@@ -20,7 +23,7 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
-    ConsistencyLevel, ContractKind, EffectKind, HttpAuthMode, HttpHeaderMode,
+    CommandJournalPolicy, ConsistencyLevel, ContractKind, EffectKind, HttpAuthMode, HttpHeaderMode,
     HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
     LocalTxRetry, WorkflowMode,
 };
@@ -82,6 +85,14 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
     // kinds: kind_dir → (modules, mod_kind) ——event/command kind 需在 mod.rs 特化加 POD / seam 定义。
     let mut kinds: BTreeMap<String, (BTreeSet<String>, ModKind)> = BTreeMap::new();
     for c in contracts {
+        if (c.manifest.kind == ContractKind::Command) != c.manifest.command.is_some() {
+            bail!(
+                "契约 {}/{}/{} 的 [command] block 与 kind 不匹配（codegen fail-closed）",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version
+            );
+        }
         let kind_dir = c.manifest.kind.as_dir().to_string();
         let module = module_name(&c.manifest.domain, &c.manifest.version);
         // 防御性安全校验：domain/version 派生的 module 名须为纯路径段，防 `../` 逃逸。
@@ -123,6 +134,7 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
         if *mod_kind == ModKind::Event {
             mod_rs.push_str(&render_event_root_subscriptions(contracts)?);
             mod_rs.push_str(&render_event_root_projection_inputs(contracts)?);
+            mod_rs.push_str(&render_event_root_producer_domains(contracts)?);
         }
         files.push((PathBuf::from(kind_dir).join("mod.rs"), mod_rs));
     }
@@ -263,6 +275,26 @@ fn slug_module_ident(slug: &str) -> Result<String> {
     Ok(ident)
 }
 
+/// Contract domain label → Rust enum variant. Separator-delimited segments become UpperCamelCase;
+/// `syn::Ident` closes the generated-code injection boundary. Callers reject cross-label collisions.
+fn producer_domain_variant(domain: &str) -> Result<String> {
+    let mut variant = String::new();
+    for segment in domain
+        .split(['.', '-', '_'])
+        .filter(|part| !part.is_empty())
+    {
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            variant.push(first.to_ascii_uppercase());
+            variant.extend(chars);
+        }
+    }
+    if variant.starts_with("r#") || syn::parse_str::<syn::Ident>(&variant).is_err() {
+        bail!("event domain {domain:?} 派生非法 Rust enum variant {variant:?}");
+    }
+    Ok(variant)
+}
+
 /// 单契约的 typify 派生 body（payload DTO + 派生 glue，**不含** `@generated` 头）。
 /// `sup` 是 POD 引用前缀：扁平 body 用 `"super::"`（POD 在父 `{kind}/mod.rs`）、嵌套 body 在
 /// `pub mod <slug>` 内故用 `"super::super::"`。对 event kind 追加订阅注册 glue（CONTRACT_ID / TOPIC /
@@ -347,7 +379,7 @@ fn render_contract_body(c: &DiscoveredContract, sup: &str) -> Result<String> {
 
     // event kind：在 payload DTO 之后追加订阅注册 glue（从 manifest 而非 schema 派生）。
     // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
-    // command kind：追加 CONTRACT/CONTRACT_ID/TOPIC + typed emit/register wrapper（triple funnel 顶层；
+    // command kind：追加 CONTRACT/CONTRACT_ID/TOPIC + policy-exclusive typed wrapper（generated seam 顶层；
     // 泛型收口到 command/mod.rs 的 CommandEmit/CommandRegister seam）。`sup` = POD 引用前缀（嵌套深一级）。
     match c.manifest.kind {
         ContractKind::Event => Ok(format!("{}{}", payload, render_event_glue(c, sup)?)),
@@ -824,8 +856,8 @@ fn render_route_permission_expr(value: &str, field: &str) -> Result<String> {
     Ok(format!("::vocab::RoutePermissionId::{variant}"))
 }
 
-/// command kind 派生 glue：CONTRACT / CONTRACT_ID / TOPIC 常量 + per-command typed `emit_async` / `register_handler`
-/// wrapper（triple funnel 顶层）。wrapper 泛型收口到 `command/mod.rs` 的 `CommandEmit` / `CommandRegister`
+/// command kind 派生 glue：CONTRACT / CONTRACT_ID / TOPIC 常量 + policy-exclusive producer / typed handler
+/// wrapper。wrapper 泛型收口到 `command/mod.rs` 的 `CommandEmit` / `CommandJournal` / `CommandRegister`
 /// seam——generated 不命名 runtime（`eventexec` Service 层），故经 seam 注入。
 ///
 /// typed `Request` 类型名 = request schema 的 `title`（typify 用作根类型名）；拼进生成源前经
@@ -860,6 +892,52 @@ fn render_command_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
         );
     }
     let request_ty = command_request_type_name(c)?;
+    let policy = c
+        .manifest
+        .command
+        .as_ref()
+        .context("command 契约缺 [command] block（codegen fail-closed）")?
+        .journal;
+    let (policy_variant, policy_trait, wrapper) = match policy {
+        CommandJournalPolicy::Required => (
+            "Required",
+            "JournaledCommandContract",
+            format!(
+                r#"
+/// Journal-required producer wrapper；idempotency key 不提供随机降级路径。
+pub async fn journal_async<J: {sup}CommandJournal>(
+    journal: &J,
+    request: {request_ty},
+    tenant: ::vocab::TenantId,
+    subject_id: J::SubjectId,
+    actor: J::Actor,
+    idempotency_key: ::std::string::String,
+) -> ::core::result::Result<J::Outcome, J::Error> {{
+    journal.journal::<Contract>(&request, tenant, subject_id, actor, &idempotency_key).await
+}}
+"#,
+            ),
+        ),
+        CommandJournalPolicy::None => (
+            "None",
+            "DirectCommandContract",
+            format!(
+                r#"
+/// Direct producer wrapper；仅 manifest 明确 `journal = "none"` 时生成。
+pub async fn emit_async<E: {sup}CommandEmit>(
+    emitter: &E,
+    request: {request_ty},
+    tenant: ::vocab::TenantId,
+    subject_id: E::SubjectId,
+    actor: E::Actor,
+    idempotency_key: ::core::option::Option<::std::string::String>,
+) -> ::core::result::Result<(), E::Error> {{
+    emitter.emit::<Contract>(&request, tenant, subject_id, actor, idempotency_key.as_deref()).await
+}}
+"#,
+            ),
+        ),
+    };
     Ok(format!(
         r#"
 /// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -873,23 +951,57 @@ pub const CONTRACT: ::vocab::ContractBinding =
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const TOPIC: &str = "{topic}";
 
-/// Producer wrapper（triple funnel 顶层）：把 typed [`{request_ty}`] 经注入的 [`super::CommandEmit`] 落
-/// durable outbox。baked `CONTRACT` / `TOPIC`——业务不裸传 topic / payload、不直调 runtime emit。
-/// `tenant` 是 typed RLS scope（必填）；`subject_id` 与 `actor` 是 bridge 绑定的 typed envelope identity；`idempotency_key` 是可选业务幂等键
-/// （`Some` ⇒ 稳定 `DispatchId`、同键二次 emit 被拒；`None` ⇒ 随机 `DispatchId`）。
-/// 由 `cargo xtask codegen` 派生；勿手改。
-pub async fn emit_async<E: {sup}CommandEmit>(
-    emitter: &E,
+/// command manifest 的 sealed generated 表示；构造器仅 generated crate 可见。
+pub const SPEC: {sup}CommandSpec =
+    {sup}CommandSpec::new(CONTRACT, TOPIC, {sup}CommandJournalPolicy::{policy_variant});
+
+/// Zero-sized generated carrier that binds this command's request schema, routing metadata and policy.
+pub struct Contract;
+
+impl {sup}private::Sealed for Contract {{}}
+
+impl {sup}CommandContract for Contract {{
+    type Request = {request_ty};
+    const SPEC: {sup}CommandSpec = SPEC;
+}}
+
+impl {sup}{policy_trait} for Contract {{}}
+
+/// Typed reconcile input for this command. Fields are private and routing is baked into [`SPEC`].
+pub struct ReconcileCommand<S, A> {{
     request: {request_ty},
     tenant: ::vocab::TenantId,
-    subject_id: E::SubjectId,
-    actor: E::Actor,
-    idempotency_key: ::core::option::Option<::std::string::String>,
-) -> ::core::result::Result<(), E::Error> {{
-    emitter
-        .emit(CONTRACT, TOPIC, &request, tenant, subject_id, actor, idempotency_key.as_deref())
-        .await
+    subject_id: S,
+    actor: A,
+    idempotency_key: ::std::string::String,
 }}
+
+impl<S, A> {sup}private::Sealed for ReconcileCommand<S, A> {{}}
+
+impl<S, A> {sup}TypedCommandSpec for ReconcileCommand<S, A> {{
+    type Contract = Contract;
+    type SubjectId = S;
+    type Actor = A;
+
+    fn request(&self) -> &<Self::Contract as {sup}CommandContract>::Request {{ &self.request }}
+    fn tenant(&self) -> ::vocab::TenantId {{ self.tenant }}
+    fn idempotency_key(&self) -> &str {{ &self.idempotency_key }}
+    fn into_identity(self) -> (Self::SubjectId, Self::Actor) {{ (self.subject_id, self.actor) }}
+}}
+
+/// Build the only reconcile-authoring input for this command. Topic, contract, and payload type are
+/// generated facts rather than caller-supplied strings/bytes.
+pub fn reconcile_command<S, A>(
+    request: {request_ty},
+    tenant: ::vocab::TenantId,
+    subject_id: S,
+    actor: A,
+    idempotency_key: ::std::string::String,
+) -> ReconcileCommand<S, A> {{
+    ReconcileCommand {{ request, tenant, subject_id, actor, idempotency_key }}
+}}
+
+{wrapper}
 
 /// Consumer wrapper（consumer 侧对称收口）：把 typed [`{request_ty}`] handler 注册到注入的
 /// [`super::CommandRegister`]。baked `CONTRACT` / `TOPIC`。由 `cargo xtask codegen` 派生；勿手改。
@@ -899,7 +1011,7 @@ where
     H: Fn({request_ty}) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
     Fut: ::core::future::Future<Output = Reg::Outcome> + ::core::marker::Send + 'static,
 {{
-    registrar.register::<{request_ty}, H, Fut>(CONTRACT, TOPIC, handler)
+    registrar.register::<Contract, H, Fut>(handler)
 }}
 "#
     ))
@@ -997,8 +1109,14 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             c.manifest.version,
         );
     }
-    // 每个 [[subscriptions]] 条目一行 SubscriptionSpec 字面量；拼前防注入收口（见函数 doc）。
+    // producer partition strategy 与 subscription list 同属一个 EventSpec；不同订阅不得各自漂移。
     let mut subs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    let partition_key = c
+        .manifest
+        .subscriptions
+        .first()
+        .map(|subscription| subscription.topology.partition_key)
+        .unwrap_or(crate::contract::manifest::PartitionKeyStrategy::None);
     for s in &c.manifest.subscriptions {
         if !is_safe_codegen_ident(&s.consumer) {
             bail!(
@@ -1018,12 +1136,21 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
                 s.group
             );
         }
+        if s.topology.partition_key != partition_key {
+            bail!(
+                "契约 {}/{}/{} 的 subscriptions partitionKey 不一致；producer strategy 必须单源",
+                c.manifest.kind.as_dir(),
+                c.manifest.domain,
+                c.manifest.version,
+            );
+        }
         subs.push(format!(
-            "    {sup}SubscriptionSpec {{ contract_id: CONTRACT_ID, topic: TOPIC, schema_version: CONTRACT.version(), schema_hash: CONTRACT.schema_hash(), consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
+            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriberReadiness::{})",
             s.consumer,
             s.group,
-            s.topology.partition_key.as_wire(),
-            s.topology.readiness.as_wire()
+            match s.topology.readiness {
+                crate::contract::manifest::SubscriberReadiness::Required => "Required",
+            }
         ));
     }
     let subs_body = if subs.is_empty() {
@@ -1048,14 +1175,18 @@ pub const TOPIC: &str = "{topic}";
 pub const CONTRACT: ::vocab::ContractBinding =
     ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
 
-/// 订阅注册声明（从 `[[subscriptions]]` 派生，供 bootstrap 接线）。
-/// 每项含 `contract_id`、`topic`、`consumer`（消费者域）、`group`（稳定 consumer group）、
-/// `partition_key`（partition key 策略）与 `readiness`（subscriber readiness gate）。
-/// `SubscriptionSpec` 类型定义见父 `{kind}/mod.rs`（经 `{sup}` 引用，扁平 `super::` / 嵌套子模块 `super::super::`），无重复定义。
-/// 由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const SUBSCRIPTIONS: &[{sup}SubscriptionSpec] = &[{subs_body}];
+/// 单一事件 topology spec；producer 与 subscriptions 不存在平行 registry。
+pub const SPEC: {sup}EventSpec = {sup}EventSpec::new(
+    CONTRACT,
+    TOPIC,
+    {sup}PartitionKeyStrategy::{partition_variant},
+    &[{subs_body}],
+);
 "#,
-        kind = c.manifest.kind.as_dir(),
+        partition_variant = match partition_key {
+            crate::contract::manifest::PartitionKeyStrategy::None => "None",
+            crate::contract::manifest::PartitionKeyStrategy::Aggregate => "Aggregate",
+        },
     ))
 }
 
@@ -1317,31 +1448,74 @@ fn generated_header(source: &str) -> String {
 /// event kind mod.rs 特化：含 `SubscriptionSpec` POD 定义（零额外依赖，纯 `&'static str` 字段）。
 /// 各 event `{domain}_{version}.rs` 经 `super::SubscriptionSpec` 引用此定义，消除重复（CODEGEN-DRIFT-01）。
 const SUBSCRIPTION_SPEC_DEF: &str = r#"
-/// 订阅注册规格——event 契约 `[[subscriptions]]` 的 codegen 派生表示。
-///
-/// 全字段均为 `&'static str`（零运行时分配）；`contract_id`/`topic`/`schema_version`/`schema_hash`
-/// 由同模块的 `CONTRACT_ID`/`TOPIC`/`CONTRACT` 常量绑定（generated，勿手改）。
-/// bootstrap 消费 `SUBSCRIPTIONS` 切片接线。
-///
-/// 由 `cargo xtask codegen` 从 `contract.toml` `[[subscriptions]]` 派生；勿手改。
+/// Partition-key policy generated from event topology metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionKeyStrategy {
+    /// The event is not partitioned by an aggregate key.
+    None,
+    /// The event carries exactly one aggregate partition key.
+    Aggregate,
+}
+
+/// Startup-readiness policy for a generated subscriber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriberReadiness {
+    /// The subscriber must be healthy before the runtime is ready.
+    Required,
+}
+
+/// 一个 event contract 的唯一 producer/subscriber topology 规格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventSpec {
+    contract: ::vocab::ContractBinding,
+    topic: &'static str,
+    partition_key: PartitionKeyStrategy,
+    subscriptions: &'static [SubscriptionSpec],
+}
+
+impl EventSpec {
+    pub(crate) const fn new(
+        contract: ::vocab::ContractBinding,
+        topic: &'static str,
+        partition_key: PartitionKeyStrategy,
+        subscriptions: &'static [SubscriptionSpec],
+    ) -> Self { Self { contract, topic, partition_key, subscriptions } }
+    /// Contract binding carried by producer and consumer paths.
+    pub const fn contract(self) -> ::vocab::ContractBinding { self.contract }
+    /// Stable contract identifier.
+    pub const fn contract_id(self) -> &'static str { self.contract.contract_id() }
+    /// Stable event topic.
+    pub const fn topic(self) -> &'static str { self.topic }
+    /// Generated schema version.
+    pub const fn schema_version(self) -> &'static str { self.contract.version() }
+    /// Generated schema fingerprint.
+    pub const fn schema_hash(self) -> &'static str { self.contract.schema_hash() }
+    /// Partition-key policy.
+    pub const fn partition_key(self) -> PartitionKeyStrategy { self.partition_key }
+    /// Generated subscriber declarations.
+    pub const fn subscriptions(self) -> &'static [SubscriptionSpec] { self.subscriptions }
+}
+
+/// 订阅只表达 consumer 端事实；producer 事实由外层 EventSpec 单源携带。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubscriptionSpec {
-    /// 契约 ID（`contract.toml` `id`）。
-    pub contract_id: &'static str,
-    /// 事件 topic（broker routing key）。
-    pub topic: &'static str,
-    /// 契约版本（`CONTRACT.version()`）。
-    pub schema_version: &'static str,
-    /// canonical schema bundle digest（`CONTRACT.schema_hash()`）。
-    pub schema_hash: &'static str,
-    /// 消费者域 DomainId。
-    pub consumer: &'static str,
-    /// 稳定 consumer group 名（broker 消费位点唯一键）。
-    pub group: &'static str,
-    /// Partition key 策略（`none` 或 `aggregate`）。
-    pub partition_key: &'static str,
-    /// Subscriber/provisioning readiness 要求（当前为 `required`）。
-    pub readiness: &'static str,
+    consumer: &'static str,
+    group: &'static str,
+    readiness: SubscriberReadiness,
+}
+
+impl SubscriptionSpec {
+    pub(crate) const fn new(
+        consumer: &'static str,
+        group: &'static str,
+        readiness: SubscriberReadiness,
+    ) -> Self { Self { consumer, group, readiness } }
+    /// Consumer domain identifier.
+    pub const fn consumer(self) -> &'static str { self.consumer }
+    /// Durable consumer group.
+    pub const fn group(self) -> &'static str { self.group }
+    /// Runtime-readiness policy.
+    pub const fn readiness(self) -> SubscriberReadiness { self.readiness }
 }
 "#;
 
@@ -1476,15 +1650,90 @@ const SAGA_SPEC_DEF: &str = r#"
 pub type SagaSpec = ::vocab::SagaContractBinding;
 "#;
 
-/// command kind mod.rs 特化：定义 `CommandEmit` / `CommandRegister` 收口 seam（各 `{domain}_{version}.rs`
-/// 经 `super::` 引用）。generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层），故
-/// per-command wrapper 经这两个泛型 seam 注入——唯一 sanctioned 实现是组合根 bridge / registrar（委托
-/// `eventexec::command::emit_async` / `register_command_handler`）。零额外依赖（serde + core）。
+/// command kind mod.rs 特化：定义 policy-exclusive `CommandEmit` / `CommandJournal` 与
+/// `CommandRegister` seam。generated 仅依赖 basis（serde），无法命名 runtime（`eventexec` Service 层）；
+/// runtime 以 typed dispatcher 实现 seam，并在 crate 内构造 reviewed DTO。零额外依赖（serde + core）。
 const COMMAND_SEAM_DEF: &str = r#"
-/// Producer 收口 seam——命令 emit 能力（triple funnel 中层接缝）。
+/// Durable journal policy generated from command contract metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandJournalPolicy {
+    /// The command must use the durable journal path.
+    Required,
+    /// The command may use the direct dispatch path.
+    None,
+}
+
+/// Generated routing and schema metadata for one command contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSpec {
+    contract: ::vocab::ContractBinding,
+    topic: &'static str,
+    journal: CommandJournalPolicy,
+}
+
+impl CommandSpec {
+    pub(crate) const fn new(
+        contract: ::vocab::ContractBinding,
+        topic: &'static str,
+        journal: CommandJournalPolicy,
+    ) -> Self { Self { contract, topic, journal } }
+    /// Contract ownership and schema binding.
+    pub const fn contract(self) -> ::vocab::ContractBinding { self.contract }
+    /// Stable command topic.
+    pub const fn topic(self) -> &'static str { self.topic }
+    /// Durable journal policy.
+    pub const fn journal(self) -> CommandJournalPolicy { self.journal }
+}
+
+mod private {
+    /// Private implementation seal shared by generated carriers.
+    pub trait Sealed {}
+}
+
+/// Schema and routing carrier generated once per command contract.
 ///
-/// per-command `emit_async` wrapper 经本 seam 泛型收口；唯一 sanctioned 实现是组合根 bridge（委托
-/// `eventexec::command::emit_async` → `outbox::Entry::new`）。由 `cargo xtask codegen` 派生；勿手改。
+/// The private supertrait prevents downstream implementations, so a request type and [`CommandSpec`]
+/// cannot be paired independently at a public seam.
+pub trait CommandContract: private::Sealed {
+    /// Schema-generated request type for this command.
+    type Request: ::serde::Serialize;
+    /// Routing, schema and journal metadata bound to [`Self::Request`].
+    const SPEC: CommandSpec;
+}
+
+/// Marker for contracts whose policy permits direct dispatch.
+pub trait DirectCommandContract: CommandContract {}
+
+/// Marker for contracts whose policy requires durable journaling.
+pub trait JournaledCommandContract: CommandContract {}
+
+/// Schema-typed reconcile command input generated per command contract.
+///
+/// The private supertrait prevents downstream implementations, so callers cannot pair an arbitrary
+/// request type with another command's routing metadata. Implementations bake one sealed
+/// [`CommandSpec`] and keep request/envelope fields private.
+pub trait TypedCommandSpec: private::Sealed {
+    /// Per-command carrier that binds the request and routing metadata.
+    type Contract: CommandContract;
+    /// Envelope subject identity supplied by the runtime.
+    type SubjectId;
+    /// Envelope actor supplied by the runtime.
+    type Actor;
+
+    /// Borrow the generated request.
+    fn request(&self) -> &<Self::Contract as CommandContract>::Request;
+    /// Tenant scope for the command.
+    fn tenant(&self) -> ::vocab::TenantId;
+    /// Caller-provided idempotency key.
+    fn idempotency_key(&self) -> &str;
+    /// Consume the wrapper into envelope identity values.
+    fn into_identity(self) -> (Self::SubjectId, Self::Actor);
+}
+
+/// Producer 收口 seam——仅供 `journal = "none"` 的命令直接 dispatch。
+///
+/// per-command `emit_async` wrapper 经本 seam 泛型收口；runtime 的 typed dispatcher 将不可外部构造的
+/// `CommandSpec` 转换为 reviewed command，再交 `CommandDispatchStore`。由 `cargo xtask codegen` 派生；勿手改。
 pub trait CommandEmit {
     /// emit 失败类型（实现绑定，如 `eventexec::command::CommandEmitError`）。
     type Error;
@@ -1492,37 +1741,54 @@ pub trait CommandEmit {
     type SubjectId: ::core::marker::Send;
     /// bridge 绑定的 actor 类型（生产 impl 应绑定为 `diport::OutboxActor`）。
     type Actor: ::core::marker::Send;
-    /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract` / `topic` 是 generated
-    /// wrapper 注入的 baked 常量；`request` 是 typed payload（实现侧 `serde_json` 编码）；`tenant` 是
+    /// 把 typed 命令 `request` 经 runtime emit 落 durable outbox。`contract` / `topic` 由 `C` 的
+    /// associated `SPEC` 注入；`request` 是 associated typed payload（实现侧 `serde_json` 编码）；`tenant` 是
     /// **runtime 必填**的 typed RLS scope；`subject_id` / `actor` 是
     /// **runtime 必填**的 typed envelope identity；`idempotency_key`
-    /// 是**可选**业务幂等键——`Some` ⇒ 经它 mint 稳定 `DispatchId`（同键二次 emit 被 claimer 拒），`None`
-    /// ⇒ bridge mint 随机 `DispatchId`（无业务去重）。
+    /// 是**可选**业务幂等键——`Some` ⇒ runtime 以独立 keyring 派生 keyed alias probes，`None` ⇒ provider
+    /// 在事务内 mint fresh canonical id；raw key 不进入 provider 或持久化。
     ///
-    /// # Impl guide（bridge 作者参考）
+    /// # Impl guide（runtime dispatcher 作者参考）
     ///
-    /// 实现本方法须依次完成以下四步：
-    ///
-    /// 1. **序列化 payload**：`let bytes = serde_json::to_vec(request)?;`
-    /// 2. **生成 DispatchId**：`idempotency_key` 为 `Some(k)` ⇒
-    ///    `eventexec::command::DispatchId::from_idempotency_key(k)?`（稳定业务幂等键）；为 `None` ⇒
-    ///    `eventexec::command::DispatchId::from_idempotency_key(&Uuid::new_v4().to_string())?`（随机）。
-    /// 3. **透传 tenant / subject_id / actor**：直接转发本参数（runtime 写入 outbox envelope，不再由 bridge 编造）。
-    /// 4. **委托 runtime emit**：`eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, bytes, subject_id, actor).await`
-    ///
-    /// 组合根 bridge 是唯一 sanctioned 实现者；域 crate 不得直接 impl 本 trait（机器守 `COMMAND-IMPL-ALLOWLIST-01`）。
+    /// 实现须序列化 typed request、派生 sealed alias probes、透传 identity，并只把 reviewed intent 交给 provider store。
+    /// 域 crate 不得直接 impl 本 trait（生产 impl 集合由 `COMMAND-IMPL-ALLOWLIST-01#provider-set` 守）。
     #[allow(clippy::too_many_arguments)]
-    fn emit<R: ::serde::Serialize + ::core::marker::Send + ::core::marker::Sync>(
+    fn emit<C>(
         &self,
-        contract: ::vocab::ContractBinding,
-        topic: &'static str,
-        request: &R,
+        request: &C::Request,
         tenant: ::vocab::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: ::core::option::Option<&str>,
-    ) -> impl ::core::future::Future<Output = ::core::result::Result<(), Self::Error>>
-    + ::core::marker::Send;
+    ) -> impl ::core::future::Future<Output = ::core::result::Result<(), Self::Error>> + ::core::marker::Send
+    where
+        C: DirectCommandContract,
+        C::Request: ::core::marker::Send + ::core::marker::Sync;
+}
+
+/// Durable journal seam；journal-required wrapper 强制传递业务幂等键。
+pub trait CommandJournal {
+    /// Journal dispatch failure.
+    type Error;
+    /// Stable journal dispatch outcome.
+    type Outcome;
+    /// Bridge-bound envelope subject type.
+    type SubjectId: ::core::marker::Send;
+    /// Bridge-bound envelope actor type.
+    type Actor: ::core::marker::Send;
+    /// Persist one typed command through its generated journaled contract carrier.
+    #[allow(clippy::too_many_arguments)]
+    fn journal<C>(
+        &self,
+        request: &C::Request,
+        tenant: ::vocab::TenantId,
+        subject_id: Self::SubjectId,
+        actor: Self::Actor,
+        idempotency_key: &str,
+    ) -> impl ::core::future::Future<Output = ::core::result::Result<Self::Outcome, Self::Error>> + ::core::marker::Send
+    where
+        C: JournaledCommandContract,
+        C::Request: ::core::marker::Send + ::core::marker::Sync;
 }
 
 /// Consumer 收口 seam——命令 handler 注册能力（consumer 侧对称收口）。
@@ -1535,16 +1801,15 @@ pub trait CommandRegister {
     type Outcome;
     /// `register` 的返回类型（如 `Result<(), KernelError>`）。
     type Output;
-    /// 把 typed `R` handler 绑到 `contract` / `topic`。typed decode + claimer 接线在实现侧。
-    fn register<R, H, Fut>(
+    /// 把 `C::Request` handler 绑到同一 carrier 的 contract/topic。typed decode + claimer 接线在实现侧。
+    fn register<C, H, Fut>(
         &mut self,
-        contract: ::vocab::ContractBinding,
-        topic: &'static str,
         handler: H,
     ) -> Self::Output
     where
-        R: for<'de> ::serde::Deserialize<'de> + ::core::marker::Send + 'static,
-        H: Fn(R) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
+        C: CommandContract,
+        C::Request: for<'de> ::serde::Deserialize<'de> + ::core::marker::Send + 'static,
+        H: Fn(C::Request) -> Fut + ::core::marker::Send + ::core::marker::Sync + 'static,
         Fut: ::core::future::Future<Output = Self::Outcome> + ::core::marker::Send + 'static;
 }
 "#;
@@ -1673,21 +1938,14 @@ fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<S
     for c in contracts
         .iter()
         .filter(|c| c.manifest.kind == ContractKind::Event)
+        .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
     {
         let module = module_name(&c.manifest.domain, &c.manifest.version);
         let path = match c.slug.as_deref() {
             Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
             None => module,
         };
-        for s in &c.manifest.subscriptions {
-            entries.push(format!(
-                "    SubscriptionSpec {{ contract_id: {path}::CONTRACT_ID, topic: {path}::TOPIC, schema_version: {path}::CONTRACT.version(), schema_hash: {path}::CONTRACT.schema_hash(), consumer: \"{}\", group: \"{}\", partition_key: \"{}\", readiness: \"{}\" }}",
-                s.consumer,
-                s.group,
-                s.topology.partition_key.as_wire(),
-                s.topology.readiness.as_wire()
-            ));
-        }
+        entries.push(format!("    {path}::SPEC"));
     }
     let body = if entries.is_empty() {
         String::new()
@@ -1696,11 +1954,11 @@ fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<S
     };
     Ok(format!(
         r#"
-/// Root event topology registry aggregated from every generated event `SUBSCRIPTIONS` slice.
+/// Root event topology registry aggregated from every active generated event `SPEC`.
 ///
 /// Runtime composition consumes this single registry through its bridge before constructing
 /// consumer bundle inputs. Do not enumerate per-contract subscription slices in runtime wiring.
-pub const SUBSCRIPTIONS: &[SubscriptionSpec] = &[{body}];
+pub const EVENTS: &[EventSpec] = &[{body}];
 "#
     ))
 }
@@ -1711,6 +1969,7 @@ fn render_event_root_projection_inputs(contracts: &[DiscoveredContract]) -> Resu
         .map(|contract| (contract.manifest.id.as_str(), contract))
         .collect();
     let mut entries = Vec::new();
+    let mut generation_tuples = Vec::new();
     for projection in contracts.iter().filter(|contract| {
         contract
             .manifest
@@ -1766,8 +2025,16 @@ fn render_event_root_projection_inputs(contracts: &[DiscoveredContract]) -> Resu
             entries.push(format!(
                 "    ::vocab::ProjectionInputBinding::from_static(\"{projection_id}\", \"{domain}\", \"{contract_id}\", \"{version}\", \"{schema_hash}\", \"{topic}\")"
             ));
+            generation_tuples.push([
+                contract_id.to_string(),
+                version.to_string(),
+                schema_hash,
+                topic.to_string(),
+            ]);
         }
     }
+    entries.sort();
+    let generation = projection_input_generation(&mut generation_tuples);
     let body = if entries.is_empty() {
         String::new()
     } else {
@@ -1779,7 +2046,84 @@ fn render_event_root_projection_inputs(contracts: &[DiscoveredContract]) -> Resu
 ///
 /// Postgres projection writers consume this static registry to decide which outbox facts are also
 /// mirrored into `projection_events`. Runtime code must not enumerate projection topics by hand.
+pub const PROJECTION_INPUT_GENERATION: &str = "{generation}";
+
+/// Projection bindings that belong to [`PROJECTION_INPUT_GENERATION`].
 pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[{body}];
+"#
+    ))
+}
+
+fn projection_input_generation(tuples: &mut [[String; 4]]) -> String {
+    tuples.sort_unstable();
+    let mut hasher = Sha256::new();
+    for tuple in tuples {
+        for field in tuple {
+            hasher.update((field.len() as u64).to_be_bytes());
+            hasher.update(field.as_bytes());
+        }
+    }
+    format!("sha256:{}", lower_hex(&hasher.finalize()))
+}
+
+fn render_event_root_producer_domains(contracts: &[DiscoveredContract]) -> Result<String> {
+    let domains: BTreeSet<&str> = contracts
+        .iter()
+        .filter(|contract| contract.manifest.kind == ContractKind::Event)
+        .filter(|contract| contract.manifest.lifecycle == Lifecycle::Active)
+        .filter(|contract| contract.manifest.consistency_level == ConsistencyLevel::OutboxFact)
+        .map(|contract| contract.manifest.domain.as_str())
+        .collect();
+    let mut variants = Vec::new();
+    let mut seen = BTreeMap::<String, &str>::new();
+    for domain in domains {
+        let variant = producer_domain_variant(domain)?;
+        if let Some(previous) = seen.insert(variant.clone(), domain) {
+            bail!(
+                "active event domains {previous:?} and {domain:?} collide on ProducerDomain::{variant}"
+            );
+        }
+        variants.push((variant, domain));
+    }
+    let declarations = variants
+        .iter()
+        .map(|(variant, _)| format!("    {variant},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let match_arms = variants
+        .iter()
+        .map(|(variant, domain)| format!("            Self::{variant} => \"{domain}\","))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let entries = variants
+        .iter()
+        .map(|(variant, _)| format!("    ProducerDomain::{variant},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        r#"
+/// Closed producer-domain topology derived from active OutboxFact [`EVENTS`].
+///
+/// Runtime must exhaustively match this enum when binding domain-specific relay providers; adding
+/// an active producer domain therefore becomes a compile-time wiring change instead of a silent
+/// omission from a handwritten string list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProducerDomain {{
+{declarations}
+}}
+
+impl ProducerDomain {{
+    pub const fn as_str(self) -> &'static str {{
+        match self {{
+{match_arms}
+        }}
+    }}
+}}
+
+/// Deduplicated producer domains for every active OutboxFact generated event.
+pub const PRODUCER_DOMAINS: &[ProducerDomain] = &[
+{entries}
+];
 "#
     ))
 }
@@ -2032,7 +2376,7 @@ mod tests {
                 "version = \"v1\"\n",
                 "owner = \"_framework\"\n",
                 "consistencyLevel = \"OutboxFact\"\n",
-                "lifecycle = \"draft\"\n",
+                "lifecycle = \"active\"\n",
                 "topic = \"seed.happened\"\n",
                 "delivery = \"at-least-once\"\n",
                 "[schemas]\n",
@@ -3071,32 +3415,20 @@ mod tests {
                 && rendered.contains(r#""sha256:"#),
             "缺 CONTRACT binding 常量:\n{rendered}"
         );
-        // SUBSCRIPTIONS 切片含 consumer / group 字面量
+        // 每事件只有一个 SPEC，subscription 嵌套在同一 EventSpec。
         assert!(
-            rendered.contains(r#"consumer: "audit""#),
-            "SUBSCRIPTIONS 缺 consumer 字面量:\n{rendered}"
-        );
-        assert!(
-            rendered.contains(r#"group: "audit.seed-happened""#),
-            "SUBSCRIPTIONS 缺 group 字面量:\n{rendered}"
-        );
-        assert_generated_contains(
-            &rendered,
-            "schema_version: CONTRACT.version()",
-            "SUBSCRIPTIONS 缺 schema_version 绑定",
-        );
-        assert_generated_contains(
-            &rendered,
-            "schema_hash: CONTRACT.schema_hash()",
-            "SUBSCRIPTIONS 缺 schema_hash 绑定",
+            rendered.contains("SubscriptionSpec::new(")
+                && rendered.contains(r#""audit""#)
+                && rendered.contains(r#""audit.seed-happened""#),
+            "SPEC 缺 consumer 字面量:\n{rendered}"
         );
         assert!(
-            rendered.contains(r#"partition_key: "none""#),
-            "SUBSCRIPTIONS 缺 partition_key 字面量:\n{rendered}"
+            rendered.contains("super::PartitionKeyStrategy::None"),
+            "SPEC 缺 typed partition strategy:\n{rendered}"
         );
         assert!(
-            rendered.contains(r#"readiness: "required""#),
-            "SUBSCRIPTIONS 缺 readiness 字面量:\n{rendered}"
+            rendered.contains("super::SubscriberReadiness::Required"),
+            "SPEC 缺 typed readiness:\n{rendered}"
         );
         // SubscriptionSpec 定义在 mod.rs（子模块经 super:: 引用）
         assert!(
@@ -3104,35 +3436,44 @@ mod tests {
             "mod.rs 缺 SubscriptionSpec 定义:\n{mod_rs}"
         );
         assert!(
-            mod_rs.contains("pub const SUBSCRIPTIONS: &[SubscriptionSpec]"),
-            "mod.rs 缺 root SUBSCRIPTIONS registry:\n{mod_rs}"
+            mod_rs.contains("pub const EVENTS: &[EventSpec]"),
+            "mod.rs 缺 root EVENTS registry:\n{mod_rs}"
         );
         assert!(
-            mod_rs.contains("contract_id: _seed_v1::CONTRACT_ID"),
-            "root registry 应引用生成模块 CONTRACT_ID:\n{mod_rs}"
+            mod_rs.contains("_seed_v1::SPEC"),
+            "root registry 应只引用每事件 SPEC:\n{mod_rs}"
         );
-        assert!(
-            mod_rs.contains("topic: _seed_v1::TOPIC"),
-            "root registry 应引用生成模块 TOPIC:\n{mod_rs}"
-        );
-        assert_generated_contains(
-            &mod_rs,
-            "schema_version: _seed_v1::CONTRACT.version()",
-            "root registry 应引用生成模块 CONTRACT.version()",
-        );
-        assert_generated_contains(
-            &mod_rs,
-            "schema_hash: _seed_v1::CONTRACT.schema_hash()",
-            "root registry 应引用生成模块 CONTRACT.schema_hash()",
-        );
-        assert!(
-            mod_rs.contains(r#"consumer: "audit""#),
-            "root registry 缺 consumer 字面量:\n{mod_rs}"
-        );
+        assert!(mod_rs.contains("pub const fn schema_hash"));
         // 子模块通过 super:: 引用（不重复定义）
         assert!(
-            rendered.contains("super::SubscriptionSpec"),
-            "子模块应通过 super:: 引用 SubscriptionSpec:\n{rendered}"
+            rendered.contains("pub const SPEC: super::EventSpec"),
+            "子模块应生成单一 EventSpec:\n{rendered}"
+        );
+        assert!(!rendered.contains("pub const SUBSCRIPTIONS"));
+        assert!(!mod_rs.contains("pub const SUBSCRIPTIONS"));
+        Ok(())
+    }
+
+    #[test]
+    fn event_partition_strategy_mismatch_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_event_partition_mismatch");
+        seed_event_with_subscription(&root)?;
+        let manifest = root.join("contracts/event/_seed/v1/contract.toml");
+        let mut text = std::fs::read_to_string(&manifest)?;
+        text.push_str(concat!(
+            "[[subscriptions]]\n",
+            "consumer = \"settings\"\n",
+            "group = \"settings.seed-happened\"\n",
+            "[subscriptions.topology]\n",
+            "partitionKey = \"aggregate\"\n",
+            "readiness = \"required\"\n",
+        ));
+        std::fs::write(&manifest, text)?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result.is_err(),
+            "同一 event 的 partition strategy 漂移必须失败"
         );
         Ok(())
     }
@@ -3230,10 +3571,11 @@ mod tests {
                 && rendered.contains(r#""sha256:"#),
             "draft 缺 CONTRACT binding 常量:\n{rendered}"
         );
-        // 空 subscriptions 切片
+        // draft 仍有完整 EventSpec，但不进入 root active EVENTS。
         assert!(
-            rendered.contains("pub const SUBSCRIPTIONS: &[super::SubscriptionSpec] = &[];"),
-            "空 subscriptions 应生成空切片:\n{rendered}"
+            rendered.contains("pub const SPEC: super::EventSpec")
+                && rendered.contains("super::PartitionKeyStrategy::None, &[]"),
+            "空 subscriptions 应生成 sealed EventSpec:\n{rendered}"
         );
         Ok(())
     }
@@ -3254,6 +3596,11 @@ mod tests {
             mod_rs.contains("pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding]"),
             "event/mod.rs 缺 projection input root registry:\n{mod_rs}"
         );
+        assert!(
+            mod_rs.contains("pub const PROJECTION_INPUT_GENERATION: &str =")
+                && mod_rs.contains("\"sha256:"),
+            "event/mod.rs 缺 projection input generation digest:\n{mod_rs}"
+        );
         assert_generated_contains(
             &mod_rs,
             "::vocab::ProjectionInputBinding::from_static(",
@@ -3272,6 +3619,35 @@ mod tests {
             "input binding 应包含目标 event 的 domain/id/version/topic/schema_hash:\n{mod_rs}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn projection_input_generation_is_sorted_u64_length_prefixed_known_answer() {
+        let seed = [
+            "seed.happened".to_string(),
+            "v1".to_string(),
+            "sha256:e75b5df7855eff522195aacdad81fd493b4290ecef710d871fe038efe9e43e07".to_string(),
+            "seed.happened".to_string(),
+        ];
+        let other = [
+            "alpha.changed".to_string(),
+            "v2".to_string(),
+            format!("sha256:{}", "0".repeat(64)),
+            "alpha.changed".to_string(),
+        ];
+        let mut single = vec![seed.clone()];
+        assert_eq!(
+            projection_input_generation(&mut single),
+            "sha256:b9b30e01a1a96f97c64f9f36e3cd88fc90fe7f69433cf7ec17c71def3a88071d"
+        );
+
+        let mut forward = vec![seed.clone(), other.clone()];
+        let mut reversed = vec![other, seed];
+        assert_eq!(
+            projection_input_generation(&mut forward),
+            projection_input_generation(&mut reversed),
+            "generation must depend on the sorted tuple set, not manifest discovery order"
+        );
     }
 
     /// F3 anti-vacuity（负向）：contract.toml 的 domain 含 `../` 时，codegen 须 bail（防逃逸），
@@ -3468,6 +3844,8 @@ mod tests {
                 "topic = \"seed.commands.do-thing\"\n",
                 "[schemas]\n",
                 "request = \"request.schema.json\"\n",
+                "[command]\n",
+                "journal = \"required\"\n",
             ),
         )?;
         // schema 与真实 contracts/command/_seed/v1/request.schema.json 对齐（targetId + amount）。
@@ -3476,8 +3854,8 @@ mod tests {
         Ok(())
     }
 
-    /// command glue 测试（#1124）：command 契约派生 .rs 须含 CONTRACT_ID / TOPIC + typed `emit_async` /
-    /// `register_handler` wrapper（triple funnel 顶层，锁 typed Request = schema title）；seam
+    /// command glue 测试（#1124）：journal=required 仅派生 typed `journal_async`，不派生 `emit_async`。
+    /// `register_handler` wrapper（generated seam 顶层，锁 typed Request = schema title）；seam
     /// `CommandEmit` / `CommandRegister` 定义在 `command/mod.rs`，子模块经 `super::` 引用（无重复定义）。
     /// anti-vacuity：合法 command 契约正常派生全部 wrapper + seam。
     #[test]
@@ -3500,33 +3878,37 @@ mod tests {
             "缺 TOPIC:\n{rendered}"
         );
         assert!(
-            rendered.contains("pub async fn emit_async<E: super::CommandEmit>"),
-            "缺 emit_async wrapper:\n{rendered}"
+            rendered.contains("pub async fn journal_async<J: super::CommandJournal>"),
+            "缺 journal_async wrapper:\n{rendered}"
         );
+        assert!(!rendered.contains("pub async fn emit_async"));
         assert!(
             rendered.contains("pub fn register_handler<Reg, H, Fut>"),
             "缺 register_handler wrapper:\n{rendered}"
         );
         assert!(
-            rendered.contains(
-                "registrar.register::<SeedDoThingRequest, H, Fut>(CONTRACT, TOPIC, handler)"
-            ),
-            "register_handler 必须把 CONTRACT 传给 seam 以携带 schema fingerprint:\n{rendered}"
+            rendered.contains("pub struct ReconcileCommand")
+                && rendered
+                    .contains("impl<S, A> super::TypedCommandSpec for ReconcileCommand<S, A>")
+                && rendered.contains("pub fn reconcile_command<S, A>"),
+            "缺 per-command typed reconcile wrapper/spec impl:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("registrar.register::<Contract, H, Fut>(handler)"),
+            "register_handler 必须只把 per-command carrier 传给 seam:\n{rendered}"
         );
         // wrapper 锁 typed Request（= request schema title 派生）
         assert!(
             rendered.contains("request: SeedDoThingRequest"),
-            "emit_async 须锁 typed Request:\n{rendered}"
+            "journal_async 须锁 typed Request:\n{rendered}"
         );
-        // F1（#1124 review）：wrapper + seam 把 tenant / subject_id / actor（必填）+ idempotency_key（可选）
-        // 纳入类型面，否则 bridge 拿不到 runtime 必需的 per-call tenant / subject / actor / 业务幂等键。
+        // required wrapper 把 tenant/identity 与非可选业务幂等键纳入类型面。
         assert!(
             rendered.contains("tenant: ::vocab::TenantId")
-                && rendered.contains("subject_id: E::SubjectId")
-                && rendered.contains("actor: E::Actor")
-                && rendered
-                    .contains("idempotency_key: ::core::option::Option<::std::string::String>"),
-            "emit_async wrapper 须含 tenant + subject_id + actor + idempotency_key 参数:\n{rendered}"
+                && rendered.contains("subject_id: J::SubjectId")
+                && rendered.contains("actor: J::Actor")
+                && rendered.contains("idempotency_key: ::std::string::String"),
+            "journal_async wrapper 须含必填 idempotency_key:\n{rendered}"
         );
         assert!(
             mod_rs.contains("tenant: ::vocab::TenantId")
@@ -3534,23 +3916,248 @@ mod tests {
                 && mod_rs.contains("type Actor: ::core::marker::Send")
                 && mod_rs.contains("subject_id: Self::SubjectId")
                 && mod_rs.contains("actor: Self::Actor")
-                && mod_rs.contains("idempotency_key: ::core::option::Option<&str>"),
-            "CommandEmit::emit seam 须含 tenant + subject_id + actor + idempotency_key 参数:\n{mod_rs}"
+                && mod_rs.contains("idempotency_key: &str"),
+            "CommandJournal seam 须含 tenant + subject_id + actor + idempotency_key 参数:\n{mod_rs}"
         );
         assert!(
-            mod_rs.contains("contract: ::vocab::ContractBinding"),
-            "CommandRegister::register seam 须接收 ContractBinding:\n{mod_rs}"
+            mod_rs.contains("pub trait CommandContract: private::Sealed")
+                && mod_rs.contains("type Request: ::serde::Serialize")
+                && mod_rs.contains("const SPEC: CommandSpec")
+                && rendered.contains("pub struct Contract")
+                && rendered.contains("impl super::CommandContract for Contract")
+                && rendered.contains("impl super::JournaledCommandContract for Contract"),
+            "Command seams 须由 per-command carrier 绑定 Request/SPEC/policy:\n{mod_rs}\n{rendered}"
+        );
+        assert!(
+            !mod_rs.contains("spec: CommandSpec")
+                && !mod_rs.contains("fn emit<R:")
+                && !mod_rs.contains("fn journal<R:")
+                && !mod_rs.contains("fn register<R,"),
+            "Command seams 不得保留独立 spec + arbitrary R seam:\n{mod_rs}"
         );
         // seam 定义在 mod.rs，子模块经 super:: 引用
         assert!(
             mod_rs.contains("pub trait CommandEmit")
-                && mod_rs.contains("pub trait CommandRegister"),
-            "mod.rs 缺 CommandEmit/CommandRegister seam:\n{mod_rs}"
+                && mod_rs.contains("pub trait CommandJournal")
+                && mod_rs.contains("pub trait CommandRegister")
+                && mod_rs.contains("pub trait TypedCommandSpec: private::Sealed"),
+            "mod.rs 缺 command seams:\n{mod_rs}"
         );
         assert!(
-            rendered.contains("super::CommandEmit"),
+            rendered.contains("super::CommandJournal"),
             "wrapper 应经 super:: 引用 seam:\n{rendered}"
         );
+        Ok(())
+    }
+
+    fn has_doc(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| attr.path().is_ident("doc"))
+    }
+
+    fn documented(attrs: &[syn::Attribute], label: impl std::fmt::Display) {
+        assert!(
+            has_doc(attrs),
+            "generated owned public item lacks rustdoc: {label}"
+        );
+    }
+
+    fn assert_public_enum_documented(item: &syn::ItemEnum) {
+        if !matches!(item.vis, syn::Visibility::Public(_)) {
+            return;
+        }
+        documented(&item.attrs, &item.ident);
+        for variant in &item.variants {
+            documented(&variant.attrs, format!("{}::{}", item.ident, variant.ident));
+        }
+    }
+
+    fn assert_public_struct_documented(item: &syn::ItemStruct) {
+        if !matches!(item.vis, syn::Visibility::Public(_)) {
+            return;
+        }
+        documented(&item.attrs, &item.ident);
+        for field in &item.fields {
+            if matches!(field.vis, syn::Visibility::Public(_)) {
+                documented(
+                    &field.attrs,
+                    field
+                        .ident
+                        .as_ref()
+                        .map_or_else(|| item.ident.to_string(), ToString::to_string),
+                );
+            }
+        }
+    }
+
+    fn assert_public_trait_documented(item: &syn::ItemTrait) {
+        if !matches!(item.vis, syn::Visibility::Public(_)) {
+            return;
+        }
+        documented(&item.attrs, &item.ident);
+        for trait_item in &item.items {
+            match trait_item {
+                syn::TraitItem::Const(item) => documented(&item.attrs, &item.ident),
+                syn::TraitItem::Fn(item) => documented(&item.attrs, &item.sig.ident),
+                syn::TraitItem::Type(item) => documented(&item.attrs, &item.ident),
+                _ => {}
+            }
+        }
+    }
+
+    fn assert_public_impl_items_documented(item: &syn::ItemImpl) {
+        for impl_item in &item.items {
+            match impl_item {
+                syn::ImplItem::Const(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                    documented(&item.attrs, &item.ident);
+                }
+                syn::ImplItem::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                    documented(&item.attrs, &item.sig.ident);
+                }
+                syn::ImplItem::Type(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                    documented(&item.attrs, &item.ident);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn assert_public_api_documented(source: &str) -> syn::Result<()> {
+        let file = syn::parse_file(source)?;
+        for item in &file.items {
+            match item {
+                syn::Item::Enum(item) => assert_public_enum_documented(item),
+                syn::Item::Struct(item) => assert_public_struct_documented(item),
+                syn::Item::Trait(item) => assert_public_trait_documented(item),
+                syn::Item::Impl(item) => assert_public_impl_items_documented(item),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// F10 reproduction: owned event/command templates are a public API and every public item,
+    /// enum variant, accessor and associated item must carry rustdoc.
+    #[test]
+    fn owned_event_and_command_seam_templates_document_public_api() -> syn::Result<()> {
+        assert_public_api_documented(SUBSCRIPTION_SPEC_DEF)?;
+        assert_public_api_documented(COMMAND_SEAM_DEF)?;
+        Ok(())
+    }
+
+    #[test]
+    fn event_root_producer_domains_derive_from_active_events() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_producer_domains");
+        for (domain, id, slug) in [
+            ("settings", "settings.changed", "changed"),
+            ("identity", "identity.created", "created"),
+            ("identity", "identity.updated", "updated"),
+        ] {
+            let dir = root.join(format!("contracts/event/{domain}/v1/{slug}"));
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(
+                dir.join("contract.toml"),
+                format!(
+                    "id = \"{id}\"\nkind = \"event\"\ndomain = \"{domain}\"\nversion = \"v1\"\nowner = \"{domain}\"\nconsistencyLevel = \"OutboxFact\"\nlifecycle = \"active\"\ntopic = \"{id}\"\ndelivery = \"at-least-once\"\n[schemas]\npayload = \"payload.schema.json\"\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("payload.schema.json"),
+                "{\"title\":\"EventPayload\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+            )?;
+        }
+        for (domain, lifecycle, level) in [
+            ("draftdomain", "draft", "OutboxFact"),
+            ("localdomain", "active", "LocalOnly"),
+        ] {
+            let dir = root.join(format!("contracts/event/{domain}/v1/ignored"));
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(
+                dir.join("contract.toml"),
+                format!(
+                    "id = \"{domain}.ignored\"\nkind = \"event\"\ndomain = \"{domain}\"\nversion = \"v1\"\nowner = \"{domain}\"\nconsistencyLevel = \"{level}\"\nlifecycle = \"{lifecycle}\"\ntopic = \"{domain}.ignored\"\ndelivery = \"at-least-once\"\n[schemas]\npayload = \"payload.schema.json\"\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("payload.schema.json"),
+                "{\"title\":\"IgnoredPayload\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+            )?;
+        }
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let mod_rs = std::fs::read_to_string(gen_src.join("event/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &mod_rs,
+            "pub enum ProducerDomain",
+            "event root 应生成闭合 producer-domain enum",
+        );
+        assert_generated_contains(
+            &mod_rs,
+            "pub const PRODUCER_DOMAINS: &[ProducerDomain]",
+            "event root 应生成 active producer-domain registry",
+        );
+        assert_eq!(
+            mod_rs.matches("ProducerDomain::Identity").count(),
+            1,
+            "同 domain 多 active events 必须去重:\n{mod_rs}"
+        );
+        assert!(
+            mod_rs.contains("ProducerDomain::Identity")
+                && mod_rs.contains("ProducerDomain::Settings")
+                && !mod_rs.contains("ProducerDomain::Draftdomain")
+                && !mod_rs.contains("ProducerDomain::Localdomain"),
+            "producer domains 必须只来自 active OutboxFact events:\n{mod_rs}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_journal_none_emits_only_direct_wrapper() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_cmd_none");
+        seed_command(&root)?;
+        let manifest = root.join("contracts/command/_seed/v1/contract.toml");
+        let text = std::fs::read_to_string(&manifest)?
+            .replace("journal = \"required\"", "journal = \"none\"");
+        std::fs::write(&manifest, text)?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("command/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(rendered.contains("pub async fn emit_async<E: super::CommandEmit>"));
+        assert!(!rendered.contains("pub async fn journal_async"));
+        assert!(rendered.contains("super::CommandJournalPolicy::None"));
+        Ok(())
+    }
+
+    #[test]
+    fn command_missing_policy_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_cmd_missing_policy");
+        seed_command(&root)?;
+        let manifest = root.join("contracts/command/_seed/v1/contract.toml");
+        let text =
+            std::fs::read_to_string(&manifest)?.replace("[command]\njournal = \"required\"\n", "");
+        std::fs::write(&manifest, text)?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            result.is_err(),
+            "command 缺 journal policy 时 codegen 必须失败"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_command_policy_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen_non_cmd_policy");
+        seed_event(&root)?;
+        let manifest = root.join("contracts/event/_seed/v1/contract.toml");
+        let mut text = std::fs::read_to_string(&manifest)?;
+        text.push_str("[command]\njournal = \"none\"\n");
+        std::fs::write(&manifest, text)?;
+        let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(result.is_err(), "非 command 的 [command] block 必须失败");
         Ok(())
     }
 
@@ -3575,6 +4182,8 @@ mod tests {
                 "topic = \"seed.commands.do-thing\"\n",
                 "[schemas]\n",
                 "request = \"request.schema.json\"\n",
+                "[command]\n",
+                "journal = \"required\"\n",
             ),
         )?;
         // title 含空格 / 分号 → 非法 Rust 标识符（typify 类型名注入面）
@@ -3646,8 +4255,8 @@ mod tests {
             "缺 role_revoked 子模块: {file}"
         );
         assert!(
-            file.contains("super::super::SubscriptionSpec"),
-            "嵌套 glue POD 须 super::super:: 引用父 mod 定义: {file}"
+            file.contains("pub const SPEC: super::super::EventSpec"),
+            "嵌套 glue 须 super::super:: 引用父 mod EventSpec: {file}"
         );
         assert_eq!(
             file.matches("@generated").count(),

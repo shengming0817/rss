@@ -7,7 +7,7 @@
     "key": { "type": "string", "x-redaction": "internal" },
     "tenantId": { "type": "string" },
     "version": { "type": "integer", "format": "int64" },
-    "changeKind": { "title": "SettingsConfigChangeKind", "type": "string", "enum": ["published", "rolledBack"] },
+    "changeKind": { "title": "SettingsConfigChangeKind", "type": "string", "enum": ["published", "rolledBack", "deleted"] },
     "sourceVersion": { "type": "integer", "format": "int64" },
     "occurredAt": { "type": "integer", "format": "int64" }
   },

@@ -54,6 +54,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 use diport::{Clock, DynCasStore, DynPublisher, ManagedResource};
 use eventexec::TenantAuthority;
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
@@ -71,7 +72,7 @@ use crate::{
     PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore, PgResourceAttributeRepo,
     PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo,
     PgServiceTokenReplayGuard, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
-    PgStoreGuard, ProjectionMaintenanceCapability,
+    PgStoreGuard,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -131,6 +132,35 @@ pub struct PgMaintenanceDeps {
     clock: Arc<dyn Clock>,
 }
 
+/// Projection replay 所需的最小 store 集；字段私有，防止 maintenance 获得通用 infra 能力。
+pub struct PgProjectionReplayStores<'a> {
+    events: PgProjectionEvents,
+    checkpoint: PgCheckpointStore,
+    dead_letter: PgDeadLetterStore,
+    receipt: &'a ProjectionMaintenanceReceipt,
+    tenant: vocab::TenantId,
+    projection: Box<str>,
+}
+
+impl PgProjectionReplayStores<'_> {
+    /// 消费式拆出 replay 所需的三个互异能力。
+    pub fn into_parts(
+        self,
+    ) -> Result<
+        (PgProjectionEvents, PgCheckpointStore, PgDeadLetterStore),
+        crate::ProjectionControlError,
+    > {
+        if !self.receipt.authorizes(
+            ProjectionMaintenanceAction::Replay,
+            self.tenant,
+            &self.projection,
+        ) {
+            return Err(crate::ProjectionControlError::ReceiptTargetMismatch);
+        }
+        Ok((self.events, self.checkpoint, self.dead_letter))
+    }
+}
+
 struct PgMaintenanceSystemClock;
 
 impl Clock for PgMaintenanceSystemClock {
@@ -151,6 +181,7 @@ impl PgRuntimeDeps {
     pub async fn setup(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
+        projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         Self::setup_with_audit_admin_config(
@@ -158,6 +189,7 @@ impl PgRuntimeDeps {
             serving_config,
             None,
             LegacyConfigPlaintextPolicy::Deny,
+            projection_generation,
             projection_inputs,
         )
         .await
@@ -169,6 +201,7 @@ impl PgRuntimeDeps {
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
+        projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         Self::setup_with_audit_admin_config(
@@ -176,6 +209,7 @@ impl PgRuntimeDeps {
             serving_config,
             None,
             legacy_config_plaintext_policy,
+            projection_generation,
             projection_inputs,
         )
         .await
@@ -188,6 +222,7 @@ impl PgRuntimeDeps {
         serving_config: &PgConfig,
         audit_admin_config: Option<&PgConfig>,
         legacy_config_plaintext_policy: LegacyConfigPlaintextPolicy,
+        projection_generation: &'static str,
         projection_inputs: &'static [vocab::ProjectionInputBinding],
     ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
@@ -196,7 +231,7 @@ impl PgRuntimeDeps {
             .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
             .await?;
         migrator
-            .replace_projection_input_bindings(projection_inputs)
+            .register_projection_input_bindings(projection_generation, projection_inputs)
             .await
             .map_err(PgError::ProjectionBindings)?;
         migrator.shutdown().await.ok();
@@ -483,20 +518,52 @@ impl PgMaintenanceDeps {
 
     /// Projection replay / shadow-swap control store.
     #[must_use]
-    pub fn projection_control(
+    pub fn projection_control<'a>(
         &self,
-        capability: ProjectionMaintenanceCapability,
-    ) -> PgProjectionControl {
-        PgStore::projection_control(Arc::clone(&self.store), capability)
+        receipt: &'a ProjectionMaintenanceReceipt,
+    ) -> PgProjectionControl<'a> {
+        PgStore::projection_control(Arc::clone(&self.store), receipt)
     }
 
-    /// Framework/global stores for offline maintenance commands.
+    /// Projection replay 所需的精确 capability bundle。
+    pub fn projection_replay_stores<'a>(
+        &self,
+        receipt: &'a ProjectionMaintenanceReceipt,
+        selector: &eventexec::ProjectionSelector,
+        payload_protector: DlxPayloadProtector,
+    ) -> Result<PgProjectionReplayStores<'a>, crate::ProjectionControlError> {
+        crate::projection_control::authorize_receipt(
+            receipt,
+            ProjectionMaintenanceAction::Replay,
+            selector,
+        )?;
+        Ok(PgProjectionReplayStores {
+            events: self.store.projection_events(),
+            checkpoint: self.store.checkpoint(),
+            dead_letter: self.store.dead_letter(payload_protector),
+            receipt,
+            tenant: selector.tenant(),
+            projection: selector.projection().as_str().into(),
+        })
+    }
+
+    /// 带 payload replay 能力的 DLQ maintenance store。
     #[must_use]
-    pub fn infra(&self) -> PgInfraDeps {
-        PgInfraDeps {
-            store: Arc::clone(&self.store),
-            projection_registry: ProjectionWriteRegistry::empty(),
-        }
+    pub fn dlq_store(
+        &self,
+        payload_protector: DlxPayloadProtector,
+        projection_inputs: &'static [vocab::ProjectionInputBinding],
+    ) -> PgDlqStore {
+        self.store.dlq_with_projection_registry(
+            payload_protector,
+            ProjectionWriteRegistry::from_generated(projection_inputs),
+        )
+    }
+
+    /// 不允许 consumer payload replay 的 inspection/outbox-redrive store。
+    #[must_use]
+    pub fn dlq_store_without_payload_replay(&self) -> PgDlqStore {
+        self.store.dlq_without_payload_replay()
     }
 
     /// 关闭维护连接池。
@@ -573,7 +640,7 @@ impl PgDomainDeps<caps::Settings> {
     ///
     /// `clock`（`Arc<dyn Clock>`，构造器位置参，必填、非 `Option`、不默认系统钟）：单一注入 clock 经
     /// `Arc::clone` 扇出到 read/write 两个 [`PgConfigRepo`] 实例（envelope `occurred_at` 源；write lane 经
-    /// `save_and_append_outbox` 用，read lane 不触）。read/write 各持一个实例——`Box<DynConfigRepo>` 与
+    /// `commit` 用，read lane 不触）。read/write 各持一个实例——`Box<DynConfigRepo>` 与
     /// `Box<DynConfigUnitOfWork>` 是不同 dyn 类型、各自 own 其值，一个 Box 无法同时充当两者。
     ///
     /// 返回类型 [`PgSettingsBundle`] 自身 `#[must_use]`（drop 而不 `into_parts` 即 lint），故此处无方法级
@@ -916,8 +983,7 @@ impl PgInfraDeps {
     /// because it decrypts `dead_letter.original_entry`.
     #[must_use]
     pub fn dlq_without_payload_replay(&self) -> PgDlqStore {
-        self.store
-            .dlq_without_payload_replay(self.projection_registry)
+        self.store.dlq_without_payload_replay()
     }
 
     /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
@@ -1259,6 +1325,45 @@ mod tests {
             audit_admin.pool.is_closed(),
             "audit admin store must be closed"
         );
+    }
+
+    #[tokio::test]
+    async fn maintenance_capabilities_construct_without_general_infra_escape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let deps = PgMaintenanceDeps {
+            store: lazy_store(),
+            audit_admin_store: None,
+            clock: Arc::new(EpochClock),
+        };
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let projection = eventexec::ProjectionId::parse("audit.session-projection")?;
+        let selector = eventexec::ProjectionSelector::new(
+            tenant,
+            projection,
+            eventexec::ProjectionVersion::parse("v1")?,
+        );
+        let principal =
+            authn::test_support::principal(vocab::PrincipalKind::Service, "test-operator", None);
+        let grants = authn::ProjectionMaintenanceGrantSet::new(vec![
+            authn::ProjectionMaintenanceGrant::new(
+                "test-operator",
+                ProjectionMaintenanceAction::Replay,
+                tenant,
+                "audit.session-projection",
+            )?,
+        ])?;
+        let receipt = grants.authorize(
+            &principal,
+            ProjectionMaintenanceAction::Replay,
+            tenant,
+            "audit.session-projection",
+        )?;
+        let (_events, _checkpoint, _dead_letter) = deps
+            .projection_replay_stores(&receipt, &selector, payload_protector())?
+            .into_parts()?;
+        let _ = deps.dlq_store(payload_protector(), generated::event::PROJECTION_INPUTS);
+        let _ = deps.dlq_store_without_payload_replay();
+        Ok(())
     }
 
     #[tokio::test]

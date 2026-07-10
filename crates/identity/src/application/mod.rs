@@ -25,12 +25,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use base64::Engine as _;
 use bootstrap::{Domain, KernelError, Registry};
-use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{
     Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
 };
 use generated::event::identity_v1::session_created::{
-    CONTRACT, IdentitySessionCreatedPayload, TOPIC,
+    IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
 #[cfg(test)]
 use generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
@@ -75,6 +75,9 @@ use generated::http::identity_v1::{
 use generated::http::{
     HttpAuthMode, HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
     settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
+    settings_v4::SPEC as SETTINGS_CONFIG_GET_HTTP_SPEC,
+    settings_v5::SPEC as SETTINGS_CONFIG_DELETE_HTTP_SPEC,
+    settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
 };
 use httpserve::{
     AuthorizedSubject, Primary, PrimaryRoute, ResourceProjection, RouteAuthorizationDecision,
@@ -113,7 +116,7 @@ pub use policy_manage::{PolicyManageError, PolicyManageService};
 
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
 /// 不再手写字面量——envelope `domain` 由 `OutboxEnvelopeParts::new(CONTRACT, ..)` 同源承载。
-const SESSION_DOMAIN: &str = CONTRACT.domain();
+const SESSION_DOMAIN: &str = SESSION_CREATED_SPEC.contract().domain();
 
 fn tenant_repo_scope(tenant: TenantId) -> TenantRepoScope {
     TenantRepoScope::from_authenticated_tenant(tenant)
@@ -324,8 +327,8 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
 
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
         let event_id = Uuid::new_v4().to_string();
-        let entry = Entry::new(
-            Topic::parse(TOPIC).map_err(|_| LoginError::EntryBuild)?,
+        let entry = EventEntry::new(
+            EventTopic::parse(SESSION_CREATED_SPEC.topic()).map_err(|_| LoginError::EntryBuild)?,
             IdemKey::parse(&event_id).map_err(|_| LoginError::EntryBuild)?,
             OutboxPayload::from_reviewed_event_bytes(bytes),
         );
@@ -341,7 +344,8 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             tenant,
             vocab::ScopedTenant::SelfOnly,
         );
-        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor);
+        let envelope =
+            OutboxEnvelopeParts::new(SESSION_CREATED_SPEC.contract(), tenant, subject_id, actor);
 
         // 5. 首发 token bundle（#1252，F4 reorder：mint 先于 co-tx）。
         //    铸 access JWT（注入的 vault `Signer`）+ 签发首个 refresh token——令组合根注入的 `Signer`
@@ -1165,9 +1169,15 @@ fn permission_from_request(
 }
 
 fn builtin_admin_permission(contract_id: &'static str, permission: RoutePermissionId) -> bool {
-    [SETTINGS_CONFIG_HTTP_SPEC, SETTINGS_SECRET_HTTP_SPEC]
-        .iter()
-        .any(|spec| spec.contract_id == contract_id && spec.auth.permission == Some(permission))
+    [
+        SETTINGS_CONFIG_HTTP_SPEC,
+        SETTINGS_SECRET_HTTP_SPEC,
+        SETTINGS_CONFIG_GET_HTTP_SPEC,
+        SETTINGS_CONFIG_DELETE_HTTP_SPEC,
+        SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
+    ]
+    .iter()
+    .any(|spec| spec.contract_id == contract_id && spec.auth.permission == Some(permission))
 }
 
 fn policy_management_permission_for(target_permission: RoutePermissionId) -> GrantPermission {
@@ -2753,7 +2763,7 @@ mod tests {
     // `writes` + `inner` 两 store。
     #[derive(Clone, Default)]
     struct CapturingSessionLifecycle {
-        writes: Arc<Mutex<Vec<(Session, Entry, OutboxEnvelopeParts)>>>,
+        writes: Arc<Mutex<Vec<(Session, EventEntry, OutboxEnvelopeParts)>>>,
         inner: crate::internal::mem::InMemSessionLifecycle,
     }
     impl SessionLifecycle for CapturingSessionLifecycle {
@@ -2761,7 +2771,7 @@ mod tests {
             &self,
             scope: TenantRepoScope,
             session: Session,
-            entry: Entry,
+            entry: EventEntry,
             envelope: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
             // 委托 inner 承载 store（创建即写 → 同源 find/revoke）；同时捕获写入供 outbox 断言。
@@ -3451,7 +3461,7 @@ mod tests {
         );
 
         // EventId ≠ session_id（敏感标识不得进 broker metadata）。
-        assert_eq!(entry.topic().as_str(), TOPIC);
+        assert_eq!(entry.topic().as_str(), SESSION_CREATED_SPEC.topic());
         assert!(!entry.idem_key().as_str().is_empty(), "EventId 不应为空");
         assert_ne!(
             entry.idem_key().as_str(),
@@ -3474,7 +3484,7 @@ mod tests {
 
         // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id + version + schema_hash 同源，#1193/#1618）；
         // subject_id = canonical user id（登录标识不进 broker metadata）。
-        assert_eq!(*envelope.contract(), CONTRACT);
+        assert_eq!(*envelope.contract(), SESSION_CREATED_SPEC.contract());
         assert_eq!(envelope.subject_id().as_str(), CANON_USER);
         assert_eq!(envelope.actor().kind(), vocab::PrincipalKind::User);
     }
@@ -4247,7 +4257,13 @@ mod tests {
             make_shared_clock(1_000),
         );
 
-        for spec in [SETTINGS_CONFIG_HTTP_SPEC, SETTINGS_SECRET_HTTP_SPEC] {
+        for spec in [
+            SETTINGS_CONFIG_HTTP_SPEC,
+            SETTINGS_SECRET_HTTP_SPEC,
+            SETTINGS_CONFIG_GET_HTTP_SPEC,
+            SETTINGS_CONFIG_DELETE_HTTP_SPEC,
+            SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
+        ] {
             let decision = authorizer
                 .authorize(RouteAuthorizationRequest {
                     contract_id: spec.contract_id,
@@ -4262,6 +4278,50 @@ mod tests {
                 decision,
                 RouteAuthorizationDecision::Allow,
                 "trusted Admin gets built-in settings permission for {}",
+                spec.contract_id
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_denies_unbound_user_settings_permissions() {
+        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingLifecycle<'static>> =
+            Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            empty_policy_repo(),
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        for spec in [
+            SETTINGS_CONFIG_HTTP_SPEC,
+            SETTINGS_SECRET_HTTP_SPEC,
+            SETTINGS_CONFIG_GET_HTTP_SPEC,
+            SETTINGS_CONFIG_DELETE_HTTP_SPEC,
+            SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
+        ] {
+            let decision = authorizer
+                .authorize(RouteAuthorizationRequest {
+                    contract_id: spec.contract_id,
+                    permission: spec.auth.permission.expect("settings permission"),
+                    tenant_id: Some(tid(CANON_TENANT)),
+                    principal_kind: vocab::PrincipalKind::User,
+                    principal_id: CANON_USER.to_string(),
+                    resource: None,
+                })
+                .await;
+            assert_eq!(
+                decision,
+                RouteAuthorizationDecision::Deny,
+                "unbound user is denied {}",
                 spec.contract_id
             );
         }

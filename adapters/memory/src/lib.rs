@@ -19,8 +19,10 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
+use consistency::EventTopic;
 use consistency::{
-    EngineError, Entry, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
+    EngineError, EventEntry, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
     LeaseToken as IdemLeaseToken, Lsn, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus,
     SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
     SagaLeaseOutcome, SeenState,
@@ -293,7 +295,7 @@ fn transport_metadata(source: &diport::EnvelopeMetadata) -> diport::EnvelopeMeta
 impl OutboxEmitter for MemEmitter {
     async fn emit(
         &self,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         let topic = entry.topic().as_str();
@@ -363,7 +365,7 @@ impl SessionLifecycle for MemSessionLifecycle {
         &self,
         scope: TenantRepoScope,
         session: Session,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         if session.tenant() != scope.tenant() {
@@ -1693,8 +1695,8 @@ mod tests {
             .subscribe(Topic::new(TOPIC), token.clone())
             .await
             .expect("subscribe");
-        let entry = Entry::new(
-            consistency::Topic::parse(TOPIC).expect("topic"),
+        let entry = EventEntry::new(
+            EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-77").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
@@ -1748,8 +1750,8 @@ mod tests {
             .subscribe(Topic::new(TOPIC), token.clone())
             .await
             .expect("subscribe");
-        let entry = Entry::new(
-            consistency::Topic::parse(TOPIC).expect("topic"),
+        let entry = EventEntry::new(
+            EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-signed-tenant").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
@@ -1805,8 +1807,8 @@ mod tests {
             SystemTime::UNIX_EPOCH + Duration::from_secs(3600),
             SystemTime::UNIX_EPOCH,
         );
-        let entry = Entry::new(
-            consistency::Topic::parse(TOPIC).expect("topic"),
+        let entry = EventEntry::new(
+            EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-mem-tenant").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
@@ -1869,8 +1871,8 @@ mod tests {
             SystemTime::UNIX_EPOCH,
         );
         let session_id = session.id().clone();
-        let entry = Entry::new(
-            consistency::Topic::parse(TOPIC).expect("topic"),
+        let entry = EventEntry::new(
+            EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-mem-mismatch").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
@@ -1925,8 +1927,8 @@ mod tests {
             SystemTime::UNIX_EPOCH,
         );
         let session_id = session.id().clone();
-        let entry = Entry::new(
-            consistency::Topic::parse(TOPIC).expect("topic"),
+        let entry = EventEntry::new(
+            EventTopic::parse(TOPIC).expect("topic"),
             IdemKey::parse("evt-session-mem-envelope-mismatch").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
@@ -3366,7 +3368,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: 测试 happy-path 断言，item-level carve-out（error-handling.md §Carve-out）。
     async fn dead_letter_store_records_entry() {
-        use diport::{DeadLetterSummary, EnvelopeMetadata, WritableDeadLetterSource};
+        use diport::{DeadLetterProvenance, DeadLetterSummary, EnvelopeMetadata};
 
         let store = MemDeadLetterStore::new();
         assert!(store.is_empty());
@@ -3374,14 +3376,13 @@ mod tests {
         let record = DeadLetterRecord::new(
             vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
             "msg-1",
-            "identity",
+            DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("max retries exhausted"),
             3,
-            WritableDeadLetterSource::Consumer,
             EnvelopeMetadata::empty(),
         );
         store
@@ -3391,7 +3392,8 @@ mod tests {
 
         assert_eq!(store.len(), 1);
         let records = store.records();
-        assert_eq!(records[0].domain(), "identity");
+        assert_eq!(records[0].producer_domain(), "identity");
+        assert_eq!(records[0].consumer_domain(), Some("audit"));
         assert_eq!(records[0].topic(), "session.created");
         assert_eq!(records[0].num_attempts(), 3);
         assert_eq!(records[0].error_summary(), "max retries exhausted");

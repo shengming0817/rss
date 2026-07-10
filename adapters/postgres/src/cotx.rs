@@ -17,7 +17,7 @@
 //!
 //! ref: debezium outbox SMT / MassTransit Bus Outbox（业务写 + outbox 行同一本地事务，producer 侧 durable）
 
-use consistency::Entry;
+use consistency::EventEntry;
 use futures::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use vocab::TenantId;
@@ -105,7 +105,7 @@ struct OutboxTenantMismatch;
 
 struct CoTxOutboxWrite<'a> {
     tenant: TenantId,
-    entry: &'a Entry,
+    entry: &'a EventEntry,
     env: &'a OutboxEnvelope,
 }
 
@@ -246,7 +246,7 @@ impl PgTenantPool {
     pub(crate) async fn co_tx_with_outbox<S, F, E>(
         &self,
         scope: S,
-        entry: &Entry,
+        entry: &EventEntry,
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
@@ -273,7 +273,7 @@ impl PgTenantPool {
     pub(crate) async fn retry_co_tx_with_outbox<S, F, E>(
         &self,
         scope: S,
-        entry: &Entry,
+        entry: &EventEntry,
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
@@ -507,7 +507,7 @@ async fn co_tx_with_outbox<F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
-    entry: &Entry,
+    entry: &EventEntry,
     env: &OutboxEnvelope,
     business_write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
@@ -586,7 +586,7 @@ async fn write_in_tx<F, E>(
     tx: &mut Transaction<'_, Postgres>,
     projection_registry: ProjectionWriteRegistry,
     tenant: TenantId,
-    entry: &Entry,
+    entry: &EventEntry,
     env: &OutboxEnvelope,
     business_write: F,
     bound_lock_wait: bool,
@@ -661,7 +661,7 @@ impl<E> CoTxWriteError<E> {
     }
 }
 
-fn log_cotx_write_error<E>(entry: &Entry, env: &OutboxEnvelope, error: &CoTxWriteError<E>) {
+fn log_cotx_write_error<E>(entry: &EventEntry, env: &OutboxEnvelope, error: &CoTxWriteError<E>) {
     if let Some(source) = error.sqlx_source() {
         log_cotx_sqlx_error(entry, env, error.stage(), source);
     } else {
@@ -670,7 +670,7 @@ fn log_cotx_write_error<E>(entry: &Entry, env: &OutboxEnvelope, error: &CoTxWrit
 }
 
 fn log_cotx_sqlx_error(
-    entry: &Entry,
+    entry: &EventEntry,
     env: &OutboxEnvelope,
     stage: &'static str,
     source: &sqlx::Error,
@@ -686,7 +686,7 @@ fn log_cotx_sqlx_error(
     );
 }
 
-fn log_cotx_domain_error(entry: &Entry, env: &OutboxEnvelope, stage: &'static str) {
+fn log_cotx_domain_error(entry: &EventEntry, env: &OutboxEnvelope, stage: &'static str) {
     tracing::warn!(
         target: "postgres",
         event_id = entry.idem_key().as_str(),

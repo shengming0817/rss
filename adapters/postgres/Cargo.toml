@@ -26,6 +26,8 @@ tracewire = { path = "../../crates/tracewire" }
 diport = { path = "../../crates/diport" }
 # Implements eventexec's DLQ inspection/replay service port (#1214).
 eventexec = { path = "../../crates/eventexec" }
+# Consumes authn-owned sealed projection maintenance receipts at adapter I/O boundaries.
+authn = { path = "../../crates/authn" }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper + allows(Adapter,Domain) 放行）。
 # PgRoleRepo impl identity::ports::RoleRepo（roles 表 + tenant scope，#1250）——真实 impl（替换原 #[cfg(test)] RoleRepoEdgeProof）。
 identity = { path = "../../crates/identity" }
@@ -54,6 +56,8 @@ serde = { workspace = true }
 uuid = { workspace = true }
 # audit_repo cursor encode/decode（base64url URL_SAFE_NO_PAD；与 vocab::Cursor 相同引擎）。
 base64 = { workspace = true }
+# Stable deployment generation for additive projection-input registration.
+sha2 = { workspace = true }
 # 后台周期 DB liveness 采样 loop（pg_readiness_sampling_loop + PgReadinessSampler worker）。
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 # CancellationToken（tokio_util::sync::CancellationToken）——adopt 式 worker 两阶段关闭。
@@ -69,6 +73,8 @@ integration = ["testkit/containers"]
 fault-matrix-test-support = ["dep:anyhow"]
 
 [dev-dependencies]
+generated = { path = "../../generated" }
+authn = { path = "../../crates/authn", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 # #1224 trace 接线单测：复用 tracewire 的 `test-util` 脚手架（with_test_subscriber）装 otel subscriber，
 # 验证 metadata_with_ambient 盖章 `trace`——**不直接 import otel**（otel 收口在 tracewire，同 identity test-support 范式）。

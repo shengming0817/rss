@@ -17,7 +17,7 @@
 //! （含嵌套）title 须 PascalCase + **契约内**唯一（R13；title→typify Rust 类型名）。契约内重复 / 缺 root
 //! title **未必**被 codegen 兜底（前者可能被合并 / 类型歧义、后者直接丢根类型，均非 compile error、非
 //! fail-closed）；本规则在 validate 阶段提供 fail-fast + 清晰诊断（早于 codegen）+ PascalCase 形态。
-//! INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code" }— `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
+//! INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::r14_active_event_empty_subscriptions_rejected", anti_vacuity = "tests::r14_active_event_with_subscription_ok" }— `lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空（R14，Medium）；
 //! active event 无 subscriber 即死事件，视为错误配置（#1120）。
 //! INVARIANT: CONTRACT-REDACTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— declared schema property 上的 `x-pii` / `x-redaction`
 //! 是 generated 安全 `Debug` 的单源（R16）。遗留 `x-sensitive`、未知枚举、高风险字段未标注、
@@ -62,13 +62,13 @@ use syn::visit::Visit;
 
 use super::manifest::{
     Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
-    FIELD_DELIVERY, FIELD_EFFECT_PROFILE, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
-    FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
-    FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth,
-    HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpMethod, HttpResourceSharingMode, Lifecycle,
-    LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole,
-    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering,
-    WorkflowRequirement,
+    FIELD_COMMAND, FIELD_DELIVERY, FIELD_EFFECT_PROFILE, FIELD_ENDPOINTS_HTTP_AUTH,
+    FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
+    FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD, FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA,
+    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
+    HttpMethod, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
+    LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD,
+    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -140,7 +140,7 @@ pub(crate) enum Rule {
     SchemaTitle,
     /// R14：`lifecycle=active && kind=event` 的契约必须至少有一个 `[[subscriptions]]` 声明。
     ///
-    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code" }— active event 契约无 subscriber 即"死事件"（发出无消费），
+    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::r14_active_event_empty_subscriptions_rejected", anti_vacuity = "tests::r14_active_event_with_subscription_ok" }— active event 契约无 subscriber 即"死事件"（发出无消费），
     /// 视为错误配置（Medium，CI 门）。draft/deprecated 豁免（种子 / 前瞻 / 退役契约不受约束）。
     /// synthetic red：active event + 空 subscriptions → Finding；
     /// anti-vacuity：① active event + ≥1 subscription → 通过；② draft event + 空 subscriptions → 通过。
@@ -152,6 +152,8 @@ pub(crate) enum Rule {
     /// wire 语义（与 lifecycle 无关），R8 此前只校验 active command 的 `topic`、未机器锁一致性等级（#1124
     /// review F6）；本规则补足，防 command 契约误标 L0/L1/L3/L4 致 outbox 接线语义漂移。
     CommandConsistency,
+    /// R24：command 必须显式声明 `[command]`，非 command 禁止声明。
+    CommandPolicy,
     /// R16：schema property 的 `x-pii` / `x-redaction` 字段级策略须合法且完整。
     ///
     /// INVARIANT: CONTRACT-REDACTION-POLICY-01 { level = "Medium", exec = "verify", source = "code" }— generated wire DTO 的安全 `Debug` 从 contract JSON
@@ -258,8 +260,8 @@ fn read_runtime_relay_wiring(root: &Path) -> Result<RuntimeRelayWiring> {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RuntimeRelayWiring {
-    relay_domains: BTreeSet<String>,
-    wired_domains: BTreeSet<String>,
+    uses_generated_registry: bool,
+    has_complete_generated_loop: bool,
 }
 
 fn parse_runtime_relay_wiring(content: &str) -> Result<RuntimeRelayWiring> {
@@ -275,46 +277,142 @@ struct RuntimeRelayVisitor {
 }
 
 impl<'ast> Visit<'ast> for RuntimeRelayVisitor {
-    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        if node.ident == "RELAY_DOMAINS" {
-            self.wiring
-                .relay_domains
-                .extend(expr_string_array_literals(&node.expr));
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        let syn::Pat::Ident(producer) = &*node.pat else {
+            syn::visit::visit_expr_for_loop(self, node);
+            return;
+        };
+        if expr_references_generated_producer_domains(&node.expr) {
+            self.wiring.uses_generated_registry = true;
+            let mut evidence = RelayLoopEvidence::new(producer.ident.to_string());
+            evidence.visit_block(&node.body);
+            self.wiring.has_complete_generated_loop |=
+                evidence.wires_generated_domain && evidence.exhaustively_maps_producer;
         }
-        syn::visit::visit_item_const(self, node);
+        syn::visit::visit_expr_for_loop(self, node);
+    }
+}
+
+fn expr_references_generated_producer_domains(expr: &syn::Expr) -> bool {
+    #[derive(Default)]
+    struct ExactPathVisitor(bool);
+
+    impl<'ast> Visit<'ast> for ExactPathVisitor {
+        fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+            let segments = node
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            self.0 |= segments == ["generated", "event", "PRODUCER_DOMAINS"];
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+
+    let mut visitor = ExactPathVisitor::default();
+    visitor.visit_expr(expr);
+    visitor.0
+}
+
+struct RelayLoopEvidence {
+    producer: String,
+    domain_aliases: BTreeSet<String>,
+    wires_generated_domain: bool,
+    exhaustively_maps_producer: bool,
+}
+
+impl RelayLoopEvidence {
+    fn new(producer: String) -> Self {
+        Self {
+            producer,
+            domain_aliases: BTreeSet::new(),
+            wires_generated_domain: false,
+            exhaustively_maps_producer: false,
+        }
+    }
+
+    fn is_domain_expr(&self, expr: &syn::Expr) -> bool {
+        expr_path_ident(expr).is_some_and(|ident| self.domain_aliases.contains(&ident))
+            || expr_method_on_ident(expr, "as_str", &self.producer)
+    }
+}
+
+impl<'ast> Visit<'ast> for RelayLoopEvidence {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Ident(alias) = &node.pat
+            && node
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_method_on_ident(&init.expr, "as_str", &self.producer))
+        {
+            self.domain_aliases.insert(alias.ident.to_string());
+        }
+        syn::visit::visit_local(self, node);
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if expr_call_is_ident(&node.func, "wire_domain_relay")
             && let Some(first) = node.args.first()
-            && let Some(domain) = expr_string_literal(first)
+            && self.is_domain_expr(first)
         {
-            self.wiring.wired_domains.insert(domain);
+            self.wires_generated_domain = true;
         }
         syn::visit::visit_expr_call(self, node);
     }
-}
 
-fn expr_string_array_literals(expr: &syn::Expr) -> Vec<String> {
-    match expr {
-        syn::Expr::Array(array) => array.elems.iter().filter_map(expr_string_literal).collect(),
-        syn::Expr::Group(group) => expr_string_array_literals(&group.expr),
-        syn::Expr::Paren(paren) => expr_string_array_literals(&paren.expr),
-        syn::Expr::Reference(reference) => expr_string_array_literals(&reference.expr),
-        _ => Vec::new(),
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        if expr_path_is_ident(&node.expr, &self.producer)
+            && !node.arms.is_empty()
+            && node
+                .arms
+                .iter()
+                .all(|arm| !matches!(arm.pat, syn::Pat::Wild(_)))
+        {
+            self.exhaustively_maps_producer = true;
+        }
+        syn::visit::visit_expr_match(self, node);
+    }
+
+    fn visit_expr_for_loop(&mut self, _node: &'ast syn::ExprForLoop) {
+        // Evidence from a nested loop must not satisfy the enclosing generated-registry loop.
     }
 }
 
-fn expr_string_literal(expr: &syn::Expr) -> Option<String> {
+fn expr_path_ident(expr: &syn::Expr) -> Option<String> {
     match expr {
-        syn::Expr::Lit(lit) => match &lit.lit {
-            syn::Lit::Str(s) => Some(s.value()),
-            _ => None,
-        },
-        syn::Expr::Group(group) => expr_string_literal(&group.expr),
-        syn::Expr::Paren(paren) => expr_string_literal(&paren.expr),
-        syn::Expr::Reference(reference) => expr_string_literal(&reference.expr),
+        syn::Expr::Path(path) if path.path.segments.len() == 1 => path
+            .path
+            .segments
+            .first()
+            .map(|segment| segment.ident.to_string()),
+        syn::Expr::Group(group) => expr_path_ident(&group.expr),
+        syn::Expr::Paren(paren) => expr_path_ident(&paren.expr),
         _ => None,
+    }
+}
+
+fn expr_method_on_ident(expr: &syn::Expr, method: &str, receiver: &str) -> bool {
+    match expr {
+        syn::Expr::MethodCall(call) => {
+            call.method == method && expr_path_is_ident(&call.receiver, receiver)
+        }
+        syn::Expr::Group(group) => expr_method_on_ident(&group.expr, method, receiver),
+        syn::Expr::Paren(paren) => expr_method_on_ident(&paren.expr, method, receiver),
+        _ => false,
+    }
+}
+
+fn expr_path_is_ident(expr: &syn::Expr, ident: &str) -> bool {
+    match expr {
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == ident),
+        syn::Expr::Group(group) => expr_path_is_ident(&group.expr, ident),
+        syn::Expr::Paren(paren) => expr_path_is_ident(&paren.expr, ident),
+        _ => false,
     }
 }
 
@@ -363,22 +461,22 @@ fn rule_runtime_relay_coverage(
                 continue;
             }
             let domain = target.manifest.domain.as_str();
-            if !runtime.relay_domains.contains(domain) {
+            if !runtime.uses_generated_registry {
                 out.push(finding(
                     Rule::ConsistencyCapability,
                     label.clone(),
                     format!(
-                        "contract id={} missing capability={CAP_RUNTIME_RELAY_DOMAIN} missing capability ref={emitted_id}；active HTTP OutboxFact producer 发出的 active event domain={domain} 必须出现在 {RUNTIME_EVENT_TRANSPORT_RS} 的 RELAY_DOMAINS",
+                        "contract id={} missing capability={CAP_RUNTIME_RELAY_DOMAIN} missing capability ref={emitted_id}；active HTTP OutboxFact producer 发出的 active event domain={domain} 必须由 {RUNTIME_EVENT_TRANSPORT_RS} 迭代 generated::event::PRODUCER_DOMAINS",
                         manifest.id
                     ),
                 ));
             }
-            if !runtime.wired_domains.contains(domain) {
+            if !runtime.has_complete_generated_loop {
                 out.push(finding(
                     Rule::ConsistencyCapability,
                     label.clone(),
                     format!(
-                        "contract id={} missing capability={CAP_RUNTIME_RELAY_WIRING} missing capability ref={emitted_id}；active HTTP OutboxFact producer 发出的 active event domain={domain} 必须经 {RUNTIME_EVENT_TRANSPORT_RS} 调用 wire_domain_relay",
+                        "contract id={} missing capability={CAP_RUNTIME_RELAY_WIRING} missing capability ref={emitted_id}；active HTTP OutboxFact producer 发出的 active event domain={domain} 必须经 PRODUCER_DOMAINS 循环调用 wire_domain_relay，并以无 wildcard 的 ProducerDomain match 穷举 provider capability",
                         manifest.id
                     ),
                 ));
@@ -909,6 +1007,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     let mut findings = Vec::new();
     findings.extend(rule_saga_consistency(&c.manifest, &label));
     findings.extend(rule_command_consistency(&c.manifest, &label));
+    findings.extend(rule_command_policy(&c.manifest, &label));
     findings.extend(rule_framework_kind(&c.manifest, &label));
     findings.extend(rule_path_match(c, &label));
     findings.extend(rule_schema_shape(&c.manifest, &label));
@@ -974,6 +1073,22 @@ fn rule_command_consistency(m: &ContractManifest, label: &str) -> Option<Finding
         ));
     }
     None
+}
+
+/// R24：command journal policy 不允许默认；跨 kind block 不允许被静默忽略。
+fn rule_command_policy(m: &ContractManifest, label: &str) -> Option<Finding> {
+    let valid = matches!(m.kind, ContractKind::Command) == m.command.is_some();
+    (!valid).then(|| {
+        finding(
+            Rule::CommandPolicy,
+            label,
+            if m.kind == ContractKind::Command {
+                format!("kind=command 必须显式声明 {FIELD_COMMAND} journal=required|none")
+            } else {
+                format!("{FIELD_COMMAND} 只允许用于 kind=command")
+            },
+        )
+    })
 }
 
 /// R2：framework owner ⇒ kind ∈ {http, event, command}。
@@ -2197,12 +2312,10 @@ fn is_safe_slug(s: &str) -> bool {
 /// 三者文法一致，故共用单源。小写连字符同 RSS 事件命名约定（见 CLAUDE.md：`session.created` /
 /// `config.entry-upserted`），拒 camelCase。
 ///
-/// 文法**单一事实源** = `consistency::Topic`（运行期 topic 构造面）；本函数反向 delegate `Topic::parse`
-/// （#1126 兑现，原镜像实现已删）。topic 是 wire routing key——contract 声明面（R7 校验 `contract.toml` 的
-/// `id`/`topic`/`group`）与运行期构造面文法必须同形，单源后漂移结构性不可表达。`Topic::parse(s).is_ok()`
-/// ≡ 原谓词：`parse` 先拒空再过 canonical 文法，二者合取与原 `!empty && canonical` 逐分支等价。
+/// 文法单一事实源是只读谓词 `consistency::is_canonical_topic_name`。治理校验不得调用任何 topic
+/// authoring constructor，否则读取 manifest 会意外获得持久化写入 authority。
 fn is_dotted_id(s: &str) -> bool {
-    consistency::Topic::parse(s).is_ok()
+    consistency::is_canonical_topic_name(s)
 }
 
 /// 域名（owner 用）：`[a-z][a-z0-9_]*`，非空、首字符字母（拒 `_` 前缀保留段与空串）。
@@ -2249,6 +2362,7 @@ mod tests {
             topic: None,
             delivery: None,
             saga: None,
+            command: None,
             reconcile: None,
             effect_profile: None,
             subscriptions: Vec::new(),
@@ -2556,7 +2670,34 @@ mod tests {
             },
         );
         m.id = "seed.do-thing".to_string();
+        m.command = Some(crate::contract::manifest::CommandBlock {
+            journal: crate::contract::manifest::CommandJournalPolicy::Required,
+        });
         m
+    }
+
+    #[test]
+    fn r24_command_policy_is_mandatory_and_scoped() {
+        let mut command = command_manifest(ConsistencyLevel::OutboxFact);
+        command.command = None;
+        assert_eq!(
+            rule_command_policy(&command, "command/_seed/v1").map(|f| f.rule),
+            Some(Rule::CommandPolicy)
+        );
+
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        event.command = Some(crate::contract::manifest::CommandBlock {
+            journal: crate::contract::manifest::CommandJournalPolicy::None,
+        });
+        assert_eq!(
+            rule_command_policy(&event, "event/_seed/v1").map(|f| f.rule),
+            Some(Rule::CommandPolicy)
+        );
     }
 
     /// R15 红向（#1124 F6）：command + 非 OutboxFact（如 LocalTx）→ CommandConsistency，subject=label。
@@ -2993,9 +3134,8 @@ mod tests {
 
     /// `is_dotted_id` 谓词隔离 accept/reject 表——锁 R7 dotted-id 文法在 xtask 边界的行为
     /// （此前仅经 `rule_ident_syntax` 间接覆盖 id/topic/group）。用例集对齐 consistency 侧文法单源
-    /// `Topic::parse` 的接受/拒绝集（#1126：`is_dotted_id` 反向 delegate `consistency::Topic::parse`）。
-    /// anti-vacuity：含正反两类用例；**禁**写 `is_dotted_id(s) == Topic::parse(s).is_ok()` 自指等价断言
-    /// （delegate 后恒真、无效），一律硬编码期望布尔。
+    /// `is_canonical_topic_name` 的接受/拒绝集（只读治理谓词，不取得 authoring authority）。
+    /// anti-vacuity：含正反两类用例；禁与被委托谓词做自指等价断言，一律硬编码期望布尔。
     #[rstest]
     #[case("seed.thing-happened", true)]
     #[case("session.created", true)]
@@ -4420,7 +4560,7 @@ mod tests {
     // ── R14 ActiveSubscriber（EVENT-ACTIVE-SUB-01）────────────────────────
 
     /// synthetic red：active event + 空 subscriptions → 产生 ActiveSubscriber finding。
-    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code" }
+    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::r14_active_event_empty_subscriptions_rejected", anti_vacuity = "tests::r14_active_event_with_subscription_ok" }
     #[test]
     fn r14_active_event_empty_subscriptions_rejected() {
         let mut m = manifest(
@@ -4781,10 +4921,13 @@ mod tests {
         discovered(m, PathBuf::from(format!("/{id}")))
     }
 
-    fn runtime_relay_wiring(relay_domains: &[&str], wired_domains: &[&str]) -> RuntimeRelayWiring {
+    fn runtime_relay_wiring(
+        uses_generated_registry: bool,
+        has_complete_generated_loop: bool,
+    ) -> RuntimeRelayWiring {
         RuntimeRelayWiring {
-            relay_domains: relay_domains.iter().map(|s| (*s).to_string()).collect(),
-            wired_domains: wired_domains.iter().map(|s| (*s).to_string()).collect(),
+            uses_generated_registry,
+            has_complete_generated_loop,
         }
     }
 
@@ -4792,19 +4935,65 @@ mod tests {
     fn r22_runtime_relay_parser_reads_registry_and_wiring_calls() -> anyhow::Result<()> {
         let wiring = parse_runtime_relay_wiring(
             r#"
-            const RELAY_DOMAINS: &[&str] = &["identity", "settings"];
-
             fn wire() -> anyhow::Result<()> {
-                wire_domain_relay("identity", identity_outbox, &timing, &mut module)?;
-                wire_domain_relay("settings", settings_outbox, &timing, &mut module)?;
+                for producer in generated::event::PRODUCER_DOMAINS.iter().copied() {
+                    let domain = producer.as_str();
+                    let outbox = match producer {
+                        ProducerDomain::Identity => identity_outbox,
+                        ProducerDomain::Settings => settings_outbox,
+                    };
+                    wire_domain_relay(domain, outbox, &timing, &mut module)?;
+                }
                 Ok(())
             }
             "#,
         )?;
-        assert_eq!(
-            wiring,
-            runtime_relay_wiring(&["identity", "settings"], &["identity", "settings"])
-        );
+        assert_eq!(wiring, runtime_relay_wiring(true, true));
+        Ok(())
+    }
+
+    #[test]
+    fn r22_runtime_relay_parser_rejects_wildcard_provider_mapping() -> anyhow::Result<()> {
+        let wiring = parse_runtime_relay_wiring(
+            r#"
+            fn wire() {
+                for producer in generated::event::PRODUCER_DOMAINS {
+                    let outbox = match producer {
+                        ProducerDomain::Identity => identity_outbox,
+                        _ => fallback_outbox,
+                    };
+                    wire_domain_relay(producer.as_str(), outbox, &timing, &mut module);
+                }
+            }
+            "#,
+        )?;
+        assert!(wiring.uses_generated_registry);
+        assert!(!wiring.has_complete_generated_loop);
+        Ok(())
+    }
+
+    #[test]
+    fn r22_runtime_relay_parser_rejects_dispersed_evidence() -> anyhow::Result<()> {
+        let wiring = parse_runtime_relay_wiring(
+            r#"
+            fn registry_only() {
+                for producer in generated::event::PRODUCER_DOMAINS {
+                    let _ = producer.as_str();
+                }
+            }
+            fn unrelated_match(producer: ProducerDomain) {
+                match producer {
+                    ProducerDomain::Identity => identity_outbox,
+                    ProducerDomain::Settings => settings_outbox,
+                };
+            }
+            fn unrelated_wire(domain: &str) {
+                wire_domain_relay(domain, outbox, &timing, &mut module);
+            }
+            "#,
+        )?;
+        assert!(wiring.uses_generated_registry);
+        assert!(!wiring.has_complete_generated_loop);
         Ok(())
     }
 
@@ -4818,7 +5007,7 @@ mod tests {
             ),
             active_outbox_event("billing", "billing.invoice-created"),
         ];
-        let runtime = runtime_relay_wiring(&[], &["billing"]);
+        let runtime = runtime_relay_wiring(false, true);
         let findings = rule_runtime_relay_coverage(&contracts, &runtime);
         assert_r22_detail(
             &findings,
@@ -4837,7 +5026,7 @@ mod tests {
             ),
             active_outbox_event("billing", "billing.invoice-created"),
         ];
-        let runtime = runtime_relay_wiring(&["billing"], &[]);
+        let runtime = runtime_relay_wiring(true, false);
         let findings = rule_runtime_relay_coverage(&contracts, &runtime);
         assert_r22_detail(
             &findings,

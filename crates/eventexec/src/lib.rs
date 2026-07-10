@@ -27,8 +27,7 @@ pub use consumer_worker::{
     spawn_consumer_ackable_subscriber, spawn_consumer_ackable_tx_subscriber, spawn_relay,
 };
 
-// 命令分发 runtime（P12，#1124）：sealed emit funnel + 幂等消费。`emit_async` 不在 crate root re-export
-// ——保留唯一路径 `eventexec::command::emit_async`，令 COMMAND-SYMMETRY-01 的「无裸 emit 出口」扫描可收口。
+// 命令分发 runtime：generated seam → reviewed command capability → provider store，命令不再借事件 emitter。
 pub mod command;
 
 pub mod relay;
@@ -58,8 +57,7 @@ pub use reconcile::{
     Builder as ReconcileBuilder, ClaimedTarget, DurableReconciler, RECONCILE_PROBE,
     ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileScheduleError,
     ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWorker, ReconcileWorkerControl,
-    ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome, StableDispatchKey, Tenancy,
-    Trigger, TriggerError,
+    ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger, TriggerError,
 };
 
 pub mod projection;

@@ -31,8 +31,6 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 # session-created 订阅 handler 入参：diport::Message（跨域事件信封）。
 diport = { path = "../diport" }
-# handle 返回 BoxFuture（bootstrap::SubscriberHandler 同范式，手写 box）。
-futures = { workspace = true }
 # 解码 session-created event payload（generated 派生类型）。
 serde_json = { workspace = true }
 # 跨租户 admin 读 HTTP handler（GET /api/v1/audit/entries）：axum Query/Json + route_group 挂载。

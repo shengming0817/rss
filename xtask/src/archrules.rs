@@ -4,13 +4,15 @@
 //! baseline），不引入手写规则目录；文档仅作为 `doc_ref`。
 //! INVARIANT: ARCHRULES-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code" } —— [`ArchRules`] 作为 no-compile governance gate 接入 verify/ci，
 //! 缺 carrier / fixture / gate 证据时 fail-closed。
+//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 11 个持久化 funnel 仅引用真实 rule key，强度和证明从 carrier 反向派生。
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
-use anyhow::{Context, Result};
-use std::collections::BTreeSet;
+use anyhow::{Context, Result, bail};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::visit::Visit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -28,6 +30,14 @@ pub(crate) enum Rule {
     InvalidInvariantMetadata,
     CarrierBindingMismatch,
     MissingNativeHardSource,
+    MissingCodegenHardProof,
+    ConflictingInvariantFacet,
+    MatrixCoverage,
+    MatrixMissingBoundary,
+    MatrixMissingInvariant,
+    MatrixEvidence,
+    MatrixResidual,
+    MatrixDocDrift,
 }
 
 pub(crate) struct ArchRules;
@@ -40,13 +50,186 @@ impl GovernanceCheck for ArchRules {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
-        check_root(&workspace_root()?)
+        let root = workspace_root()?;
+        let index = build_index(&root)?;
+        let mut findings = index.findings;
+        findings.extend(validate_matrix(&root, &index.records, true)?);
+        Ok((
+            format!(
+                "{} 条规则索引 + {} 行持久化 funnel",
+                index.records.len(),
+                FUNNELS.len()
+            ),
+            findings,
+        ))
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatrixAction {
+    Print,
+    Write,
+    Check,
+}
+
+const MATRIX_DOC: &str =
+    "docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct InvariantKey {
+    id: &'static str,
+    facet: Option<&'static str>,
+}
+
+const fn invariant(id: &'static str) -> InvariantKey {
+    InvariantKey { id, facet: None }
+}
+
+const fn invariant_facet(id: &'static str, facet: &'static str) -> InvariantKey {
+    InvariantKey {
+        id,
+        facet: Some(facet),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResidualDisposition {
+    None,
+    AcceptedMedium {
+        risk: &'static str,
+        why_no_low_cost_hardening: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunnelSpec {
+    key: &'static str,
+    source_issues: &'static [u32],
+    upstream: &'static [InvariantKey],
+    downstream: &'static [InvariantKey],
+    residual: ResidualDisposition,
+}
+
+const FUNNELS: &[FunnelSpec] = &[
+    FunnelSpec {
+        key: "runtime-wiring",
+        source_issues: &[1422, 1425, 1430, 1431, 1432],
+        upstream: &[invariant("WIRING-DEPS-INFRA-ONLY-01")],
+        downstream: &[invariant("RUNTIME-BASELINE-DRIFT-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "跨文件 runtime 装配集合仍可能出现未识别的新语法形态",
+            why_no_low_cost_hardening: "Rust 类型系统无法表达 workspace 级依赖集合；AST 守卫与 baseline 已覆盖已知入口",
+        },
+    },
+    FunnelSpec {
+        key: "pg-capability",
+        source_issues: &[1423, 1436],
+        upstream: &[invariant("PG-TX-CAPABILITY-SEAL-01")],
+        downstream: &[invariant("PG-BUNDLE-DOMAIN-02")],
+        residual: ResidualDisposition::None,
+    },
+    FunnelSpec {
+        key: "adapter-bundle",
+        source_issues: &[1424],
+        upstream: &[invariant("PG-BUNDLE-FUNNEL-01")],
+        downstream: &[invariant("PG-BUNDLE-POOL-03")],
+        residual: ResidualDisposition::None,
+    },
+    FunnelSpec {
+        key: "rls",
+        source_issues: &[1437],
+        upstream: &[invariant("TENANCY-RLS-FORCE-01")],
+        downstream: &[invariant("TENANCY-PG-TX-FUNNEL-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "SQL policy 与运行时 catalog 属于跨文件、跨后端集合事实",
+            why_no_low_cost_hardening: "schema AST 守卫与运行时 catalog 验证已覆盖 canonical tenant predicate",
+        },
+    },
+    FunnelSpec {
+        key: "repo-uow",
+        source_issues: &[1426, 1427, 1428],
+        upstream: &[invariant("TENANCY-REPO-SCOPE-SIGNATURE-01")],
+        downstream: &[invariant("OUTBOX-COTX-BINDING-API-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "仓库 trait 集合与调用面需要 workspace AST 枚举",
+            why_no_low_cost_hardening: "单个事务绑定由类型 Hard，集合完整性由 synthetic-red AST 守卫补足",
+        },
+    },
+    FunnelSpec {
+        key: "event-topology",
+        source_issues: &[1438],
+        upstream: &[invariant("EVENT-ACTIVE-SUB-01")],
+        downstream: &[invariant_facet(
+            "EVENT-TOPOLOGY-GENERATED-01",
+            "single-registry",
+        )],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "active contract 集合完整性需要跨 manifest 校验",
+            why_no_low_cost_hardening: "单注册表由 codegen Hard；manifest 集合事实只能由 verify AST/TOML 守卫表达",
+        },
+    },
+    FunnelSpec {
+        key: "consumer-bundle",
+        source_issues: &[1429, 1433, 1434, 1435],
+        upstream: &[invariant("EVENT-TRANSPORT-PG-INBOX-01")],
+        downstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "consumer provider 与历史 token 禁用是跨 crate 集合事实",
+            why_no_low_cost_hardening: "AST 守卫拒绝 bypass、alias 与字符串注释伪证据，并保留真实绿路径",
+        },
+    },
+    FunnelSpec {
+        key: "generated-runtime-bridge",
+        source_issues: &[1442],
+        upstream: &[invariant_facet(
+            "EVENT-TOPOLOGY-GENERATED-01",
+            "single-registry",
+        )],
+        downstream: &[invariant("EVENT-TRANSPORT-PG-INBOX-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "真实 producer 调用点集合无法由单 crate 类型系统证明完整",
+            why_no_low_cost_hardening: "生成注册表由 Hard codegen 固定，调用集合由 event transport AST red/green 守卫验证",
+        },
+    },
+    FunnelSpec {
+        key: "retry",
+        source_issues: &[1439],
+        upstream: &[invariant("TENANCY-PG-TX-FUNNEL-01")],
+        downstream: &[invariant("OUTBOX-COTX-BINDING-API-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "任意手写 retry loop 无法静态完备识别",
+            why_no_low_cost_hardening: "retry primitive 与 sanctioned callsite 已由 AST 守卫收口；事务 API 由类型 Hard",
+        },
+    },
+    FunnelSpec {
+        key: "redrive",
+        source_issues: &[1440],
+        upstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
+        downstream: &[invariant("EVENT-TRANSPORT-PG-INBOX-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "redrive worker 与 durable inbox 连接属于运行时集合事实",
+            why_no_low_cost_hardening: "现有 transport/cutover AST 守卫同时覆盖拒绝路径与真实装配路径",
+        },
+    },
+    FunnelSpec {
+        key: "command-journal",
+        source_issues: &[1441],
+        upstream: &[invariant_facet(
+            "COMMAND-JOURNAL-GENERATED-01",
+            "manifest-policy",
+        )],
+        downstream: &[invariant_facet("COMMAND-IMPL-ALLOWLIST-01", "provider-set")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "生产 provider impl 与 callsite 集合无法完全由可见性表达",
+            why_no_low_cost_hardening: "authoring seam 由私有字段/构造器 Hard 封闭，仅剩集合事实由 AST red/green 守卫承担",
+        },
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuleRecord {
     id: String,
+    facet: Option<String>,
     level: RuleLevel,
     exec: ExecutionLevel,
     source_kind: SourceKind,
@@ -55,6 +238,10 @@ struct RuleRecord {
     evidence: String,
     gate: String,
     status: String,
+    native: Option<String>,
+    golden: Option<String>,
+    synthetic_red: Option<String>,
+    anti_vacuity: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -63,14 +250,20 @@ struct Index {
     findings: Vec<Finding<Rule>>,
 }
 
+type FacetKey = (String, String, Option<String>);
+type RuleBinding = (RuleLevel, ExecutionLevel, SourceKind);
+
 pub(crate) fn list() -> Result<()> {
     let root = workspace_root()?;
     let index = build_index(&root)?;
-    println!("id | level | exec | source_kind | carrier | source | evidence | gate | status");
+    println!(
+        "id | facet | level | exec | source_kind | carrier | source | evidence | gate | status"
+    );
     for record in &index.records {
         println!(
-            "{} | {} | {} | {} | {} | {} | {} | {} | {}",
+            "{} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
             record.id,
+            record.facet.as_deref().unwrap_or("-"),
             record.level.as_str(),
             record.exec.as_str(),
             record.source_kind.as_str(),
@@ -91,10 +284,347 @@ pub(crate) fn list() -> Result<()> {
     Ok(())
 }
 
-fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
-    let index = build_index(root)?;
-    let summary = format!("{} 条规则索引", index.records.len());
-    Ok((summary, index.findings))
+pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
+    let root = workspace_root()?;
+    let index = build_index(&root)?;
+    let mut findings = index.findings;
+    findings.extend(validate_matrix(
+        &root,
+        &index.records,
+        action == MatrixAction::Check,
+    )?);
+    if !findings.is_empty() {
+        crate::diagnostic::print_findings(&findings);
+        bail!("archrules matrix: {} 项校验失败", findings.len());
+    }
+    let rendered = render_matrix(&index.records)?;
+    match action {
+        MatrixAction::Print => print!("{rendered}"),
+        MatrixAction::Write => {
+            let path = root.join(MATRIX_DOC);
+            fs::write(&path, rendered)
+                .with_context(|| format!("写入 matrix `{}`", path.display()))?;
+            eprintln!("archrules matrix: 已写入 {MATRIX_DOC}");
+        }
+        MatrixAction::Check => eprintln!("archrules matrix: 11 行与 committed 文档一致"),
+    }
+    Ok(())
+}
+
+fn validate_matrix(
+    root: &Path,
+    records: &[RuleRecord],
+    check_doc_drift: bool,
+) -> Result<Vec<Finding<Rule>>> {
+    let mut findings = Vec::new();
+    let expected_issues = (1422_u32..=1442).collect::<BTreeSet<_>>();
+    let mut actual_issues = BTreeSet::new();
+    let mut seen_issues = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    if FUNNELS.len() != 11 {
+        findings.push(finding(
+            Rule::MatrixCoverage,
+            "FUNNELS",
+            format!("必须恰好 11 行，实际 {} 行", FUNNELS.len()),
+        ));
+    }
+    for funnel in FUNNELS {
+        if !keys.insert(funnel.key) {
+            findings.push(finding(Rule::MatrixCoverage, funnel.key, "funnel key 重复"));
+        }
+        if funnel.upstream.is_empty() || funnel.downstream.is_empty() {
+            findings.push(finding(
+                Rule::MatrixMissingBoundary,
+                funnel.key,
+                "upstream/downstream 必须均非空",
+            ));
+        }
+        for issue in funnel.source_issues {
+            actual_issues.insert(*issue);
+            if !seen_issues.insert(*issue) {
+                findings.push(finding(
+                    Rule::MatrixCoverage,
+                    funnel.key,
+                    format!("来源 issue #{issue} 重复归属"),
+                ));
+            }
+        }
+        let mut has_medium = false;
+        for key in funnel.upstream.iter().chain(funnel.downstream) {
+            let Some(record) = select_record(records, *key) else {
+                findings.push(finding(
+                    Rule::MatrixMissingInvariant,
+                    funnel.key,
+                    format!(
+                        "真实索引缺 invariant `{}` facet `{}`",
+                        key.id,
+                        key.facet.unwrap_or("-")
+                    ),
+                ));
+                continue;
+            };
+            match record.level {
+                RuleLevel::Hard => validate_hard_evidence(root, funnel.key, record, &mut findings)?,
+                RuleLevel::Medium => {
+                    has_medium = true;
+                    validate_medium_evidence(root, funnel.key, record, &mut findings)?;
+                }
+            }
+        }
+        match (has_medium, funnel.residual) {
+            (true, ResidualDisposition::None) => findings.push(finding(
+                Rule::MatrixResidual,
+                funnel.key,
+                "含 Medium 边界却未声明 AcceptedMedium residual",
+            )),
+            (
+                _,
+                ResidualDisposition::AcceptedMedium {
+                    risk,
+                    why_no_low_cost_hardening,
+                },
+            ) if risk.trim().is_empty() || why_no_low_cost_hardening.trim().is_empty() => {
+                findings.push(finding(
+                    Rule::MatrixResidual,
+                    funnel.key,
+                    "AcceptedMedium 必须说明 risk 与无低成本 Hard 化原因",
+                ));
+            }
+            _ => {}
+        }
+    }
+    if actual_issues != expected_issues {
+        findings.push(finding(
+            Rule::MatrixCoverage,
+            "source issues",
+            format!(
+                "来源 issue 并集必须恰为 #1422..#1442；missing={:?}, extra={:?}",
+                expected_issues
+                    .difference(&actual_issues)
+                    .collect::<Vec<_>>(),
+                actual_issues
+                    .difference(&expected_issues)
+                    .collect::<Vec<_>>()
+            ),
+        ));
+    }
+    if check_doc_drift && findings.is_empty() {
+        let path = root.join(MATRIX_DOC);
+        let expected = render_matrix(records)?;
+        let actual = fs::read_to_string(&path).unwrap_or_default();
+        if actual != expected {
+            findings.push(finding(
+                Rule::MatrixDocDrift,
+                MATRIX_DOC,
+                "generated matrix 漂移；运行 `cargo xtask archrules matrix --write`",
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn select_record(records: &[RuleRecord], key: InvariantKey) -> Option<&RuleRecord> {
+    records
+        .iter()
+        .filter(|record| record.id == key.id && record.facet.as_deref() == key.facet)
+        .max_by_key(|record| {
+            (
+                usize::from(record.level == RuleLevel::Hard),
+                usize::from(record.exec == ExecutionLevel::Verify),
+                usize::from(record.carrier == "xtask"),
+            )
+        })
+}
+
+fn validate_hard_evidence(
+    root: &Path,
+    funnel: &str,
+    record: &RuleRecord,
+    findings: &mut Vec<Finding<Rule>>,
+) -> Result<()> {
+    let valid = match record.source_kind {
+        SourceKind::Codegen => {
+            let Some(golden) = record.golden.as_deref() else {
+                return push_matrix_evidence(findings, funnel, record, "codegen Hard 缺 golden");
+            };
+            let red = record.synthetic_red.as_deref();
+            let green = record.anti_vacuity.as_deref();
+            root.join(golden).is_file()
+                && red.is_some_and(|symbol| {
+                    record_source_has_test_symbol(root, record, symbol).unwrap_or(false)
+                })
+                && green.is_some_and(|symbol| {
+                    record_source_has_test_symbol(root, record, symbol).unwrap_or(false)
+                })
+        }
+        SourceKind::Code | SourceKind::Rustdoc | SourceKind::Trybuild => {
+            record
+                .native
+                .as_deref()
+                .is_some_and(|native| !native.trim().is_empty())
+                || record.source_kind == SourceKind::Trybuild
+        }
+        _ => false,
+    };
+    if !valid {
+        push_matrix_evidence(
+            findings,
+            funnel,
+            record,
+            "Hard carrier 缺真实 native/golden/synthetic-red/anti-vacuity 证明",
+        )?;
+    }
+    Ok(())
+}
+
+fn push_matrix_evidence(
+    findings: &mut Vec<Finding<Rule>>,
+    funnel: &str,
+    record: &RuleRecord,
+    detail: &str,
+) -> Result<()> {
+    findings.push(finding(
+        Rule::MatrixEvidence,
+        funnel,
+        format!("{}: {detail}", record.id),
+    ));
+    Ok(())
+}
+
+fn validate_medium_evidence(
+    root: &Path,
+    funnel: &str,
+    record: &RuleRecord,
+    findings: &mut Vec<Finding<Rule>>,
+) -> Result<()> {
+    let red = record.synthetic_red.as_deref();
+    let green = record.anti_vacuity.as_deref();
+    let explicitly_bound = red.zip(green).is_some_and(|(red, green)| {
+        red != green
+            && record_source_has_test_symbol(root, record, red).unwrap_or(false)
+            && record_source_has_test_symbol(root, record, green).unwrap_or(false)
+    });
+    if !explicitly_bound {
+        push_matrix_evidence(
+            findings,
+            funnel,
+            record,
+            &format!(
+                "Medium invariant 必须用 metadata 显式绑定同载体真实 AST test；synthetic_red={red:?}, anti_vacuity={green:?}"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn record_test_names(root: &Path, record: &RuleRecord) -> Result<Vec<String>> {
+    let relative = record.source.split(':').next().unwrap_or(&record.source);
+    collect_test_names(&root.join(relative))
+}
+
+fn collect_test_names(path: &Path) -> Result<Vec<String>> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("读取 evidence source `{}`", path.display()))?;
+    let file = syn::parse_file(&text)
+        .with_context(|| format!("解析 evidence source `{}`", path.display()))?;
+    #[derive(Default)]
+    struct Collector(Vec<String>);
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            let is_test = node.attrs.iter().any(|attr| {
+                attr.path().segments.last().is_some_and(|segment| {
+                    matches!(segment.ident.to_string().as_str(), "test" | "rstest")
+                })
+            });
+            if is_test && !node.block.stmts.is_empty() {
+                self.0.push(node.sig.ident.to_string());
+            }
+            syn::visit::visit_item_fn(self, node);
+        }
+    }
+    let mut collector = Collector::default();
+    collector.visit_file(&file);
+    collector.0.sort();
+    collector.0.dedup();
+    Ok(collector.0)
+}
+
+fn record_source_has_test_symbol(root: &Path, record: &RuleRecord, symbol: &str) -> Result<bool> {
+    let name = symbol.rsplit("::").next().unwrap_or(symbol);
+    Ok(record_test_names(root, record)?
+        .iter()
+        .any(|candidate| candidate == name))
+}
+
+fn render_matrix(records: &[RuleRecord]) -> Result<String> {
+    let mut out = String::from(
+        "<!-- GENERATED by `cargo xtask archrules matrix --write`; DO NOT EDIT. -->\n\
+# Persistence Funnel AI-Robust Matrix\n\n\
+本矩阵只引用真实 `INVARIANT` carrier；level、carrier、gate、source 与 evidence 均由 ArchRules 索引派生。\n\n\
+| Funnel | Issues | Upstream | Downstream | Residual |\n\
+|---|---|---|---|---|\n",
+    );
+    for funnel in FUNNELS {
+        let issues = funnel
+            .source_issues
+            .iter()
+            .map(|issue| format!("#{issue}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let upstream = render_boundaries(records, funnel.upstream)?;
+        let downstream = render_boundaries(records, funnel.downstream)?;
+        let residual = match funnel.residual {
+            ResidualDisposition::None => "None (Hard)".to_string(),
+            ResidualDisposition::AcceptedMedium {
+                risk,
+                why_no_low_cost_hardening,
+            } => format!("AcceptedMedium: {risk}；{why_no_low_cost_hardening}"),
+        };
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} |\n",
+            funnel.key, issues, upstream, downstream, residual
+        ));
+    }
+    out.push_str(
+        "\n## Verification\n\n\
+`cargo xtask archrules matrix --check` 校验固定 11 行、#1422–#1442 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
+    );
+    Ok(out)
+}
+
+fn render_boundaries(records: &[RuleRecord], keys: &[InvariantKey]) -> Result<String> {
+    keys.iter()
+        .map(|key| {
+            let record = select_record(records, *key)
+                .with_context(|| format!("matrix 缺 invariant {}", key.id))?;
+            let proof = match record.level {
+                RuleLevel::Hard if record.source_kind == SourceKind::Codegen => format!(
+                    "golden={}, red={}, green={}",
+                    record.golden.as_deref().unwrap_or("-"),
+                    record.synthetic_red.as_deref().unwrap_or("-"),
+                    record.anti_vacuity.as_deref().unwrap_or("-")
+                ),
+                RuleLevel::Hard => record.native.as_deref().unwrap_or("trybuild").to_string(),
+                RuleLevel::Medium => format!(
+                    "red={}, green={}",
+                    record.synthetic_red.as_deref().unwrap_or("-"),
+                    record.anti_vacuity.as_deref().unwrap_or("-")
+                ),
+            };
+            Ok(format!(
+                "`{}{}` {} / {} / {} / {} / evidence={} ({})",
+                key.id,
+                key.facet.map_or(String::new(), |facet| format!("#{facet}")),
+                record.level.as_str(),
+                record.carrier,
+                record.gate,
+                record.source,
+                record.evidence,
+                proof
+            ))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join("<br>"))
 }
 
 fn build_index(root: &Path) -> Result<Index> {
@@ -113,6 +643,7 @@ fn build_index(root: &Path) -> Result<Index> {
     scan_public_api(root, &mut index)?;
     scan_source_invariants(root, &mut index)?;
     scan_trybuild_and_native(root, &mut index)?;
+    reject_conflicting_facets(&mut index);
     check_docs_only(root, &mut index)?;
     require_anti_vacuity(&mut index);
     if index.records.is_empty() {
@@ -124,6 +655,7 @@ fn build_index(root: &Path) -> Result<Index> {
     }
     index.records.sort_by(|a, b| {
         a.id.cmp(&b.id)
+            .then_with(|| a.facet.cmp(&b.facet))
             .then_with(|| a.carrier.cmp(&b.carrier))
             .then_with(|| a.source.cmp(&b.source))
     });
@@ -475,12 +1007,14 @@ fn scan_invariant_file_filtered(
             ));
         }
         for rule in found.rules.iter().filter(|rule| include_rule(rule)) {
-            let Some(metadata) = validated_metadata(index, &found.source, carrier, gate, rule)
+            let Some(metadata) =
+                validated_metadata(root, index, &found.source, carrier, gate, rule)
             else {
                 continue;
             };
             index.records.push(RuleRecord {
                 id: rule.id.clone(),
+                facet: metadata.facet.clone(),
                 level: metadata.level,
                 exec: metadata.exec,
                 source_kind: metadata.source_kind,
@@ -489,6 +1023,10 @@ fn scan_invariant_file_filtered(
                 evidence: evidence.clone(),
                 gate: gate_text.clone(),
                 status: status.clone(),
+                native: metadata.native.clone(),
+                golden: metadata.golden.clone(),
+                synthetic_red: metadata.synthetic_red.clone(),
+                anti_vacuity: metadata.anti_vacuity.clone(),
             });
         }
     }
@@ -540,12 +1078,14 @@ fn scan_source_invariant_file(
             ));
         }
         for rule in &found.rules {
-            let Some(metadata) = validated_metadata(index, &found.source, carrier, gate, rule)
+            let Some(metadata) =
+                validated_metadata(root, index, &found.source, carrier, gate, rule)
             else {
                 continue;
             };
             index.records.push(RuleRecord {
                 id: rule.id.clone(),
+                facet: metadata.facet.clone(),
                 level: metadata.level,
                 exec: metadata.exec,
                 source_kind: metadata.source_kind,
@@ -554,6 +1094,10 @@ fn scan_source_invariant_file(
                 evidence: evidence.clone(),
                 gate: gate_text.clone(),
                 status: status.clone(),
+                native: metadata.native.clone(),
+                golden: metadata.golden.clone(),
+                synthetic_red: metadata.synthetic_red.clone(),
+                anti_vacuity: metadata.anti_vacuity.clone(),
             });
         }
     }
@@ -568,6 +1112,7 @@ fn scan_source_invariant_file(
 }
 
 fn validated_metadata(
+    root: &Path,
     index: &mut Index,
     source: &str,
     carrier: &str,
@@ -649,7 +1194,57 @@ fn validated_metadata(
             ),
         ));
     }
+    if metadata.level == RuleLevel::Hard && metadata.source_kind == SourceKind::Codegen {
+        let complete = metadata
+            .golden
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty() && root.join(value).is_file())
+            && metadata
+                .synthetic_red
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && metadata
+                .anti_vacuity
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+        if !complete {
+            index.findings.push(finding(
+                Rule::MissingCodegenHardProof,
+                source.to_string(),
+                format!(
+                    "INVARIANT `{}` codegen Hard 缺 committed golden / synthetic_red / anti_vacuity 证明",
+                    rule.id
+                ),
+            ));
+        }
+    }
     Some(metadata)
+}
+
+fn reject_conflicting_facets(index: &mut Index) {
+    let mut seen: BTreeMap<FacetKey, RuleBinding> = BTreeMap::new();
+    for record in &index.records {
+        let file = record
+            .source
+            .rsplit_once(':')
+            .map_or(record.source.as_str(), |(file, _)| file)
+            .to_string();
+        let key = (file, record.id.clone(), record.facet.clone());
+        let binding = (record.level, record.exec, record.source_kind);
+        if seen.get(&key).is_some_and(|prior| *prior != binding) {
+            index.findings.push(finding(
+                Rule::ConflictingInvariantFacet,
+                record.source.clone(),
+                format!(
+                    "INVARIANT `{}` facet `{}` 在同一 carrier 文件声明冲突强度/载体",
+                    record.id,
+                    record.facet.as_deref().unwrap_or("<default>")
+                ),
+            ));
+        } else {
+            seen.insert(key, binding);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -691,14 +1286,17 @@ impl RuleLevel {
         match self {
             Self::Medium => true,
             Self::Hard => {
-                carrier == "native-hard"
+                (carrier == "native-hard"
                     && matches!(
                         (metadata.exec, metadata.source_kind),
                         (
                             ExecutionLevel::NativeCompile,
                             SourceKind::Code | SourceKind::Rustdoc
                         ) | (ExecutionLevel::Verify, SourceKind::Trybuild)
-                    )
+                    ))
+                    || (carrier == "xtask"
+                        && metadata.exec == ExecutionLevel::Verify
+                        && metadata.source_kind == SourceKind::Codegen)
             }
         }
     }
@@ -805,6 +1403,10 @@ struct InvariantMetadata {
     exec: ExecutionLevel,
     source_kind: SourceKind,
     native: Option<String>,
+    facet: Option<String>,
+    golden: Option<String>,
+    synthetic_red: Option<String>,
+    anti_vacuity: Option<String>,
 }
 
 fn extract_invariants(root: &Path, path: &Path) -> Result<Vec<FoundInvariant>> {
@@ -952,11 +1554,21 @@ fn parse_metadata(metadata: &str) -> Result<InvariantMetadata, String> {
         .get("native")
         .and_then(toml::Value::as_str)
         .map(str::to_string);
+    let optional = |name: &str| {
+        table
+            .get(name)
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+    };
     Ok(InvariantMetadata {
         level,
         exec,
         source_kind,
         native,
+        facet: optional("facet"),
+        golden: optional("golden"),
+        synthetic_red: optional("synthetic_red"),
+        anti_vacuity: optional("anti_vacuity"),
     })
 }
 
@@ -1537,6 +2149,82 @@ mod tests {
     }
 
     #[test]
+    fn invariant_parser_preserves_facet_and_codegen_hard_proof() -> Result<()> {
+        let metadata = parse_metadata(
+            r#"level = "Hard", exec = "verify", source = "codegen", facet = "producer", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_red", anti_vacuity = "codegen::tests::event_green""#,
+        )
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(metadata.facet.as_deref(), Some("producer"));
+        assert_eq!(
+            metadata.golden.as_deref(),
+            Some("generated/src/event/mod.rs")
+        );
+        assert_eq!(
+            metadata.synthetic_red.as_deref(),
+            Some("codegen::tests::event_red")
+        );
+        assert_eq!(
+            metadata.anti_vacuity.as_deref(),
+            Some("codegen::tests::event_green")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_hard_requires_committed_complete_proof() -> Result<()> {
+        let root = unique_tmp("archrules-codegen-hard-proof");
+        let file = root.join("xtask/src/demo.rs");
+        write(
+            &file,
+            "//! INVARIANT: DEMO-CODEGEN-01 { level = \"Hard\", exec = \"verify\", source = \"codegen\", facet = \"wire\", golden = \"generated/demo.rs\", synthetic_red = \"tests::red\", anti_vacuity = \"tests::green\" }\n",
+        )?;
+        write(&root.join("generated/demo.rs"), "// golden\n")?;
+        let mut index = Index::default();
+        scan_invariant_file(&root, &mut index, &file, "xtask", "demo", Some("verify"))?;
+        assert!(
+            !index
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingCodegenHardProof),
+            "{:?}",
+            index.findings
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn conflicting_same_file_id_facet_is_rejected() {
+        let record = |level| RuleRecord {
+            id: "DEMO-CONFLICT-01".to_string(),
+            facet: Some("wire".to_string()),
+            level,
+            exec: ExecutionLevel::Verify,
+            source_kind: SourceKind::Code,
+            carrier: "xtask".to_string(),
+            source: "xtask/src/demo.rs:1".to_string(),
+            evidence: "test".to_string(),
+            gate: "verify".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        let mut index = Index {
+            records: vec![record(RuleLevel::Medium), record(RuleLevel::Hard)],
+            findings: Vec::new(),
+        };
+        reject_conflicting_facets(&mut index);
+        assert!(
+            index
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ConflictingInvariantFacet)
+        );
+    }
+
+    #[test]
     fn invariant_parser_rejects_exec_without_matching_gate() -> Result<()> {
         let root = unique_tmp("archrules-exec-binding");
         let file = root.join("xtask/src/demo.rs");
@@ -2059,6 +2747,150 @@ members = ["rss_demo"]
         ] {
             assert!(index.records.iter().any(|r| r.id == id), "missing {id}");
         }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn funnel_matrix_has_exact_rows_and_issue_partition() {
+        assert_eq!(FUNNELS.len(), 11);
+        let issues = FUNNELS
+            .iter()
+            .flat_map(|funnel| funnel.source_issues.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(issues.len(), 21, "每个来源 issue 必须且只能归属一行");
+        assert_eq!(
+            issues.iter().copied().collect::<BTreeSet<_>>(),
+            (1422_u32..=1442).collect::<BTreeSet<_>>()
+        );
+        assert!(
+            FUNNELS
+                .iter()
+                .all(|funnel| !funnel.upstream.is_empty() && !funnel.downstream.is_empty())
+        );
+    }
+
+    #[test]
+    fn real_workspace_archrules_and_derived_matrix_pass() -> Result<()> {
+        let (summary, findings) = ArchRules.check()?;
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(summary.contains("11 行持久化 funnel"), "{summary}");
+        matrix(MatrixAction::Check)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ast_evidence_rejects_comment_string_and_empty_test_spoofs() -> Result<()> {
+        let root = unique_tmp("archrules-matrix-evidence-spoof");
+        let file = root.join("spoof.rs");
+        write(
+            &file,
+            r##"
+// #[test] fn red_rejected() { panic!() }
+const BAIT: &str = "#[test] fn green_accepted() {}";
+#[test]
+fn empty_red_rejected() {}
+#[test]
+fn real_red_rejected() { assert!(true); }
+#[test]
+fn real_green_accepted() { assert!(true); }
+"##,
+        )?;
+        let tests = collect_test_names(&file)?;
+        assert_eq!(
+            tests,
+            vec![
+                "real_green_accepted".to_string(),
+                "real_red_rejected".to_string()
+            ]
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn medium_evidence_must_be_explicitly_bound_to_its_invariant() -> Result<()> {
+        let root = unique_tmp("archrules-medium-evidence-binding");
+        write(
+            &root.join("xtask/src/demo.rs"),
+            r#"
+#[test]
+fn unrelated_red_rejected() { assert!(true); }
+#[test]
+fn unrelated_green_accepted() { assert!(true); }
+"#,
+        )?;
+        let mut record = RuleRecord {
+            id: "DEMO-MEDIUM-01".to_string(),
+            facet: None,
+            level: RuleLevel::Medium,
+            exec: ExecutionLevel::Verify,
+            source_kind: SourceKind::Code,
+            carrier: "xtask".to_string(),
+            source: "xtask/src/demo.rs:1".to_string(),
+            evidence: "xtask module demo.rs".to_string(),
+            gate: "verify".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        let mut findings = Vec::new();
+        validate_medium_evidence(&root, "demo", &record, &mut findings)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "同文件无关 red/green 测试不能替代 invariant 自己声明的证据"
+        );
+        record.synthetic_red = Some("tests::unrelated_red_rejected".to_string());
+        record.anti_vacuity = Some("tests::unrelated_green_accepted".to_string());
+        findings.clear();
+        validate_medium_evidence(&root, "demo", &record, &mut findings)?;
+        assert!(
+            findings.is_empty(),
+            "显式绑定的真实测试应通过: {findings:?}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_hard_symbol_must_be_nonempty_real_ast_test() -> Result<()> {
+        let root = unique_tmp("archrules-matrix-codegen-symbol");
+        write(&root.join("generated/demo.rs"), "// committed golden\n")?;
+        write(
+            &root.join("xtask/src/demo.rs"),
+            r##"
+// #[test] fn fake_red() { panic!() }
+const BAIT: &str = "#[test] fn fake_red() { panic!() }";
+#[test]
+fn real_green() { assert!(true); }
+"##,
+        )?;
+        let record = RuleRecord {
+            id: "DEMO-CODEGEN-01".to_string(),
+            facet: Some("wire".to_string()),
+            level: RuleLevel::Hard,
+            exec: ExecutionLevel::Verify,
+            source_kind: SourceKind::Codegen,
+            carrier: "xtask".to_string(),
+            source: "xtask/src/demo.rs:1".to_string(),
+            evidence: "codegen".to_string(),
+            gate: "verify".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: Some("generated/demo.rs".to_string()),
+            synthetic_red: Some("demo::tests::fake_red".to_string()),
+            anti_vacuity: Some("demo::tests::real_green".to_string()),
+        };
+        let mut findings = Vec::new();
+        validate_hard_evidence(&root, "demo", &record, &mut findings)?;
+        assert_eq!(
+            findings.len(),
+            1,
+            "comment/string symbol 不得充当 test 证明"
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -2,15 +2,15 @@
 //!
 //! 配置写入路径证明 L2 接缝：CAS upsert 新版本 + outbox append 经 [`crate::ports::ConfigUnitOfWork`]
 //! **同事务**原子落库（both-or-neither，消除 emit-after-save 的 write-without-event 窗口，#1232；in-mem 共享
-//! store 替身 / 生产 postgres `PgConfigUnitOfWork`）→ 返回新版本。读路径（next_version / get_value /
+//! store 替身 / 生产 postgres `PgConfigUnitOfWork`）→ 返回新版本。读路径（next_version / get_config /
 //! rollback 源值）经 [`crate::ports::ConfigRepo`]。发布与回滚复用同一 fact，`changeKind` 判别（published /
 //! rolledBack）。flag 求值经域内
 //! [`crate::internal::ports::FlagStore`] 取快照 + `domain::evaluate_flag`（L0 纯计算）。
 //!
 //! HTTP 接缝（#1430 PERSIST-009 settings 首条 durable module 闭环）：[`SettingsDomain`] 持 config + secret
 //! 应用服务，`init` 经 typed `route_group::<Primary>` + `mount_primary`（`ListenerRouter<Primary>` 方法，
-//! #1113/#1103 typed route funnel）从 generated SPEC 挂 `settings.config-publish` / `settings.secret-publish`
-//! 两条认证路由（鉴权 = permission，租户来自 route gate 注入的 [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
+//! #1113/#1103 typed route funnel）从 generated SPEC 挂 config publish/get/delete/rollback 与 secret-publish
+//! 五条认证路由（鉴权 = permission，租户来自 route gate 注入的 [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
 //! 域错误经 generic `vocab::CoreErrorKind` 映射状态码（4xx 客户端 / 5xx 内部，不铸 `ERR_SETTINGS_` 命名空间）。
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
@@ -18,29 +18,23 @@
 //! ref: crates/identity/src/application.rs（L2 OutboxFact 经 OutboxEmitter 落 durable outbox 范式，#1100）
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use bootstrap::{
-    Domain, KernelError, Registry, SubscriberErrorDisposition, SubscriberHandler,
-    SubscriberHandlerError,
-};
+use axum::routing::{delete, get, post};
+use bootstrap::{Domain, KernelError, Registry};
 use consistency::{
-    ConsumerGroup, EngineError, EngineErrorKind, Entry, HandleResult, IdemKey, OutboxPayload,
-    PermanentError, PermanentErrorKind, Topic,
+    ConsumerGroup, EngineError, EngineErrorKind, EventEntry, EventTopic, HandleResult, IdemKey,
+    OutboxPayload,
 };
 use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
-    CONTRACT, SUBSCRIPTIONS as VERSION_CHANGED_SUBSCRIPTIONS, SettingsConfigChangeKind,
-    SettingsConfigVersionChangedPayload, TOPIC as VERSION_CHANGED_TOPIC,
+    SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
 use generated::http::HttpAuthMode;
 use generated::http::settings_v1::{
@@ -48,6 +42,14 @@ use generated::http::settings_v1::{
     SettingsConfigPublishResponse,
 };
 use generated::http::settings_v2::SPEC as SECRET_HTTP_SPEC;
+use generated::http::settings_v4::{
+    SPEC as CONFIG_GET_HTTP_SPEC, SettingsConfigGetData, SettingsConfigGetResponse,
+};
+use generated::http::settings_v5::SPEC as CONFIG_DELETE_HTTP_SPEC;
+use generated::http::settings_v6::{
+    SPEC as CONFIG_ROLLBACK_HTTP_SPEC, SettingsConfigRollbackData, SettingsConfigRollbackRequest,
+    SettingsConfigRollbackResponse,
+};
 use httpserve::{AuthorizedSubject, Primary, PrimaryRoute, RoutePermission, RouteResourceScope};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
@@ -58,8 +60,8 @@ use vocab::{CoreError, CoreErrorKind, TenantId};
 use crate::secret_application::secret_publish_handler;
 
 use crate::domain::{
-    ConfigEntry, ConfigRepoError, ConfigValue, ConfigVersion, EvalContext, FlagDecision, FlagKey,
-    SettingKey, SettingsError, evaluate_flag,
+    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, ConfigTombstone, ConfigValue,
+    ConfigVersion, EvalContext, FlagDecision, FlagKey, SettingKey, SettingsError, evaluate_flag,
 };
 #[cfg(any(test, feature = "seed-data"))]
 use crate::internal::mem::{
@@ -118,7 +120,7 @@ pub enum SettingsServiceError {
     /// config-version-changed payload 编码失败（原始错误进 source，不进 Display）。
     #[error("config-version-changed payload encode failed")]
     PayloadEncode(#[source] serde_json::Error),
-    /// outbox Entry 构造失败（topic / idem-key 形态非法——programmer error，topic/event_id 内部派生）。
+    /// outbox event entry 构造失败（topic / idem-key 形态非法——programmer error，topic/event_id 内部派生）。
     #[error("config-version-changed outbox entry build failed")]
     EntryBuild,
     /// 底层存储失败（配置写 / 同事务 outbox append 持久化错误；原始错误进 source，不进 Display/wire）。
@@ -194,6 +196,7 @@ pub struct ConfigVersionChangedEvent {
     tenant: TenantId,
     key: SettingKey,
     version: u64,
+    change_kind: SettingsConfigChangeKind,
 }
 
 impl ConfigVersionChangedEvent {
@@ -205,6 +208,11 @@ impl ConfigVersionChangedEvent {
     #[must_use]
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    #[must_use]
+    pub fn change_kind(&self) -> SettingsConfigChangeKind {
+        self.change_kind
     }
 }
 
@@ -224,6 +232,7 @@ pub fn config_version_changed_event_from_message(
         tenant,
         key,
         version,
+        change_kind: payload.change_kind,
     })
 }
 
@@ -285,7 +294,7 @@ impl SettingsService {
     /// 门控于 `test` / `seed-data` feature（编译期边界，对标 identity seed-login）：生产组合根不启用即无
     /// in-mem provider 路径。组合根（journeys）经 `settings = { features = ["seed-data"] }` 启用 + 注入
     /// `memory::MemEmitter`。读端口 [`InMemConfigRepo`] 与写 UoW [`InMemConfigUnitOfWork`] 经 `Arc` **共享同一
-    /// store**——`find` 读得到 `save_and_append_outbox` 写入。真实持久化（postgres adapter）留 Join。
+    /// store**——`find` 读得到 `commit` 写入。真实持久化（postgres adapter）留 Join。
     ///
     /// `emitter` 取**具体** [`diport::OutboxEmitter`] 类型（非 `Box<DynOutboxEmitter>`）：in-mem co-tx UoW 须
     /// `Sync`（`ConfigUnitOfWork: Send` 端口），dyn wrapper 仅 `Send`；组合根（journey）传 `memory::MemEmitter`
@@ -311,13 +320,13 @@ impl SettingsService {
         key: &SettingKey,
     ) -> Result<u64, SettingsServiceError> {
         // 真实最高版本（含 tombstone）+ 1——delete 软删后 version 单调不重置，防 event_id 复用（#1249 F1）。
-        // 用 `latest_version` 而非 `find`：`find` 排除 tombstone，删后返 `None` 会误回 v1 → 复用旧 event_id。
-        let current = self.configs.latest_version(scope, key).await?;
-        Ok(current.map_or(1, |v| v + 1))
+        // 用 `head` 而非 `find`：`find` 排除 tombstone，删后返 `None` 会误回 v1 → 复用旧 event_id。
+        let current = self.configs.head(scope, key).await?;
+        Ok(current.map_or(1, |head| head.version().saturating_add(1)))
     }
 
-    /// 构造 `config-version-changed` outbox [`Entry`] + [`OutboxEnvelopeParts`]（纯派生，无 I/O）；实际落
-    /// durable outbox 与配置写**同事务**由 [`ConfigUnitOfWork::save_and_append_outbox`] 承载（L2 OutboxFact）。
+    /// 构造 `config-version-changed` outbox [`EventEntry`] + [`OutboxEnvelopeParts`]（纯派生，无 I/O）；实际落
+    /// durable outbox 与配置写**同事务**由 [`ConfigUnitOfWork::commit`] 承载（L2 OutboxFact）。
     ///
     /// EventId（outbox `event_id` / `IdemKey`）= 内容派生 `{topic}:{tenant}:{key}:v{version}`：每个
     /// (tenant, key, version) 仅一次发射（version 单调递增，publish/rollback 各产新版本），故按内容确定唯一——
@@ -331,7 +340,7 @@ impl SettingsService {
         version: u64,
         change_kind: SettingsConfigChangeKind,
         source_version: Option<u64>,
-    ) -> Result<(Entry, OutboxEnvelopeParts), SettingsServiceError> {
+    ) -> Result<(EventEntry, OutboxEnvelopeParts), SettingsServiceError> {
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.as_str().to_string(),
@@ -342,11 +351,13 @@ impl SettingsService {
         };
         let bytes = serde_json::to_vec(&payload).map_err(SettingsServiceError::PayloadEncode)?;
         let event_id = format!(
-            "{VERSION_CHANGED_TOPIC}:{tenant}:{}:v{version}",
+            "{}:{tenant}:{}:v{version}",
+            VERSION_CHANGED_SPEC.topic(),
             key.as_str()
         );
-        let entry = Entry::new(
-            Topic::parse(VERSION_CHANGED_TOPIC).map_err(|_| SettingsServiceError::EntryBuild)?,
+        let entry = EventEntry::new(
+            EventTopic::parse(VERSION_CHANGED_SPEC.topic())
+                .map_err(|_| SettingsServiceError::EntryBuild)?,
             IdemKey::parse(&event_id).map_err(|_| SettingsServiceError::EntryBuild)?,
             OutboxPayload::from_reviewed_event_bytes(bytes),
         );
@@ -354,7 +365,8 @@ impl SettingsService {
         // subject = opaque 配置 key。
         let subject_id = EnvelopeSubjectId::from_opaque(key.as_str())
             .map_err(|_| SettingsServiceError::EntryBuild)?;
-        let envelope = OutboxEnvelopeParts::new(CONTRACT, tenant, subject_id, actor);
+        let envelope =
+            OutboxEnvelopeParts::new(VERSION_CHANGED_SPEC.contract(), tenant, subject_id, actor);
         Ok((entry, envelope))
     }
 
@@ -388,7 +400,12 @@ impl SettingsService {
         // co-tx：CAS 配置写 + outbox append 同事务（both-or-neither）——冲突冒泡 `VersionConflict`，
         // 存储失败冒泡 `Storage`；二者皆使配置写与 outbox 行共回滚（消除 write-without-event 窗口）。
         self.writer
-            .save_and_append_outbox(scope, entry.clone(), outbox_entry, envelope)
+            .commit(
+                scope,
+                ConfigMutation::Put(entry.clone()),
+                outbox_entry,
+                envelope,
+            )
             .await?;
         self.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
@@ -432,7 +449,12 @@ impl SettingsService {
         // 不可变无 TOCTOU；新版本号（`next_version`）存在 read-then-write 窗口，由 CAS INSERT 守住——并发
         // 冲突返 `VersionConflict`，调用方读后重写重试。
         self.writer
-            .save_and_append_outbox(scope, entry.clone(), outbox_entry, envelope)
+            .commit(
+                scope,
+                ConfigMutation::Put(entry.clone()),
+                outbox_entry,
+                envelope,
+            )
             .await?;
         self.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
@@ -443,35 +465,88 @@ impl SettingsService {
         })
     }
 
-    /// 读取 key 当前活跃配置值（不存在返回 `Ok(None)`）。
+    /// 读取 key 当前活跃配置（不存在或已删除返回 `Ok(None)`）。
+    ///
+    /// cache 只作为本实例的值缓存：每次读取都先向权威仓储查询 head revision，只有 active head
+    /// 与缓存版本一致时才命中。版本变化重新加载；tombstone / 不存在清缓存；head/find 错误直接返回，
+    /// 不允许用旧缓存降级，因而事件订阅只负责预热与提前失效，不参与读取正确性证明。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
-    pub async fn get_value(
+    pub async fn get_config(
         &self,
         tenant: TenantId,
         key: &str,
-    ) -> Result<Option<String>, SettingsServiceError> {
+    ) -> Result<Option<ConfigEntry>, SettingsServiceError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
-        if let Some(entry) = self.cache.find(tenant, &key) {
-            return Ok(Some(entry.value().to_string()));
+        match self.configs.head(scope, &key).await? {
+            Some(ConfigHead::Active(version)) => {
+                if let Some(entry) = self.cache.find(tenant, &key)
+                    && entry.version() == version
+                {
+                    return Ok(Some(entry));
+                }
+            }
+            Some(ConfigHead::Deleted(_)) | None => {
+                self.cache.remove(tenant, &key);
+                return Ok(None);
+            }
         }
         let entry = self.configs.find(scope, &key).await?;
-        if let Some(entry) = &entry {
-            self.cache.upsert(entry.clone());
+        match &entry {
+            Some(entry) => self.cache.upsert(entry.clone()),
+            None => self.cache.remove(tenant, &key),
         }
-        Ok(entry.map(|entry| entry.value().to_string()))
+        Ok(entry)
     }
 
     /// 软删除 key（tombstone，幂等）：仓储在 `max+1` 追加 tombstone 版本 → version 单调不重置（防 event_id
-    /// 复用，#1249 F1）；此后 `get_value` 返回 `None`，历史值仍可 `find_version` 读。
+    /// 复用，#1249 F1）；此后 `get_config` 返回 `None`，历史值仍可 `find_version` 读。
     ///
-    /// **不发射删除事件**（已知 gap）：订阅缓存 consumer（flag 缓存 / 投影）感知删除的 `config-version-deleted`
-    /// 事件留订阅缓存单元 #1120（同 `ports.rs` 注记）；届时 delete 亦走 co-tx writer 发 tombstone fact。
+    /// tombstone 与 `changeKind=deleted` 的版本变更事实经同一个 UoW 原子提交；幂等 no-op 也会清除
+    /// 本实例缓存，避免其它实例已删除而当前实例仍返回旧值。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
-    pub async fn delete(&self, tenant: TenantId, key: &str) -> Result<(), SettingsServiceError> {
+    pub async fn delete(
+        &self,
+        tenant: TenantId,
+        actor: OutboxActor,
+        key: &str,
+    ) -> Result<(), SettingsServiceError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
-        self.configs.delete(scope, &key).await?;
+        let current = match self.configs.head(scope, &key).await? {
+            Some(ConfigHead::Active(current)) => current,
+            Some(ConfigHead::Deleted(_)) | None => {
+                self.cache.remove(tenant, &key);
+                return Ok(());
+            }
+        };
+        let version = current.saturating_add(1);
+        let mutation = ConfigMutation::Delete(ConfigTombstone::new(
+            key.clone(),
+            tenant,
+            ConfigVersion::new(version),
+        ));
+        let (outbox_entry, envelope) = self.build_version_changed_entry(
+            &key,
+            tenant,
+            actor,
+            version,
+            SettingsConfigChangeKind::Deleted,
+            None,
+        )?;
+        match self
+            .writer
+            .commit(scope, mutation, outbox_entry, envelope)
+            .await
+        {
+            Ok(()) => {}
+            Err(ConfigRepoError::VersionConflict)
+                if matches!(
+                    self.configs.head(scope, &key).await?,
+                    Some(ConfigHead::Deleted(_))
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
         self.cache.remove(tenant, &key);
         Ok(())
     }
@@ -496,21 +571,16 @@ impl SettingsService {
         Ok(evaluate_flag(&state, &EvalContext::new(&owned)) == FlagDecision::Enabled)
     }
 
-    pub async fn apply_config_version_changed_event(
-        &self,
-        event: ConfigVersionChangedEvent,
-    ) -> Result<(), SubscriberHandlerError> {
-        self.apply_config_version_changed(event.tenant, event.key, event.version)
-            .await
-    }
-
     pub async fn handle_config_version_changed_event(
         &self,
         event: ConfigVersionChangedEvent,
     ) -> HandleResult {
-        match self.apply_config_version_changed_event(event).await {
+        match self
+            .apply_config_version_changed(event.tenant, event.key, event.version, event.change_kind)
+            .await
+        {
             Ok(()) => HandleResult::ack(),
-            Err(error) => subscriber_error_to_handle_result(error),
+            Err(error) => HandleResult::requeue(error),
         }
     }
 
@@ -519,38 +589,43 @@ impl SettingsService {
         tenant: TenantId,
         key: SettingKey,
         version: u64,
-    ) -> Result<(), SubscriberHandlerError> {
+        change_kind: SettingsConfigChangeKind,
+    ) -> Result<(), EngineError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let latest = self
             .configs
-            .latest_version(scope, &key)
+            .head(scope, &key)
             .await
-            .map_err(SubscriberHandlerError::transient)?;
+            .map_err(|_| config_refresh_error())?;
         match latest {
-            Some(current) if current > version => {
+            Some(current) if current.version() > version => {
                 let current = self
                     .configs
                     .find(scope, &key)
                     .await
-                    .map_err(SubscriberHandlerError::transient)?;
+                    .map_err(|_| config_refresh_error())?;
                 match current {
                     Some(entry) => self.cache.upsert(entry),
                     None => self.cache.remove(tenant, &key),
                 }
                 return Ok(());
             }
-            Some(current) if current < version => {
-                return Err(SubscriberHandlerError::transient(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "config version from event is not visible yet",
-                )));
+            Some(current) if current.version() < version => {
+                return Err(config_refresh_error());
             }
-            Some(_) => {}
+            Some(ConfigHead::Deleted(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
+                self.cache.remove(tenant, &key);
+                return Ok(());
+            }
+            Some(ConfigHead::Active(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
+                return Err(config_refresh_error());
+            }
+            Some(ConfigHead::Deleted(_)) => {
+                return Err(config_refresh_error());
+            }
+            Some(ConfigHead::Active(_)) => {}
             None => {
-                return Err(SubscriberHandlerError::transient(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "config key from event was not found",
-                )));
+                return Err(config_refresh_error());
             }
         }
 
@@ -558,27 +633,15 @@ impl SettingsService {
             .configs
             .find_version(scope, &key, version)
             .await
-            .map_err(SubscriberHandlerError::transient)?
-            .ok_or_else(|| {
-                SubscriberHandlerError::transient(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "config version from event was not found",
-                ))
-            })?;
+            .map_err(|_| config_refresh_error())?
+            .ok_or_else(config_refresh_error)?;
         self.cache.upsert(entry);
         Ok(())
     }
 }
 
-fn subscriber_error_to_handle_result(error: SubscriberHandlerError) -> HandleResult {
-    match error.disposition() {
-        SubscriberErrorDisposition::Transient => {
-            HandleResult::requeue(EngineError::new(EngineErrorKind::Transient))
-        }
-        SubscriberErrorDisposition::Permanent => {
-            HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
-        }
-    }
+fn config_refresh_error() -> EngineError {
+    EngineError::new(EngineErrorKind::Transient)
 }
 
 // ---------------------------------------------------------------------------
@@ -628,7 +691,10 @@ pub(crate) fn authenticated_tenant_scope(
     authenticated_tenant(req).map(TenantRepoScope::from_authenticated_tenant)
 }
 
-fn authenticated_actor(req: &Request<Body>) -> Result<(TenantId, OutboxActor), AuthReject> {
+fn authenticated_actor(
+    req: &Request<Body>,
+    spec: &generated::http::HttpSpec,
+) -> Result<(TenantId, OutboxActor), AuthReject> {
     let auth = req
         .extensions()
         .get::<AuthorizedSubject>()
@@ -639,7 +705,7 @@ fn authenticated_actor(req: &Request<Body>) -> Result<(TenantId, OutboxActor), A
             error = %err,
             tenant_id = %tenant,
             principal_kind = ?auth.principal_kind(),
-            contract_id = CONFIG_HTTP_SPEC.contract_id,
+            contract_id = spec.contract_id,
             "settings authorized subject cannot be represented as outbox actor id"
         );
         AuthReject::InvalidActor
@@ -699,7 +765,7 @@ async fn config_publish_handler(
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
-    let (scope, actor) = match authenticated_actor(&req) {
+    let (scope, actor) = match authenticated_actor(&req, &CONFIG_HTTP_SPEC) {
         Ok(ctx) => ctx,
         Err(reject) => return reject.into_response(&request_id),
     };
@@ -725,7 +791,120 @@ pub(crate) async fn config_publish_handler_bytes(
     };
     match service.publish_config(tenant, actor, request).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-        Err(err) => config_error_response(&err, tenant, request_id),
+        Err(err) => config_error_response(
+            &err,
+            tenant,
+            request_id,
+            &CONFIG_HTTP_SPEC,
+            "config_publish",
+        ),
+    }
+}
+
+/// `settings.config-get` handler：租户只来自 route gate 的 [`AuthorizedSubject`]；读取先验证权威
+/// revision，事件未送达也不会返回 stale cache。
+async fn config_get_handler(
+    Path(key): Path<String>,
+    State(service): State<Arc<SettingsService>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let tenant = match authenticated_tenant(&req) {
+        Ok(tenant) => tenant,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    match service.get_config(tenant, &key).await {
+        Ok(Some(entry)) => (
+            StatusCode::OK,
+            Json(SettingsConfigGetResponse {
+                data: SettingsConfigGetData {
+                    key: entry.key().as_str().to_string(),
+                    value: entry.value().to_string(),
+                    version: wire_version(entry.version()),
+                },
+            }),
+        )
+            .into_response(),
+        Ok(None) => config_error_response(
+            &SettingsServiceError::NotFound,
+            tenant,
+            &request_id,
+            &CONFIG_GET_HTTP_SPEC,
+            "config_get",
+        ),
+        Err(error) => config_error_response(
+            &error,
+            tenant,
+            &request_id,
+            &CONFIG_GET_HTTP_SPEC,
+            "config_get",
+        ),
+    }
+}
+
+/// `settings.config-delete` handler：首次删除提交 tombstone + Deleted fact，已删除/不存在为 204 no-op。
+async fn config_delete_handler(
+    Path(key): Path<String>,
+    State(service): State<Arc<SettingsService>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let (tenant, actor) = match authenticated_actor(&req, &CONFIG_DELETE_HTTP_SPEC) {
+        Ok(context) => context,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    match service.delete(tenant, actor, &key).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => config_error_response(
+            &error,
+            tenant,
+            &request_id,
+            &CONFIG_DELETE_HTTP_SPEC,
+            "config_delete",
+        ),
+    }
+}
+
+/// `settings.config-rollback` handler：历史版本值作为新 active version 原子写入并发出 RolledBack fact。
+async fn config_rollback_handler(
+    Path(key): Path<String>,
+    State(service): State<Arc<SettingsService>>,
+    req: Request<Body>,
+) -> Response {
+    let request_id = request_id_from(&req);
+    let (tenant, actor) = match authenticated_actor(&req, &CONFIG_ROLLBACK_HTTP_SPEC) {
+        Ok(context) => context,
+        Err(reject) => return reject.into_response(&request_id),
+    };
+    let (_, body) = req.into_parts();
+    let body = match to_bytes(body, MAX_CONFIG_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let request: SettingsConfigRollbackRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+    };
+    let source_version = request.to_version.get();
+    match service.rollback(tenant, actor, &key, source_version).await {
+        Ok(response) => (
+            StatusCode::CREATED,
+            Json(SettingsConfigRollbackResponse {
+                data: SettingsConfigRollbackData {
+                    key: response.data.key,
+                    version: response.data.version,
+                    source_version: wire_version(source_version),
+                },
+            }),
+        )
+            .into_response(),
+        Err(error) => config_error_response(
+            &error,
+            tenant,
+            &request_id,
+            &CONFIG_ROLLBACK_HTTP_SPEC,
+            "config_rollback",
+        ),
     }
 }
 
@@ -736,6 +915,8 @@ fn config_error_response(
     err: &SettingsServiceError,
     tenant: TenantId,
     request_id: &str,
+    spec: &generated::http::HttpSpec,
+    operation: &'static str,
 ) -> Response {
     let kind = match err {
         SettingsServiceError::InvalidKey | SettingsServiceError::PercentageOutOfRange => {
@@ -754,55 +935,18 @@ fn config_error_response(
             error = %err,
             request_id,
             tenant_id = %tenant,
-            contract_id = CONFIG_HTTP_SPEC.contract_id,
-            operation = "config_publish",
-            "settings config publish failed"
+            contract_id = spec.contract_id,
+            operation,
+            "settings config operation failed"
         );
     }
     httpserve::error::core_error_response(&CoreError::new(kind), request_id)
 }
 
-struct ConfigVersionChangedSubscriber {
-    service: Arc<SettingsService>,
-}
-
-impl ConfigVersionChangedSubscriber {
-    fn new(service: Arc<SettingsService>) -> Self {
-        Self { service }
-    }
-}
-
-impl SubscriberHandler for ConfigVersionChangedSubscriber {
-    fn handle(
-        &self,
-        message: Message,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SubscriberHandlerError>> + Send + 'static>> {
-        let service = self.service.clone();
-        Box::pin(async move {
-            let msg_id = message.id.as_str().to_string();
-            let event = config_version_changed_event_from_message(&message)
-                .map_err(|e| reject_config_version_changed_event_error(&msg_id, e))?;
-            service.apply_config_version_changed_event(event).await
-        })
-    }
-}
-
-fn reject_config_version_changed_event_error(
-    message_id: &str,
-    error: ConfigVersionChangedEventError,
-) -> SubscriberHandlerError {
-    tracing::error!(
-        message_id,
-        error = %error,
-        "settings subscriber: config-version-changed payload rejected"
-    );
-    SubscriberHandlerError::permanent(error)
-}
-
-/// settings 域 bootstrap 生命周期：挂载 config-publish / secret-publish 业务路由（Primary listener）。
+/// settings 域 bootstrap 生命周期：挂载 config publish/get/delete/rollback 与 secret-publish 业务路由。
 ///
 /// 持有 config 应用服务 + secret 仓储端口（构造器必填位置参注入，缺失即编译错误，rust-standards §工程护栏）；
-/// `init` 经 typed `route_group::<Primary>` + `mount_primary` 从 generated SPEC 单源挂两条认证路由
+/// `init` 经 typed `route_group::<Primary>` + `mount_primary` 从 generated SPEC 单源挂五条认证路由
 /// （对标 identity `IdentityDomain`）。
 ///
 /// secret 路由 State 持 `Arc<DynSecretRepo>`（而非 `SecretService`）：`SecretService` 含 `Box<DynSecretResolver>`
@@ -833,19 +977,17 @@ impl SettingsDomain {
 
 impl Domain for SettingsDomain {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        let spec = VERSION_CHANGED_SUBSCRIPTIONS
+        let spec = VERSION_CHANGED_SPEC
+            .subscriptions()
             .iter()
-            .find(|s| s.consumer == SETTINGS_DOMAIN)
+            .find(|s| s.consumer() == SETTINGS_DOMAIN)
             .ok_or(KernelError::Subscriber)?;
-        let group = ConsumerGroup::parse(spec.group).map_err(|_| KernelError::Subscriber)?;
+        let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
         reg.subscriber(
-            spec.contract_id,
-            spec.topic,
-            spec.consumer,
+            VERSION_CHANGED_SPEC.contract_id(),
+            VERSION_CHANGED_SPEC.topic(),
+            spec.consumer(),
             group,
-            Box::new(ConfigVersionChangedSubscriber::new(Arc::clone(
-                &self.config,
-            ))),
         )?;
 
         let config = Arc::clone(&self.config);
@@ -853,7 +995,19 @@ impl Domain for SettingsDomain {
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount_primary(
                 primary_route_from_spec(&CONFIG_HTTP_SPEC)?,
-                post(config_publish_handler).with_state(config),
+                post(config_publish_handler).with_state(Arc::clone(&config)),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&CONFIG_GET_HTTP_SPEC)?,
+                get(config_get_handler).with_state(Arc::clone(&config)),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&CONFIG_DELETE_HTTP_SPEC)?,
+                delete(config_delete_handler).with_state(Arc::clone(&config)),
+            );
+            let rb = rb.mount_primary(
+                primary_route_from_spec(&CONFIG_ROLLBACK_HTTP_SPEC)?,
+                post(config_rollback_handler).with_state(config),
             );
             let rb = rb.mount_primary(
                 primary_route_from_spec(&SECRET_HTTP_SPEC)?,
@@ -896,12 +1050,12 @@ mod tests {
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：OutboxEmitter / Clock 替身在此手写。
     #[derive(Clone, Default)]
     struct CapturingEmitter {
-        emitted: Arc<Mutex<Vec<(Entry, OutboxEnvelopeParts)>>>,
+        emitted: Arc<Mutex<Vec<(EventEntry, OutboxEnvelopeParts)>>>,
     }
     impl OutboxEmitter for CapturingEmitter {
         async fn emit(
             &self,
-            entry: Entry,
+            entry: EventEntry,
             envelope: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
             self.emitted
@@ -968,6 +1122,10 @@ mod tests {
         }
     }
 
+    fn config_value(entry: Option<ConfigEntry>) -> Option<String> {
+        entry.map(|entry| entry.value().to_string())
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn publish_config_creates_v1_and_emits() {
@@ -985,10 +1143,13 @@ mod tests {
         let facts = emitted_facts(&capture);
         assert_eq!(facts.len(), 1, "L2：每次 publish 恰发射一条 outbox entry");
         let fact = &facts[0];
-        assert_eq!(fact.topic, VERSION_CHANGED_TOPIC);
+        assert_eq!(fact.topic, VERSION_CHANGED_SPEC.topic());
         // envelope：域 / 契约 / opaque subject（config key）——域 + 契约同源 generated `CONTRACT`（#1193）。
-        assert_eq!(fact.domain, CONTRACT.domain());
-        assert_eq!(fact.contract_id, CONTRACT.contract_id());
+        assert_eq!(fact.domain, VERSION_CHANGED_SPEC.contract().domain());
+        assert_eq!(
+            fact.contract_id,
+            VERSION_CHANGED_SPEC.contract().contract_id()
+        );
         assert_eq!(fact.subject_id, "app.timeout");
         // payload。
         assert_eq!(fact.payload.key, "app.timeout");
@@ -1017,7 +1178,10 @@ mod tests {
             .expect("v2");
         assert_eq!(resp.data.version, 2);
         assert_eq!(
-            svc.get_value(tenant(), "app.k").await.expect("get"),
+            svc.get_config(tenant(), "app.k")
+                .await
+                .expect("get")
+                .map(|entry| entry.value().to_string()),
             Some("v2".to_string())
         );
     }
@@ -1033,29 +1197,6 @@ mod tests {
             .expect_err("invalid key");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
         assert!(emitted_facts(&capture).is_empty(), "非法 key 不发射");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn cas_conflict_on_stale_save() {
-        // 直接对 repo 验 CAS：写 v1 后，再写 v1（陈旧版本号）→ VersionConflict。
-        let repo = InMemConfigRepo::from_shared(new_config_store());
-        let t = tenant();
-        let key = SettingKey::parse("app.k").expect("key");
-        let entry_v1 = ConfigEntry::new(
-            key.clone(),
-            ConfigValue::new("v1"),
-            t,
-            ConfigVersion::new(1),
-        );
-        repo.save(TenantRepoScope::for_test(t), entry_v1)
-            .await
-            .expect("v1 ok");
-        let stale = ConfigEntry::new(key, ConfigValue::new("v1b"), t, ConfigVersion::new(1));
-        assert!(matches!(
-            repo.save(TenantRepoScope::for_test(t), stale).await,
-            Err(ConfigRepoError::VersionConflict)
-        ));
     }
 
     #[tokio::test]
@@ -1076,7 +1217,10 @@ mod tests {
             .expect("rollback");
         assert_eq!(resp.data.version, 3, "回滚生成新版本 v3");
         assert_eq!(
-            svc.get_value(tenant(), "app.k").await.expect("get"),
+            svc.get_config(tenant(), "app.k")
+                .await
+                .expect("get")
+                .map(|entry| entry.value().to_string()),
             Some("v1".to_string()),
             "v3 值 = v1 的值"
         );
@@ -1115,8 +1259,15 @@ mod tests {
         svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
             .await
             .expect("v1");
-        svc.delete(tenant(), "app.k").await.expect("delete");
-        assert_eq!(svc.get_value(tenant(), "app.k").await.expect("get"), None);
+        svc.delete(tenant(), actor(), "app.k")
+            .await
+            .expect("delete");
+        assert!(
+            svc.get_config(tenant(), "app.k")
+                .await
+                .expect("get")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1202,11 +1353,28 @@ mod tests {
         }
     }
 
+    fn config_resource_router(
+        service: Arc<SettingsService>,
+        auth: Option<AuthorizedSubject>,
+    ) -> axum::Router {
+        let router = axum::Router::new()
+            .route(
+                "/configs/{key}",
+                get(config_get_handler).delete(config_delete_handler),
+            )
+            .route("/configs/{key}/rollbacks", post(config_rollback_handler))
+            .with_state(service);
+        match auth {
+            Some(evidence) => router.layer(axum::Extension(evidence)),
+            None => router,
+        }
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn settings_domain_declares_business_route_group() {
         let domain = settings_domain_for_test();
-        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert_eq!(
             groups.len(),
@@ -1215,6 +1383,8 @@ mod tests {
         );
         assert_eq!(groups[0].0, ListenerKind::Primary);
         assert_eq!(groups[0].1, SETTINGS_ROUTE_PREFIX);
+        let finalized = reg.finalize_routes().expect("active routes finalize");
+        assert_eq!(finalized.len(), 1, "five routes share one Primary listener");
     }
 
     #[test]
@@ -1223,13 +1393,13 @@ mod tests {
         let domain = settings_domain_for_test();
         let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
         let subs = reg.drain_subscribers();
-        let spec = VERSION_CHANGED_SUBSCRIPTIONS[0];
-        assert_eq!(spec.consumer, SETTINGS_DOMAIN);
+        let spec = VERSION_CHANGED_SPEC.subscriptions()[0];
+        assert_eq!(spec.consumer(), SETTINGS_DOMAIN);
         assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].contract_id, spec.contract_id);
-        assert_eq!(subs[0].topic, spec.topic);
-        assert_eq!(subs[0].consumer, spec.consumer);
-        assert_eq!(subs[0].group.as_str(), spec.group);
+        assert_eq!(subs[0].contract_id, VERSION_CHANGED_SPEC.contract_id());
+        assert_eq!(subs[0].topic, VERSION_CHANGED_SPEC.topic());
+        assert_eq!(subs[0].consumer, spec.consumer());
+        assert_eq!(subs[0].group.as_str(), spec.group());
     }
 
     #[allow(clippy::expect_used)]
@@ -1239,8 +1409,23 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn version_changed_payload_for(tenant_id: &str, key: &str, version: i64) -> Vec<u8> {
+        version_changed_payload_with_kind(
+            tenant_id,
+            key,
+            version,
+            SettingsConfigChangeKind::Published,
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn version_changed_payload_with_kind(
+        tenant_id: &str,
+        key: &str,
+        version: i64,
+        change_kind: SettingsConfigChangeKind,
+    ) -> Vec<u8> {
         let payload = SettingsConfigVersionChangedPayload {
-            change_kind: SettingsConfigChangeKind::Published,
+            change_kind,
             key: key.to_string(),
             occurred_at: 1_700_000_000,
             source_version: None,
@@ -1252,7 +1437,38 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn config_version_changed_subscriber_refreshes_config_cache() {
+    async fn config_version_deleted_durable_handler_removes_cache() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .await
+            .expect("publish config");
+        service
+            .delete(tenant(), actor(), "app.feature")
+            .await
+            .expect("delete config");
+        let key = SettingKey::parse("app.feature").expect("valid key");
+        assert!(service.cache.find(tenant(), &key).is_none());
+
+        let message = Message::new(
+            "m-settings-deleted",
+            version_changed_payload_with_kind(
+                TENANT,
+                "app.feature",
+                2,
+                SettingsConfigChangeKind::Deleted,
+            ),
+        );
+        let event = config_version_changed_event_from_message(&message).expect("parse event");
+        let result = service.handle_config_version_changed_event(event).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
+        assert!(service.cache.find(tenant(), &key).is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_version_changed_durable_handler_refreshes_config_cache() {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
@@ -1266,11 +1482,10 @@ mod tests {
             "test must start with an empty cache slot"
         );
 
-        let handler = ConfigVersionChangedSubscriber::new(Arc::clone(&service));
-        let result = handler
-            .handle(Message::new("m-settings", version_changed_payload(TENANT)))
-            .await;
-        assert!(result.is_ok());
+        let message = Message::new("m-settings", version_changed_payload(TENANT));
+        let event = config_version_changed_event_from_message(&message).expect("parse event");
+        let result = service.handle_config_version_changed_event(event).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
             .cache
             .find(tenant(), &key)
@@ -1304,7 +1519,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn config_version_changed_subscriber_ignores_stale_event_version() {
+    async fn config_version_changed_durable_handler_ignores_stale_event_version() {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
         service
@@ -1318,14 +1533,13 @@ mod tests {
         let key = SettingKey::parse("app.feature").expect("valid key");
         service.cache.remove(tenant(), &key);
 
-        let handler = ConfigVersionChangedSubscriber::new(Arc::clone(&service));
-        let result = handler
-            .handle(Message::new(
-                "m-settings-stale",
-                version_changed_payload_for(TENANT, "app.feature", 1),
-            ))
-            .await;
-        assert!(result.is_ok());
+        let message = Message::new(
+            "m-settings-stale",
+            version_changed_payload_for(TENANT, "app.feature", 1),
+        );
+        let event = config_version_changed_event_from_message(&message).expect("parse event");
+        let result = service.handle_config_version_changed_event(event).await;
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
             .cache
             .find(tenant(), &key)
@@ -1334,39 +1548,52 @@ mod tests {
         assert_eq!(cached.version(), 2);
     }
 
-    #[tokio::test]
-    async fn config_version_changed_subscriber_rejects_invalid_tenant() {
-        let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
-        let handler = ConfigVersionChangedSubscriber::new(service);
-        let result = handler
-            .handle(Message::new(
-                "m-settings",
-                version_changed_payload("not-a-uuid"),
-            ))
-            .await;
+    #[test]
+    fn config_version_changed_decode_rejects_invalid_tenant() {
+        let result = config_version_changed_event_from_message(&Message::new(
+            "m-settings",
+            version_changed_payload("not-a-uuid"),
+        ));
         assert!(result.is_err());
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn primary_route_from_config_spec_derives_relative_path_no_optout() {
-        let route = primary_route_from_spec(&CONFIG_HTTP_SPEC).expect("route");
-        assert_eq!(
-            route.path(),
-            "/configs",
-            "SPEC 绝对 path 剥前缀得相对挂载段"
-        );
-        assert_eq!(*route.method(), Method::POST);
-        assert_eq!(route.contract_id(), "settings.config-publish");
-        assert!(
-            route.opt_out_kind().is_none(),
-            "permission 模式无 opt-out 降级"
-        );
-        assert!(
-            route.route_permission().is_some(),
-            "permission 模式携带 route permission"
-        );
+    fn primary_routes_derive_active_settings_specs_without_optout() {
+        let cases = [
+            (
+                CONFIG_HTTP_SPEC,
+                "/configs",
+                Method::POST,
+                "settings.config-publish",
+            ),
+            (
+                CONFIG_GET_HTTP_SPEC,
+                "/configs/{key}",
+                Method::GET,
+                "settings.config-get",
+            ),
+            (
+                CONFIG_DELETE_HTTP_SPEC,
+                "/configs/{key}",
+                Method::DELETE,
+                "settings.config-delete",
+            ),
+            (
+                CONFIG_ROLLBACK_HTTP_SPEC,
+                "/configs/{key}/rollbacks",
+                Method::POST,
+                "settings.config-rollback",
+            ),
+        ];
+        for (spec, path, method, contract_id) in cases {
+            let route = primary_route_from_spec(&spec).expect("route");
+            assert_eq!(route.path(), path, "SPEC absolute path strips prefix");
+            assert_eq!(*route.method(), method);
+            assert_eq!(route.contract_id(), contract_id);
+            assert!(route.opt_out_kind().is_none());
+            assert!(route.route_permission().is_some());
+        }
     }
 
     #[test]
@@ -1437,6 +1664,203 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn config_get_delete_and_rollback_handlers_serve_typed_contracts() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish v1");
+        service
+            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+            .await
+            .expect("publish v2");
+        let router = config_resource_router(Arc::clone(&service), Some(user_evidence(tenant())));
+
+        let get_response = testkit::call(router.clone(), ContractRequest::get("/configs/app.k"))
+            .await
+            .expect("get call");
+        get_response.ensure_status(StatusCode::OK).expect("200");
+        let get_body: SettingsConfigGetResponse = get_response.json().expect("get json");
+        assert_eq!(get_body.data.key, "app.k");
+        assert_eq!(get_body.data.value, "v2");
+        assert_eq!(get_body.data.version, 2);
+
+        let rollback_response = testkit::call(
+            router.clone(),
+            ContractRequest::post("/configs/app.k/rollbacks").json(
+                &SettingsConfigRollbackRequest {
+                    to_version: std::num::NonZeroU64::new(1).expect("non-zero"),
+                },
+            ),
+        )
+        .await
+        .expect("rollback call");
+        rollback_response
+            .ensure_status(StatusCode::CREATED)
+            .expect("201");
+        let rollback_body: SettingsConfigRollbackResponse =
+            rollback_response.json().expect("rollback json");
+        assert_eq!(rollback_body.data.key, "app.k");
+        assert_eq!(rollback_body.data.version, 3);
+        assert_eq!(rollback_body.data.source_version, 1);
+
+        let delete_response =
+            testkit::call(router.clone(), ContractRequest::delete("/configs/app.k"))
+                .await
+                .expect("delete call");
+        delete_response
+            .ensure_status(StatusCode::NO_CONTENT)
+            .expect("204");
+        let repeat_delete =
+            testkit::call(router.clone(), ContractRequest::delete("/configs/app.k"))
+                .await
+                .expect("repeat delete");
+        repeat_delete
+            .ensure_status(StatusCode::NO_CONTENT)
+            .expect("idempotent 204");
+        assert_eq!(
+            emitted_facts(&capture).len(),
+            4,
+            "two publishes, rollback, and only the first delete emit"
+        );
+
+        let missing = testkit::call(router, ContractRequest::get("/configs/app.k"))
+            .await
+            .expect("get deleted");
+        missing
+            .ensure_status(StatusCode::NOT_FOUND)
+            .expect("deleted is 404");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_resource_handlers_reject_bad_input_missing_source_and_missing_auth() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish");
+        let authed = config_resource_router(Arc::clone(&service), Some(user_evidence(tenant())));
+
+        let invalid_key = testkit::call(authed.clone(), ContractRequest::get("/configs/nodot"))
+            .await
+            .expect("invalid key get");
+        invalid_key
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("path key is validated by the domain funnel");
+
+        let invalid = testkit::call(
+            authed.clone(),
+            ContractRequest::post("/configs/app.k/rollbacks")
+                .json(&serde_json::json!({"toVersion": 0})),
+        )
+        .await
+        .expect("invalid rollback");
+        invalid
+            .ensure_status(StatusCode::BAD_REQUEST)
+            .expect("zero source version is 400");
+
+        let missing_source = testkit::call(
+            authed,
+            ContractRequest::post("/configs/app.k/rollbacks").json(
+                &SettingsConfigRollbackRequest {
+                    to_version: std::num::NonZeroU64::new(9).expect("non-zero"),
+                },
+            ),
+        )
+        .await
+        .expect("missing rollback source");
+        missing_source
+            .ensure_status(StatusCode::NOT_FOUND)
+            .expect("missing source is 404");
+
+        let unauthenticated = config_resource_router(service, None);
+        for request in [
+            ContractRequest::get("/configs/app.k"),
+            ContractRequest::delete("/configs/app.k"),
+            ContractRequest::post("/configs/app.k/rollbacks").json(
+                &SettingsConfigRollbackRequest {
+                    to_version: std::num::NonZeroU64::new(1).expect("non-zero"),
+                },
+            ),
+        ] {
+            let response = testkit::call(unauthenticated.clone(), request)
+                .await
+                .expect("unauthenticated call");
+            response
+                .ensure_status(StatusCode::UNAUTHORIZED)
+                .expect("missing AuthorizedSubject is 401");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_rollback_handler_maps_cas_conflict_and_get_is_tenant_scoped() {
+        struct ConflictUnitOfWork;
+
+        impl ConfigUnitOfWork for ConflictUnitOfWork {
+            async fn commit(
+                &self,
+                _scope: TenantRepoScope,
+                _mutation: ConfigMutation,
+                _outbox_entry: EventEntry,
+                _envelope: OutboxEnvelopeParts,
+            ) -> Result<(), ConfigRepoError> {
+                Err(ConfigRepoError::VersionConflict)
+            }
+        }
+
+        let store = new_config_store();
+        let capture = CapturingEmitter::default();
+        let writer = SettingsService::new(
+            DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store.clone(), capture)),
+            Box::new(InMemFlagStore::new()),
+            Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+        );
+        writer
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("seed v1");
+
+        let conflict_service = Arc::new(SettingsService::new(
+            DynConfigRepo::new_box(InMemConfigRepo::from_shared(store)),
+            DynConfigUnitOfWork::new_box(ConflictUnitOfWork),
+            Box::new(InMemFlagStore::new()),
+            Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+        ));
+        let tenant_b_router = config_resource_router(
+            Arc::clone(&conflict_service),
+            Some(user_evidence(tenant_b())),
+        );
+        let cross_tenant = testkit::call(tenant_b_router, ContractRequest::get("/configs/app.k"))
+            .await
+            .expect("cross-tenant get");
+        cross_tenant
+            .ensure_status(StatusCode::NOT_FOUND)
+            .expect("other tenant cannot see config");
+
+        let tenant_a_router =
+            config_resource_router(conflict_service, Some(user_evidence(tenant())));
+        let conflict = testkit::call(
+            tenant_a_router,
+            ContractRequest::post("/configs/app.k/rollbacks").json(
+                &SettingsConfigRollbackRequest {
+                    to_version: std::num::NonZeroU64::new(1).expect("non-zero"),
+                },
+            ),
+        )
+        .await
+        .expect("conflicting rollback");
+        conflict
+            .ensure_status(StatusCode::CONFLICT)
+            .expect("CAS conflict is 409");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn config_publish_handler_actor_id_overflow_returns_500_not_forbidden() {
         let capture = CapturingEmitter::default();
         let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
@@ -1502,7 +1926,8 @@ mod tests {
         ];
         for (err, want) in cases {
             assert_eq!(
-                config_error_response(&err, tenant(), "rid").status(),
+                config_error_response(&err, tenant(), "rid", &CONFIG_HTTP_SPEC, "config_publish",)
+                    .status(),
                 want,
                 "{err:?} → {want}"
             );
@@ -1516,7 +1941,7 @@ mod tests {
         TenantId::parse(TENANT_B).expect("canonical uuid")
     }
 
-    // cross-tenant 隔离：tenant_a publish "app.k"，tenant_b get_value("app.k")==None。
+    // cross-tenant 隔离：tenant_a publish "app.k"，tenant_b get_config("app.k")==None。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn cross_tenant_isolation() {
@@ -1526,10 +1951,10 @@ mod tests {
             .await
             .expect("tenant_a publish");
         let val = svc
-            .get_value(tenant_b(), "app.k")
+            .get_config(tenant_b(), "app.k")
             .await
             .expect("tenant_b get");
-        assert_eq!(val, None, "跨租户隔离：tenant_b 不应读到 tenant_a 的值");
+        assert!(val.is_none(), "跨租户隔离：tenant_b 不应读到 tenant_a 的值");
     }
 
     // event_id (idem_key) 派生稳定性：同 tenant/key/version → 同 idem-key。
@@ -1559,7 +1984,10 @@ mod tests {
         );
         // 断言 idem-key 格式包含 topic:tenant:key:vN。
         let eid = &facts1[0].idem;
-        assert!(eid.contains(VERSION_CHANGED_TOPIC), "idem 含 topic: {eid}");
+        assert!(
+            eid.contains(VERSION_CHANGED_SPEC.topic()),
+            "idem 含 topic: {eid}"
+        );
         assert!(eid.contains(TENANT), "idem 含 tenant: {eid}");
         assert!(eid.contains("app.timeout"), "idem 含 key: {eid}");
         assert!(eid.contains("v1"), "idem 含版本: {eid}");
@@ -1586,13 +2014,16 @@ mod tests {
         assert!(matches!(err, SettingsServiceError::InvalidKey));
     }
 
-    // invalid-key 测试：get_value 非法 key。
+    // invalid-key 测试：get_config 非法 key。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn get_value_invalid_key_returns_invalid_key() {
+    async fn get_config_invalid_key_returns_invalid_key() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        let err = svc.get_value(tenant(), "nodot").await.expect_err("invalid");
+        let err = svc
+            .get_config(tenant(), "nodot")
+            .await
+            .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
     }
 
@@ -1602,7 +2033,10 @@ mod tests {
     async fn delete_invalid_key_returns_invalid_key() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
-        let err = svc.delete(tenant(), "nodot").await.expect_err("invalid");
+        let err = svc
+            .delete(tenant(), actor(), "nodot")
+            .await
+            .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
     }
 
@@ -1617,13 +2051,313 @@ mod tests {
             .expect("publish");
 
         // 软删（tombstone）。
-        svc.delete(tenant(), "app.k").await.expect("delete");
+        svc.delete(tenant(), actor(), "app.k")
+            .await
+            .expect("delete");
 
-        // get_value 已是 None（latest 为 tombstone）。
-        assert_eq!(svc.get_value(tenant(), "app.k").await.expect("get"), None);
+        // get_config 已是 None（latest 为 tombstone）。
+        assert!(
+            svc.get_config(tenant(), "app.k")
+                .await
+                .expect("get")
+                .is_none()
+        );
 
         // 再次 delete 应幂等（latest 已 tombstone → no-op，返回 Ok）。
-        svc.delete(tenant(), "app.k").await.expect("幂等 delete");
+        svc.delete(tenant(), actor(), "app.k")
+            .await
+            .expect("幂等 delete");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn idempotent_delete_clears_stale_cache_after_other_instance_deleted() {
+        let store = new_config_store();
+        let capture = CapturingEmitter::default();
+        let make_service = || {
+            SettingsService::new(
+                DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+                DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
+                    store.clone(),
+                    capture.clone(),
+                )),
+                Box::new(InMemFlagStore::new()),
+                Box::new(FixedClock(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+                )),
+            )
+        };
+        let writer = make_service();
+        let stale_reader = make_service();
+
+        writer
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish");
+        assert_eq!(
+            stale_reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("prime stale cache"),
+            Some("v1".to_string())
+        );
+        writer
+            .delete(tenant(), actor(), "app.k")
+            .await
+            .expect("first instance delete");
+
+        stale_reader
+            .delete(tenant(), actor(), "app.k")
+            .await
+            .expect("idempotent delete");
+        assert_eq!(
+            stale_reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("read after idempotent delete"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn authoritative_reads_refresh_cross_instance_cache_without_events() {
+        let store = new_config_store();
+        let capture = CapturingEmitter::default();
+        let make_service = || {
+            SettingsService::new(
+                DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+                DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
+                    store.clone(),
+                    capture.clone(),
+                )),
+                Box::new(InMemFlagStore::new()),
+                Box::new(FixedClock(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+                )),
+            )
+        };
+        let writer = make_service();
+        let stale_reader = make_service();
+
+        writer
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish v1");
+        assert_eq!(
+            stale_reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("prime cache"),
+            Some("v1".to_string())
+        );
+
+        writer
+            .publish_config(tenant(), actor(), publish_req("app.k", "v2"))
+            .await
+            .expect("publish v2");
+        assert_eq!(
+            stale_reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("read after remote publish"),
+            Some("v2".to_string()),
+            "cache is an optimization: reads must validate the authoritative revision"
+        );
+
+        writer
+            .rollback(tenant(), actor(), "app.k", 1)
+            .await
+            .expect("rollback to v1");
+        assert_eq!(
+            stale_reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("read after remote rollback"),
+            Some("v1".to_string())
+        );
+
+        writer
+            .delete(tenant(), actor(), "app.k")
+            .await
+            .expect("remote delete");
+        assert_eq!(
+            stale_reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("read after remote delete"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn authoritative_read_failure_never_falls_back_to_cached_value() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct HeadFailureRepo {
+            inner: InMemConfigRepo,
+            fail_head: Arc<AtomicBool>,
+        }
+
+        impl ConfigRepo for HeadFailureRepo {
+            async fn find(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.inner.find(scope, key).await
+            }
+
+            async fn find_version(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+                version: u64,
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.inner.find_version(scope, key, version).await
+            }
+
+            async fn head(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+            ) -> Result<Option<ConfigHead>, ConfigRepoError> {
+                if self.fail_head.load(Ordering::SeqCst) {
+                    return Err(ConfigRepoError::Storage(Box::new(std::io::Error::other(
+                        "head unavailable",
+                    ))));
+                }
+                self.inner.head(scope, key).await
+            }
+        }
+
+        let store = new_config_store();
+        let capture = CapturingEmitter::default();
+        let writer = SettingsService::new(
+            DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(
+                store.clone(),
+                capture.clone(),
+            )),
+            Box::new(InMemFlagStore::new()),
+            Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+        );
+        let fail_head = Arc::new(AtomicBool::new(false));
+        let reader = SettingsService::new(
+            DynConfigRepo::new_box(HeadFailureRepo {
+                inner: InMemConfigRepo::from_shared(store.clone()),
+                fail_head: Arc::clone(&fail_head),
+            }),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture)),
+            Box::new(InMemFlagStore::new()),
+            Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
+        );
+
+        writer
+            .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish");
+        assert_eq!(
+            reader
+                .get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("prime cache"),
+            Some("v1".to_string())
+        );
+
+        fail_head.store(true, Ordering::SeqCst);
+        let error = reader
+            .get_config(tenant(), "app.k")
+            .await
+            .expect_err("authoritative failure must be visible");
+        assert!(matches!(error, SettingsServiceError::Storage(_)));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn concurrent_delete_converges_after_losing_tombstone_cas() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DeleteBarrierConfigRepo {
+            inner: InMemConfigRepo,
+            barrier: tokio::sync::Barrier,
+            head_reads: AtomicUsize,
+        }
+
+        impl ConfigRepo for DeleteBarrierConfigRepo {
+            async fn find(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.inner.find(scope, key).await
+            }
+
+            async fn find_version(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+                version: u64,
+            ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
+                self.inner.find_version(scope, key, version).await
+            }
+
+            async fn head(
+                &self,
+                scope: TenantRepoScope,
+                key: &SettingKey,
+            ) -> Result<Option<ConfigHead>, ConfigRepoError> {
+                let result = self.inner.head(scope, key).await;
+                if matches!(self.head_reads.fetch_add(1, Ordering::SeqCst), 1 | 2) {
+                    self.barrier.wait().await;
+                }
+                result
+            }
+        }
+
+        let capture = CapturingEmitter::default();
+        let store = new_config_store();
+        let svc = SettingsService::new(
+            DynConfigRepo::new_box(DeleteBarrierConfigRepo {
+                inner: InMemConfigRepo::from_shared(store.clone()),
+                barrier: tokio::sync::Barrier::new(2),
+                head_reads: AtomicUsize::new(0),
+            }),
+            DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
+            Box::new(InMemFlagStore::new()),
+            Box::new(FixedClock(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+            )),
+        );
+        svc.publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+            .await
+            .expect("publish");
+
+        let (first, second) = tokio::join!(
+            svc.delete(tenant(), actor(), "app.k"),
+            svc.delete(tenant(), actor(), "app.k"),
+        );
+        first.expect("first delete");
+        second.expect("second delete converges to tombstone");
+        assert!(
+            svc.get_config(tenant(), "app.k")
+                .await
+                .expect("get")
+                .is_none()
+        );
+        assert_eq!(
+            emitted_facts(&capture).len(),
+            2,
+            "publish and the single winning delete each emit one fact"
+        );
     }
 
     // F1 回归（service 层）：delete 软删后 republish **不重置版本**——next_version 经 latest_version（含
@@ -1640,7 +2374,9 @@ mod tests {
             .expect("publish v1");
         assert_eq!(v1.data.version, 1);
 
-        svc.delete(tenant(), "app.k").await.expect("delete");
+        svc.delete(tenant(), actor(), "app.k")
+            .await
+            .expect("delete");
 
         // republish：版本继续递增（v1 + tombstone v2 → v3），**非**重置回 1。
         let v3 = svc
@@ -1652,25 +2388,33 @@ mod tests {
             "delete 软删后 republish 版本应继续（v3），不重置回 1"
         );
         assert_eq!(
-            svc.get_value(tenant(), "app.k").await.expect("get"),
+            svc.get_config(tenant(), "app.k")
+                .await
+                .map(config_value)
+                .expect("get"),
             Some("v1-again".to_string()),
             "republish 后活跃值恢复"
         );
 
-        // 发射事实：publish v1 + republish v3 = 2 条，version 各异 → event_id 不复用（防 outbox 吞事件）。
+        // 发射事实：publish v1 + delete v2 + republish v3，三次 mutation 均有 co-tx fact。
         let facts = emitted_facts(&capture);
         assert_eq!(
             facts.len(),
-            2,
-            "delete 不发事件；publish v1 + republish v3 = 2 条 fact"
+            3,
+            "publish/delete/republish 三次 mutation 各发一条 fact"
         );
         assert_eq!(facts[0].payload.version, 1);
+        assert_eq!(facts[1].payload.version, 2);
         assert_eq!(
-            facts[1].payload.version, 3,
+            facts[1].payload.change_kind,
+            SettingsConfigChangeKind::Deleted
+        );
+        assert_eq!(
+            facts[2].payload.version, 3,
             "republish 事件版本 = 3（新 event_id）"
         );
         assert_ne!(
-            facts[0].idem, facts[1].idem,
+            facts[0].idem, facts[2].idem,
             "delete+republish 的 event_id 不复用"
         );
     }
@@ -1724,36 +2468,22 @@ mod tests {
             ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
                 self.inner.find_version(scope, key, version).await
             }
-            async fn latest_version(
+            async fn head(
                 &self,
                 scope: TenantRepoScope,
                 key: &SettingKey,
-            ) -> Result<Option<u64>, ConfigRepoError> {
-                let result = self.inner.latest_version(scope, key).await;
+            ) -> Result<Option<ConfigHead>, ConfigRepoError> {
+                let result = self.inner.head(scope, key).await;
                 if self.version_reads.fetch_add(1, Ordering::SeqCst) < 2 {
                     self.barrier.wait().await;
                 }
                 result
             }
-            async fn save(
-                &self,
-                scope: TenantRepoScope,
-                entry: ConfigEntry,
-            ) -> Result<(), ConfigRepoError> {
-                self.inner.save(scope, entry).await
-            }
-            async fn delete(
-                &self,
-                scope: TenantRepoScope,
-                key: &SettingKey,
-            ) -> Result<(), ConfigRepoError> {
-                self.inner.delete(scope, key).await
-            }
         }
 
         let capture = CapturingEmitter::default();
         // 读端口（barrier-wrapped）与写 UoW 共享同一 store：barrier 同步两 find（皆读 None）后，各自经
-        // writer.save_and_append_outbox 对共享 store CAS，制造 read-then-write 竞争（恰一胜一冲突）。
+        // writer.commit 对共享 store CAS，制造 read-then-write 竞争（恰一胜一冲突）。
         let store = new_config_store();
         let svc = SettingsService::new(
             DynConfigRepo::new_box(BarrierConfigRepo {
@@ -1791,7 +2521,11 @@ mod tests {
         );
 
         // 最终活跃版本是某个胜者的值（v1）。
-        let val = svc.get_value(tenant(), "app.k").await.expect("get");
+        let val = svc
+            .get_config(tenant(), "app.k")
+            .await
+            .map(config_value)
+            .expect("get");
         assert!(
             val == Some("a".to_string()) || val == Some("b".to_string()),
             "最终值是某个胜者的值"

@@ -1,6 +1,6 @@
 //! `OutboxEmitter` —— durable outbox 发射 provider DI port（可替换：prod postgres / demo in-mem）。
 //!
-//! 域 crate 经此 port 把一条 [`consistency::Entry`]（topic + idem_key(EventId) + 编码 payload）落 durable
+//! 域 crate 经此 port 把一条 [`consistency::EventEntry`]（topic + idem_key(EventId) + 编码 payload）落 durable
 //! outbox（与契约声明的 L2 OutboxFact 语义同源）。**域不能命名 `PgConnection` / `OutboxEnvelope`**
 //! （域→adapter 被 `deny.toml` 禁），故 envelope 字段以 opaque [`OutboxEnvelopeParts`] 传入，由 adapter
 //! 组装 provider 私有 envelope（reserved key `occurredAt` 在 adapter 受控构造点经注入 `Clock` 注入，#1129；
@@ -11,7 +11,7 @@
 //! `OutboxEmitter` 是 producer 把业务事件**持久化进 durable outbox**（含幂等锚点 EventId）的端口——
 //! 二者语义正交，故为不同 port（不复用 `Publisher` 的 fire-and-forget 语义）。
 //!
-//! **单事实 emit 语义**：本 port 保证一条 [`Entry`] 的 durable 落库原子性（单 outbox 写自成事务）——
+//! **单事实 emit 语义**：本 port 保证一条 [`EventEntry`] 的 durable 落库原子性（单 outbox 写自成事务）——
 //! 用于**无 co-located 业务写**的 OutboxFact 事件（纯通知）。与业务写同事务的 **co-tx 原子性**（FR-003
 //! 完整 L2，如 session 持久化与 outbox append 同一 `PgTransaction`）**已交付**（#1083/#1192）：经各域**域形
 //! Unit-of-Work 端口**（如 `identity::ports::SessionLifecycle`，combined 方法把业务写 + `append_outbox`
@@ -24,7 +24,7 @@
 
 use dynosaur::dynosaur;
 
-use consistency::Entry;
+use consistency::EventEntry;
 
 use crate::redacted::RedactedSource;
 
@@ -370,10 +370,10 @@ impl std::fmt::Debug for OutboxEnvelopeParts {
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `OutboxEmitter` 变体 +
 // dynosaur `DynOutboxEmitter` 承载（DI 注入走 Send wrapper）。ADR-003 既定 dyn-port 范式。
 pub trait OutboxEmitterLocal {
-    /// 把一条 [`Entry`] 落 durable outbox（envelope 由 [`OutboxEnvelopeParts`] 组装）。
+    /// 把一条 [`EventEntry`] 落 durable outbox（envelope 由 [`OutboxEnvelopeParts`] 组装）。
     async fn emit(
         &self,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError>;
 }
@@ -606,7 +606,7 @@ mod partition_key_tests {
 #[cfg(test)]
 mod smoke {
     //! build smoke：证明 async DI port 可 native AFIT impl + 经 `Box<DynOutboxEmitter>` 动态注入（Send）。
-    use consistency::{Entry, IdemKey, OutboxPayload, Topic};
+    use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 
     use super::{
         DynOutboxEmitter, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError,
@@ -649,9 +649,9 @@ mod smoke {
 
     #[allow(clippy::expect_used)]
     // reason: 测试构造 Entry 需 parse Topic/IdemKey（合法输入恒 Ok）；item-level carve-out。
-    fn sample() -> (Entry, OutboxEnvelopeParts) {
-        let entry = Entry::new(
-            Topic::parse("identity.session-created").expect("topic"),
+    fn sample() -> (EventEntry, OutboxEnvelopeParts) {
+        let entry = EventEntry::new(
+            EventTopic::parse("identity.session-created").expect("topic"),
             IdemKey::parse("evt-1").expect("idem"),
             OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
@@ -668,7 +668,7 @@ mod smoke {
     impl OutboxEmitter for NoopEmitter {
         async fn emit(
             &self,
-            _entry: Entry,
+            _entry: EventEntry,
             _env: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
             Ok(())

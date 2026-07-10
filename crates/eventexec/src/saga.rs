@@ -32,10 +32,10 @@ use consistency::{
     SagaStepCtx, StepName,
 };
 use diport::{
-    CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterRecord, DeadLetterStore,
-    DeadLetterSummary, EnvelopeMetadata, LockAcquireOutcome, LockRenewOutcome, LockStoreError,
-    LockStoreKey, OwnerCheckpointStore, SagaContractId, SagaInstanceRegistration,
-    SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome, WritableDeadLetterSource,
+    CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterProvenance, DeadLetterRecord,
+    DeadLetterStore, DeadLetterSummary, EnvelopeMetadata, LockAcquireOutcome, LockRenewOutcome,
+    LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaContractId, SagaInstanceRegistration,
+    SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
 
 /// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
@@ -1997,14 +1997,13 @@ where
         let record = DeadLetterRecord::new(
             self.instance.tenant(),
             self.instance.saga_id().as_uuid().to_string(),
-            self.owner.as_str(),
+            DeadLetterProvenance::saga(self.owner.as_str()),
             self.contract_id,
             self.instance.saga_id().as_uuid().to_string(),
             None,
             payload,
             DeadLetterSummary::new(error_summary),
             1,
-            WritableDeadLetterSource::Saga,
             EnvelopeMetadata::empty(),
         );
         match self.dead_letter.write_dead_letter(record).await {

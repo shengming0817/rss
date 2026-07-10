@@ -18,7 +18,7 @@ workspace = true
 # seed-login：启用 identity 的明文种子登录构造器（仅 journeys/demo；生产组合根不启用，PR #186 F1）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 identity = { path = "../crates/identity", features = ["seed-login", "test-support"] }
-audit = { path = "../crates/audit" }
+audit = { path = "../crates/audit", features = ["test-support"] }
 httpserve = { path = "../crates/httpserve" }
 # seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
@@ -26,7 +26,7 @@ settings = { path = "../crates/settings", features = ["seed-data", "test-support
 bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
 deviceloop = { path = "../crates/deviceloop" }
-# run_consumer 幂等消费驱动的载体类型：HandleResult / InboxStore / Entry / IdemKey / ConsumerGroup。
+# run_consumer 幂等消费驱动的载体类型：HandleResult / InboxStore / StoredOutboxEntry / IdemKey / ConsumerGroup。
 consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport" }
 secure = { path = "../crates/secure" }

@@ -72,6 +72,9 @@ pub enum RoutePermissionId {
     IdentityPolicyUpdate,
     IdentityPolicyDeactivate,
     SettingsConfigPublish,
+    SettingsConfigGet,
+    SettingsConfigDelete,
+    SettingsConfigRollback,
     SettingsSecretPublish,
     MtlsInvoke,
 }
@@ -96,6 +99,9 @@ impl RoutePermissionId {
         Self::IdentityPolicyUpdate,
         Self::IdentityPolicyDeactivate,
         Self::SettingsConfigPublish,
+        Self::SettingsConfigGet,
+        Self::SettingsConfigDelete,
+        Self::SettingsConfigRollback,
         Self::SettingsSecretPublish,
         Self::MtlsInvoke,
     ];
@@ -120,6 +126,9 @@ impl RoutePermissionId {
             "identity:policy:update" => Ok(Self::IdentityPolicyUpdate),
             "identity:policy:deactivate" => Ok(Self::IdentityPolicyDeactivate),
             "settings.config-publish" => Ok(Self::SettingsConfigPublish),
+            "settings.config-get" => Ok(Self::SettingsConfigGet),
+            "settings.config-delete" => Ok(Self::SettingsConfigDelete),
+            "settings.config-rollback" => Ok(Self::SettingsConfigRollback),
             "settings.secret-publish" => Ok(Self::SettingsSecretPublish),
             "mtls:invoke" => Ok(Self::MtlsInvoke),
             _ => Err(PermissionParseError::Unknown),
@@ -146,6 +155,9 @@ impl RoutePermissionId {
             Self::IdentityPolicyUpdate => "identity:policy:update",
             Self::IdentityPolicyDeactivate => "identity:policy:deactivate",
             Self::SettingsConfigPublish => "settings.config-publish",
+            Self::SettingsConfigGet => "settings.config-get",
+            Self::SettingsConfigDelete => "settings.config-delete",
+            Self::SettingsConfigRollback => "settings.config-rollback",
             Self::SettingsSecretPublish => "settings.secret-publish",
             Self::MtlsInvoke => "mtls:invoke",
         }
@@ -171,6 +183,9 @@ impl RoutePermissionId {
             Self::IdentityPolicyUpdate => "IdentityPolicyUpdate",
             Self::IdentityPolicyDeactivate => "IdentityPolicyDeactivate",
             Self::SettingsConfigPublish => "SettingsConfigPublish",
+            Self::SettingsConfigGet => "SettingsConfigGet",
+            Self::SettingsConfigDelete => "SettingsConfigDelete",
+            Self::SettingsConfigRollback => "SettingsConfigRollback",
             Self::SettingsSecretPublish => "SettingsSecretPublish",
             Self::MtlsInvoke => "MtlsInvoke",
         }
@@ -377,6 +392,15 @@ mod tests {
             (
                 "settings.config-publish",
                 RoutePermissionId::SettingsConfigPublish,
+            ),
+            ("settings.config-get", RoutePermissionId::SettingsConfigGet),
+            (
+                "settings.config-delete",
+                RoutePermissionId::SettingsConfigDelete,
+            ),
+            (
+                "settings.config-rollback",
+                RoutePermissionId::SettingsConfigRollback,
             ),
             (
                 "settings.secret-publish",

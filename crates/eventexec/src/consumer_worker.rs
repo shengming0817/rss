@@ -435,8 +435,8 @@ mod tests {
     use consistency::error::EngineError;
     use consistency::idempotency::{IdemKey, LeaseOutcome, LeaseToken, SeenState};
     use diport::dead_letter_store::{
-        DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DeadLetterSummary,
-        WritableDeadLetterSource,
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError,
+        DeadLetterSummary,
     };
     use diport::{
         AckAction, AckError, AckableSubscriber, Acker, Delivery, DynAckableSubscriber, DynAcker,
@@ -673,14 +673,13 @@ mod tests {
             vocab::TenantId::parse("00000000-0000-0000-0000-000000000001")
                 .expect("valid tenant id"),
             message_id,
-            "audit",
+            DeadLetterProvenance::consumer("identity", "audit"),
             "identity.session-created",
             "identity.session-created",
             Some("audit.session.consumer".to_string()),
             b"payload".to_vec(),
             DeadLetterSummary::new("test dead letter"),
             1,
-            WritableDeadLetterSource::Consumer,
             EnvelopeMetadata::empty(),
         )
     }

@@ -1,6 +1,6 @@
 //! `pg-tenant-tx-guard` —— Postgres tenant-table raw-pool / TxManager bypass guard.
 //!
-//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" } —
+//! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_core_file_exception_does_not_mask_raw_tenant_access", anti_vacuity = "tests::green_scoped_tenant_and_global_tables_pass" } —
 //! tenant-table production paths must go through
 //! `PgTenantPool::{read,write,co_tx_with_outbox}` or the lower-level `cotx.rs` funnel. Raw
 //! `sqlx::PgPool` / direct connection / global transaction paths are allowed only for explicitly
@@ -32,6 +32,10 @@ pub(crate) enum Rule {
     ProdFilesAbsent,
     SqlSitesAbsent,
     StaleException,
+    /// transaction retry primitive or postgres wrapper used outside the sanctioned UoW boundary.
+    RetryPlacement,
+    /// real workspace scan did not find both required retry boundaries.
+    RetrySitesAbsent,
 }
 
 pub(crate) struct PgTenantTxGuard;
@@ -199,89 +203,18 @@ pub(crate) fn scan_guard(
         ));
     }
 
-    let mut tenant_sql_sites = 0usize;
-    let mut raw_sites = 0usize;
-    let mut allowed_exceptions = BTreeSet::new();
+    let mut state = ScanState::default();
     findings.extend(fault_matrix_exception_staleness(files));
 
     for (rel, content) in files {
-        let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(content));
-        let expanded = expand_simple_table_consts(&stripped).to_lowercase();
-        let tenant_hits = tenant_table_hits(&expanded, &tenant_tables);
-        if !tenant_hits.is_empty() {
-            tenant_sql_sites += 1;
-        }
-        let helper_tables = tenant_pgconnection_helpers(&expanded, &tenant_tables);
-        let (raw_hits, site_exceptions) =
-            raw_tenant_accesses(rel, &expanded, &tenant_tables, &helper_tables);
-        let (raw_outbox_insert_hits, outbox_insert_exceptions) =
-            raw_outbox_insert_sites(rel, &expanded);
-        let outbox_append_bypass_hits = outbox_append_bypass_sites(rel, &expanded);
-        let tx_capability_mint_hits = tx_capability_mint_sites(rel, &expanded);
-        allowed_exceptions.extend(site_exceptions);
-        allowed_exceptions.extend(outbox_insert_exceptions);
-        let raw_pool_field_hits = raw_tenant_pool_fields(&expanded);
-        let raw_pool_field_exception = raw_pool_field_exception(rel, &expanded);
-        note_raw_pool_field_exception(
-            &mut allowed_exceptions,
-            raw_pool_field_exception,
-            &raw_pool_field_hits,
-        );
-        raw_sites += raw_hits.len();
-        raw_sites += raw_pool_field_hits.len();
-        raw_sites += raw_outbox_insert_hits.len();
-        raw_sites += outbox_append_bypass_hits.len();
-        raw_sites += tx_capability_mint_hits.len();
-        for hit in &raw_outbox_insert_hits {
-            findings.push(finding(
-                Rule::RawOutboxInsert,
-                site_subject(rel, hit.line),
-                "outbox rows must be created through outbox.rs TxCapability append funnel",
-            ));
-        }
-        for hit in &outbox_append_bypass_hits {
-            findings.push(finding(
-                Rule::OutboxAppendBypass,
-                site_subject(rel, hit.line),
-                format!(
-                    "outbox producer opens a raw transaction near {:?}; use PgTenantPool write/co-tx funnel",
-                    hit.pattern
-                ),
-            ));
-        }
-        for hit in &tx_capability_mint_hits {
-            findings.push(finding(
-                Rule::TxCapabilityMintOutsideFunnel,
-                site_subject(rel, hit.line),
-                "TxCapability minting is restricted to transaction funnel modules",
-            ));
-        }
-        findings.extend(raw_pool_field_findings(
-            rel,
-            &tenant_hits,
-            &raw_pool_field_hits,
-            raw_pool_field_exception,
-        ));
-        if raw_hits.is_empty() {
-            continue;
-        }
-        for hit in &raw_hits {
-            findings.push(finding(
-                Rule::RawTenantTableAccess,
-                site_subject(rel, hit.line),
-                format!(
-                    "tenant tables {:?} touched through raw pattern {:?}; use PgTenantPool scoped methods",
-                    hit.tables, hit.pattern
-                ),
-            ));
-        }
+        findings.extend(scan_source_file(rel, content, &tenant_tables, &mut state));
     }
 
     for expected in [
         "config-legacy-plaintext-startup-probe",
         "config-value-maintenance",
     ] {
-        if !allowed_exceptions.contains(expected) {
+        if !state.allowed_exceptions.contains(expected) {
             findings.push(finding(
                 Rule::StaleException,
                 expected,
@@ -290,22 +223,367 @@ pub(crate) fn scan_guard(
         }
     }
 
-    if tenant_sql_sites == 0 {
+    if state.tenant_sql_sites == 0 {
         findings.push(finding(
             Rule::SqlSitesAbsent,
             "adapters/postgres/src",
             "未扫描到任何 tenant-table SQL site，guard 真空化",
         ));
     }
+    if files.iter().any(|(rel, _)| rel == "tx_retry.rs") {
+        for required in ["settings-config-commit", "identity-credential-bump-version"] {
+            if !state.retry_sites.contains(required) {
+                findings.push(finding(
+                    Rule::RetrySitesAbsent,
+                    required,
+                    "sanctioned transaction retry boundary was not found",
+                ));
+            }
+        }
+    }
 
     let summary = format!(
         "{} tenant 表；{} 个生产文件；{} 个 tenant SQL 文件；{} 个 raw pattern",
         tenant_tables.len(),
         files.len(),
-        tenant_sql_sites,
-        raw_sites
+        state.tenant_sql_sites,
+        state.raw_sites
     );
     (summary, findings)
+}
+
+#[derive(Default)]
+struct ScanState {
+    tenant_sql_sites: usize,
+    raw_sites: usize,
+    allowed_exceptions: BTreeSet<&'static str>,
+    retry_sites: BTreeSet<&'static str>,
+}
+
+fn scan_source_file(
+    rel: &str,
+    content: &str,
+    tenant_tables: &BTreeSet<String>,
+    state: &mut ScanState,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let stripped = strip_rust_comment_lines(&strip_cfg_test_modules(content));
+    let expanded = expand_simple_table_consts(&stripped).to_lowercase();
+    findings.extend(retry_placement_findings(
+        rel,
+        &stripped,
+        &mut state.retry_sites,
+    ));
+    let tenant_hits = tenant_table_hits(&expanded, tenant_tables);
+    state.tenant_sql_sites += usize::from(!tenant_hits.is_empty());
+    let helper_tables = tenant_pgconnection_helpers(&expanded, tenant_tables);
+    let (raw_hits, site_exceptions) =
+        raw_tenant_accesses(rel, &expanded, tenant_tables, &helper_tables);
+    let (outbox_insert_hits, outbox_exceptions) = raw_outbox_insert_sites(rel, &expanded);
+    let append_bypass_hits = outbox_append_bypass_sites(rel, &expanded);
+    let capability_mint_hits = tx_capability_mint_sites(rel, &expanded);
+    state.allowed_exceptions.extend(site_exceptions);
+    state.allowed_exceptions.extend(outbox_exceptions);
+    let raw_pool_field_hits = raw_tenant_pool_fields(&expanded);
+    let raw_pool_field_exception = raw_pool_field_exception(rel, &expanded);
+    note_raw_pool_field_exception(
+        &mut state.allowed_exceptions,
+        raw_pool_field_exception,
+        &raw_pool_field_hits,
+    );
+    state.raw_sites += raw_hits.len()
+        + raw_pool_field_hits.len()
+        + outbox_insert_hits.len()
+        + append_bypass_hits.len()
+        + capability_mint_hits.len();
+
+    findings.extend(outbox_insert_hits.iter().map(|hit| {
+        finding(
+            Rule::RawOutboxInsert,
+            site_subject(rel, hit.line),
+            "outbox rows must be created through outbox.rs TxCapability append funnel",
+        )
+    }));
+    findings.extend(append_bypass_hits.iter().map(|hit| {
+        finding(
+            Rule::OutboxAppendBypass,
+            site_subject(rel, hit.line),
+            format!(
+                "outbox producer opens a raw transaction near {:?}; use PgTenantPool write/co-tx funnel",
+                hit.pattern
+            ),
+        )
+    }));
+    findings.extend(capability_mint_hits.iter().map(|hit| {
+        finding(
+            Rule::TxCapabilityMintOutsideFunnel,
+            site_subject(rel, hit.line),
+            "TxCapability minting is restricted to transaction funnel modules",
+        )
+    }));
+    findings.extend(raw_pool_field_findings(
+        rel,
+        &tenant_hits,
+        &raw_pool_field_hits,
+        raw_pool_field_exception,
+    ));
+    findings.extend(raw_hits.iter().map(|hit| {
+        finding(
+            Rule::RawTenantTableAccess,
+            site_subject(rel, hit.line),
+            format!(
+                "tenant tables {:?} touched through raw pattern {:?}; use PgTenantPool scoped methods",
+                hit.tables, hit.pattern
+            ),
+        )
+    }));
+    findings
+}
+
+fn retry_placement_findings(
+    rel: &str,
+    content: &str,
+    sites: &mut BTreeSet<&'static str>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let syntax = match syn::parse_file(content) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                rel,
+                format!("cannot parse production Rust for retry placement: {error}"),
+            ));
+            return findings;
+        }
+    };
+    let aliases = retry_aliases(&syntax);
+    let mut scan = RetryAstScan::new(&aliases);
+    syn::visit::Visit::visit_file(&mut scan, &syntax);
+
+    for call in &scan.direct_calls {
+        if rel != "tx_retry.rs" || call.function.as_deref() != Some("run_pg_tx_retry") {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                site_subject(rel, call.line),
+                "consistency::run_tx_retry may only be called by tx_retry.rs::run_pg_tx_retry",
+            ));
+        }
+    }
+    if scan.wrapper_calls.is_empty() {
+        return findings;
+    }
+
+    let allowed = match rel {
+        "config_repo.rs" => Some((
+            "commit",
+            "SETTINGS_CONFIG_BOUNDARY",
+            "retry_co_tx_with_outbox",
+            "settings-config-commit",
+        )),
+        "credential_repo.rs" => Some((
+            "bump_version",
+            "IDENTITY_CREDENTIAL_BOUNDARY",
+            "retry_write",
+            "identity-credential-bump-version",
+        )),
+        _ => None,
+    };
+    let Some((fn_marker, boundary, primitive, site)) = allowed else {
+        for call in scan.wrapper_calls {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                site_subject(rel, call.line),
+                "run_pg_tx_retry is restricted to settings commit and identity credential bump_version",
+            ));
+        }
+        return findings;
+    };
+
+    for call in &scan.wrapper_calls {
+        if call.function.as_deref() != Some(fn_marker) {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                site_subject(rel, call.line),
+                format!("run_pg_tx_retry call must remain inside {fn_marker}"),
+            ));
+        }
+    }
+    let facts = scan.functions.get(fn_marker);
+    if facts.is_some_and(|facts| {
+        facts.wrapper_calls == 1
+            && facts.paths.contains(boundary)
+            && facts.methods.contains(primitive)
+    }) {
+        sites.insert(site);
+    } else {
+        findings.push(finding(
+            Rule::RetryPlacement,
+            rel,
+            format!(
+                "{fn_marker} must contain exactly one run_pg_tx_retry call with {boundary} and {primitive}"
+            ),
+        ));
+    }
+    findings
+}
+
+#[derive(Default)]
+struct RetryAliases {
+    direct: BTreeSet<String>,
+    wrapper: BTreeSet<String>,
+}
+
+fn retry_aliases(file: &syn::File) -> RetryAliases {
+    let mut aliases = RetryAliases {
+        direct: BTreeSet::from(["run_tx_retry".to_string()]),
+        wrapper: BTreeSet::from(["run_pg_tx_retry".to_string()]),
+    };
+    for item in &file.items {
+        if let syn::Item::Use(item_use) = item {
+            collect_retry_use_aliases(&item_use.tree, &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn collect_retry_use_aliases(tree: &syn::UseTree, aliases: &mut RetryAliases) {
+    match tree {
+        syn::UseTree::Path(path) => collect_retry_use_aliases(&path.tree, aliases),
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_retry_use_aliases(item, aliases);
+            }
+        }
+        syn::UseTree::Name(name) => {
+            note_retry_alias(&name.ident.to_string(), &name.ident.to_string(), aliases)
+        }
+        syn::UseTree::Rename(rename) => note_retry_alias(
+            &rename.ident.to_string(),
+            &rename.rename.to_string(),
+            aliases,
+        ),
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn note_retry_alias(original: &str, local: &str, aliases: &mut RetryAliases) {
+    match original {
+        "run_tx_retry" => {
+            aliases.direct.insert(local.to_string());
+        }
+        "run_pg_tx_retry" => {
+            aliases.wrapper.insert(local.to_string());
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug)]
+struct RetryCall {
+    line: usize,
+    function: Option<String>,
+}
+
+#[derive(Default)]
+struct RetryFunctionFacts {
+    wrapper_calls: usize,
+    paths: BTreeSet<String>,
+    methods: BTreeSet<String>,
+}
+
+struct RetryAstScan<'a> {
+    aliases: &'a RetryAliases,
+    current_function: Option<String>,
+    direct_calls: Vec<RetryCall>,
+    wrapper_calls: Vec<RetryCall>,
+    functions: BTreeMap<String, RetryFunctionFacts>,
+}
+
+impl<'a> RetryAstScan<'a> {
+    fn new(aliases: &'a RetryAliases) -> Self {
+        Self {
+            aliases,
+            current_function: None,
+            direct_calls: Vec::new(),
+            wrapper_calls: Vec::new(),
+            functions: BTreeMap::new(),
+        }
+    }
+
+    fn visit_function(&mut self, name: String, block: &syn::Block) {
+        let previous = self.current_function.replace(name.clone());
+        self.functions.entry(name).or_default();
+        syn::visit::visit_block(self, block);
+        self.current_function = previous;
+    }
+}
+
+impl syn::visit::Visit<'_> for RetryAstScan<'_> {
+    fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.block);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
+        self.visit_function(node.sig.ident.to_string(), &node.block);
+    }
+
+    fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+        use syn::spanned::Spanned as _;
+        if let syn::Expr::Path(path) = &*node.func
+            && let Some(name) = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+        {
+            let call = || RetryCall {
+                line: node.func.span().start().line,
+                function: self.current_function.clone(),
+            };
+            if self.aliases.direct.contains(&name) {
+                self.direct_calls.push(call());
+            }
+            if self.aliases.wrapper.contains(&name) {
+                self.wrapper_calls.push(call());
+                if let Some(function) = &self.current_function {
+                    self.functions
+                        .entry(function.clone())
+                        .or_default()
+                        .wrapper_calls += 1;
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+        if let (Some(function), Some(name)) = (
+            &self.current_function,
+            node.path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+        ) {
+            self.functions
+                .entry(function.clone())
+                .or_default()
+                .paths
+                .insert(name);
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if let Some(function) = &self.current_function {
+            self.functions
+                .entry(function.clone())
+                .or_default()
+                .methods
+                .insert(node.method.to_string());
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
 }
 
 fn tenant_tables_from_migrations(files: &[(String, String)]) -> BTreeSet<String> {
@@ -1763,5 +2041,83 @@ pub mod fault_matrix;
         );
         assert!(!stripped.contains("self.pool.begin"));
         assert!(stripped.contains("fn prod"));
+    }
+
+    #[test]
+    fn retry_guard_rejects_direct_engine_retry_and_alias_outside_boundary() {
+        let mut sites = BTreeSet::new();
+        let direct = retry_placement_findings(
+            "role_repo.rs",
+            "async fn save(){ run_tx_retry(policy, op, classify, sleep).await; }",
+            &mut sites,
+        );
+        assert!(direct.iter().any(|f| f.rule == Rule::RetryPlacement));
+
+        let alias = retry_placement_findings(
+            "role_repo.rs",
+            "use crate::tx_retry::run_pg_tx_retry as retry; async fn save(){ retry(B, op, c).await; }",
+            &mut sites,
+        );
+        assert!(alias.iter().any(|f| f.rule == Rule::RetryPlacement));
+    }
+
+    #[test]
+    fn retry_guard_resolves_grouped_multiline_direct_alias_and_glob() {
+        let mut sites = BTreeSet::new();
+        for source in [
+            "use consistency::{\n run_tx_retry as retry\n}; async fn save(){ retry(policy, op, classify, sleep).await; }",
+            "use consistency::*; async fn save(){ run_tx_retry(policy, op, classify, sleep).await; }",
+        ] {
+            let findings = retry_placement_findings("role_repo.rs", source, &mut sites);
+            assert!(
+                findings.iter().any(|f| f.rule == Rule::RetryPlacement),
+                "alias/glob must not bypass retry placement: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_guard_ast_ignores_comment_and_string_bait() {
+        let mut sites = BTreeSet::new();
+        let findings = retry_placement_findings(
+            "role_repo.rs",
+            r#"async fn save(){ let _ = "run_tx_retry(policy, op, classify, sleep)"; /* run_pg_tx_retry(B, op, c) */ }"#,
+            &mut sites,
+        );
+        assert!(
+            findings.is_empty(),
+            "non-call bait must be ignored: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn retry_guard_accepts_grouped_wrapper_alias_inside_exact_boundary() {
+        let mut sites = BTreeSet::new();
+        let findings = retry_placement_findings(
+            "config_repo.rs",
+            "use crate::tx_retry::{run_pg_tx_retry as retry}; impl Uow { async fn commit(&self){ retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            &mut sites,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(sites.contains("settings-config-commit"));
+    }
+
+    #[test]
+    fn retry_guard_accepts_exact_settings_and_identity_boundaries() {
+        let mut sites = BTreeSet::new();
+        let config = retry_placement_findings(
+            "config_repo.rs",
+            "impl Uow { async fn commit(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            &mut sites,
+        );
+        let identity = retry_placement_findings(
+            "credential_repo.rs",
+            "impl Repo { async fn bump_version(&self){ run_pg_tx_retry(IDENTITY_CREDENTIAL_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            &mut sites,
+        );
+        assert!(config.is_empty(), "{config:?}");
+        assert!(identity.is_empty(), "{identity:?}");
+        assert!(sites.contains("settings-config-commit"));
+        assert!(sites.contains("identity-credential-bump-version"));
     }
 }

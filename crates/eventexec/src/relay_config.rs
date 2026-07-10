@@ -31,7 +31,7 @@ const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
 /// relay 单轮 batch 下限：0 ⇒ poll 恒空、relay 永不推进（静默积压）。
 const MIN_BATCH: usize = 1;
-/// relay 单轮 batch 上限：防单 tick 重建超大 `Vec<Entry>`（拉爆内存）+ 长事务锁窗。
+/// relay 单轮 batch 上限：防单 tick 重建超大 `Vec<StoredOutboxEntry>`（拉爆内存）+ 长事务锁窗。
 const MAX_BATCH: usize = 10_000;
 /// backlog 采样间隔下限：非零 + 防热轮询聚合查询。
 const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);

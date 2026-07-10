@@ -84,7 +84,8 @@ pub struct DlqEntrySummary {
     source: DeadLetterSource,
     tenant: vocab::TenantId,
     message_id: String,
-    domain: String,
+    producer_domain: String,
+    consumer_domain: Option<String>,
     contract_id: String,
     topic: String,
     consumer_group: Option<String>,
@@ -103,7 +104,8 @@ impl DlqEntrySummary {
         source: DeadLetterSource,
         tenant: vocab::TenantId,
         message_id: impl Into<String>,
-        domain: impl Into<String>,
+        producer_domain: impl Into<String>,
+        consumer_domain: Option<String>,
         contract_id: impl Into<String>,
         topic: impl Into<String>,
         consumer_group: Option<String>,
@@ -118,7 +120,8 @@ impl DlqEntrySummary {
             source,
             tenant,
             message_id: message_id.into(),
-            domain: domain.into(),
+            producer_domain: producer_domain.into(),
+            consumer_domain,
             contract_id: contract_id.into(),
             topic: topic.into(),
             consumer_group,
@@ -149,8 +152,12 @@ impl DlqEntrySummary {
         &self.message_id
     }
 
-    pub fn domain(&self) -> &str {
-        &self.domain
+    pub fn producer_domain(&self) -> &str {
+        &self.producer_domain
+    }
+
+    pub fn consumer_domain(&self) -> Option<&str> {
+        self.consumer_domain.as_deref()
     }
 
     pub fn contract_id(&self) -> &str {
@@ -261,11 +268,13 @@ impl DlqCursor {
     }
 }
 
-/// DLQ list filter. Tenant is mandatory; domain/source/contract are optional.
+/// DLQ list filter. Tenant is mandatory; producer domain, consumer domain, source, and contract
+/// are optional.
 #[derive(Debug, Clone)]
 pub struct DlqListQuery {
     tenant: vocab::TenantId,
-    domain: Option<String>,
+    producer_domain: Option<String>,
+    consumer_domain: Option<String>,
     contract_id: Option<String>,
     source: Option<DeadLetterSource>,
     limit: u32,
@@ -297,7 +306,8 @@ impl DlqListQuery {
     pub fn new(tenant: vocab::TenantId) -> Self {
         Self {
             tenant,
-            domain: None,
+            producer_domain: None,
+            consumer_domain: None,
             contract_id: None,
             source: None,
             limit: 100,
@@ -305,8 +315,13 @@ impl DlqListQuery {
         }
     }
 
-    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        self.domain = Some(domain.into());
+    pub fn with_producer_domain(mut self, producer_domain: impl Into<String>) -> Self {
+        self.producer_domain = Some(producer_domain.into());
+        self
+    }
+
+    pub fn with_consumer_domain(mut self, consumer_domain: impl Into<String>) -> Self {
+        self.consumer_domain = Some(consumer_domain.into());
         self
     }
 
@@ -334,8 +349,12 @@ impl DlqListQuery {
         self.tenant
     }
 
-    pub fn domain(&self) -> Option<&str> {
-        self.domain.as_deref()
+    pub fn producer_domain(&self) -> Option<&str> {
+        self.producer_domain.as_deref()
+    }
+
+    pub fn consumer_domain(&self) -> Option<&str> {
+        self.consumer_domain.as_deref()
     }
 
     pub fn contract_id(&self) -> Option<&str> {
@@ -377,7 +396,12 @@ impl DlqListResult {
                 query
                     .contract_id()
                     .is_none_or(|contract_id| row.contract_id() == contract_id)
-                    && query.domain().is_none_or(|domain| row.domain() == domain)
+                    && query
+                        .producer_domain()
+                        .is_none_or(|domain| row.producer_domain() == domain)
+                    && query
+                        .consumer_domain()
+                        .is_none_or(|domain| row.consumer_domain() == Some(domain))
                     && query.source().is_none_or(|source| row.source() == source)
                     && query
                         .cursor()
@@ -690,6 +714,7 @@ mod tests {
             tenant,
             "msg-1",
             "identity",
+            Some("audit".to_string()),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
@@ -729,6 +754,7 @@ mod tests {
                     tenant,
                     format!("msg-{i}"),
                     "identity",
+                    Some("audit".to_string()),
                     "contract-session",
                     "session.created",
                     Some("identity.session.consumer".to_string()),
@@ -761,6 +787,7 @@ mod tests {
                 tenant,
                 "msg-a",
                 "identity",
+                Some("audit".to_string()),
                 "identity.session-created",
                 "session.created",
                 Some("identity.session.consumer".to_string()),
@@ -776,6 +803,7 @@ mod tests {
                 tenant,
                 "msg-b",
                 "identity",
+                Some("audit".to_string()),
                 "identity.role-assigned",
                 "role.assigned",
                 Some("identity.role.consumer".to_string()),
@@ -804,6 +832,46 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
+    fn list_result_filters_producer_and_consumer_domains_independently() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        let rows = ["audit", "search"]
+            .into_iter()
+            .map(|consumer_domain| {
+                DlqEntrySummary::new(
+                    DlqEntryKind::DeadLetter,
+                    format!("row-{consumer_domain}"),
+                    DeadLetterSource::Consumer,
+                    tenant,
+                    format!("msg-{consumer_domain}"),
+                    "identity",
+                    Some(consumer_domain.to_string()),
+                    "identity.session-created",
+                    "session.created",
+                    Some(format!("{consumer_domain}.session.consumer")),
+                    4,
+                    "max retries exhausted",
+                    3,
+                    1_700_000_000,
+                )
+            })
+            .collect();
+
+        let result = DlqListResult::from_sorted_rows(
+            &DlqListQuery::new(tenant)
+                .with_producer_domain("identity")
+                .with_consumer_domain("audit"),
+            rows,
+        );
+
+        assert_eq!(result.data().len(), 1);
+        assert_eq!(result.data()[0].producer_domain(), "identity");
+        assert_eq!(result.data()[0].consumer_domain(), Some("audit"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit test fixture uses a known canonical tenant id.
     fn list_cursor_is_keyset_not_offset() {
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
@@ -816,6 +884,7 @@ mod tests {
                     tenant,
                     format!("msg-{i}"),
                     "identity",
+                    Some("audit".to_string()),
                     "contract-session",
                     "session.created",
                     Some("identity.session.consumer".to_string()),
@@ -837,6 +906,7 @@ mod tests {
             tenant,
             "msg-new",
             "identity",
+            Some("audit".to_string()),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
@@ -852,6 +922,7 @@ mod tests {
             tenant,
             "msg-tail",
             "identity",
+            Some("audit".to_string()),
             "contract-session",
             "session.created",
             Some("identity.session.consumer".to_string()),
@@ -887,6 +958,7 @@ mod tests {
                     tenant,
                     format!("msg-{i}"),
                     "identity",
+                    Some("audit".to_string()),
                     "contract-session",
                     "session.created",
                     Some("identity.session.consumer".to_string()),

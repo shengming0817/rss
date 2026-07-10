@@ -19,8 +19,7 @@ use diport::dead_letter_store::{
     DynDeadLetterStore,
 };
 use diport::{
-    Acker as _, EnvelopeHeader, EnvelopeHeaderError, Message, MessageStream,
-    WritableDeadLetterSource,
+    Acker as _, DeadLetterProvenance, EnvelopeHeader, EnvelopeHeaderError, Message, MessageStream,
 };
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
@@ -698,7 +697,7 @@ pub(crate) async fn dead_letter<S>(
     let record = DeadLetterRecord::new(
         ctx.tenant_id(),
         msg.id.as_str(),
-        meta.domain(),
+        DeadLetterProvenance::consumer(meta.authority_domain(), meta.domain()),
         meta.contract_id(),
         meta.topic(),
         Some(meta.consumer_group().to_string()),
@@ -707,7 +706,6 @@ pub(crate) async fn dead_letter<S>(
         // （review #216 F7，INVARIANT DIPORT-DLX-SUMMARY-STATIC-01）。
         DeadLetterSummary::new(error_summary),
         num_attempts,
-        WritableDeadLetterSource::Consumer,
         msg.metadata.clone(),
     );
 
@@ -1538,7 +1536,8 @@ mod tests {
     struct CapturedDlxRecord {
         tenant_id: String,
         message_id: String,
-        domain: String,
+        producer_domain: String,
+        consumer_domain: Option<String>,
         consumer_group: Option<String>,
         error_summary: String,
         num_attempts: u32,
@@ -1578,7 +1577,8 @@ mod tests {
             self.written.lock().unwrap().push(CapturedDlxRecord {
                 tenant_id: record.tenant().to_string(),
                 message_id: record.message_id().to_string(),
-                domain: record.domain().to_string(),
+                producer_domain: record.producer_domain().to_string(),
+                consumer_domain: record.consumer_domain().map(str::to_string),
                 consumer_group: record.consumer_group().map(str::to_string),
                 error_summary: record.error_summary().to_string(),
                 num_attempts: record.num_attempts(),
@@ -1936,8 +1936,13 @@ mod tests {
         #[allow(clippy::unwrap_used)]
         let record = dlx_store.last_record().unwrap();
         assert_eq!(
-            record.domain, "audit",
-            "DLX attribution remains consumer domain"
+            record.producer_domain, "identity",
+            "DLX attribution preserves the producer domain"
+        );
+        assert_eq!(
+            record.consumer_domain.as_deref(),
+            Some("audit"),
+            "DLX attribution records the consumer domain independently"
         );
         assert_eq!(idem.commit_count(), 1, "verified DLX should commit");
     }

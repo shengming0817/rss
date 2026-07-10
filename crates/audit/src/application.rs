@@ -25,27 +25,23 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use bootstrap::{Domain, KernelError, Registry, SubscriberHandler, SubscriberHandlerError};
+use bootstrap::{Domain, KernelError, Registry};
 use consistency::ConsumerGroup;
 use diport::Message;
-use futures::future::BoxFuture;
-use generated::event::SubscriptionSpec;
+use generated::event::EventSpec;
 use generated::event::identity_v1::{
     policy_updated::{
         IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
-        IdentityPolicyUpdatedPayloadChangeKind, SUBSCRIPTIONS as POLICY_UPDATED_SUBSCRIPTIONS,
+        IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
     },
     role_assigned::{
         IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind,
-        SUBSCRIPTIONS as ROLE_ASSIGNED_SUBSCRIPTIONS,
+        SPEC as ROLE_ASSIGNED_SPEC,
     },
     role_revoked::{
-        IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind,
-        SUBSCRIPTIONS as ROLE_REVOKED_SUBSCRIPTIONS,
+        IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind, SPEC as ROLE_REVOKED_SPEC,
     },
-    session_created::{
-        IdentitySessionCreatedPayload, SUBSCRIPTIONS as SESSION_CREATED_SUBSCRIPTIONS,
-    },
+    session_created::{IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC},
 };
 use generated::http::audit_v1::{
     list_entries::{
@@ -68,7 +64,7 @@ use crate::ports::{
     DynAuditAdminRepo, DynAuditRepo, TenantRepoScope,
 };
 
-/// 本域 DomainId（在 generated `SUBSCRIPTIONS` 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
+/// 本域 DomainId（在 generated event spec 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
 const AUDIT_DOMAIN: &str = "audit";
 
 /// 审计资源类别（const literal）。
@@ -784,61 +780,6 @@ async fn authorize_read_projection(
     .ok_or(AuditReadAuthError::Forbidden)
 }
 
-/// session-created 订阅 handler：解码 payload → 构造 [`AuditRecord`] → [`AuditRepo`] 原子封链 append。
-///
-/// crate-local（私有 module 内，不外泄）；持 `Arc<DynAuditRepo>`（erased provider）：clone 进 `Send` future
-/// （被 eventexec 分发 / `tokio::spawn`；`AuditRepo` Send 变体 future + `DynAuditRepo: Send + Sync` ⇒ `Arc` 可跨 await 持有）。
-pub(crate) struct SessionCreatedAuditHandler {
-    repo: Arc<DynAuditRepo<'static>>,
-}
-
-impl SessionCreatedAuditHandler {
-    /// 注入审计仓储构造。
-    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
-        Self { repo }
-    }
-}
-
-impl SubscriberHandler for SessionCreatedAuditHandler {
-    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-        let repo = self.repo.clone();
-        Box::pin(async move {
-            let msg_id = message.id.as_str().to_string();
-            let record = audit_record_from_event_message(AuditEventKind::SessionCreated, &message)
-                .map_err(|e| {
-                    reject_audit_event_record_error(&msg_id, "identity.session-created", e)
-                })?;
-            let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
-            repo.append(scope, record).await.map_err(|e| {
-                tracing::error!(
-                    domain = AUDIT_DOMAIN,
-                    message_id = msg_id.as_str(),
-                    error_chain = %secure::redact_error(&e),
-                    "audit handler: chain append failed"
-                );
-                // 瞬态：append/存储失败可恢复，走 ConsumerBase 有界重试预算，不首投即 DLX（F2/C2）。
-                SubscriberHandlerError::transient(e)
-            })?;
-            Ok(())
-        })
-    }
-}
-
-fn reject_audit_event_record_error(
-    message_id: &str,
-    event_name: &'static str,
-    error: AuditEventRecordError,
-) -> SubscriberHandlerError {
-    tracing::error!(
-        domain = AUDIT_DOMAIN,
-        message_id,
-        event_name,
-        error_chain = %secure::redact_error(&error),
-        "audit handler: event payload rejected"
-    );
-    SubscriberHandlerError::permanent(error)
-}
-
 fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &str) -> String {
     format!("tenant/{tenant}/role/{role_id}/subject/{subject}")
 }
@@ -893,108 +834,14 @@ fn policy_updated_actor_kind(kind: IdentityPolicyUpdatedPayloadActorKind) -> voc
     }
 }
 
-async fn append_audit_record(
-    repo: Arc<DynAuditRepo<'static>>,
-    message_id: &str,
-    event_name: &'static str,
-    record: AuditRecord,
-) -> Result<(), SubscriberHandlerError> {
-    let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
-    repo.append(scope, record).await.map_err(|e| {
-        tracing::error!(
-            domain = AUDIT_DOMAIN,
-            message_id,
-            event_name,
-            error_chain = %secure::redact_error(&e),
-            "audit handler: chain append failed"
-        );
-        SubscriberHandlerError::transient(e)
-    })
-}
-
-pub(crate) struct RoleAssignedAuditHandler {
-    repo: Arc<DynAuditRepo<'static>>,
-}
-
-impl RoleAssignedAuditHandler {
-    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
-        Self { repo }
-    }
-}
-
-impl SubscriberHandler for RoleAssignedAuditHandler {
-    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-        let repo = self.repo.clone();
-        Box::pin(async move {
-            let msg_id = message.id.as_str().to_string();
-            let record = audit_record_from_event_message(AuditEventKind::RoleAssigned, &message)
-                .map_err(|e| {
-                    reject_audit_event_record_error(&msg_id, "identity.role-assigned", e)
-                })?;
-            append_audit_record(repo, &msg_id, "identity.role-assigned", record).await
-        })
-    }
-}
-
-pub(crate) struct RoleRevokedAuditHandler {
-    repo: Arc<DynAuditRepo<'static>>,
-}
-
-impl RoleRevokedAuditHandler {
-    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
-        Self { repo }
-    }
-}
-
-impl SubscriberHandler for RoleRevokedAuditHandler {
-    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-        let repo = self.repo.clone();
-        Box::pin(async move {
-            let msg_id = message.id.as_str().to_string();
-            let record = audit_record_from_event_message(AuditEventKind::RoleRevoked, &message)
-                .map_err(|e| {
-                    reject_audit_event_record_error(&msg_id, "identity.role-revoked", e)
-                })?;
-            append_audit_record(repo, &msg_id, "identity.role-revoked", record).await
-        })
-    }
-}
-
-pub(crate) struct PolicyUpdatedAuditHandler {
-    repo: Arc<DynAuditRepo<'static>>,
-}
-
-impl PolicyUpdatedAuditHandler {
-    pub(crate) fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
-        Self { repo }
-    }
-}
-
-impl SubscriberHandler for PolicyUpdatedAuditHandler {
-    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), SubscriberHandlerError>> {
-        let repo = self.repo.clone();
-        Box::pin(async move {
-            let msg_id = message.id.as_str().to_string();
-            let record = audit_record_from_event_message(AuditEventKind::PolicyUpdated, &message)
-                .map_err(|e| {
-                reject_audit_event_record_error(&msg_id, "identity.policy-updated", e)
-            })?;
-            append_audit_record(repo, &msg_id, "identity.policy-updated", record).await
-        })
-    }
-}
-
-fn register_audit_subscriber(
-    reg: &mut Registry,
-    specs: &[SubscriptionSpec],
-    handler: Box<dyn SubscriberHandler>,
-) -> Result<(), KernelError> {
-    let spec = specs
+fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(), KernelError> {
+    let spec = event
+        .subscriptions()
         .iter()
-        .find(|s| s.consumer == AUDIT_DOMAIN)
+        .find(|s| s.consumer() == AUDIT_DOMAIN)
         .ok_or(KernelError::Subscriber)?;
-    let group = ConsumerGroup::parse(spec.group).map_err(|_| KernelError::Subscriber)?;
-    reg.subscriber(spec.contract_id, spec.topic, spec.consumer, group, handler)
+    let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
+    reg.subscriber(event.contract_id(), event.topic(), spec.consumer(), group)
 }
 
 /// audit 域 bootstrap 生命周期：声明 session-created 订阅 + admin 读路由组。
@@ -1042,28 +889,12 @@ where
     S: diport::AuditSink + Send + Sync + 'static,
 {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
-        // 订阅元数据（contract_id / topic / group）单源自 generated `SUBSCRIPTIONS`（契约 codegen 派生）——
+        // 订阅元数据（contract_id / topic / group）单源自 generated event `SPEC`（契约 codegen 派生）——
         // 不手维护平行 const，消除 contract↔consumer 漂移（AI-HARD：codegen funnel + golden）。缺失即 fail-fast。
-        register_audit_subscriber(
-            reg,
-            SESSION_CREATED_SUBSCRIPTIONS,
-            Box::new(SessionCreatedAuditHandler::new(self.repo.clone())),
-        )?;
-        register_audit_subscriber(
-            reg,
-            ROLE_ASSIGNED_SUBSCRIPTIONS,
-            Box::new(RoleAssignedAuditHandler::new(self.repo.clone())),
-        )?;
-        register_audit_subscriber(
-            reg,
-            ROLE_REVOKED_SUBSCRIPTIONS,
-            Box::new(RoleRevokedAuditHandler::new(self.repo.clone())),
-        )?;
-        register_audit_subscriber(
-            reg,
-            POLICY_UPDATED_SUBSCRIPTIONS,
-            Box::new(PolicyUpdatedAuditHandler::new(self.repo.clone())),
-        )?;
+        register_audit_subscriber(reg, SESSION_CREATED_SPEC)?;
+        register_audit_subscriber(reg, ROLE_ASSIGNED_SPEC)?;
+        register_audit_subscriber(reg, ROLE_REVOKED_SPEC)?;
+        register_audit_subscriber(reg, POLICY_UPDATED_SPEC)?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
         let scoped_repo = self.repo.clone();
@@ -1175,6 +1006,16 @@ mod tests {
         Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(keyed_hasher(
             0x5a,
         ))))
+    }
+
+    async fn append_event_for_test(
+        repo: Arc<DynAuditRepo<'static>>,
+        kind: AuditEventKind,
+        message: Message,
+    ) -> Result<(), String> {
+        let record = audit_record_from_event_message(kind, &message).map_err(|e| e.to_string())?;
+        let scope = TenantRepoScope::from_authenticated_tenant(record.tenant);
+        repo.append(scope, record).await.map_err(|e| e.to_string())
     }
 
     #[derive(Clone, Default)]
@@ -1560,14 +1401,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn session_created_appends_verifiable_chain_entry() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
-                "m-1",
-                payload_bytes(CANON_SUBJECT, CANON_TENANT),
-            ))
-            .await
-            .expect("handle ok");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m-1", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+        )
+        .await
+        .expect("handle ok");
 
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let page = AuditPage {
@@ -1594,14 +1434,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn role_assigned_appends_audit_entry() {
         let repo = repo();
-        let handler = RoleAssignedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
-                "m-role-assigned",
-                role_assigned_payload_bytes(),
-            ))
-            .await
-            .expect("handle ok");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::RoleAssigned,
+            Message::new("m-role-assigned", role_assigned_payload_bytes()),
+        )
+        .await
+        .expect("handle ok");
 
         let listed = repo
             .list(
@@ -1629,11 +1468,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn role_revoked_appends_audit_entry() {
         let repo = repo();
-        let handler = RoleRevokedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new("m-role-revoked", role_revoked_payload_bytes()))
-            .await
-            .expect("handle ok");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::RoleRevoked,
+            Message::new("m-role-revoked", role_revoked_payload_bytes()),
+        )
+        .await
+        .expect("handle ok");
 
         let listed = repo
             .list(
@@ -1661,14 +1502,16 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn policy_updated_appends_audit_entry() {
         let repo = repo();
-        let handler = PolicyUpdatedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::PolicyUpdated,
+            Message::new(
                 "m-policy-updated",
                 policy_updated_payload_bytes(IdentityPolicyUpdatedPayloadChangeKind::Updated),
-            ))
-            .await
-            .expect("handle ok");
+            ),
+        )
+        .await
+        .expect("handle ok");
 
         let listed = repo
             .list(
@@ -1698,17 +1541,19 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn role_assigned_preserves_service_actor_kind() {
         let repo = repo();
-        let handler = RoleAssignedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::RoleAssigned,
+            Message::new(
                 "m-role-assigned-service",
                 role_assigned_payload_bytes_for_kind(
                     "target-subject",
                     IdentityRoleAssignedPayloadActorKind::Service,
                 ),
-            ))
-            .await
-            .expect("handle ok");
+            ),
+        )
+        .await
+        .expect("handle ok");
 
         let listed = repo
             .list(
@@ -1731,21 +1576,26 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn role_binding_audit_resource_distinguishes_subjects() {
         let repo = repo();
-        let handler = RoleAssignedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::RoleAssigned,
+            Message::new(
                 "m-role-assigned-a",
                 role_assigned_payload_bytes_for("target-a"),
-            ))
-            .await
-            .expect("handle target-a");
-        handler
-            .handle(Message::new(
+            ),
+        )
+        .await
+        .expect("handle target-a");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::RoleAssigned,
+            Message::new(
                 "m-role-assigned-b",
                 role_assigned_payload_bytes_for("target-b"),
-            ))
-            .await
-            .expect("handle target-b");
+            ),
+        )
+        .await
+        .expect("handle target-b");
 
         let listed = repo
             .list(
@@ -1769,10 +1619,12 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rejects_undecodable_payload_without_appending() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        let result = handler
-            .handle(Message::new("m-bad", b"not json".to_vec()))
-            .await;
+        let result = append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m-bad", b"not json".to_vec()),
+        )
+        .await;
         assert!(result.is_err());
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let listed = repo
@@ -1792,13 +1644,12 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rejects_non_canonical_tenant() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        let result = handler
-            .handle(Message::new(
-                "m",
-                payload_bytes(CANON_SUBJECT, "NOT-A-UUID"),
-            ))
-            .await;
+        let result = append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m", payload_bytes(CANON_SUBJECT, "NOT-A-UUID")),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1807,14 +1658,17 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn rejects_non_canonical_subject() {
-        let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        // 手造 payload JSON：subject 为非 UUID 字符串（typed `uuid::Uuid` 字段无法表达，故走 raw bytes）。
+        let repo = repo(); // 手造 payload JSON：subject 为非 UUID 字符串（typed `uuid::Uuid` 字段无法表达，故走 raw bytes）。
         let raw = format!(
             r#"{{"sessionId":"{CANON_SESSION}","subject":"alice-not-uuid","tenantId":"{CANON_TENANT}","occurredAt":1700000000}}"#
         )
         .into_bytes();
-        let result = handler.handle(Message::new("m", raw)).await;
+        let result = append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m", raw),
+        )
+        .await;
         assert!(
             result.is_err(),
             "非 UUID subject 须在 wire decode 层 fail-closed 拒（typed uuid::Uuid 不可表达）"
@@ -1826,13 +1680,15 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rejects_non_canonical_session_id() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        let result = handler
-            .handle(Message::new(
+        let result = append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new(
                 "m",
                 payload_bytes_with_session(CANON_SUBJECT, CANON_TENANT, "sess-not-uuid"),
-            ))
-            .await;
+            ),
+        )
+        .await;
         assert!(result.is_err(), "非 canonical session_id 须拒绝");
         // anti-vacuity：未 append（链空）。
         let listed = repo
@@ -1874,25 +1730,31 @@ mod tests {
         assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.method, "GET");
         let subs = reg.drain_subscribers();
         let expected: Vec<_> = [
-            SESSION_CREATED_SUBSCRIPTIONS,
-            ROLE_ASSIGNED_SUBSCRIPTIONS,
-            ROLE_REVOKED_SUBSCRIPTIONS,
-            POLICY_UPDATED_SUBSCRIPTIONS,
+            SESSION_CREATED_SPEC,
+            ROLE_ASSIGNED_SPEC,
+            ROLE_REVOKED_SPEC,
+            POLICY_UPDATED_SPEC,
         ]
         .into_iter()
-        .flat_map(|specs| specs.iter())
+        .flat_map(|event| {
+            event
+                .subscriptions()
+                .iter()
+                .filter(|spec| spec.consumer() == AUDIT_DOMAIN)
+                .map(move |spec| (event, spec))
+        })
         .collect();
         assert_eq!(expected.len(), 4);
         assert_eq!(subs.len(), expected.len());
-        for spec in expected {
-            assert_eq!(spec.consumer, AUDIT_DOMAIN);
+        for (event, spec) in expected {
+            assert_eq!(spec.consumer(), AUDIT_DOMAIN);
             assert!(
-                subs.iter().any(|sub| sub.contract_id == spec.contract_id
-                    && sub.topic == spec.topic
-                    && sub.consumer == spec.consumer
-                    && sub.group.as_str() == spec.group),
+                subs.iter().any(|sub| sub.contract_id == event.contract_id()
+                    && sub.topic == event.topic()
+                    && sub.consumer == spec.consumer()
+                    && sub.group.as_str() == spec.group()),
                 "missing subscriber binding for {}",
-                spec.contract_id
+                event.contract_id()
             );
         }
     }
@@ -2176,15 +2038,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn admin_read_lists_tenant_entries_with_pagination() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
         for _ in 0..3 {
-            handler
-                .handle(Message::new(
-                    "m",
-                    payload_bytes(CANON_SUBJECT, CANON_TENANT),
-                ))
-                .await
-                .expect("append");
+            append_event_for_test(
+                repo.clone(),
+                AuditEventKind::SessionCreated,
+                Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            )
+            .await
+            .expect("append");
         }
         // 首页 limit=2 → 2 条 + hasMore + nextCursor。
         let (status, body) = get_entries(repo.clone(), "?limit=2").await;
@@ -2213,13 +2074,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn admin_read_masks_sensitive_fields_by_default() {
         let repo = repo();
-        SessionCreatedAuditHandler::new(repo.clone())
-            .handle(Message::new(
-                "m",
-                payload_bytes(CANON_SUBJECT, CANON_TENANT),
-            ))
-            .await
-            .expect("append");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+        )
+        .await
+        .expect("append");
 
         let (status, body) = get_entries(repo, "").await;
 
@@ -2254,13 +2115,13 @@ mod tests {
             vocab::ProjectionField::AuditTenantId,
         ];
         let repo = repo();
-        SessionCreatedAuditHandler::new(repo.clone())
-            .handle(Message::new(
-                "m",
-                payload_bytes(CANON_SUBJECT, CANON_TENANT),
-            ))
-            .await
-            .expect("append");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+        )
+        .await
+        .expect("append");
         let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
         let admin = principal(vocab::PrincipalKind::Admin, Some(tenant));
 
@@ -2363,14 +2224,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_requires_super_admin_and_writes_audit() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
-        handler
-            .handle(Message::new(
-                "m",
-                payload_bytes(CANON_SUBJECT, CANON_TENANT),
-            ))
-            .await
-            .expect("append");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+        )
+        .await
+        .expect("append");
         let sink = RecordingAuditSink::ok();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
 
@@ -2411,13 +2271,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_via_sealed_router_uses_generated_request_context() {
         let repo = repo();
-        SessionCreatedAuditHandler::new(repo.clone())
-            .handle(Message::new(
-                "m",
-                payload_bytes(CANON_SUBJECT, CANON_TENANT),
-            ))
-            .await
-            .expect("append");
+        append_event_for_test(
+            repo.clone(),
+            AuditEventKind::SessionCreated,
+            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+        )
+        .await
+        .expect("append");
         let sink = RecordingAuditSink::ok();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
         let domain = AuditDomain::new(
@@ -2780,15 +2640,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_cursor_is_bound_to_requested_tenant() {
         let repo = repo();
-        let handler = SessionCreatedAuditHandler::new(repo.clone());
         for _ in 0..2 {
-            handler
-                .handle(Message::new(
-                    "m",
-                    payload_bytes(CANON_SUBJECT, CANON_TENANT),
-                ))
-                .await
-                .expect("append");
+            append_event_for_test(
+                repo.clone(),
+                AuditEventKind::SessionCreated,
+                Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            )
+            .await
+            .expect("append");
         }
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
         let (status, body) = get_target_entries_with(

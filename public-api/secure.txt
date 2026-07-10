@@ -16,26 +16,6 @@ impl core::marker::Unpin for secure::aead::AeadError
 impl core::marker::UnsafeUnpin for secure::aead::AeadError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::AeadError
 impl core::panic::unwind_safe::UnwindSafe for secure::aead::AeadError
-impl<T, U> core::convert::Into<U> for secure::aead::AeadError where U: core::convert::From<T>
-pub fn secure::aead::AeadError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::aead::AeadError where U: core::convert::Into<T>
-pub type secure::aead::AeadError::Error = core::convert::Infallible
-pub fn secure::aead::AeadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::aead::AeadError where U: core::convert::TryFrom<T>
-pub type secure::aead::AeadError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::aead::AeadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::aead::AeadError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::aead::AeadError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::aead::AeadError where T: 'static + ?core::marker::Sized
-pub fn secure::aead::AeadError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::aead::AeadError where T: ?core::marker::Sized
-pub fn secure::aead::AeadError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::aead::AeadError where T: ?core::marker::Sized
-pub fn secure::aead::AeadError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::aead::AeadError
-pub fn secure::aead::AeadError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::aead::AeadError
-pub type secure::aead::AeadError::Output = T
 pub struct secure::aead::Plaintext(_)
 impl secure::aead::Plaintext
 pub fn secure::aead::Plaintext::expose(&self) -> &[u8]
@@ -49,24 +29,6 @@ impl core::marker::Unpin for secure::aead::Plaintext
 impl core::marker::UnsafeUnpin for secure::aead::Plaintext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Plaintext
 impl core::panic::unwind_safe::UnwindSafe for secure::aead::Plaintext
-impl<T, U> core::convert::Into<U> for secure::aead::Plaintext where U: core::convert::From<T>
-pub fn secure::aead::Plaintext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::aead::Plaintext where U: core::convert::Into<T>
-pub type secure::aead::Plaintext::Error = core::convert::Infallible
-pub fn secure::aead::Plaintext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::aead::Plaintext where U: core::convert::TryFrom<T>
-pub type secure::aead::Plaintext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::aead::Plaintext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::aead::Plaintext where T: 'static + ?core::marker::Sized
-pub fn secure::aead::Plaintext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::aead::Plaintext where T: ?core::marker::Sized
-pub fn secure::aead::Plaintext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::aead::Plaintext where T: ?core::marker::Sized
-pub fn secure::aead::Plaintext::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::aead::Plaintext
-pub fn secure::aead::Plaintext::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::aead::Plaintext
-pub type secure::aead::Plaintext::Output = T
 pub trait secure::aead::Aead
 pub fn secure::aead::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>
 pub fn secure::aead::Aead::seal(&self, &[u8], &secure::protection::DerivedAad) -> core::result::Result<secure::envelope::CiphertextEnvelope, secure::aead::AeadError>
@@ -88,26 +50,6 @@ impl core::marker::Unpin for secure::blind_index::BlindIndexError
 impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexError
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexError
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexError where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndexError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexError where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndexError::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndexError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexError where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndexError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndexError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::blind_index::BlindIndexError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::blind_index::BlindIndexError where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndexError
-pub fn secure::blind_index::BlindIndexError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexError
-pub type secure::blind_index::BlindIndexError::Output = T
 #[non_exhaustive] pub enum secure::blind_index::Transform
 pub secure::blind_index::Transform::DigitsOnly
 pub secure::blind_index::Transform::LastN(usize)
@@ -129,30 +71,6 @@ impl core::marker::Unpin for secure::blind_index::Transform
 impl core::marker::UnsafeUnpin for secure::blind_index::Transform
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::Transform
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::Transform
-impl<T, U> core::convert::Into<U> for secure::blind_index::Transform where U: core::convert::From<T>
-pub fn secure::blind_index::Transform::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::Transform where U: core::convert::Into<T>
-pub type secure::blind_index::Transform::Error = core::convert::Infallible
-pub fn secure::blind_index::Transform::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::Transform where U: core::convert::TryFrom<T>
-pub type secure::blind_index::Transform::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::Transform::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::blind_index::Transform where T: core::clone::Clone
-pub type secure::blind_index::Transform::Owned = T
-pub fn secure::blind_index::Transform::clone_into(&self, &mut T)
-pub fn secure::blind_index::Transform::to_owned(&self) -> T
-impl<T> core::any::Any for secure::blind_index::Transform where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::Transform::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::Transform where T: ?core::marker::Sized
-pub fn secure::blind_index::Transform::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::Transform where T: ?core::marker::Sized
-pub fn secure::blind_index::Transform::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::blind_index::Transform where T: core::clone::Clone
-pub unsafe fn secure::blind_index::Transform::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::blind_index::Transform
-pub fn secure::blind_index::Transform::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::Transform
-pub type secure::blind_index::Transform::Output = T
 pub struct secure::blind_index::BlindIndex<'a>
 impl<'a> secure::blind_index::BlindIndex<'a>
 pub fn secure::blind_index::BlindIndex<'a>::index(&self, &secure::blind_index::BlindIndexKey, &str) -> core::result::Result<secure::blind_index::BlindIndexValue, secure::blind_index::BlindIndexError>
@@ -165,24 +83,6 @@ impl<'a> core::marker::Unpin for secure::blind_index::BlindIndex<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::blind_index::BlindIndex<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndex<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndex<'a>
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndex<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndex<'a>::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndex<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndex<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndex<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::blind_index::BlindIndex<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndex<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndex<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndex<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndex<'a>
-pub fn secure::blind_index::BlindIndex<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndex<'a>
-pub type secure::blind_index::BlindIndex<'a>::Output = T
 pub struct secure::blind_index::BlindIndexKey(_)
 impl secure::blind_index::BlindIndexKey
 pub fn secure::blind_index::BlindIndexKey::from_bytes(impl core::convert::Into<alloc::vec::Vec<u8>>) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
@@ -199,24 +99,6 @@ impl core::marker::Unpin for secure::blind_index::BlindIndexKey
 impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexKey
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexKey
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexKey
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexKey where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndexKey::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexKey where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndexKey::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndexKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexKey where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndexKey::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndexKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::blind_index::BlindIndexKey where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexKey::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexKey::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexKey::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndexKey
-pub fn secure::blind_index::BlindIndexKey::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexKey
-pub type secure::blind_index::BlindIndexKey::Output = T
 pub struct secure::blind_index::BlindIndexValue
 impl secure::blind_index::BlindIndexValue
 pub fn secure::blind_index::BlindIndexValue::as_bytes(&self) -> &[u8]
@@ -233,24 +115,6 @@ impl core::marker::Unpin for secure::blind_index::BlindIndexValue
 impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexValue
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexValue
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexValue
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexValue where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndexValue::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexValue where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndexValue::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndexValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexValue where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndexValue::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndexValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::blind_index::BlindIndexValue where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexValue::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexValue::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexValue::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndexValue
-pub fn secure::blind_index::BlindIndexValue::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexValue
-pub type secure::blind_index::BlindIndexValue::Output = T
 pub struct secure::blind_index::FilterBits(_)
 impl secure::blind_index::FilterBits
 pub const secure::blind_index::FilterBits::DEFAULT: secure::blind_index::FilterBits
@@ -272,30 +136,6 @@ impl core::marker::Unpin for secure::blind_index::FilterBits
 impl core::marker::UnsafeUnpin for secure::blind_index::FilterBits
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::FilterBits
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::FilterBits
-impl<T, U> core::convert::Into<U> for secure::blind_index::FilterBits where U: core::convert::From<T>
-pub fn secure::blind_index::FilterBits::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::FilterBits where U: core::convert::Into<T>
-pub type secure::blind_index::FilterBits::Error = core::convert::Infallible
-pub fn secure::blind_index::FilterBits::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::FilterBits where U: core::convert::TryFrom<T>
-pub type secure::blind_index::FilterBits::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::FilterBits::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::blind_index::FilterBits where T: core::clone::Clone
-pub type secure::blind_index::FilterBits::Owned = T
-pub fn secure::blind_index::FilterBits::clone_into(&self, &mut T)
-pub fn secure::blind_index::FilterBits::to_owned(&self) -> T
-impl<T> core::any::Any for secure::blind_index::FilterBits where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::FilterBits::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
-pub fn secure::blind_index::FilterBits::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
-pub fn secure::blind_index::FilterBits::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::blind_index::FilterBits where T: core::clone::Clone
-pub unsafe fn secure::blind_index::FilterBits::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::blind_index::FilterBits
-pub fn secure::blind_index::FilterBits::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::FilterBits
-pub type secure::blind_index::FilterBits::Output = T
 pub struct secure::blind_index::IndexScope<'a>
 impl<'a> secure::blind_index::IndexScope<'a>
 pub fn secure::blind_index::IndexScope<'a>::new(vocab::tenant::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
@@ -314,30 +154,6 @@ impl<'a> core::marker::Unpin for secure::blind_index::IndexScope<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::blind_index::IndexScope<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::IndexScope<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::IndexScope<'a>
-impl<T, U> core::convert::Into<U> for secure::blind_index::IndexScope<'a> where U: core::convert::From<T>
-pub fn secure::blind_index::IndexScope<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::IndexScope<'a> where U: core::convert::Into<T>
-pub type secure::blind_index::IndexScope<'a>::Error = core::convert::Infallible
-pub fn secure::blind_index::IndexScope<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::IndexScope<'a> where U: core::convert::TryFrom<T>
-pub type secure::blind_index::IndexScope<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::IndexScope<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
-pub type secure::blind_index::IndexScope<'a>::Owned = T
-pub fn secure::blind_index::IndexScope<'a>::clone_into(&self, &mut T)
-pub fn secure::blind_index::IndexScope<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for secure::blind_index::IndexScope<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::IndexScope<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::IndexScope<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::IndexScope<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
-pub unsafe fn secure::blind_index::IndexScope<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::blind_index::IndexScope<'a>
-pub fn secure::blind_index::IndexScope<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::IndexScope<'a>
-pub type secure::blind_index::IndexScope<'a>::Output = T
 pub mod secure::cookie
 #[non_exhaustive] pub enum secure::cookie::CookieError
 pub secure::cookie::CookieError::Malformed
@@ -354,26 +170,6 @@ impl core::marker::Unpin for secure::cookie::CookieError
 impl core::marker::UnsafeUnpin for secure::cookie::CookieError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieError
 impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieError
-impl<T, U> core::convert::Into<U> for secure::cookie::CookieError where U: core::convert::From<T>
-pub fn secure::cookie::CookieError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieError where U: core::convert::Into<T>
-pub type secure::cookie::CookieError::Error = core::convert::Infallible
-pub fn secure::cookie::CookieError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieError where U: core::convert::TryFrom<T>
-pub type secure::cookie::CookieError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::cookie::CookieError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::cookie::CookieError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::cookie::CookieError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::cookie::CookieError where T: 'static + ?core::marker::Sized
-pub fn secure::cookie::CookieError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::cookie::CookieError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::cookie::CookieError
-pub fn secure::cookie::CookieError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::cookie::CookieError
-pub type secure::cookie::CookieError::Output = T
 #[non_exhaustive] pub enum secure::cookie::CookieValueError
 pub secure::cookie::CookieValueError::Empty
 pub secure::cookie::CookieValueError::Format
@@ -389,26 +185,6 @@ impl core::marker::Unpin for secure::cookie::CookieValueError
 impl core::marker::UnsafeUnpin for secure::cookie::CookieValueError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValueError
 impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValueError
-impl<T, U> core::convert::Into<U> for secure::cookie::CookieValueError where U: core::convert::From<T>
-pub fn secure::cookie::CookieValueError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValueError where U: core::convert::Into<T>
-pub type secure::cookie::CookieValueError::Error = core::convert::Infallible
-pub fn secure::cookie::CookieValueError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValueError where U: core::convert::TryFrom<T>
-pub type secure::cookie::CookieValueError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::cookie::CookieValueError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::cookie::CookieValueError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::cookie::CookieValueError where T: 'static + ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::cookie::CookieValueError
-pub fn secure::cookie::CookieValueError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::cookie::CookieValueError
-pub type secure::cookie::CookieValueError::Output = T
 pub struct secure::cookie::CookieValue(_)
 impl secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::as_str(&self) -> &str
@@ -430,30 +206,6 @@ impl core::marker::Unpin for secure::cookie::CookieValue
 impl core::marker::UnsafeUnpin for secure::cookie::CookieValue
 impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValue
 impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValue
-impl<T, U> core::convert::Into<U> for secure::cookie::CookieValue where U: core::convert::From<T>
-pub fn secure::cookie::CookieValue::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValue where U: core::convert::Into<T>
-pub type secure::cookie::CookieValue::Error = core::convert::Infallible
-pub fn secure::cookie::CookieValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValue where U: core::convert::TryFrom<T>
-pub type secure::cookie::CookieValue::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::cookie::CookieValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::cookie::CookieValue where T: core::clone::Clone
-pub type secure::cookie::CookieValue::Owned = T
-pub fn secure::cookie::CookieValue::clone_into(&self, &mut T)
-pub fn secure::cookie::CookieValue::to_owned(&self) -> T
-impl<T> core::any::Any for secure::cookie::CookieValue where T: 'static + ?core::marker::Sized
-pub fn secure::cookie::CookieValue::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValue::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValue::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::cookie::CookieValue where T: core::clone::Clone
-pub unsafe fn secure::cookie::CookieValue::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::cookie::CookieValue
-pub type secure::cookie::CookieValue::Output = T
 pub trait secure::cookie::CookieCodec
 pub fn secure::cookie::CookieCodec::decode(&self, &str) -> core::result::Result<secure::cookie::CookieValue, secure::cookie::CookieError>
 pub fn secure::cookie::CookieCodec::encode(&self, &secure::cookie::CookieValue) -> alloc::string::String
@@ -477,30 +229,6 @@ impl core::marker::Unpin for secure::envelope::CipherAlg
 impl core::marker::UnsafeUnpin for secure::envelope::CipherAlg
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CipherAlg
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CipherAlg
-impl<T, U> core::convert::Into<U> for secure::envelope::CipherAlg where U: core::convert::From<T>
-pub fn secure::envelope::CipherAlg::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::CipherAlg where U: core::convert::Into<T>
-pub type secure::envelope::CipherAlg::Error = core::convert::Infallible
-pub fn secure::envelope::CipherAlg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::CipherAlg where U: core::convert::TryFrom<T>
-pub type secure::envelope::CipherAlg::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::CipherAlg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::envelope::CipherAlg where T: core::clone::Clone
-pub type secure::envelope::CipherAlg::Owned = T
-pub fn secure::envelope::CipherAlg::clone_into(&self, &mut T)
-pub fn secure::envelope::CipherAlg::to_owned(&self) -> T
-impl<T> core::any::Any for secure::envelope::CipherAlg where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::CipherAlg::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
-pub fn secure::envelope::CipherAlg::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
-pub fn secure::envelope::CipherAlg::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::envelope::CipherAlg where T: core::clone::Clone
-pub unsafe fn secure::envelope::CipherAlg::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::envelope::CipherAlg
-pub fn secure::envelope::CipherAlg::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::CipherAlg
-pub type secure::envelope::CipherAlg::Output = T
 #[non_exhaustive] pub enum secure::envelope::EncryptionMode
 pub secure::envelope::EncryptionMode::Deterministic
 pub secure::envelope::EncryptionMode::Randomized
@@ -520,30 +248,6 @@ impl core::marker::Unpin for secure::envelope::EncryptionMode
 impl core::marker::UnsafeUnpin for secure::envelope::EncryptionMode
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EncryptionMode
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EncryptionMode
-impl<T, U> core::convert::Into<U> for secure::envelope::EncryptionMode where U: core::convert::From<T>
-pub fn secure::envelope::EncryptionMode::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::EncryptionMode where U: core::convert::Into<T>
-pub type secure::envelope::EncryptionMode::Error = core::convert::Infallible
-pub fn secure::envelope::EncryptionMode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::EncryptionMode where U: core::convert::TryFrom<T>
-pub type secure::envelope::EncryptionMode::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::EncryptionMode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::envelope::EncryptionMode where T: core::clone::Clone
-pub type secure::envelope::EncryptionMode::Owned = T
-pub fn secure::envelope::EncryptionMode::clone_into(&self, &mut T)
-pub fn secure::envelope::EncryptionMode::to_owned(&self) -> T
-impl<T> core::any::Any for secure::envelope::EncryptionMode where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::EncryptionMode::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
-pub fn secure::envelope::EncryptionMode::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
-pub fn secure::envelope::EncryptionMode::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::envelope::EncryptionMode where T: core::clone::Clone
-pub unsafe fn secure::envelope::EncryptionMode::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::envelope::EncryptionMode
-pub fn secure::envelope::EncryptionMode::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::EncryptionMode
-pub type secure::envelope::EncryptionMode::Output = T
 #[non_exhaustive] pub enum secure::envelope::EnvelopeError
 pub secure::envelope::EnvelopeError::AlgModeMismatch
 pub secure::envelope::EnvelopeError::EmptyKeyId
@@ -559,26 +263,6 @@ impl core::marker::Unpin for secure::envelope::EnvelopeError
 impl core::marker::UnsafeUnpin for secure::envelope::EnvelopeError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EnvelopeError
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EnvelopeError
-impl<T, U> core::convert::Into<U> for secure::envelope::EnvelopeError where U: core::convert::From<T>
-pub fn secure::envelope::EnvelopeError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::EnvelopeError where U: core::convert::Into<T>
-pub type secure::envelope::EnvelopeError::Error = core::convert::Infallible
-pub fn secure::envelope::EnvelopeError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::EnvelopeError where U: core::convert::TryFrom<T>
-pub type secure::envelope::EnvelopeError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::EnvelopeError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::envelope::EnvelopeError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::envelope::EnvelopeError where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::envelope::EnvelopeError
-pub fn secure::envelope::EnvelopeError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::EnvelopeError
-pub type secure::envelope::EnvelopeError::Output = T
 pub struct secure::envelope::CiphertextEnvelope
 impl secure::envelope::CiphertextEnvelope
 pub fn secure::envelope::CiphertextEnvelope::aad(&self) -> &secure::protection::ProtectionAad
@@ -608,30 +292,6 @@ impl core::marker::Unpin for secure::envelope::CiphertextEnvelope
 impl core::marker::UnsafeUnpin for secure::envelope::CiphertextEnvelope
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CiphertextEnvelope
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CiphertextEnvelope
-impl<T, U> core::convert::Into<U> for secure::envelope::CiphertextEnvelope where U: core::convert::From<T>
-pub fn secure::envelope::CiphertextEnvelope::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::CiphertextEnvelope where U: core::convert::Into<T>
-pub type secure::envelope::CiphertextEnvelope::Error = core::convert::Infallible
-pub fn secure::envelope::CiphertextEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::CiphertextEnvelope where U: core::convert::TryFrom<T>
-pub type secure::envelope::CiphertextEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::CiphertextEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
-pub type secure::envelope::CiphertextEnvelope::Owned = T
-pub fn secure::envelope::CiphertextEnvelope::clone_into(&self, &mut T)
-pub fn secure::envelope::CiphertextEnvelope::to_owned(&self) -> T
-impl<T> core::any::Any for secure::envelope::CiphertextEnvelope where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::CiphertextEnvelope::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
-pub fn secure::envelope::CiphertextEnvelope::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
-pub fn secure::envelope::CiphertextEnvelope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
-pub unsafe fn secure::envelope::CiphertextEnvelope::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::envelope::CiphertextEnvelope
-pub fn secure::envelope::CiphertextEnvelope::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::CiphertextEnvelope
-pub type secure::envelope::CiphertextEnvelope::Output = T
 pub const secure::envelope::ENVELOPE_VERSION: u8
 pub mod secure::password
 #[non_exhaustive] pub enum secure::password::PasswordError
@@ -648,26 +308,6 @@ impl core::marker::Unpin for secure::password::PasswordError
 impl core::marker::UnsafeUnpin for secure::password::PasswordError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordError
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordError
-impl<T, U> core::convert::Into<U> for secure::password::PasswordError where U: core::convert::From<T>
-pub fn secure::password::PasswordError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::password::PasswordError where U: core::convert::Into<T>
-pub type secure::password::PasswordError::Error = core::convert::Infallible
-pub fn secure::password::PasswordError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::password::PasswordError where U: core::convert::TryFrom<T>
-pub type secure::password::PasswordError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::password::PasswordError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::password::PasswordError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::password::PasswordError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::password::PasswordError where T: 'static + ?core::marker::Sized
-pub fn secure::password::PasswordError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::password::PasswordError where T: ?core::marker::Sized
-pub fn secure::password::PasswordError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::password::PasswordError where T: ?core::marker::Sized
-pub fn secure::password::PasswordError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::password::PasswordError
-pub fn secure::password::PasswordError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::password::PasswordError
-pub type secure::password::PasswordError::Output = T
 pub struct secure::password::PasswordHash(_)
 impl secure::password::PasswordHash
 pub fn secure::password::PasswordHash::as_str(&self) -> &str
@@ -689,30 +329,6 @@ impl core::marker::Unpin for secure::password::PasswordHash
 impl core::marker::UnsafeUnpin for secure::password::PasswordHash
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordHash
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordHash
-impl<T, U> core::convert::Into<U> for secure::password::PasswordHash where U: core::convert::From<T>
-pub fn secure::password::PasswordHash::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::password::PasswordHash where U: core::convert::Into<T>
-pub type secure::password::PasswordHash::Error = core::convert::Infallible
-pub fn secure::password::PasswordHash::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::password::PasswordHash where U: core::convert::TryFrom<T>
-pub type secure::password::PasswordHash::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::password::PasswordHash::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::password::PasswordHash where T: core::clone::Clone
-pub type secure::password::PasswordHash::Owned = T
-pub fn secure::password::PasswordHash::clone_into(&self, &mut T)
-pub fn secure::password::PasswordHash::to_owned(&self) -> T
-impl<T> core::any::Any for secure::password::PasswordHash where T: 'static + ?core::marker::Sized
-pub fn secure::password::PasswordHash::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::password::PasswordHash where T: ?core::marker::Sized
-pub fn secure::password::PasswordHash::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::password::PasswordHash where T: ?core::marker::Sized
-pub fn secure::password::PasswordHash::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::password::PasswordHash where T: core::clone::Clone
-pub unsafe fn secure::password::PasswordHash::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::password::PasswordHash
-pub type secure::password::PasswordHash::Output = T
 pub fn secure::password::hash_password(&str) -> core::result::Result<secure::password::PasswordHash, secure::password::PasswordError>
 pub fn secure::password::verify_password(&str, &secure::password::PasswordHash) -> bool
 pub fn secure::password::verify_password_constant_time(&str, core::option::Option<&secure::password::PasswordHash>) -> bool
@@ -733,26 +349,6 @@ impl core::marker::Unpin for secure::protection::AadError
 impl core::marker::UnsafeUnpin for secure::protection::AadError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::AadError
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::AadError
-impl<T, U> core::convert::Into<U> for secure::protection::AadError where U: core::convert::From<T>
-pub fn secure::protection::AadError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::AadError where U: core::convert::Into<T>
-pub type secure::protection::AadError::Error = core::convert::Infallible
-pub fn secure::protection::AadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::AadError where U: core::convert::TryFrom<T>
-pub type secure::protection::AadError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::AadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::protection::AadError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::protection::AadError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::protection::AadError where T: 'static + ?core::marker::Sized
-pub fn secure::protection::AadError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::AadError where T: ?core::marker::Sized
-pub fn secure::protection::AadError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::AadError where T: ?core::marker::Sized
-pub fn secure::protection::AadError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::protection::AadError
-pub fn secure::protection::AadError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::AadError
-pub type secure::protection::AadError::Output = T
 pub struct secure::protection::DerivedAad
 impl secure::protection::DerivedAad
 pub fn secure::protection::DerivedAad::as_canonical_bytes(&self) -> &[u8]
@@ -768,30 +364,6 @@ impl core::marker::Unpin for secure::protection::DerivedAad
 impl core::marker::UnsafeUnpin for secure::protection::DerivedAad
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
-impl<T, U> core::convert::Into<U> for secure::protection::DerivedAad where U: core::convert::From<T>
-pub fn secure::protection::DerivedAad::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::DerivedAad where U: core::convert::Into<T>
-pub type secure::protection::DerivedAad::Error = core::convert::Infallible
-pub fn secure::protection::DerivedAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::DerivedAad where U: core::convert::TryFrom<T>
-pub type secure::protection::DerivedAad::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::DerivedAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::protection::DerivedAad where T: core::clone::Clone
-pub type secure::protection::DerivedAad::Owned = T
-pub fn secure::protection::DerivedAad::clone_into(&self, &mut T)
-pub fn secure::protection::DerivedAad::to_owned(&self) -> T
-impl<T> core::any::Any for secure::protection::DerivedAad where T: 'static + ?core::marker::Sized
-pub fn secure::protection::DerivedAad::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
-pub fn secure::protection::DerivedAad::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
-pub fn secure::protection::DerivedAad::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::protection::DerivedAad where T: core::clone::Clone
-pub unsafe fn secure::protection::DerivedAad::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::protection::DerivedAad
-pub fn secure::protection::DerivedAad::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::DerivedAad
-pub type secure::protection::DerivedAad::Output = T
 pub struct secure::protection::ProtectionAad
 impl secure::protection::ProtectionAad
 pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
@@ -810,30 +382,6 @@ impl core::marker::Unpin for secure::protection::ProtectionAad
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionAad
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionAad
-impl<T, U> core::convert::Into<U> for secure::protection::ProtectionAad where U: core::convert::From<T>
-pub fn secure::protection::ProtectionAad::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionAad where U: core::convert::Into<T>
-pub type secure::protection::ProtectionAad::Error = core::convert::Infallible
-pub fn secure::protection::ProtectionAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionAad where U: core::convert::TryFrom<T>
-pub type secure::protection::ProtectionAad::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::ProtectionAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionAad where T: core::clone::Clone
-pub type secure::protection::ProtectionAad::Owned = T
-pub fn secure::protection::ProtectionAad::clone_into(&self, &mut T)
-pub fn secure::protection::ProtectionAad::to_owned(&self) -> T
-impl<T> core::any::Any for secure::protection::ProtectionAad where T: 'static + ?core::marker::Sized
-pub fn secure::protection::ProtectionAad::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionAad::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionAad::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::protection::ProtectionAad where T: core::clone::Clone
-pub unsafe fn secure::protection::ProtectionAad::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::protection::ProtectionAad
-pub fn secure::protection::ProtectionAad::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::ProtectionAad
-pub type secure::protection::ProtectionAad::Output = T
 pub struct secure::protection::ProtectionContext
 impl secure::protection::ProtectionContext
 pub fn secure::protection::ProtectionContext::authenticated_request(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
@@ -854,30 +402,6 @@ impl core::marker::Unpin for secure::protection::ProtectionContext
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
-impl<T, U> core::convert::Into<U> for secure::protection::ProtectionContext where U: core::convert::From<T>
-pub fn secure::protection::ProtectionContext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionContext where U: core::convert::Into<T>
-pub type secure::protection::ProtectionContext::Error = core::convert::Infallible
-pub fn secure::protection::ProtectionContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionContext where U: core::convert::TryFrom<T>
-pub type secure::protection::ProtectionContext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::ProtectionContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionContext where T: core::clone::Clone
-pub type secure::protection::ProtectionContext::Owned = T
-pub fn secure::protection::ProtectionContext::clone_into(&self, &mut T)
-pub fn secure::protection::ProtectionContext::to_owned(&self) -> T
-impl<T> core::any::Any for secure::protection::ProtectionContext where T: 'static + ?core::marker::Sized
-pub fn secure::protection::ProtectionContext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionContext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionContext::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::protection::ProtectionContext where T: core::clone::Clone
-pub unsafe fn secure::protection::ProtectionContext::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::protection::ProtectionContext
-pub fn secure::protection::ProtectionContext::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::ProtectionContext
-pub type secure::protection::ProtectionContext::Output = T
 pub mod secure::redaction
 #[non_exhaustive] pub enum secure::redaction::PiiKind
 pub secure::redaction::PiiKind::Address
@@ -903,30 +427,6 @@ impl core::marker::Unpin for secure::redaction::PiiKind
 impl core::marker::UnsafeUnpin for secure::redaction::PiiKind
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::PiiKind
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::PiiKind
-impl<T, U> core::convert::Into<U> for secure::redaction::PiiKind where U: core::convert::From<T>
-pub fn secure::redaction::PiiKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::PiiKind where U: core::convert::Into<T>
-pub type secure::redaction::PiiKind::Error = core::convert::Infallible
-pub fn secure::redaction::PiiKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::PiiKind where U: core::convert::TryFrom<T>
-pub type secure::redaction::PiiKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::PiiKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::PiiKind where T: core::clone::Clone
-pub type secure::redaction::PiiKind::Owned = T
-pub fn secure::redaction::PiiKind::clone_into(&self, &mut T)
-pub fn secure::redaction::PiiKind::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::PiiKind where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::PiiKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::PiiKind where T: ?core::marker::Sized
-pub fn secure::redaction::PiiKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::PiiKind where T: ?core::marker::Sized
-pub fn secure::redaction::PiiKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::PiiKind where T: core::clone::Clone
-pub unsafe fn secure::redaction::PiiKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::PiiKind
-pub fn secure::redaction::PiiKind::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::PiiKind
-pub type secure::redaction::PiiKind::Output = T
 #[non_exhaustive] pub enum secure::redaction::RedactScope
 pub secure::redaction::RedactScope::ServerLog
 pub secure::redaction::RedactScope::Wire
@@ -946,30 +446,6 @@ impl core::marker::Unpin for secure::redaction::RedactScope
 impl core::marker::UnsafeUnpin for secure::redaction::RedactScope
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactScope
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactScope
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactScope where U: core::convert::From<T>
-pub fn secure::redaction::RedactScope::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactScope where U: core::convert::Into<T>
-pub type secure::redaction::RedactScope::Error = core::convert::Infallible
-pub fn secure::redaction::RedactScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactScope where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactScope::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactScope where T: core::clone::Clone
-pub type secure::redaction::RedactScope::Owned = T
-pub fn secure::redaction::RedactScope::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactScope::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactScope where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactScope::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
-pub fn secure::redaction::RedactScope::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
-pub fn secure::redaction::RedactScope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactScope where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactScope::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactScope
-pub fn secure::redaction::RedactScope::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactScope
-pub type secure::redaction::RedactScope::Output = T
 pub enum secure::redaction::RedactValue<'a>
 pub secure::redaction::RedactValue::Absent
 pub secure::redaction::RedactValue::Bool(bool)
@@ -994,30 +470,6 @@ impl<'a> core::marker::Unpin for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::RedactValue<'a>
 impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactValue<'a>
 impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactValue<'a>
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactValue<'a> where U: core::convert::From<T>
-pub fn secure::redaction::RedactValue<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactValue<'a> where U: core::convert::Into<T>
-pub type secure::redaction::RedactValue<'a>::Error = core::convert::Infallible
-pub fn secure::redaction::RedactValue<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactValue<'a> where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactValue<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactValue<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactValue<'a> where T: core::clone::Clone
-pub type secure::redaction::RedactValue<'a>::Owned = T
-pub fn secure::redaction::RedactValue<'a>::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactValue<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactValue<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactValue<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactValue<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::RedactValue<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactValue<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::RedactValue<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactValue<'a> where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactValue<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactValue<'a>
-pub fn secure::redaction::RedactValue<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactValue<'a>
-pub type secure::redaction::RedactValue<'a>::Output = T
 #[non_exhaustive] pub enum secure::redaction::RedactionHashError
 pub secure::redaction::RedactionHashError::KeyTooShort
 impl core::clone::Clone for secure::redaction::RedactionHashError
@@ -1039,32 +491,6 @@ impl core::marker::Unpin for secure::redaction::RedactionHashError
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionHashError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionHashError
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionHashError
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionHashError where U: core::convert::From<T>
-pub fn secure::redaction::RedactionHashError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionHashError where U: core::convert::Into<T>
-pub type secure::redaction::RedactionHashError::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionHashError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionHashError where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionHashError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionHashError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactionHashError where T: core::clone::Clone
-pub type secure::redaction::RedactionHashError::Owned = T
-pub fn secure::redaction::RedactionHashError::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactionHashError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::redaction::RedactionHashError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::redaction::RedactionHashError where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionHashError where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionHashError where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactionHashError where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactionHashError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactionHashError
-pub fn secure::redaction::RedactionHashError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionHashError
-pub type secure::redaction::RedactionHashError::Output = T
 #[non_exhaustive] pub enum secure::redaction::RedactionMode
 pub secure::redaction::RedactionMode::Drop
 pub secure::redaction::RedactionMode::EmailMask
@@ -1087,30 +513,6 @@ impl core::marker::Unpin for secure::redaction::RedactionMode
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionMode
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionMode where U: core::convert::From<T>
-pub fn secure::redaction::RedactionMode::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionMode where U: core::convert::Into<T>
-pub type secure::redaction::RedactionMode::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionMode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionMode where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionMode::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionMode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactionMode where T: core::clone::Clone
-pub type secure::redaction::RedactionMode::Owned = T
-pub fn secure::redaction::RedactionMode::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactionMode::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactionMode where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionMode::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionMode where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionMode::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionMode where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionMode::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactionMode where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactionMode::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactionMode
-pub fn secure::redaction::RedactionMode::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionMode
-pub type secure::redaction::RedactionMode::Output = T
 #[non_exhaustive] pub enum secure::redaction::Sensitivity
 pub secure::redaction::Sensitivity::Internal
 pub secure::redaction::Sensitivity::Pii(secure::redaction::PiiKind)
@@ -1135,30 +537,6 @@ impl core::marker::Unpin for secure::redaction::Sensitivity
 impl core::marker::UnsafeUnpin for secure::redaction::Sensitivity
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Sensitivity
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Sensitivity
-impl<T, U> core::convert::Into<U> for secure::redaction::Sensitivity where U: core::convert::From<T>
-pub fn secure::redaction::Sensitivity::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::Sensitivity where U: core::convert::Into<T>
-pub type secure::redaction::Sensitivity::Error = core::convert::Infallible
-pub fn secure::redaction::Sensitivity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::Sensitivity where U: core::convert::TryFrom<T>
-pub type secure::redaction::Sensitivity::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::Sensitivity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::Sensitivity where T: core::clone::Clone
-pub type secure::redaction::Sensitivity::Owned = T
-pub fn secure::redaction::Sensitivity::clone_into(&self, &mut T)
-pub fn secure::redaction::Sensitivity::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::Sensitivity where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::Sensitivity::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::Sensitivity where T: ?core::marker::Sized
-pub fn secure::redaction::Sensitivity::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::Sensitivity where T: ?core::marker::Sized
-pub fn secure::redaction::Sensitivity::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::Sensitivity where T: core::clone::Clone
-pub unsafe fn secure::redaction::Sensitivity::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::Sensitivity
-pub type secure::redaction::Sensitivity::Output = T
 pub struct secure::redaction::FieldRedaction<'a>
 pub secure::redaction::FieldRedaction::mode: secure::redaction::RedactionMode
 pub secure::redaction::FieldRedaction::name: core::option::Option<&'static str>
@@ -1175,30 +553,6 @@ impl<'a> core::marker::Unpin for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::FieldRedaction<'a>
 impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::FieldRedaction<'a>
 impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::FieldRedaction<'a>
-impl<T, U> core::convert::Into<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::From<T>
-pub fn secure::redaction::FieldRedaction<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::Into<T>
-pub type secure::redaction::FieldRedaction<'a>::Error = core::convert::Infallible
-pub fn secure::redaction::FieldRedaction<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::TryFrom<T>
-pub type secure::redaction::FieldRedaction<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::FieldRedaction<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::FieldRedaction<'a> where T: core::clone::Clone
-pub type secure::redaction::FieldRedaction<'a>::Owned = T
-pub fn secure::redaction::FieldRedaction<'a>::clone_into(&self, &mut T)
-pub fn secure::redaction::FieldRedaction<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::FieldRedaction<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::FieldRedaction<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::FieldRedaction<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::FieldRedaction<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::FieldRedaction<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::FieldRedaction<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::FieldRedaction<'a> where T: core::clone::Clone
-pub unsafe fn secure::redaction::FieldRedaction<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::FieldRedaction<'a>
-pub fn secure::redaction::FieldRedaction<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::FieldRedaction<'a>
-pub type secure::redaction::FieldRedaction<'a>::Output = T
 pub struct secure::redaction::LastError(_)
 impl secure::redaction::LastError
 pub fn secure::redaction::LastError::as_str(&self) -> &str
@@ -1221,32 +575,6 @@ impl core::marker::Unpin for secure::redaction::LastError
 impl core::marker::UnsafeUnpin for secure::redaction::LastError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::LastError
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::LastError
-impl<T, U> core::convert::Into<U> for secure::redaction::LastError where U: core::convert::From<T>
-pub fn secure::redaction::LastError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::LastError where U: core::convert::Into<T>
-pub type secure::redaction::LastError::Error = core::convert::Infallible
-pub fn secure::redaction::LastError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::LastError where U: core::convert::TryFrom<T>
-pub type secure::redaction::LastError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::LastError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::LastError where T: core::clone::Clone
-pub type secure::redaction::LastError::Owned = T
-pub fn secure::redaction::LastError::clone_into(&self, &mut T)
-pub fn secure::redaction::LastError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::redaction::LastError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::redaction::LastError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::redaction::LastError where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::LastError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::LastError where T: ?core::marker::Sized
-pub fn secure::redaction::LastError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::LastError where T: ?core::marker::Sized
-pub fn secure::redaction::LastError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::LastError where T: core::clone::Clone
-pub unsafe fn secure::redaction::LastError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::LastError
-pub fn secure::redaction::LastError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::LastError
-pub type secure::redaction::LastError::Output = T
 pub struct secure::redaction::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
@@ -1267,32 +595,6 @@ impl core::marker::Unpin for secure::redaction::Redacted
 impl core::marker::UnsafeUnpin for secure::redaction::Redacted
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Redacted
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Redacted
-impl<T, U> core::convert::Into<U> for secure::redaction::Redacted where U: core::convert::From<T>
-pub fn secure::redaction::Redacted::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::Redacted where U: core::convert::Into<T>
-pub type secure::redaction::Redacted::Error = core::convert::Infallible
-pub fn secure::redaction::Redacted::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::Redacted where U: core::convert::TryFrom<T>
-pub type secure::redaction::Redacted::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::Redacted::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::Redacted where T: core::clone::Clone
-pub type secure::redaction::Redacted::Owned = T
-pub fn secure::redaction::Redacted::clone_into(&self, &mut T)
-pub fn secure::redaction::Redacted::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::redaction::Redacted where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::redaction::Redacted::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::redaction::Redacted where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::Redacted::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::Redacted where T: ?core::marker::Sized
-pub fn secure::redaction::Redacted::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::Redacted where T: ?core::marker::Sized
-pub fn secure::redaction::Redacted::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::Redacted where T: core::clone::Clone
-pub unsafe fn secure::redaction::Redacted::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::Redacted
-pub fn secure::redaction::Redacted::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::Redacted
-pub type secure::redaction::Redacted::Output = T
 pub struct secure::redaction::RedactionHashKey(_)
 impl secure::redaction::RedactionHashKey
 pub fn secure::redaction::RedactionHashKey::from_bytes(impl core::convert::Into<alloc::vec::Vec<u8>>) -> core::result::Result<Self, secure::redaction::RedactionHashError>
@@ -1309,24 +611,6 @@ impl core::marker::Unpin for secure::redaction::RedactionHashKey
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionHashKey
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionHashKey
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionHashKey
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionHashKey where U: core::convert::From<T>
-pub fn secure::redaction::RedactionHashKey::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionHashKey where U: core::convert::Into<T>
-pub type secure::redaction::RedactionHashKey::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionHashKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionHashKey where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionHashKey::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionHashKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::redaction::RedactionHashKey where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionHashKey::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionHashKey where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashKey::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionHashKey where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashKey::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::redaction::RedactionHashKey
-pub fn secure::redaction::RedactionHashKey::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionHashKey
-pub type secure::redaction::RedactionHashKey::Output = T
 pub trait secure::redaction::Redact
 pub fn secure::redaction::Redact::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl secure::redaction::Redact for secure::blind_index::BlindIndexKey
@@ -1407,24 +691,6 @@ impl core::marker::Unpin for secure::refresh::OpaqueToken
 impl core::marker::UnsafeUnpin for secure::refresh::OpaqueToken
 impl core::panic::unwind_safe::RefUnwindSafe for secure::refresh::OpaqueToken
 impl core::panic::unwind_safe::UnwindSafe for secure::refresh::OpaqueToken
-impl<T, U> core::convert::Into<U> for secure::refresh::OpaqueToken where U: core::convert::From<T>
-pub fn secure::refresh::OpaqueToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::refresh::OpaqueToken where U: core::convert::Into<T>
-pub type secure::refresh::OpaqueToken::Error = core::convert::Infallible
-pub fn secure::refresh::OpaqueToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::refresh::OpaqueToken where U: core::convert::TryFrom<T>
-pub type secure::refresh::OpaqueToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::refresh::OpaqueToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::refresh::OpaqueToken where T: 'static + ?core::marker::Sized
-pub fn secure::refresh::OpaqueToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::refresh::OpaqueToken where T: ?core::marker::Sized
-pub fn secure::refresh::OpaqueToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::refresh::OpaqueToken where T: ?core::marker::Sized
-pub fn secure::refresh::OpaqueToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::refresh::OpaqueToken
-pub fn secure::refresh::OpaqueToken::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::refresh::OpaqueToken
-pub type secure::refresh::OpaqueToken::Output = T
 pub fn secure::refresh::digest(&str) -> [u8; 32]
 pub mod secure::transport_endpoint
 pub enum secure::transport_endpoint::PlaintextEndpointPolicy
@@ -1447,30 +713,6 @@ impl core::marker::Unpin for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::From<T>
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::Into<T>
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Owned = T
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::to_owned(&self) -> T
-impl<T> core::any::Any for secure::transport_endpoint::PlaintextEndpointPolicy where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::PlaintextEndpointPolicy
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::PlaintextEndpointPolicy
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Output = T
 #[non_exhaustive] pub enum secure::transport_endpoint::TransportEndpointError
 pub secure::transport_endpoint::TransportEndpointError::AmqpHostRequired
 pub secure::transport_endpoint::TransportEndpointError::AmqpVhostRequired
@@ -1509,26 +751,6 @@ impl core::marker::Unpin for secure::transport_endpoint::TransportEndpointError
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::TransportEndpointError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::TransportEndpointError
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::TransportEndpointError
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::From<T>
-pub fn secure::transport_endpoint::TransportEndpointError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::Into<T>
-pub type secure::transport_endpoint::TransportEndpointError::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::TransportEndpointError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::TransportEndpointError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::TransportEndpointError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::transport_endpoint::TransportEndpointError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::TransportEndpointError where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::transport_endpoint::TransportEndpointError
-pub fn secure::transport_endpoint::TransportEndpointError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::TransportEndpointError
-pub type secure::transport_endpoint::TransportEndpointError::Output = T
 pub struct secure::transport_endpoint::AmqpEndpoint(_)
 impl secure::transport_endpoint::AmqpEndpoint
 pub fn secure::transport_endpoint::AmqpEndpoint::expose(&self) -> &str
@@ -1550,32 +772,6 @@ impl core::marker::Unpin for secure::transport_endpoint::AmqpEndpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::AmqpEndpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::AmqpEndpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::AmqpEndpoint
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::From<T>
-pub fn secure::transport_endpoint::AmqpEndpoint::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::Into<T>
-pub type secure::transport_endpoint::AmqpEndpoint::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::AmqpEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::AmqpEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::AmqpEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
-pub type secure::transport_endpoint::AmqpEndpoint::Owned = T
-pub fn secure::transport_endpoint::AmqpEndpoint::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::AmqpEndpoint::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::transport_endpoint::AmqpEndpoint where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::AmqpEndpoint where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::AmqpEndpoint::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::AmqpEndpoint
-pub fn secure::transport_endpoint::AmqpEndpoint::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::AmqpEndpoint
-pub type secure::transport_endpoint::AmqpEndpoint::Output = T
 pub struct secure::transport_endpoint::RedisEndpoint(_)
 impl secure::transport_endpoint::RedisEndpoint
 pub fn secure::transport_endpoint::RedisEndpoint::expose(&self) -> &str
@@ -1597,32 +793,6 @@ impl core::marker::Unpin for secure::transport_endpoint::RedisEndpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::RedisEndpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::RedisEndpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::RedisEndpoint
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::From<T>
-pub fn secure::transport_endpoint::RedisEndpoint::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::Into<T>
-pub type secure::transport_endpoint::RedisEndpoint::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::RedisEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::RedisEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::RedisEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
-pub type secure::transport_endpoint::RedisEndpoint::Owned = T
-pub fn secure::transport_endpoint::RedisEndpoint::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::RedisEndpoint::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::transport_endpoint::RedisEndpoint where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::RedisEndpoint where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::RedisEndpoint::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::RedisEndpoint
-pub fn secure::transport_endpoint::RedisEndpoint::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::RedisEndpoint
-pub type secure::transport_endpoint::RedisEndpoint::Output = T
 pub struct secure::transport_endpoint::S3Endpoint(_)
 impl secure::transport_endpoint::S3Endpoint
 pub fn secure::transport_endpoint::S3Endpoint::expose(&self) -> &str
@@ -1645,32 +815,6 @@ impl core::marker::Unpin for secure::transport_endpoint::S3Endpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::S3Endpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::S3Endpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::S3Endpoint
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::From<T>
-pub fn secure::transport_endpoint::S3Endpoint::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::Into<T>
-pub type secure::transport_endpoint::S3Endpoint::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::S3Endpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::S3Endpoint::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::S3Endpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
-pub type secure::transport_endpoint::S3Endpoint::Owned = T
-pub fn secure::transport_endpoint::S3Endpoint::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::S3Endpoint::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::transport_endpoint::S3Endpoint where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::S3Endpoint where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::S3Endpoint::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::S3Endpoint
-pub fn secure::transport_endpoint::S3Endpoint::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::S3Endpoint
-pub type secure::transport_endpoint::S3Endpoint::Output = T
 #[non_exhaustive] pub enum secure::AadError
 pub secure::AadError::EmptyDimension
 impl core::error::Error for secure::protection::AadError
@@ -1685,26 +829,6 @@ impl core::marker::Unpin for secure::protection::AadError
 impl core::marker::UnsafeUnpin for secure::protection::AadError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::AadError
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::AadError
-impl<T, U> core::convert::Into<U> for secure::protection::AadError where U: core::convert::From<T>
-pub fn secure::protection::AadError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::AadError where U: core::convert::Into<T>
-pub type secure::protection::AadError::Error = core::convert::Infallible
-pub fn secure::protection::AadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::AadError where U: core::convert::TryFrom<T>
-pub type secure::protection::AadError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::AadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::protection::AadError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::protection::AadError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::protection::AadError where T: 'static + ?core::marker::Sized
-pub fn secure::protection::AadError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::AadError where T: ?core::marker::Sized
-pub fn secure::protection::AadError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::AadError where T: ?core::marker::Sized
-pub fn secure::protection::AadError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::protection::AadError
-pub fn secure::protection::AadError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::AadError
-pub type secure::protection::AadError::Output = T
 #[non_exhaustive] pub enum secure::AeadError
 pub secure::AeadError::Open
 pub secure::AeadError::Seal
@@ -1720,26 +844,6 @@ impl core::marker::Unpin for secure::aead::AeadError
 impl core::marker::UnsafeUnpin for secure::aead::AeadError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::AeadError
 impl core::panic::unwind_safe::UnwindSafe for secure::aead::AeadError
-impl<T, U> core::convert::Into<U> for secure::aead::AeadError where U: core::convert::From<T>
-pub fn secure::aead::AeadError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::aead::AeadError where U: core::convert::Into<T>
-pub type secure::aead::AeadError::Error = core::convert::Infallible
-pub fn secure::aead::AeadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::aead::AeadError where U: core::convert::TryFrom<T>
-pub type secure::aead::AeadError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::aead::AeadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::aead::AeadError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::aead::AeadError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::aead::AeadError where T: 'static + ?core::marker::Sized
-pub fn secure::aead::AeadError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::aead::AeadError where T: ?core::marker::Sized
-pub fn secure::aead::AeadError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::aead::AeadError where T: ?core::marker::Sized
-pub fn secure::aead::AeadError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::aead::AeadError
-pub fn secure::aead::AeadError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::aead::AeadError
-pub type secure::aead::AeadError::Output = T
 #[non_exhaustive] pub enum secure::BlindIndexError
 pub secure::BlindIndexError::EmptyPlaintext
 pub secure::BlindIndexError::EmptyScope
@@ -1757,26 +861,6 @@ impl core::marker::Unpin for secure::blind_index::BlindIndexError
 impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexError
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexError
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexError where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndexError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexError where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndexError::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndexError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexError where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndexError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndexError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::blind_index::BlindIndexError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::blind_index::BlindIndexError where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexError where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndexError
-pub fn secure::blind_index::BlindIndexError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexError
-pub type secure::blind_index::BlindIndexError::Output = T
 #[non_exhaustive] pub enum secure::CipherAlg
 pub secure::CipherAlg::Aes256Gcm
 pub secure::CipherAlg::Aes256Siv
@@ -1796,30 +880,6 @@ impl core::marker::Unpin for secure::envelope::CipherAlg
 impl core::marker::UnsafeUnpin for secure::envelope::CipherAlg
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CipherAlg
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CipherAlg
-impl<T, U> core::convert::Into<U> for secure::envelope::CipherAlg where U: core::convert::From<T>
-pub fn secure::envelope::CipherAlg::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::CipherAlg where U: core::convert::Into<T>
-pub type secure::envelope::CipherAlg::Error = core::convert::Infallible
-pub fn secure::envelope::CipherAlg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::CipherAlg where U: core::convert::TryFrom<T>
-pub type secure::envelope::CipherAlg::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::CipherAlg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::envelope::CipherAlg where T: core::clone::Clone
-pub type secure::envelope::CipherAlg::Owned = T
-pub fn secure::envelope::CipherAlg::clone_into(&self, &mut T)
-pub fn secure::envelope::CipherAlg::to_owned(&self) -> T
-impl<T> core::any::Any for secure::envelope::CipherAlg where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::CipherAlg::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
-pub fn secure::envelope::CipherAlg::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::CipherAlg where T: ?core::marker::Sized
-pub fn secure::envelope::CipherAlg::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::envelope::CipherAlg where T: core::clone::Clone
-pub unsafe fn secure::envelope::CipherAlg::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::envelope::CipherAlg
-pub fn secure::envelope::CipherAlg::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::CipherAlg
-pub type secure::envelope::CipherAlg::Output = T
 #[non_exhaustive] pub enum secure::CookieError
 pub secure::CookieError::Malformed
 pub secure::CookieError::Signature
@@ -1835,26 +895,6 @@ impl core::marker::Unpin for secure::cookie::CookieError
 impl core::marker::UnsafeUnpin for secure::cookie::CookieError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieError
 impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieError
-impl<T, U> core::convert::Into<U> for secure::cookie::CookieError where U: core::convert::From<T>
-pub fn secure::cookie::CookieError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieError where U: core::convert::Into<T>
-pub type secure::cookie::CookieError::Error = core::convert::Infallible
-pub fn secure::cookie::CookieError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieError where U: core::convert::TryFrom<T>
-pub type secure::cookie::CookieError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::cookie::CookieError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::cookie::CookieError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::cookie::CookieError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::cookie::CookieError where T: 'static + ?core::marker::Sized
-pub fn secure::cookie::CookieError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::cookie::CookieError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::cookie::CookieError
-pub fn secure::cookie::CookieError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::cookie::CookieError
-pub type secure::cookie::CookieError::Output = T
 #[non_exhaustive] pub enum secure::CookieValueError
 pub secure::CookieValueError::Empty
 pub secure::CookieValueError::Format
@@ -1870,26 +910,6 @@ impl core::marker::Unpin for secure::cookie::CookieValueError
 impl core::marker::UnsafeUnpin for secure::cookie::CookieValueError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValueError
 impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValueError
-impl<T, U> core::convert::Into<U> for secure::cookie::CookieValueError where U: core::convert::From<T>
-pub fn secure::cookie::CookieValueError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValueError where U: core::convert::Into<T>
-pub type secure::cookie::CookieValueError::Error = core::convert::Infallible
-pub fn secure::cookie::CookieValueError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValueError where U: core::convert::TryFrom<T>
-pub type secure::cookie::CookieValueError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::cookie::CookieValueError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::cookie::CookieValueError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::cookie::CookieValueError where T: 'static + ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValueError where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValueError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::cookie::CookieValueError
-pub fn secure::cookie::CookieValueError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::cookie::CookieValueError
-pub type secure::cookie::CookieValueError::Output = T
 #[non_exhaustive] pub enum secure::EncryptionMode
 pub secure::EncryptionMode::Deterministic
 pub secure::EncryptionMode::Randomized
@@ -1909,30 +929,6 @@ impl core::marker::Unpin for secure::envelope::EncryptionMode
 impl core::marker::UnsafeUnpin for secure::envelope::EncryptionMode
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EncryptionMode
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EncryptionMode
-impl<T, U> core::convert::Into<U> for secure::envelope::EncryptionMode where U: core::convert::From<T>
-pub fn secure::envelope::EncryptionMode::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::EncryptionMode where U: core::convert::Into<T>
-pub type secure::envelope::EncryptionMode::Error = core::convert::Infallible
-pub fn secure::envelope::EncryptionMode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::EncryptionMode where U: core::convert::TryFrom<T>
-pub type secure::envelope::EncryptionMode::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::EncryptionMode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::envelope::EncryptionMode where T: core::clone::Clone
-pub type secure::envelope::EncryptionMode::Owned = T
-pub fn secure::envelope::EncryptionMode::clone_into(&self, &mut T)
-pub fn secure::envelope::EncryptionMode::to_owned(&self) -> T
-impl<T> core::any::Any for secure::envelope::EncryptionMode where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::EncryptionMode::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
-pub fn secure::envelope::EncryptionMode::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::EncryptionMode where T: ?core::marker::Sized
-pub fn secure::envelope::EncryptionMode::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::envelope::EncryptionMode where T: core::clone::Clone
-pub unsafe fn secure::envelope::EncryptionMode::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::envelope::EncryptionMode
-pub fn secure::envelope::EncryptionMode::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::EncryptionMode
-pub type secure::envelope::EncryptionMode::Output = T
 #[non_exhaustive] pub enum secure::EnvelopeError
 pub secure::EnvelopeError::AlgModeMismatch
 pub secure::EnvelopeError::EmptyKeyId
@@ -1948,26 +944,6 @@ impl core::marker::Unpin for secure::envelope::EnvelopeError
 impl core::marker::UnsafeUnpin for secure::envelope::EnvelopeError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::EnvelopeError
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::EnvelopeError
-impl<T, U> core::convert::Into<U> for secure::envelope::EnvelopeError where U: core::convert::From<T>
-pub fn secure::envelope::EnvelopeError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::EnvelopeError where U: core::convert::Into<T>
-pub type secure::envelope::EnvelopeError::Error = core::convert::Infallible
-pub fn secure::envelope::EnvelopeError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::EnvelopeError where U: core::convert::TryFrom<T>
-pub type secure::envelope::EnvelopeError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::EnvelopeError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::envelope::EnvelopeError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::envelope::EnvelopeError where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::EnvelopeError where T: ?core::marker::Sized
-pub fn secure::envelope::EnvelopeError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::envelope::EnvelopeError
-pub fn secure::envelope::EnvelopeError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::EnvelopeError
-pub type secure::envelope::EnvelopeError::Output = T
 #[non_exhaustive] pub enum secure::PasswordError
 pub secure::PasswordError::Hash
 impl core::error::Error for secure::password::PasswordError
@@ -1982,26 +958,6 @@ impl core::marker::Unpin for secure::password::PasswordError
 impl core::marker::UnsafeUnpin for secure::password::PasswordError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordError
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordError
-impl<T, U> core::convert::Into<U> for secure::password::PasswordError where U: core::convert::From<T>
-pub fn secure::password::PasswordError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::password::PasswordError where U: core::convert::Into<T>
-pub type secure::password::PasswordError::Error = core::convert::Infallible
-pub fn secure::password::PasswordError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::password::PasswordError where U: core::convert::TryFrom<T>
-pub type secure::password::PasswordError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::password::PasswordError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::password::PasswordError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::password::PasswordError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::password::PasswordError where T: 'static + ?core::marker::Sized
-pub fn secure::password::PasswordError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::password::PasswordError where T: ?core::marker::Sized
-pub fn secure::password::PasswordError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::password::PasswordError where T: ?core::marker::Sized
-pub fn secure::password::PasswordError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::password::PasswordError
-pub fn secure::password::PasswordError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::password::PasswordError
-pub type secure::password::PasswordError::Output = T
 #[non_exhaustive] pub enum secure::PiiKind
 pub secure::PiiKind::Address
 pub secure::PiiKind::Email
@@ -2026,30 +982,6 @@ impl core::marker::Unpin for secure::redaction::PiiKind
 impl core::marker::UnsafeUnpin for secure::redaction::PiiKind
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::PiiKind
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::PiiKind
-impl<T, U> core::convert::Into<U> for secure::redaction::PiiKind where U: core::convert::From<T>
-pub fn secure::redaction::PiiKind::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::PiiKind where U: core::convert::Into<T>
-pub type secure::redaction::PiiKind::Error = core::convert::Infallible
-pub fn secure::redaction::PiiKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::PiiKind where U: core::convert::TryFrom<T>
-pub type secure::redaction::PiiKind::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::PiiKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::PiiKind where T: core::clone::Clone
-pub type secure::redaction::PiiKind::Owned = T
-pub fn secure::redaction::PiiKind::clone_into(&self, &mut T)
-pub fn secure::redaction::PiiKind::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::PiiKind where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::PiiKind::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::PiiKind where T: ?core::marker::Sized
-pub fn secure::redaction::PiiKind::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::PiiKind where T: ?core::marker::Sized
-pub fn secure::redaction::PiiKind::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::PiiKind where T: core::clone::Clone
-pub unsafe fn secure::redaction::PiiKind::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::PiiKind
-pub fn secure::redaction::PiiKind::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::PiiKind
-pub type secure::redaction::PiiKind::Output = T
 pub enum secure::PlaintextEndpointPolicy
 pub secure::PlaintextEndpointPolicy::AllowDevContainer
 pub secure::PlaintextEndpointPolicy::AllowLoopback
@@ -2070,30 +1002,6 @@ impl core::marker::Unpin for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::PlaintextEndpointPolicy
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::From<T>
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::Into<T>
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::PlaintextEndpointPolicy where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Owned = T
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::to_owned(&self) -> T
-impl<T> core::any::Any for secure::transport_endpoint::PlaintextEndpointPolicy where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::PlaintextEndpointPolicy where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::PlaintextEndpointPolicy where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::PlaintextEndpointPolicy::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::PlaintextEndpointPolicy
-pub fn secure::transport_endpoint::PlaintextEndpointPolicy::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::PlaintextEndpointPolicy
-pub type secure::transport_endpoint::PlaintextEndpointPolicy::Output = T
 #[non_exhaustive] pub enum secure::RedactScope
 pub secure::RedactScope::ServerLog
 pub secure::RedactScope::Wire
@@ -2113,30 +1021,6 @@ impl core::marker::Unpin for secure::redaction::RedactScope
 impl core::marker::UnsafeUnpin for secure::redaction::RedactScope
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactScope
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactScope
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactScope where U: core::convert::From<T>
-pub fn secure::redaction::RedactScope::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactScope where U: core::convert::Into<T>
-pub type secure::redaction::RedactScope::Error = core::convert::Infallible
-pub fn secure::redaction::RedactScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactScope where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactScope::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactScope where T: core::clone::Clone
-pub type secure::redaction::RedactScope::Owned = T
-pub fn secure::redaction::RedactScope::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactScope::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactScope where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactScope::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
-pub fn secure::redaction::RedactScope::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactScope where T: ?core::marker::Sized
-pub fn secure::redaction::RedactScope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactScope where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactScope::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactScope
-pub fn secure::redaction::RedactScope::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactScope
-pub type secure::redaction::RedactScope::Output = T
 pub enum secure::RedactValue<'a>
 pub secure::RedactValue::Absent
 pub secure::RedactValue::Bool(bool)
@@ -2161,30 +1045,6 @@ impl<'a> core::marker::Unpin for secure::redaction::RedactValue<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::RedactValue<'a>
 impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactValue<'a>
 impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactValue<'a>
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactValue<'a> where U: core::convert::From<T>
-pub fn secure::redaction::RedactValue<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactValue<'a> where U: core::convert::Into<T>
-pub type secure::redaction::RedactValue<'a>::Error = core::convert::Infallible
-pub fn secure::redaction::RedactValue<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactValue<'a> where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactValue<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactValue<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactValue<'a> where T: core::clone::Clone
-pub type secure::redaction::RedactValue<'a>::Owned = T
-pub fn secure::redaction::RedactValue<'a>::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactValue<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactValue<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactValue<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactValue<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::RedactValue<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactValue<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::RedactValue<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactValue<'a> where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactValue<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactValue<'a>
-pub fn secure::redaction::RedactValue<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactValue<'a>
-pub type secure::redaction::RedactValue<'a>::Output = T
 #[non_exhaustive] pub enum secure::RedactionHashError
 pub secure::RedactionHashError::KeyTooShort
 impl core::clone::Clone for secure::redaction::RedactionHashError
@@ -2206,32 +1066,6 @@ impl core::marker::Unpin for secure::redaction::RedactionHashError
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionHashError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionHashError
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionHashError
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionHashError where U: core::convert::From<T>
-pub fn secure::redaction::RedactionHashError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionHashError where U: core::convert::Into<T>
-pub type secure::redaction::RedactionHashError::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionHashError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionHashError where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionHashError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionHashError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactionHashError where T: core::clone::Clone
-pub type secure::redaction::RedactionHashError::Owned = T
-pub fn secure::redaction::RedactionHashError::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactionHashError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::redaction::RedactionHashError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::redaction::RedactionHashError where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionHashError where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionHashError where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactionHashError where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactionHashError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactionHashError
-pub fn secure::redaction::RedactionHashError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionHashError
-pub type secure::redaction::RedactionHashError::Output = T
 #[non_exhaustive] pub enum secure::RedactionMode
 pub secure::RedactionMode::Drop
 pub secure::RedactionMode::EmailMask
@@ -2254,30 +1088,6 @@ impl core::marker::Unpin for secure::redaction::RedactionMode
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionMode
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionMode where U: core::convert::From<T>
-pub fn secure::redaction::RedactionMode::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionMode where U: core::convert::Into<T>
-pub type secure::redaction::RedactionMode::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionMode::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionMode where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionMode::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionMode::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::RedactionMode where T: core::clone::Clone
-pub type secure::redaction::RedactionMode::Owned = T
-pub fn secure::redaction::RedactionMode::clone_into(&self, &mut T)
-pub fn secure::redaction::RedactionMode::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::RedactionMode where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionMode::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionMode where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionMode::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionMode where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionMode::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::RedactionMode where T: core::clone::Clone
-pub unsafe fn secure::redaction::RedactionMode::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::RedactionMode
-pub fn secure::redaction::RedactionMode::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionMode
-pub type secure::redaction::RedactionMode::Output = T
 #[non_exhaustive] pub enum secure::Sensitivity
 pub secure::Sensitivity::Internal
 pub secure::Sensitivity::Pii(secure::redaction::PiiKind)
@@ -2302,30 +1112,6 @@ impl core::marker::Unpin for secure::redaction::Sensitivity
 impl core::marker::UnsafeUnpin for secure::redaction::Sensitivity
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Sensitivity
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Sensitivity
-impl<T, U> core::convert::Into<U> for secure::redaction::Sensitivity where U: core::convert::From<T>
-pub fn secure::redaction::Sensitivity::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::Sensitivity where U: core::convert::Into<T>
-pub type secure::redaction::Sensitivity::Error = core::convert::Infallible
-pub fn secure::redaction::Sensitivity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::Sensitivity where U: core::convert::TryFrom<T>
-pub type secure::redaction::Sensitivity::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::Sensitivity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::Sensitivity where T: core::clone::Clone
-pub type secure::redaction::Sensitivity::Owned = T
-pub fn secure::redaction::Sensitivity::clone_into(&self, &mut T)
-pub fn secure::redaction::Sensitivity::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::Sensitivity where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::Sensitivity::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::Sensitivity where T: ?core::marker::Sized
-pub fn secure::redaction::Sensitivity::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::Sensitivity where T: ?core::marker::Sized
-pub fn secure::redaction::Sensitivity::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::Sensitivity where T: core::clone::Clone
-pub unsafe fn secure::redaction::Sensitivity::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::Sensitivity
-pub fn secure::redaction::Sensitivity::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::Sensitivity
-pub type secure::redaction::Sensitivity::Output = T
 #[non_exhaustive] pub enum secure::Transform
 pub secure::Transform::DigitsOnly
 pub secure::Transform::LastN(usize)
@@ -2347,30 +1133,6 @@ impl core::marker::Unpin for secure::blind_index::Transform
 impl core::marker::UnsafeUnpin for secure::blind_index::Transform
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::Transform
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::Transform
-impl<T, U> core::convert::Into<U> for secure::blind_index::Transform where U: core::convert::From<T>
-pub fn secure::blind_index::Transform::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::Transform where U: core::convert::Into<T>
-pub type secure::blind_index::Transform::Error = core::convert::Infallible
-pub fn secure::blind_index::Transform::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::Transform where U: core::convert::TryFrom<T>
-pub type secure::blind_index::Transform::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::Transform::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::blind_index::Transform where T: core::clone::Clone
-pub type secure::blind_index::Transform::Owned = T
-pub fn secure::blind_index::Transform::clone_into(&self, &mut T)
-pub fn secure::blind_index::Transform::to_owned(&self) -> T
-impl<T> core::any::Any for secure::blind_index::Transform where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::Transform::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::Transform where T: ?core::marker::Sized
-pub fn secure::blind_index::Transform::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::Transform where T: ?core::marker::Sized
-pub fn secure::blind_index::Transform::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::blind_index::Transform where T: core::clone::Clone
-pub unsafe fn secure::blind_index::Transform::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::blind_index::Transform
-pub fn secure::blind_index::Transform::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::Transform
-pub type secure::blind_index::Transform::Output = T
 #[non_exhaustive] pub enum secure::TransportEndpointError
 pub secure::TransportEndpointError::AmqpHostRequired
 pub secure::TransportEndpointError::AmqpVhostRequired
@@ -2409,26 +1171,6 @@ impl core::marker::Unpin for secure::transport_endpoint::TransportEndpointError
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::TransportEndpointError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::TransportEndpointError
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::TransportEndpointError
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::From<T>
-pub fn secure::transport_endpoint::TransportEndpointError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::Into<T>
-pub type secure::transport_endpoint::TransportEndpointError::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::TransportEndpointError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::TransportEndpointError where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::TransportEndpointError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::TransportEndpointError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::string::ToString for secure::transport_endpoint::TransportEndpointError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::TransportEndpointError where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::TransportEndpointError where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::TransportEndpointError::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::transport_endpoint::TransportEndpointError
-pub fn secure::transport_endpoint::TransportEndpointError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::TransportEndpointError
-pub type secure::transport_endpoint::TransportEndpointError::Output = T
 pub struct secure::AmqpEndpoint(_)
 impl secure::transport_endpoint::AmqpEndpoint
 pub fn secure::transport_endpoint::AmqpEndpoint::expose(&self) -> &str
@@ -2450,32 +1192,6 @@ impl core::marker::Unpin for secure::transport_endpoint::AmqpEndpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::AmqpEndpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::AmqpEndpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::AmqpEndpoint
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::From<T>
-pub fn secure::transport_endpoint::AmqpEndpoint::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::Into<T>
-pub type secure::transport_endpoint::AmqpEndpoint::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::AmqpEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::AmqpEndpoint where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::AmqpEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::AmqpEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
-pub type secure::transport_endpoint::AmqpEndpoint::Owned = T
-pub fn secure::transport_endpoint::AmqpEndpoint::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::AmqpEndpoint::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::transport_endpoint::AmqpEndpoint where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::AmqpEndpoint where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::AmqpEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::AmqpEndpoint::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::AmqpEndpoint where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::AmqpEndpoint::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::AmqpEndpoint
-pub fn secure::transport_endpoint::AmqpEndpoint::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::AmqpEndpoint
-pub type secure::transport_endpoint::AmqpEndpoint::Output = T
 pub struct secure::BlindIndex<'a>
 impl<'a> secure::blind_index::BlindIndex<'a>
 pub fn secure::blind_index::BlindIndex<'a>::index(&self, &secure::blind_index::BlindIndexKey, &str) -> core::result::Result<secure::blind_index::BlindIndexValue, secure::blind_index::BlindIndexError>
@@ -2488,24 +1204,6 @@ impl<'a> core::marker::Unpin for secure::blind_index::BlindIndex<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::blind_index::BlindIndex<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndex<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndex<'a>
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndex<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndex<'a>::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndex<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndex<'a> where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndex<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndex<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::blind_index::BlindIndex<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndex<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndex<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndex<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndex<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndex<'a>
-pub fn secure::blind_index::BlindIndex<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndex<'a>
-pub type secure::blind_index::BlindIndex<'a>::Output = T
 pub struct secure::BlindIndexKey(_)
 impl secure::blind_index::BlindIndexKey
 pub fn secure::blind_index::BlindIndexKey::from_bytes(impl core::convert::Into<alloc::vec::Vec<u8>>) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
@@ -2522,24 +1220,6 @@ impl core::marker::Unpin for secure::blind_index::BlindIndexKey
 impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexKey
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexKey
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexKey
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexKey where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndexKey::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexKey where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndexKey::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndexKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexKey where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndexKey::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndexKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::blind_index::BlindIndexKey where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexKey::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexKey::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexKey where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexKey::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndexKey
-pub fn secure::blind_index::BlindIndexKey::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexKey
-pub type secure::blind_index::BlindIndexKey::Output = T
 pub struct secure::BlindIndexValue
 impl secure::blind_index::BlindIndexValue
 pub fn secure::blind_index::BlindIndexValue::as_bytes(&self) -> &[u8]
@@ -2556,24 +1236,6 @@ impl core::marker::Unpin for secure::blind_index::BlindIndexValue
 impl core::marker::UnsafeUnpin for secure::blind_index::BlindIndexValue
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::BlindIndexValue
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::BlindIndexValue
-impl<T, U> core::convert::Into<U> for secure::blind_index::BlindIndexValue where U: core::convert::From<T>
-pub fn secure::blind_index::BlindIndexValue::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::BlindIndexValue where U: core::convert::Into<T>
-pub type secure::blind_index::BlindIndexValue::Error = core::convert::Infallible
-pub fn secure::blind_index::BlindIndexValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::BlindIndexValue where U: core::convert::TryFrom<T>
-pub type secure::blind_index::BlindIndexValue::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::BlindIndexValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::blind_index::BlindIndexValue where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexValue::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexValue::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::BlindIndexValue where T: ?core::marker::Sized
-pub fn secure::blind_index::BlindIndexValue::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::blind_index::BlindIndexValue
-pub fn secure::blind_index::BlindIndexValue::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::BlindIndexValue
-pub type secure::blind_index::BlindIndexValue::Output = T
 pub struct secure::CiphertextEnvelope
 impl secure::envelope::CiphertextEnvelope
 pub fn secure::envelope::CiphertextEnvelope::aad(&self) -> &secure::protection::ProtectionAad
@@ -2603,30 +1265,6 @@ impl core::marker::Unpin for secure::envelope::CiphertextEnvelope
 impl core::marker::UnsafeUnpin for secure::envelope::CiphertextEnvelope
 impl core::panic::unwind_safe::RefUnwindSafe for secure::envelope::CiphertextEnvelope
 impl core::panic::unwind_safe::UnwindSafe for secure::envelope::CiphertextEnvelope
-impl<T, U> core::convert::Into<U> for secure::envelope::CiphertextEnvelope where U: core::convert::From<T>
-pub fn secure::envelope::CiphertextEnvelope::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::envelope::CiphertextEnvelope where U: core::convert::Into<T>
-pub type secure::envelope::CiphertextEnvelope::Error = core::convert::Infallible
-pub fn secure::envelope::CiphertextEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::envelope::CiphertextEnvelope where U: core::convert::TryFrom<T>
-pub type secure::envelope::CiphertextEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::envelope::CiphertextEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
-pub type secure::envelope::CiphertextEnvelope::Owned = T
-pub fn secure::envelope::CiphertextEnvelope::clone_into(&self, &mut T)
-pub fn secure::envelope::CiphertextEnvelope::to_owned(&self) -> T
-impl<T> core::any::Any for secure::envelope::CiphertextEnvelope where T: 'static + ?core::marker::Sized
-pub fn secure::envelope::CiphertextEnvelope::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
-pub fn secure::envelope::CiphertextEnvelope::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::envelope::CiphertextEnvelope where T: ?core::marker::Sized
-pub fn secure::envelope::CiphertextEnvelope::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::envelope::CiphertextEnvelope where T: core::clone::Clone
-pub unsafe fn secure::envelope::CiphertextEnvelope::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::envelope::CiphertextEnvelope
-pub fn secure::envelope::CiphertextEnvelope::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::envelope::CiphertextEnvelope
-pub type secure::envelope::CiphertextEnvelope::Output = T
 pub struct secure::CookieValue(_)
 impl secure::cookie::CookieValue
 pub fn secure::cookie::CookieValue::as_str(&self) -> &str
@@ -2648,30 +1286,6 @@ impl core::marker::Unpin for secure::cookie::CookieValue
 impl core::marker::UnsafeUnpin for secure::cookie::CookieValue
 impl core::panic::unwind_safe::RefUnwindSafe for secure::cookie::CookieValue
 impl core::panic::unwind_safe::UnwindSafe for secure::cookie::CookieValue
-impl<T, U> core::convert::Into<U> for secure::cookie::CookieValue where U: core::convert::From<T>
-pub fn secure::cookie::CookieValue::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::cookie::CookieValue where U: core::convert::Into<T>
-pub type secure::cookie::CookieValue::Error = core::convert::Infallible
-pub fn secure::cookie::CookieValue::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::cookie::CookieValue where U: core::convert::TryFrom<T>
-pub type secure::cookie::CookieValue::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::cookie::CookieValue::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::cookie::CookieValue where T: core::clone::Clone
-pub type secure::cookie::CookieValue::Owned = T
-pub fn secure::cookie::CookieValue::clone_into(&self, &mut T)
-pub fn secure::cookie::CookieValue::to_owned(&self) -> T
-impl<T> core::any::Any for secure::cookie::CookieValue where T: 'static + ?core::marker::Sized
-pub fn secure::cookie::CookieValue::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValue::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::cookie::CookieValue where T: ?core::marker::Sized
-pub fn secure::cookie::CookieValue::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::cookie::CookieValue where T: core::clone::Clone
-pub unsafe fn secure::cookie::CookieValue::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::cookie::CookieValue
-pub fn secure::cookie::CookieValue::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::cookie::CookieValue
-pub type secure::cookie::CookieValue::Output = T
 pub struct secure::DerivedAad
 impl secure::protection::DerivedAad
 pub fn secure::protection::DerivedAad::as_canonical_bytes(&self) -> &[u8]
@@ -2687,30 +1301,6 @@ impl core::marker::Unpin for secure::protection::DerivedAad
 impl core::marker::UnsafeUnpin for secure::protection::DerivedAad
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
-impl<T, U> core::convert::Into<U> for secure::protection::DerivedAad where U: core::convert::From<T>
-pub fn secure::protection::DerivedAad::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::DerivedAad where U: core::convert::Into<T>
-pub type secure::protection::DerivedAad::Error = core::convert::Infallible
-pub fn secure::protection::DerivedAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::DerivedAad where U: core::convert::TryFrom<T>
-pub type secure::protection::DerivedAad::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::DerivedAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::protection::DerivedAad where T: core::clone::Clone
-pub type secure::protection::DerivedAad::Owned = T
-pub fn secure::protection::DerivedAad::clone_into(&self, &mut T)
-pub fn secure::protection::DerivedAad::to_owned(&self) -> T
-impl<T> core::any::Any for secure::protection::DerivedAad where T: 'static + ?core::marker::Sized
-pub fn secure::protection::DerivedAad::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
-pub fn secure::protection::DerivedAad::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::DerivedAad where T: ?core::marker::Sized
-pub fn secure::protection::DerivedAad::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::protection::DerivedAad where T: core::clone::Clone
-pub unsafe fn secure::protection::DerivedAad::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::protection::DerivedAad
-pub fn secure::protection::DerivedAad::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::DerivedAad
-pub type secure::protection::DerivedAad::Output = T
 pub struct secure::FieldRedaction<'a>
 pub secure::FieldRedaction::mode: secure::redaction::RedactionMode
 pub secure::FieldRedaction::name: core::option::Option<&'static str>
@@ -2727,30 +1317,6 @@ impl<'a> core::marker::Unpin for secure::redaction::FieldRedaction<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::redaction::FieldRedaction<'a>
 impl<'a> !core::panic::unwind_safe::RefUnwindSafe for secure::redaction::FieldRedaction<'a>
 impl<'a> !core::panic::unwind_safe::UnwindSafe for secure::redaction::FieldRedaction<'a>
-impl<T, U> core::convert::Into<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::From<T>
-pub fn secure::redaction::FieldRedaction<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::Into<T>
-pub type secure::redaction::FieldRedaction<'a>::Error = core::convert::Infallible
-pub fn secure::redaction::FieldRedaction<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::FieldRedaction<'a> where U: core::convert::TryFrom<T>
-pub type secure::redaction::FieldRedaction<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::FieldRedaction<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::FieldRedaction<'a> where T: core::clone::Clone
-pub type secure::redaction::FieldRedaction<'a>::Owned = T
-pub fn secure::redaction::FieldRedaction<'a>::clone_into(&self, &mut T)
-pub fn secure::redaction::FieldRedaction<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for secure::redaction::FieldRedaction<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::FieldRedaction<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::FieldRedaction<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::FieldRedaction<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::FieldRedaction<'a> where T: ?core::marker::Sized
-pub fn secure::redaction::FieldRedaction<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::FieldRedaction<'a> where T: core::clone::Clone
-pub unsafe fn secure::redaction::FieldRedaction<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::FieldRedaction<'a>
-pub fn secure::redaction::FieldRedaction<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::FieldRedaction<'a>
-pub type secure::redaction::FieldRedaction<'a>::Output = T
 pub struct secure::FilterBits(_)
 impl secure::blind_index::FilterBits
 pub const secure::blind_index::FilterBits::DEFAULT: secure::blind_index::FilterBits
@@ -2772,30 +1338,6 @@ impl core::marker::Unpin for secure::blind_index::FilterBits
 impl core::marker::UnsafeUnpin for secure::blind_index::FilterBits
 impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::FilterBits
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::FilterBits
-impl<T, U> core::convert::Into<U> for secure::blind_index::FilterBits where U: core::convert::From<T>
-pub fn secure::blind_index::FilterBits::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::FilterBits where U: core::convert::Into<T>
-pub type secure::blind_index::FilterBits::Error = core::convert::Infallible
-pub fn secure::blind_index::FilterBits::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::FilterBits where U: core::convert::TryFrom<T>
-pub type secure::blind_index::FilterBits::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::FilterBits::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::blind_index::FilterBits where T: core::clone::Clone
-pub type secure::blind_index::FilterBits::Owned = T
-pub fn secure::blind_index::FilterBits::clone_into(&self, &mut T)
-pub fn secure::blind_index::FilterBits::to_owned(&self) -> T
-impl<T> core::any::Any for secure::blind_index::FilterBits where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::FilterBits::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
-pub fn secure::blind_index::FilterBits::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::FilterBits where T: ?core::marker::Sized
-pub fn secure::blind_index::FilterBits::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::blind_index::FilterBits where T: core::clone::Clone
-pub unsafe fn secure::blind_index::FilterBits::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::blind_index::FilterBits
-pub fn secure::blind_index::FilterBits::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::FilterBits
-pub type secure::blind_index::FilterBits::Output = T
 pub struct secure::IndexScope<'a>
 impl<'a> secure::blind_index::IndexScope<'a>
 pub fn secure::blind_index::IndexScope<'a>::new(vocab::tenant::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
@@ -2814,30 +1356,6 @@ impl<'a> core::marker::Unpin for secure::blind_index::IndexScope<'a>
 impl<'a> core::marker::UnsafeUnpin for secure::blind_index::IndexScope<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::IndexScope<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for secure::blind_index::IndexScope<'a>
-impl<T, U> core::convert::Into<U> for secure::blind_index::IndexScope<'a> where U: core::convert::From<T>
-pub fn secure::blind_index::IndexScope<'a>::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::blind_index::IndexScope<'a> where U: core::convert::Into<T>
-pub type secure::blind_index::IndexScope<'a>::Error = core::convert::Infallible
-pub fn secure::blind_index::IndexScope<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::blind_index::IndexScope<'a> where U: core::convert::TryFrom<T>
-pub type secure::blind_index::IndexScope<'a>::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::blind_index::IndexScope<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
-pub type secure::blind_index::IndexScope<'a>::Owned = T
-pub fn secure::blind_index::IndexScope<'a>::clone_into(&self, &mut T)
-pub fn secure::blind_index::IndexScope<'a>::to_owned(&self) -> T
-impl<T> core::any::Any for secure::blind_index::IndexScope<'a> where T: 'static + ?core::marker::Sized
-pub fn secure::blind_index::IndexScope<'a>::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::IndexScope<'a>::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::blind_index::IndexScope<'a> where T: ?core::marker::Sized
-pub fn secure::blind_index::IndexScope<'a>::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::blind_index::IndexScope<'a> where T: core::clone::Clone
-pub unsafe fn secure::blind_index::IndexScope<'a>::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::blind_index::IndexScope<'a>
-pub fn secure::blind_index::IndexScope<'a>::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::blind_index::IndexScope<'a>
-pub type secure::blind_index::IndexScope<'a>::Output = T
 pub struct secure::LastError(_)
 impl secure::redaction::LastError
 pub fn secure::redaction::LastError::as_str(&self) -> &str
@@ -2860,32 +1378,6 @@ impl core::marker::Unpin for secure::redaction::LastError
 impl core::marker::UnsafeUnpin for secure::redaction::LastError
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::LastError
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::LastError
-impl<T, U> core::convert::Into<U> for secure::redaction::LastError where U: core::convert::From<T>
-pub fn secure::redaction::LastError::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::LastError where U: core::convert::Into<T>
-pub type secure::redaction::LastError::Error = core::convert::Infallible
-pub fn secure::redaction::LastError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::LastError where U: core::convert::TryFrom<T>
-pub type secure::redaction::LastError::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::LastError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::LastError where T: core::clone::Clone
-pub type secure::redaction::LastError::Owned = T
-pub fn secure::redaction::LastError::clone_into(&self, &mut T)
-pub fn secure::redaction::LastError::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::redaction::LastError where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::redaction::LastError::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::redaction::LastError where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::LastError::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::LastError where T: ?core::marker::Sized
-pub fn secure::redaction::LastError::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::LastError where T: ?core::marker::Sized
-pub fn secure::redaction::LastError::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::LastError where T: core::clone::Clone
-pub unsafe fn secure::redaction::LastError::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::LastError
-pub fn secure::redaction::LastError::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::LastError
-pub type secure::redaction::LastError::Output = T
 pub struct secure::OpaqueToken(_)
 impl secure::refresh::OpaqueToken
 pub fn secure::refresh::OpaqueToken::expose(&self) -> &str
@@ -2899,24 +1391,6 @@ impl core::marker::Unpin for secure::refresh::OpaqueToken
 impl core::marker::UnsafeUnpin for secure::refresh::OpaqueToken
 impl core::panic::unwind_safe::RefUnwindSafe for secure::refresh::OpaqueToken
 impl core::panic::unwind_safe::UnwindSafe for secure::refresh::OpaqueToken
-impl<T, U> core::convert::Into<U> for secure::refresh::OpaqueToken where U: core::convert::From<T>
-pub fn secure::refresh::OpaqueToken::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::refresh::OpaqueToken where U: core::convert::Into<T>
-pub type secure::refresh::OpaqueToken::Error = core::convert::Infallible
-pub fn secure::refresh::OpaqueToken::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::refresh::OpaqueToken where U: core::convert::TryFrom<T>
-pub type secure::refresh::OpaqueToken::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::refresh::OpaqueToken::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::refresh::OpaqueToken where T: 'static + ?core::marker::Sized
-pub fn secure::refresh::OpaqueToken::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::refresh::OpaqueToken where T: ?core::marker::Sized
-pub fn secure::refresh::OpaqueToken::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::refresh::OpaqueToken where T: ?core::marker::Sized
-pub fn secure::refresh::OpaqueToken::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::refresh::OpaqueToken
-pub fn secure::refresh::OpaqueToken::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::refresh::OpaqueToken
-pub type secure::refresh::OpaqueToken::Output = T
 pub struct secure::PasswordHash(_)
 impl secure::password::PasswordHash
 pub fn secure::password::PasswordHash::as_str(&self) -> &str
@@ -2938,30 +1412,6 @@ impl core::marker::Unpin for secure::password::PasswordHash
 impl core::marker::UnsafeUnpin for secure::password::PasswordHash
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::PasswordHash
 impl core::panic::unwind_safe::UnwindSafe for secure::password::PasswordHash
-impl<T, U> core::convert::Into<U> for secure::password::PasswordHash where U: core::convert::From<T>
-pub fn secure::password::PasswordHash::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::password::PasswordHash where U: core::convert::Into<T>
-pub type secure::password::PasswordHash::Error = core::convert::Infallible
-pub fn secure::password::PasswordHash::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::password::PasswordHash where U: core::convert::TryFrom<T>
-pub type secure::password::PasswordHash::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::password::PasswordHash::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::password::PasswordHash where T: core::clone::Clone
-pub type secure::password::PasswordHash::Owned = T
-pub fn secure::password::PasswordHash::clone_into(&self, &mut T)
-pub fn secure::password::PasswordHash::to_owned(&self) -> T
-impl<T> core::any::Any for secure::password::PasswordHash where T: 'static + ?core::marker::Sized
-pub fn secure::password::PasswordHash::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::password::PasswordHash where T: ?core::marker::Sized
-pub fn secure::password::PasswordHash::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::password::PasswordHash where T: ?core::marker::Sized
-pub fn secure::password::PasswordHash::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::password::PasswordHash where T: core::clone::Clone
-pub unsafe fn secure::password::PasswordHash::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::password::PasswordHash
-pub fn secure::password::PasswordHash::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::password::PasswordHash
-pub type secure::password::PasswordHash::Output = T
 pub struct secure::Plaintext(_)
 impl secure::aead::Plaintext
 pub fn secure::aead::Plaintext::expose(&self) -> &[u8]
@@ -2975,24 +1425,6 @@ impl core::marker::Unpin for secure::aead::Plaintext
 impl core::marker::UnsafeUnpin for secure::aead::Plaintext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Plaintext
 impl core::panic::unwind_safe::UnwindSafe for secure::aead::Plaintext
-impl<T, U> core::convert::Into<U> for secure::aead::Plaintext where U: core::convert::From<T>
-pub fn secure::aead::Plaintext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::aead::Plaintext where U: core::convert::Into<T>
-pub type secure::aead::Plaintext::Error = core::convert::Infallible
-pub fn secure::aead::Plaintext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::aead::Plaintext where U: core::convert::TryFrom<T>
-pub type secure::aead::Plaintext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::aead::Plaintext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::aead::Plaintext where T: 'static + ?core::marker::Sized
-pub fn secure::aead::Plaintext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::aead::Plaintext where T: ?core::marker::Sized
-pub fn secure::aead::Plaintext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::aead::Plaintext where T: ?core::marker::Sized
-pub fn secure::aead::Plaintext::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::aead::Plaintext
-pub fn secure::aead::Plaintext::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::aead::Plaintext
-pub type secure::aead::Plaintext::Output = T
 pub struct secure::ProtectionAad
 impl secure::protection::ProtectionAad
 pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
@@ -3011,30 +1443,6 @@ impl core::marker::Unpin for secure::protection::ProtectionAad
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionAad
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionAad
-impl<T, U> core::convert::Into<U> for secure::protection::ProtectionAad where U: core::convert::From<T>
-pub fn secure::protection::ProtectionAad::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionAad where U: core::convert::Into<T>
-pub type secure::protection::ProtectionAad::Error = core::convert::Infallible
-pub fn secure::protection::ProtectionAad::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionAad where U: core::convert::TryFrom<T>
-pub type secure::protection::ProtectionAad::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::ProtectionAad::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionAad where T: core::clone::Clone
-pub type secure::protection::ProtectionAad::Owned = T
-pub fn secure::protection::ProtectionAad::clone_into(&self, &mut T)
-pub fn secure::protection::ProtectionAad::to_owned(&self) -> T
-impl<T> core::any::Any for secure::protection::ProtectionAad where T: 'static + ?core::marker::Sized
-pub fn secure::protection::ProtectionAad::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionAad::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionAad where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionAad::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::protection::ProtectionAad where T: core::clone::Clone
-pub unsafe fn secure::protection::ProtectionAad::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::protection::ProtectionAad
-pub fn secure::protection::ProtectionAad::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::ProtectionAad
-pub type secure::protection::ProtectionAad::Output = T
 pub struct secure::ProtectionContext
 impl secure::protection::ProtectionContext
 pub fn secure::protection::ProtectionContext::authenticated_request(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
@@ -3055,30 +1463,6 @@ impl core::marker::Unpin for secure::protection::ProtectionContext
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
-impl<T, U> core::convert::Into<U> for secure::protection::ProtectionContext where U: core::convert::From<T>
-pub fn secure::protection::ProtectionContext::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::protection::ProtectionContext where U: core::convert::Into<T>
-pub type secure::protection::ProtectionContext::Error = core::convert::Infallible
-pub fn secure::protection::ProtectionContext::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::protection::ProtectionContext where U: core::convert::TryFrom<T>
-pub type secure::protection::ProtectionContext::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::protection::ProtectionContext::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::protection::ProtectionContext where T: core::clone::Clone
-pub type secure::protection::ProtectionContext::Owned = T
-pub fn secure::protection::ProtectionContext::clone_into(&self, &mut T)
-pub fn secure::protection::ProtectionContext::to_owned(&self) -> T
-impl<T> core::any::Any for secure::protection::ProtectionContext where T: 'static + ?core::marker::Sized
-pub fn secure::protection::ProtectionContext::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionContext::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::protection::ProtectionContext where T: ?core::marker::Sized
-pub fn secure::protection::ProtectionContext::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::protection::ProtectionContext where T: core::clone::Clone
-pub unsafe fn secure::protection::ProtectionContext::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::protection::ProtectionContext
-pub fn secure::protection::ProtectionContext::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::protection::ProtectionContext
-pub type secure::protection::ProtectionContext::Output = T
 pub struct secure::Redacted(_)
 impl secure::redaction::Redacted
 pub fn secure::redaction::Redacted::as_str(&self) -> &str
@@ -3099,32 +1483,6 @@ impl core::marker::Unpin for secure::redaction::Redacted
 impl core::marker::UnsafeUnpin for secure::redaction::Redacted
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::Redacted
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::Redacted
-impl<T, U> core::convert::Into<U> for secure::redaction::Redacted where U: core::convert::From<T>
-pub fn secure::redaction::Redacted::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::Redacted where U: core::convert::Into<T>
-pub type secure::redaction::Redacted::Error = core::convert::Infallible
-pub fn secure::redaction::Redacted::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::Redacted where U: core::convert::TryFrom<T>
-pub type secure::redaction::Redacted::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::Redacted::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::redaction::Redacted where T: core::clone::Clone
-pub type secure::redaction::Redacted::Owned = T
-pub fn secure::redaction::Redacted::clone_into(&self, &mut T)
-pub fn secure::redaction::Redacted::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::redaction::Redacted where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::redaction::Redacted::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::redaction::Redacted where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::Redacted::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::Redacted where T: ?core::marker::Sized
-pub fn secure::redaction::Redacted::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::Redacted where T: ?core::marker::Sized
-pub fn secure::redaction::Redacted::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::redaction::Redacted where T: core::clone::Clone
-pub unsafe fn secure::redaction::Redacted::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::redaction::Redacted
-pub fn secure::redaction::Redacted::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::Redacted
-pub type secure::redaction::Redacted::Output = T
 pub struct secure::RedactionHashKey(_)
 impl secure::redaction::RedactionHashKey
 pub fn secure::redaction::RedactionHashKey::from_bytes(impl core::convert::Into<alloc::vec::Vec<u8>>) -> core::result::Result<Self, secure::redaction::RedactionHashError>
@@ -3141,24 +1499,6 @@ impl core::marker::Unpin for secure::redaction::RedactionHashKey
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionHashKey
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionHashKey
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionHashKey
-impl<T, U> core::convert::Into<U> for secure::redaction::RedactionHashKey where U: core::convert::From<T>
-pub fn secure::redaction::RedactionHashKey::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::redaction::RedactionHashKey where U: core::convert::Into<T>
-pub type secure::redaction::RedactionHashKey::Error = core::convert::Infallible
-pub fn secure::redaction::RedactionHashKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::redaction::RedactionHashKey where U: core::convert::TryFrom<T>
-pub type secure::redaction::RedactionHashKey::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::redaction::RedactionHashKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for secure::redaction::RedactionHashKey where T: 'static + ?core::marker::Sized
-pub fn secure::redaction::RedactionHashKey::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::redaction::RedactionHashKey where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashKey::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::redaction::RedactionHashKey where T: ?core::marker::Sized
-pub fn secure::redaction::RedactionHashKey::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for secure::redaction::RedactionHashKey
-pub fn secure::redaction::RedactionHashKey::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::redaction::RedactionHashKey
-pub type secure::redaction::RedactionHashKey::Output = T
 pub struct secure::RedisEndpoint(_)
 impl secure::transport_endpoint::RedisEndpoint
 pub fn secure::transport_endpoint::RedisEndpoint::expose(&self) -> &str
@@ -3180,32 +1520,6 @@ impl core::marker::Unpin for secure::transport_endpoint::RedisEndpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::RedisEndpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::RedisEndpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::RedisEndpoint
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::From<T>
-pub fn secure::transport_endpoint::RedisEndpoint::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::Into<T>
-pub type secure::transport_endpoint::RedisEndpoint::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::RedisEndpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::RedisEndpoint where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::RedisEndpoint::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::RedisEndpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
-pub type secure::transport_endpoint::RedisEndpoint::Owned = T
-pub fn secure::transport_endpoint::RedisEndpoint::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::RedisEndpoint::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::transport_endpoint::RedisEndpoint where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::RedisEndpoint where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::RedisEndpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::RedisEndpoint::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::RedisEndpoint where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::RedisEndpoint::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::RedisEndpoint
-pub fn secure::transport_endpoint::RedisEndpoint::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::RedisEndpoint
-pub type secure::transport_endpoint::RedisEndpoint::Output = T
 pub struct secure::S3Endpoint(_)
 impl secure::transport_endpoint::S3Endpoint
 pub fn secure::transport_endpoint::S3Endpoint::expose(&self) -> &str
@@ -3228,32 +1542,6 @@ impl core::marker::Unpin for secure::transport_endpoint::S3Endpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::S3Endpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::S3Endpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::S3Endpoint
-impl<T, U> core::convert::Into<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::From<T>
-pub fn secure::transport_endpoint::S3Endpoint::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::Into<T>
-pub type secure::transport_endpoint::S3Endpoint::Error = core::convert::Infallible
-pub fn secure::transport_endpoint::S3Endpoint::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for secure::transport_endpoint::S3Endpoint where U: core::convert::TryFrom<T>
-pub type secure::transport_endpoint::S3Endpoint::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn secure::transport_endpoint::S3Endpoint::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> alloc::borrow::ToOwned for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
-pub type secure::transport_endpoint::S3Endpoint::Owned = T
-pub fn secure::transport_endpoint::S3Endpoint::clone_into(&self, &mut T)
-pub fn secure::transport_endpoint::S3Endpoint::to_owned(&self) -> T
-impl<T> alloc::string::ToString for secure::transport_endpoint::S3Endpoint where T: core::fmt::Display + ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::to_string(&self) -> alloc::string::String
-impl<T> core::any::Any for secure::transport_endpoint::S3Endpoint where T: 'static + ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for secure::transport_endpoint::S3Endpoint where T: ?core::marker::Sized
-pub fn secure::transport_endpoint::S3Endpoint::borrow_mut(&mut self) -> &mut T
-impl<T> core::clone::CloneToUninit for secure::transport_endpoint::S3Endpoint where T: core::clone::Clone
-pub unsafe fn secure::transport_endpoint::S3Endpoint::clone_to_uninit(&self, *mut u8)
-impl<T> core::convert::From<T> for secure::transport_endpoint::S3Endpoint
-pub fn secure::transport_endpoint::S3Endpoint::from(T) -> T
-impl<T> typenum::type_operators::Same for secure::transport_endpoint::S3Endpoint
-pub type secure::transport_endpoint::S3Endpoint::Output = T
 pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>

@@ -734,7 +734,7 @@ mod integration_tests {
         let lease = instances
             .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
             .await?
-            .expect("lease should be acquired");
+            .ok_or_else(|| std::io::Error::other("lease should be acquired"))?;
         assert!(
             instances
                 .acquire_lease(&instance, "runner-b", Duration::from_secs(30))
@@ -771,7 +771,9 @@ mod integration_tests {
         let replacement = instances
             .acquire_lease(&instance, "runner-b", Duration::from_secs(30))
             .await?
-            .expect("released lease should be acquirable by another holder");
+            .ok_or_else(|| {
+                std::io::Error::other("released lease should be acquirable by another holder")
+            })?;
         assert_eq!(
             instances
                 .extend_lease(&lease, Duration::from_secs(30))
@@ -806,7 +808,11 @@ mod integration_tests {
         let lease_b = instances
             .acquire_lease(&instance_b, "runner-b", Duration::from_secs(30))
             .await?
-            .expect("same saga uuid in another tenant should acquire independently");
+            .ok_or_else(|| {
+                std::io::Error::other(
+                    "same saga uuid in another tenant should acquire independently",
+                )
+            })?;
         let tenant_b_step = StepName::parse("tenant_b_step").unwrap();
         assert_eq!(
             journal
@@ -830,7 +836,7 @@ mod integration_tests {
         let expiring_lease = instances
             .acquire_lease(&expiring, "runner-expiring", Duration::from_secs(30))
             .await?
-            .expect("expiring lease should acquire");
+            .ok_or_else(|| std::io::Error::other("expiring lease should acquire"))?;
         sqlx::query(
             "UPDATE saga_instances \
              SET acquired_at = now() - interval '2 seconds', \
@@ -868,6 +874,8 @@ mod integration_tests {
         Ok(())
     }
 
+    #[allow(clippy::cognitive_complexity)]
+    // reason: 表驱动 catalog/RLS 验收刻意在一个 helper 中并列全部权限事实，拆散会削弱矩阵可审计性。
     async fn assert_saga_catalog_and_rls(store: &crate::PgStore) -> TestResult {
         for (table, update_expected, delete_expected) in [
             ("saga_instances", true, false),

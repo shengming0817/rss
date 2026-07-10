@@ -4,7 +4,7 @@
 //! logical-decoding/CDC pipelines. It writes immutable rows to `outbox_log` and intentionally does
 //! not participate in the relay `outbox` mutable status machine.
 
-use consistency::Entry;
+use consistency::EventEntry;
 use diport::{Clock, EnvelopeSubjectId, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use futures::future::BoxFuture;
 
@@ -38,7 +38,7 @@ impl PgOutboxCdcEmitter {
 impl OutboxEmitter for PgOutboxCdcEmitter {
     async fn emit(
         &self,
-        entry: Entry,
+        entry: EventEntry,
         envelope: OutboxEnvelopeParts,
     ) -> Result<(), OutboxEmitError> {
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
@@ -100,7 +100,11 @@ pub(crate) struct OutboxLogRecord {
 }
 
 impl OutboxLogRecord {
-    pub(crate) fn from_entry_env(entry: &Entry, env: &OutboxEnvelope, aggregate_id: &str) -> Self {
+    pub(crate) fn from_entry_env(
+        entry: &EventEntry,
+        env: &OutboxEnvelope,
+        aggregate_id: &str,
+    ) -> Self {
         Self {
             event_id: entry.idem_key().as_str().to_string(),
             tenant_id: env.tenant(),
@@ -119,7 +123,7 @@ impl OutboxLogRecord {
 
 pub(crate) async fn append_outbox_log(
     tx: &mut TxCapability<'_>,
-    entry: &Entry,
+    entry: &EventEntry,
     env: &OutboxEnvelope,
     aggregate_id: &str,
 ) -> Result<OutboxLogAppendOutcome, OutboxLogAppendError> {
@@ -199,7 +203,7 @@ fn aggregate_id_for_log(subject_id: &EnvelopeSubjectId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use consistency::{IdemKey, OutboxPayload, PartitionKey, Topic};
+    use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload, PartitionKey};
 
     use super::{OutboxLogRecord, aggregate_id_for_log};
     use crate::outbox::{OutboxEnvelope, OutboxMetadata};
@@ -217,9 +221,9 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
-    fn entry(event_id: &str) -> consistency::Entry {
-        consistency::Entry::new(
-            Topic::parse("identity.session-created").unwrap(),
+    fn entry(event_id: &str) -> EventEntry {
+        EventEntry::new(
+            EventTopic::parse("identity.session-created").unwrap(),
             IdemKey::parse(event_id).unwrap(),
             OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         )
