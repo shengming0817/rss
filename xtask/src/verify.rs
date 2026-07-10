@@ -39,6 +39,10 @@
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow 只调 `cargo xtask ci`、不逐条重列门 run
 //!   命令（门逻辑单源在 xtask）；由 `github_ci_workflow_delegates_to_xtask_ci` 治理测试守。
+//! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code" }—— CI / Integration workflow
+//!   须按 checkout → start → cache/after-cache → xtask → after-build → before-save → artifact 的唯一有序生命周期
+//!   采集资源证据，且在昂贵构建前 fail-closed 检查磁盘预算。该约束无法用 Rust 类型系统
+//!   表达，由结构化 YAML 谓词、synthetic red / anti-vacuity 与脚本 selftest 联合承载。
 
 use crate::diagnostic::run_check;
 use crate::workspace_root;
@@ -2343,14 +2347,283 @@ mod tests {
         blocks
     }
 
-    /// step 块内是否有**真实 `uses:` 键**引用某 action（行去 `- ` 前缀后须以 `uses:` 起头 + 含 action 路径）——
-    /// 排除 `name:` / `displayName:` 值、注释、`category:` 等字符串字段里的同名子串（结构绑定，非裸 `contains`，
-    /// review #281 F2）。
+    /// step 块内是否有**真实 `uses:` 键**精确引用某 action。解析键后的值再比较，排除
+    /// `name:` / `displayName:`、注释及 action 前后缀伪造（结构绑定，review #281 F2 / #469）。
     fn block_uses_action(block: &[&str], action: &str) -> bool {
         block.iter().any(|raw| {
             let line = raw.strip_prefix("- ").map(str::trim).unwrap_or(raw);
-            line.starts_with("uses:") && line.contains(action)
+            line.strip_prefix("uses:")
+                .is_some_and(|value| value.trim() == action)
         })
+    }
+
+    fn block_has_line(block: &[&str], expected: &str) -> bool {
+        block
+            .iter()
+            .any(|raw| raw.strip_prefix("- ").map(str::trim).unwrap_or(raw).trim() == expected)
+    }
+
+    fn unique_block_index(
+        blocks: &[Vec<&str>],
+        predicate: impl Fn(&[&str]) -> bool,
+    ) -> Option<usize> {
+        let matches = blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| predicate(block).then_some(index))
+            .collect::<Vec<_>>();
+        (matches.len() == 1).then(|| matches[0])
+    }
+
+    const EVIDENCE_FILE_ENV: &str = "RSS_CI_EVIDENCE_FILE: ci-evidence.json";
+    const EVIDENCE_OUTPUT_ARG: &str = "--output \"$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE\"";
+    const WORKSPACE_PATH_ARG: &str = "--path \"$GITHUB_WORKSPACE\"";
+    const XTASK_OUTCOME_ARG: &str = "--outcome \"${{ steps.xtask.outcome }}\"";
+
+    fn block_has_evidence_snapshot(block: &[&str], stage: &str, with_outcome: bool) -> bool {
+        let outcome = if with_outcome {
+            format!(" {XTASK_OUTCOME_ARG}")
+        } else {
+            String::new()
+        };
+        block_has_line(
+            block,
+            &format!(
+                ".github/scripts/ci-evidence.sh snapshot {stage} {EVIDENCE_OUTPUT_ARG}{outcome}"
+            ),
+        )
+    }
+
+    fn block_has_disk_budget(block: &[&str], stage: &str) -> bool {
+        block_has_line(
+            block,
+            &format!(".github/scripts/ci-disk-budget.sh --stage {stage} {WORKSPACE_PATH_ARG}"),
+        )
+    }
+
+    fn block_is_always(block: &[&str]) -> bool {
+        block_has_line(block, "if: ${{ always() }}")
+    }
+
+    /// 只提取顶层 `jobs:` 下唯一 job 的 `steps:`，不允许多 job 间拼接必需步骤。
+    fn workflow_single_job_step_blocks(yaml: &str) -> Option<Vec<Vec<&str>>> {
+        let lines = yaml_indented_code_lines(yaml);
+        let jobs_index = lines
+            .iter()
+            .position(|(indent, text)| *indent == 0 && *text == "jobs:")?;
+        let jobs_end = lines
+            .iter()
+            .enumerate()
+            .skip(jobs_index + 1)
+            .find_map(|(index, (indent, _))| (*indent == 0).then_some(index))
+            .unwrap_or(lines.len());
+        let job_indices = lines[jobs_index + 1..jobs_end]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, (indent, text))| {
+                (*indent == 2 && text.ends_with(':')).then_some(jobs_index + 1 + offset)
+            })
+            .collect::<Vec<_>>();
+        if job_indices.len() != 1 {
+            return None;
+        }
+
+        let job_index = job_indices[0];
+        let steps_index = lines[job_index + 1..jobs_end].iter().enumerate().find_map(
+            |(offset, (indent, text))| {
+                (*indent == 4 && *text == "steps:").then_some(job_index + 1 + offset)
+            },
+        )?;
+        let mut blocks = Vec::<Vec<&str>>::new();
+        for (indent, text) in &lines[steps_index + 1..jobs_end] {
+            if *indent <= 4 {
+                break;
+            }
+            if *indent == 6 && text.starts_with("- ") {
+                blocks.push(Vec::new());
+            }
+            blocks.last_mut()?.push(text);
+        }
+        Some(blocks)
+    }
+
+    fn workflow_has_top_level_evidence_file_env(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        lines.iter().enumerate().any(|(index, (indent, text))| {
+            *indent == 0
+                && *text == "env:"
+                && lines.get(index + 1..).is_some_and(|rest| {
+                    rest.iter()
+                        .take_while(|(child_indent, _)| *child_indent > 0)
+                        .any(|(child_indent, child)| {
+                            *child_indent == 2 && *child == EVIDENCE_FILE_ENV
+                        })
+                })
+        })
+    }
+
+    /// CI-RESOURCE-EVIDENCE-01 workflow 结构谓词。故意采用严格的七步闭集：防止额外的
+    /// 前置昂贵步骤绕过 start/budget，也防止 artifact 之后再修改证据。YAML 只是文本配置，
+    /// 因此评级 Medium；synthetic red 逐项抽掉必需子句，anti-vacuity 证明谓词非恒真。
+    fn workflow_has_resource_evidence_lifecycle(yaml: &str, delegation_forms: &[&str]) -> bool {
+        let Some(blocks) = workflow_single_job_step_blocks(yaml) else {
+            return false;
+        };
+        if blocks.len() != 7 || !workflow_has_top_level_evidence_file_env(yaml) {
+            return false;
+        }
+
+        let expected = [
+            unique_block_index(&blocks, |b| block_uses_action(b, "actions/checkout@v4")),
+            unique_block_index(&blocks, |b| {
+                block_has_evidence_snapshot(b, "start", false) && block_has_disk_budget(b, "start")
+            }),
+            unique_block_index(&blocks, |b| {
+                block_uses_action(b, "./.github/actions/setup-rss-ci")
+                    && block_has_line(b, "evidence-enabled: true")
+            }),
+            unique_block_index(&blocks, |b| {
+                block_has_line(b, "id: xtask")
+                    && delegation_forms
+                        .iter()
+                        .any(|form| block_has_line(b, &format!("run: {form}")))
+            }),
+            unique_block_index(&blocks, |b| {
+                block_is_always(b)
+                    && block_has_evidence_snapshot(b, "after-build", true)
+                    && block_has_disk_budget(b, "after-build")
+            }),
+            unique_block_index(&blocks, |b| {
+                block_is_always(b) && block_has_evidence_snapshot(b, "before-save", false)
+            }),
+            unique_block_index(&blocks, |b| {
+                block_is_always(b)
+                    && block_uses_action(b, "actions/upload-artifact@v4")
+                    && block_has_line(
+                        b,
+                        "name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}",
+                    )
+                    && block_has_line(
+                        b,
+                        "path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}",
+                    )
+                    && block_has_line(b, "if-no-files-found: error")
+                    && block_has_line(b, "retention-days: 7")
+            }),
+        ];
+        expected
+            .iter()
+            .enumerate()
+            .all(|(index, actual)| *actual == Some(index))
+    }
+
+    /// Shared composite action 中 cache restore 必须先于 after-cache 采集/预算，且 Rust
+    /// toolchain 安装必须在其后。这把 workflow 里的 setup 边界绑到真实 cache 生命周期。
+    fn action_has_required_evidence_input(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(input_index) = lines
+            .iter()
+            .position(|(indent, text)| *indent == 2 && *text == "evidence-enabled:")
+        else {
+            return false;
+        };
+        let input_lines = lines[input_index + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 2)
+            .collect::<Vec<_>>();
+        input_lines
+            .iter()
+            .any(|(indent, text)| *indent == 4 && *text == "required: true")
+            && !input_lines
+                .iter()
+                .any(|(indent, text)| *indent == 4 && text.starts_with("default:"))
+    }
+
+    fn setup_action_has_after_cache_gate(yaml: &str, cargo_target_dir: &str) -> bool {
+        let blocks = yaml_step_blocks(yaml);
+        let cache = unique_block_index(&blocks, |b| {
+            block_uses_action(b, "actions/cache@v4") && block_has_line(b, cargo_target_dir)
+        });
+        let after_cache = unique_block_index(&blocks, |b| {
+            block_has_line(b, "if: ${{ inputs.evidence-enabled == 'true' }}")
+                && block_has_evidence_snapshot(b, "after-cache", false)
+                && block_has_disk_budget(b, "after-cache")
+        });
+        let toolchain = unique_block_index(&blocks, |b| {
+            block_has_line(b, "rustup component add rustfmt clippy llvm-tools-preview")
+        });
+        action_has_required_evidence_input(yaml)
+            && matches!((cache, after_cache, toolchain), (Some(a), Some(b), Some(c)) if a < b && b < c)
+    }
+
+    fn workflow_setup_evidence_enabled(yaml: &str) -> Option<bool> {
+        let blocks = workflow_single_job_step_blocks(yaml)?;
+        let setup = unique_block_index(&blocks, |b| {
+            block_uses_action(b, "./.github/actions/setup-rss-ci")
+        })?;
+        match (
+            block_has_line(&blocks[setup], "evidence-enabled: true"),
+            block_has_line(&blocks[setup], "evidence-enabled: false"),
+        ) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
+    }
+
+    fn workflow_uses_setup_action(yaml: &str) -> bool {
+        workflow_single_job_step_blocks(yaml).is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block_uses_action(block, "./.github/actions/setup-rss-ci"))
+        })
+    }
+
+    fn workflow_has_evidence_stages_around_setup(yaml: &str) -> bool {
+        let Some(blocks) = workflow_single_job_step_blocks(yaml) else {
+            return false;
+        };
+        if !workflow_has_top_level_evidence_file_env(yaml) {
+            return false;
+        }
+        let stages = [
+            unique_block_index(&blocks, |b| {
+                block_has_evidence_snapshot(b, "start", false) && block_has_disk_budget(b, "start")
+            }),
+            unique_block_index(&blocks, |b| {
+                block_uses_action(b, "./.github/actions/setup-rss-ci")
+            }),
+            unique_block_index(&blocks, |b| {
+                block_is_always(b)
+                    && block_has_evidence_snapshot(b, "after-build", true)
+                    && block_has_disk_budget(b, "after-build")
+            }),
+            unique_block_index(&blocks, |b| {
+                block_is_always(b) && block_has_evidence_snapshot(b, "before-save", false)
+            }),
+            unique_block_index(&blocks, |b| {
+                block_is_always(b) && block_uses_action(b, "actions/upload-artifact@v4")
+            }),
+        ];
+        matches!(
+            stages,
+            [Some(start), Some(setup), Some(after), Some(before), Some(upload)]
+                if start < setup && setup < after && after < before && before < upload
+        )
+    }
+
+    fn workflow_setup_evidence_contract_matches(yaml: &str) -> bool {
+        workflow_setup_evidence_enabled(yaml)
+            == Some(workflow_has_evidence_stages_around_setup(yaml))
+    }
+
+    fn cargo_target_dir_from_config(config: &str) -> Option<String> {
+        let parsed = config.parse::<toml::Value>().ok()?;
+        parsed
+            .get("build")?
+            .get("target-dir")?
+            .as_str()
+            .map(str::to_owned)
     }
 
     /// 委托谓词（正向白名单）：YAML 的 PR/push 触发器绑定 develop，且 run/script 执行面只有安装步骤
@@ -2366,6 +2639,285 @@ mod tests {
         yaml_command_scripts(yaml)
             .iter()
             .all(|script| command_script_is_setup_only(script))
+    }
+
+    fn resource_evidence_workflow_fixture(delegate: &str) -> String {
+        [
+            "env:".to_owned(),
+            format!("  {EVIDENCE_FILE_ENV}"),
+            "jobs:\n  lane:\n    steps:".to_owned(),
+            "      - uses: actions/checkout@v4".to_owned(),
+            "      - name: Capture start evidence\n        run: |".to_owned(),
+            format!(
+                "          .github/scripts/ci-evidence.sh snapshot start {EVIDENCE_OUTPUT_ARG}"
+            ),
+            format!(
+                "          .github/scripts/ci-disk-budget.sh --stage start {WORKSPACE_PATH_ARG}"
+            ),
+            "      - uses: ./.github/actions/setup-rss-ci\n        with:\n          evidence-enabled: true"
+                .to_owned(),
+            format!("      - id: xtask\n        run: {delegate}"),
+            "      - name: Capture after-build evidence\n        if: ${{ always() }}\n        run: |"
+                .to_owned(),
+            format!(
+                "          .github/scripts/ci-evidence.sh snapshot after-build {EVIDENCE_OUTPUT_ARG} {XTASK_OUTCOME_ARG}"
+            ),
+            format!(
+                "          .github/scripts/ci-disk-budget.sh --stage after-build {WORKSPACE_PATH_ARG}"
+            ),
+            "      - name: Capture before-save evidence\n        if: ${{ always() }}\n        run: |"
+                .to_owned(),
+            format!(
+                "          .github/scripts/ci-evidence.sh snapshot before-save {EVIDENCE_OUTPUT_ARG}"
+            ),
+            "      - uses: actions/upload-artifact@v4\n        if: ${{ always() }}\n        with:\n          name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}\n          if-no-files-found: error\n          retention-days: 7"
+                .to_owned(),
+        ]
+        .join("\n")
+    }
+
+    /// CI-RESOURCE-EVIDENCE-01 synthetic green/red + anti-vacuity：完整七步形为真，每个
+    /// 生命周期子句缺失、乱序或仅出现在 display name 都为假。
+    #[test]
+    fn resource_evidence_lifecycle_predicate_green_red_and_anti_vacuity() {
+        let delegate = "cargo run --locked -p xtask -- ci";
+        let forms = [delegate];
+        let green = resource_evidence_workflow_fixture(delegate);
+        assert!(workflow_has_resource_evidence_lifecycle(&green, &forms));
+
+        let red_replacements = [
+            (EVIDENCE_FILE_ENV, "RSS_CI_EVIDENCE_FILE: other.json"),
+            ("snapshot start", "snapshot unknown"),
+            ("--stage start", "--stage other"),
+            ("uses: ./.github/actions/setup-rss-ci", "uses: ./other"),
+            ("id: xtask", "id: build"),
+            ("snapshot after-build", "snapshot before-save"),
+            ("--stage after-build", "--stage other"),
+            ("snapshot before-save", "snapshot unknown"),
+            ("actions/upload-artifact@v4", "actions/upload-artifact@v3"),
+            (
+                "name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}",
+                "name: ci-evidence",
+            ),
+            (
+                "path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}",
+                "path: ${{ runner.temp }}",
+            ),
+            ("if-no-files-found: error", "if-no-files-found: warn"),
+            ("retention-days: 7", "retention-days: 90"),
+        ];
+        for (required, replacement) in red_replacements {
+            assert!(
+                !workflow_has_resource_evidence_lifecycle(
+                    &green.replacen(required, replacement, 1),
+                    &forms
+                ),
+                "缺失或替换 `{required}` 必须 fail-closed"
+            );
+        }
+        for action in [
+            "actions/checkout@v4",
+            "./.github/actions/setup-rss-ci",
+            "actions/upload-artifact@v4",
+        ] {
+            for evil in [format!("evil-{action}"), format!("{action}-evil")] {
+                assert!(
+                    !workflow_has_resource_evidence_lifecycle(
+                        &green.replacen(action, &evil, 1),
+                        &forms
+                    ),
+                    "action 引用 `{evil}` 不得匹配 `{action}`"
+                );
+            }
+        }
+
+        let wrong_order = green
+            .replace("snapshot start", "snapshot swap")
+            .replace("snapshot after-build", "snapshot start")
+            .replace("snapshot swap", "snapshot after-build");
+        assert!(!workflow_has_resource_evidence_lifecycle(
+            &wrong_order,
+            &forms
+        ));
+        let display_name_only =
+            green.replace(&format!("run: {delegate}"), &format!("name: '{delegate}'"));
+        assert!(!workflow_has_resource_evidence_lifecycle(
+            &display_name_only,
+            &forms
+        ));
+        assert!(!workflow_has_resource_evidence_lifecycle(
+            "# snapshot start\n# actions/upload-artifact@v4\n",
+            &forms
+        ));
+        let cross_job = green.replacen(
+            "      - name: Capture after-build evidence",
+            "  second:\n    steps:\n      - name: Capture after-build evidence",
+            1,
+        );
+        assert!(
+            !workflow_has_resource_evidence_lifecycle(&cross_job, &forms),
+            "不得把不同 job 的步骤拼成证据生命周期"
+        );
+    }
+
+    #[test]
+    fn setup_after_cache_predicate_green_red_and_anti_vacuity() {
+        let green = [
+            "inputs:\n  evidence-enabled:\n    required: true\nruns:\n  steps:".to_owned(),
+            "    - uses: actions/cache@v4\n      with:\n        path: |\n          .cache/cargo-target"
+                .to_owned(),
+            "    - name: Capture after-cache evidence\n      if: ${{ inputs.evidence-enabled == 'true' }}\n      run: |"
+                .to_owned(),
+            format!(
+                "        .github/scripts/ci-evidence.sh snapshot after-cache {EVIDENCE_OUTPUT_ARG}"
+            ),
+            format!(
+                "        .github/scripts/ci-disk-budget.sh --stage after-cache {WORKSPACE_PATH_ARG}"
+            ),
+            "    - name: Rust toolchain\n      run: |\n        rustup component add rustfmt clippy llvm-tools-preview"
+                .to_owned(),
+        ]
+        .join("\n");
+        assert!(setup_action_has_after_cache_gate(
+            &green,
+            ".cache/cargo-target"
+        ));
+        for required in [
+            "evidence-enabled:",
+            "required: true",
+            ".cache/cargo-target",
+            "if: ${{ inputs.evidence-enabled == 'true' }}",
+            "actions/cache@v4",
+            "snapshot after-cache",
+            "--stage after-cache",
+            "rustup component add rustfmt clippy llvm-tools-preview",
+        ] {
+            assert!(
+                !setup_action_has_after_cache_gate(
+                    &green.replacen(required, "missing", 1),
+                    ".cache/cargo-target"
+                ),
+                "缺 `{required}` 必须 fail-closed"
+            );
+        }
+        for evil in ["evil-actions/cache@v4", "actions/cache@v4-evil"] {
+            assert!(
+                !setup_action_has_after_cache_gate(
+                    &green.replacen("actions/cache@v4", evil, 1),
+                    ".cache/cargo-target"
+                ),
+                "action 引用 `{evil}` 不得匹配 `actions/cache@v4`"
+            );
+        }
+        let wrong_order = [
+            "runs:\n  steps:".to_owned(),
+            "    - name: Rust toolchain\n      run: |\n        rustup component add rustfmt clippy llvm-tools-preview"
+                .to_owned(),
+            "    - name: Capture after-cache evidence\n      run: |".to_owned(),
+            format!(
+                "        .github/scripts/ci-evidence.sh snapshot after-cache {EVIDENCE_OUTPUT_ARG}"
+            ),
+            format!(
+                "        .github/scripts/ci-disk-budget.sh --stage after-cache {WORKSPACE_PATH_ARG}"
+            ),
+            "    - uses: actions/cache@v4".to_owned(),
+        ]
+        .join("\n");
+        assert!(!setup_action_has_after_cache_gate(
+            &wrong_order,
+            ".cache/cargo-target"
+        ));
+        assert!(!setup_action_has_after_cache_gate(
+            "# actions/cache@v4\n# snapshot after-cache\n# rustup component add rustfmt clippy llvm-tools-preview\n",
+            ".cache/cargo-target"
+        ));
+    }
+
+    #[test]
+    fn setup_action_callers_explicitly_match_evidence_lifecycle() {
+        let evidence = resource_evidence_workflow_fixture("cargo run --locked -p xtask -- ci");
+        assert!(workflow_setup_evidence_contract_matches(&evidence));
+        let audit = "jobs:\n  audit:\n    steps:\n      - uses: ./.github/actions/setup-rss-ci\n        with:\n          evidence-enabled: false\n      - run: cargo xtask audit\n";
+        assert!(workflow_setup_evidence_contract_matches(audit));
+        assert!(!workflow_setup_evidence_contract_matches(
+            &evidence.replace("evidence-enabled: true", "evidence-enabled: false")
+        ));
+        assert!(!workflow_setup_evidence_contract_matches(
+            &audit.replace("evidence-enabled: false", "evidence-enabled: true")
+        ));
+        assert!(!workflow_setup_evidence_contract_matches(
+            &evidence.replace("snapshot start", "snapshot missing")
+        ));
+    }
+
+    /// 真实 committed 执行面：两个 workflow 共用同一个七阶段证据合约，composite
+    /// action 证明 after-cache 位于真实 cache restore 与 Rust toolchain 之间。
+    #[test]
+    fn github_resource_evidence_workflows_have_lifecycle() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        for (workflow, forms) in [
+            ("ci.yml", XTASK_CI_FORMS),
+            ("integration.yml", XTASK_INTEGRATION_FORMS),
+        ] {
+            let path = root.join(".github/workflows").join(workflow);
+            let yaml = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+            assert!(
+                workflow_has_resource_evidence_lifecycle(&yaml, forms),
+                "{} 须满足 CI-RESOURCE-EVIDENCE-01 七步有序证据生命周期",
+                path.display()
+            );
+        }
+        let action_path = root.join(".github/actions/setup-rss-ci/action.yml");
+        let action_yaml = std::fs::read_to_string(&action_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", action_path.display()))?;
+        let cargo_config_path = root.join(".cargo/config.toml");
+        let cargo_config = std::fs::read_to_string(&cargo_config_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", cargo_config_path.display()))?;
+        let cargo_target_dir = cargo_target_dir_from_config(&cargo_config)
+            .ok_or_else(|| anyhow::anyhow!(".cargo/config.toml 缺 build.target-dir"))?;
+        assert!(
+            setup_action_has_after_cache_gate(&action_yaml, &cargo_target_dir),
+            "{} 须用 Cargo target-dir `{cargo_target_dir}`，并按 cache restore → opt-in after-cache evidence/budget → Rust toolchain 排序",
+            action_path.display()
+        );
+
+        let workflows_dir = root.join(".github/workflows");
+        let mut setup_callers = 0;
+        for entry in std::fs::read_dir(&workflows_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yml") {
+                continue;
+            }
+            let yaml = std::fs::read_to_string(&path)?;
+            if !workflow_uses_setup_action(&yaml) {
+                continue;
+            }
+            setup_callers += 1;
+            assert!(
+                workflow_setup_evidence_contract_matches(&yaml),
+                "{} 的 evidence-enabled 必须显式等于是否具有完整有序 evidence 生命周期",
+                path.display()
+            );
+        }
+        assert!(setup_callers > 0, "至少须发现一个 setup-rss-ci caller");
+        Ok(())
+    }
+
+    /// Shell selftest 进入 workspace test / verify 执行面，避免只在人工命令中运行。
+    #[test]
+    fn ci_evidence_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::clean_cmd(
+            "bash",
+            &[".github/scripts/ci-evidence.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 ci-evidence shell selftest 失败: {e}"))?;
+        assert!(status.success(), "ci-evidence shell selftest 必须通过");
+        Ok(())
     }
 
     fn develop_triggers() -> &'static str {
@@ -2847,9 +3399,9 @@ mod tests {
     ///
     /// - **① 触发器**：`push:` + `schedule:` 两结构键都在（行起头）——否则退化成仅 `workflow_dispatch`，SAST 不随
     ///   镜像 push / 定时跑（静默失效）。
-    /// - **② init step**：某 step 块有**真实** `uses: github/codeql-action/init`（[`block_uses_action`]，非 name /
+    /// - **② init step**：某 step 块有**真实** `uses: github/codeql-action/init@v4`（[`block_uses_action`]，非 name /
     ///   注释值），**且同块**含 `languages: rust` + `build-mode: none`（Rust GA 免编译，绑定到该 init step 的 `with`）。
-    /// - **③ analyze step**：某 step 块有真实 `uses: github/codeql-action/analyze`（产 code-scanning alert）。
+    /// - **③ analyze step**：某 step 块有真实 `uses: github/codeql-action/analyze@v4`（产 code-scanning alert）。
     /// - **④ 写权限**：`security-events: write`（advanced setup 必需）。
     ///
     /// 任一不满足即 SAST 被静默削弱 / 禁用（关键字落注释 / name / 错 step、或退化触发器均 fail-closed）。
@@ -2859,13 +3411,13 @@ mod tests {
         let triggers = workflow_event_has_develop_branch(yaml, "push")
             && workflow_has_top_level_on_event(yaml, "schedule");
         let init_bound = blocks.iter().any(|b| {
-            block_uses_action(b, "github/codeql-action/init")
+            block_uses_action(b, "github/codeql-action/init@v4")
                 && b.iter().any(|l| l.contains("languages: rust"))
                 && b.iter().any(|l| l.contains("build-mode: none"))
         });
         let analyze = blocks
             .iter()
-            .any(|b| block_uses_action(b, "github/codeql-action/analyze"));
+            .any(|b| block_uses_action(b, "github/codeql-action/analyze@v4"));
         let perm = code.iter().any(|l| l.contains("security-events: write"));
         triggers && init_bound && analyze && perm
     }

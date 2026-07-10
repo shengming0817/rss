@@ -29,6 +29,7 @@ jobs:
       - name: Setup RSS Rust CI
         uses: ./.github/actions/setup-rss-ci
         with:
+          evidence-enabled: false
           cache-prefix: cargo-audit
           tools: cargo-deny@0.19.9 cargo-audit@0.22.2
 

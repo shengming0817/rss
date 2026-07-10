@@ -13,10 +13,32 @@ inputs:
   cache-prefix:
     description: Cache key prefix for the caller lane.
     required: true
+  evidence-enabled:
+    description: Whether the caller has initialized the four-stage CI evidence lifecycle.
+    required: true
 
 runs:
   using: composite
   steps:
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          .cache/cargo-target
+        key: ${{ inputs.cache-prefix }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-prefix }}-${{ runner.os }}-
+
+    - name: Capture after-cache evidence
+      if: ${{ inputs.evidence-enabled == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/scripts/ci-evidence.sh snapshot after-cache --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE"
+        .github/scripts/ci-disk-budget.sh --stage after-cache --path "$GITHUB_WORKSPACE"
+
     - name: Rust toolchain
       shell: bash
       run: |
@@ -28,17 +50,6 @@ runs:
         rustup show
       env:
         RSS_SETUP_NIGHTLY: ${{ inputs.nightly }}
-
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ inputs.cache-prefix }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-        restore-keys: |
-          ${{ inputs.cache-prefix }}-${{ runner.os }}-
 
     - name: Install cargo-binstall
       shell: bash

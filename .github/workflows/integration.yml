@@ -16,6 +16,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RSS_CI_EVIDENCE_FILE: ci-evidence.json
 
 jobs:
   integration:
@@ -28,13 +29,41 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Capture start evidence
+        run: |
+          set -euo pipefail
+          .github/scripts/ci-evidence.sh snapshot start --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE"
+          .github/scripts/ci-disk-budget.sh --stage start --path "$GITHUB_WORKSPACE"
+
       - name: Setup RSS Rust CI
         uses: ./.github/actions/setup-rss-ci
         with:
+          evidence-enabled: true
           cache-prefix: cargo-integration
           tools: cargo-nextest@0.9.137
 
       - name: cargo xtask integration
+        id: xtask
+        run: cargo run --locked -p xtask -- integration
+
+      - name: Capture after-build evidence
+        if: ${{ always() }}
         run: |
           set -euo pipefail
-          cargo run --locked -p xtask -- integration
+          .github/scripts/ci-evidence.sh snapshot after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome "${{ steps.xtask.outcome }}"
+          .github/scripts/ci-disk-budget.sh --stage after-build --path "$GITHUB_WORKSPACE"
+
+      - name: Capture before-save evidence
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          .github/scripts/ci-evidence.sh snapshot before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE"
+
+      - name: Upload CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}
+          if-no-files-found: error
+          retention-days: 7

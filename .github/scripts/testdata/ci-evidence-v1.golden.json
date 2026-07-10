@@ -1,0 +1,58 @@
+{
+  "job": {
+    "job": "<string>",
+    "repository": "<string>",
+    "runAttempt": "<string>",
+    "runId": "<string>",
+    "runnerArch": "<string>",
+    "runnerOs": "<string>",
+    "workflow": "<string>"
+  },
+  "schemaVersion": 1,
+  "snapshots": [
+    {
+      "directories": [
+        {
+          "path": "cargo-git",
+          "sizeBytes": 0
+        },
+        {
+          "path": "cargo-registry",
+          "sizeBytes": 0
+        },
+        {
+          "path": "rustup",
+          "sizeBytes": 0
+        },
+        {
+          "path": "target",
+          "sizeBytes": 0
+        },
+        {
+          "path": "workspace",
+          "sizeBytes": 0
+        }
+      ],
+      "errors": [],
+      "filesystem": {
+        "availableBytes": 0,
+        "capacityBytes": 0,
+        "usedBytes": 0
+      },
+      "largestDirectories": [
+        {
+          "path": "<relative>",
+          "sizeBytes": 0
+        }
+      ],
+      "outcome": null,
+      "recordedAt": "<utc>",
+      "stage": "start",
+      "tools": {
+        "cargo": "<string-or-null>",
+        "git": "<string-or-null>",
+        "rustc": "<string-or-null>"
+      }
+    }
+  ]
+}
