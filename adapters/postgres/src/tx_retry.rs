@@ -5,12 +5,16 @@ use std::future::Future;
 use std::time::Duration;
 
 use consistency::{TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryReport, run_tx_retry};
+#[cfg(feature = "domain-identity")]
 use identity::ports::IdentityError;
+#[cfg(feature = "domain-settings")]
 use settings::ports::ConfigRepoError;
 
 /// Retry boundary label for settings config UoW writes.
+#[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_CONFIG_BOUNDARY: &str = "settings.config";
 /// Retry boundary label for identity credential UoW writes.
+#[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: &str = "identity.credential";
 
 /// Classify a SQLSTATE code.
@@ -57,6 +61,7 @@ fn classify_source(source: &(dyn Error + Send + Sync + 'static)) -> TxRetryClass
 }
 
 /// Classify settings repository/UoW errors.
+#[cfg(feature = "domain-settings")]
 pub(crate) fn classify_config_repo_error(error: &ConfigRepoError) -> TxRetryClass {
     match error {
         ConfigRepoError::VersionConflict => TxRetryClass::Conflict,
@@ -66,6 +71,7 @@ pub(crate) fn classify_config_repo_error(error: &ConfigRepoError) -> TxRetryClas
 }
 
 /// Classify identity repository/UoW errors.
+#[cfg(feature = "domain-identity")]
 pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
     match error {
         IdentityError::VersionConflict => TxRetryClass::Conflict,
@@ -143,12 +149,12 @@ fn record_final(boundary: &'static str, report: TxRetryReport) {
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use super::{
-        SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error, classify_sqlstate,
-        classify_sqlx_error, run_pg_tx_retry,
-    };
+    #[cfg(feature = "domain-settings")]
+    use super::{SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error};
+    use super::{classify_sqlstate, classify_sqlx_error, run_pg_tx_retry};
     use crate::cotx::commit_unknown;
     use consistency::TxRetryClass;
+    #[cfg(feature = "domain-settings")]
     use settings::ports::ConfigRepoError;
 
     #[derive(Debug)]
@@ -199,6 +205,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "domain-settings")]
     #[test]
     fn commit_unknown_is_not_retryable() {
         let err = commit_unknown(sqlx::Error::PoolTimedOut);
@@ -209,6 +216,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "domain-settings")]
     #[test]
     fn retry_metrics_emit_closed_labels() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

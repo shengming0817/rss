@@ -40,7 +40,7 @@ mod tests {
         );
         assert_eq!(
             output.probes[1].0.as_str(),
-            crate::infra::vault::KEYPROVIDER_READY_PROBE_NAME
+            settings_composition::KEYPROVIDER_READY_PROBE_NAME
         );
         let resource_names = output
             .resources

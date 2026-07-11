@@ -15,6 +15,7 @@ name = "runtime"
 path = "src/lib.rs"
 
 [dependencies]
+settings-composition = { path = "../../composition/settings" }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 httpserve = { path = "../../crates/httpserve" }
@@ -42,7 +43,7 @@ identity = { path = "../../crates/identity" }
 # 生产 MacVerifier backend（RustCrypto hmac/sha2；audit keyed-HMAC 链 verifier，#1230）。
 crypto-adapter = { path = "../../adapters/crypto" }
 # postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + PgAuditRepo + 采样组件）。
-postgres = { path = "../../adapters/postgres" }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit"] }
 # eventbus 真传输 topology-gated 接线（#1251/#1434）：durable transport = amqp publisher/subscriber
 # （backend=真 lapin，不拉 testkit）+ eventexec relay/consumer 执行体；consumer 幂等走 PG inbox。
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
@@ -101,8 +102,9 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 integration = ["testkit/containers", "identity/seed-login"]
 
 [dev-dependencies]
+settings-composition = { path = "../../composition/settings", features = ["test-support"] }
 # 默认单测仅启用 lazy typed capability bundle；不连接 postgres。
-postgres = { path = "../../adapters/postgres", features = ["test-support"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit", "test-support"] }
 # runtime 单元/e2e 测试需要显式构造 domain-local TenantRepoScope；生产依赖不启用 test-support。
 authn = { path = "../../crates/authn", features = ["test-support"] }
 audit = { path = "../../crates/audit", features = ["test-support"] }

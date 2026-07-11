@@ -107,10 +107,37 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     for assembly in &assemblies {
         findings.extend(validate_assembly(assembly));
         if let Some(metadata) = &metadata {
-            findings.extend(validate_domain_closure(root, assembly, metadata)?);
+            findings.extend(validate_target_domain_closure(root, assembly, metadata)?);
         }
     }
     Ok((assemblies.len(), findings))
+}
+
+fn validate_target_domain_closure(
+    root: &Path,
+    assembly: &DiscoveredAssembly,
+    metadata: &CargoMetadata,
+) -> Result<Vec<Finding>> {
+    // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "verify", source = "code" } —
+    // 每个 assembly.toml 的 active domain 必须是目标 assembly package 当前 target 图中同名、未 rename、
+    // 指向同名 workspace domain crate 的直接 normal dependency；inactive domain 不得进入该目标 package 的
+    // normal dependency closure。真实 Cargo fixture 覆盖 alias、target cfg、dev/build、optional、
+    // direct/transitive red case。
+    let package = package_by_manifest(metadata, &assembly.cargo_path).with_context(|| {
+        format!(
+            "{} 未出现在 cargo metadata packages 中；manifest_path={}",
+            assembly.cargo_label,
+            assembly.cargo_path.display()
+        )
+    })?;
+    let declared_direct_domains = direct_normal_domain_deps(root, metadata, package)?;
+    let target_direct_domains = cargo_tree_domains(root, assembly, metadata, Some(1))?;
+    let direct_domains = declared_direct_domains
+        .intersection(&target_direct_domains)
+        .cloned()
+        .collect();
+    let closure_domains = cargo_tree_domains(root, assembly, metadata, None)?;
+    validate_domain_sets(assembly, direct_domains, closure_domains)
 }
 
 fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
@@ -690,7 +717,6 @@ fn provider_state(provider: &DiportProvider) -> String {
 struct CargoMetadata {
     packages: Vec<MetadataPackage>,
     workspace_members: BTreeSet<String>,
-    resolve: MetadataResolve,
 }
 
 #[derive(Debug, Deserialize)]
@@ -698,32 +724,16 @@ struct MetadataPackage {
     id: String,
     name: String,
     manifest_path: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataResolve {
     #[serde(default)]
-    nodes: Vec<MetadataNode>,
+    dependencies: Vec<MetadataDependency>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MetadataNode {
-    id: String,
-    #[serde(default)]
-    deps: Vec<MetadataDep>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataDep {
+struct MetadataDependency {
     name: String,
-    pkg: String,
-    #[serde(default)]
-    dep_kinds: Vec<MetadataDepKind>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataDepKind {
     kind: Option<String>,
+    rename: Option<String>,
+    path: Option<PathBuf>,
 }
 
 fn load_workspace_metadata(root: &Path) -> Result<Option<CargoMetadata>> {
@@ -769,31 +779,122 @@ fn cargo_metadata_args(manifest_arg: &str) -> [&str; 6] {
     ]
 }
 
-fn validate_domain_closure(
+fn cargo_tree_domains(
     root: &Path,
-    a: &DiscoveredAssembly,
+    assembly: &DiscoveredAssembly,
     metadata: &CargoMetadata,
+    depth: Option<usize>,
+) -> Result<BTreeSet<String>> {
+    let manifest = assembly.cargo_path.display().to_string();
+    let depth_value = depth.map(|value| value.to_string());
+    let mut args = vec![
+        "tree",
+        "--manifest-path",
+        manifest.as_str(),
+        "--edges",
+        "normal",
+        "--all-features",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+    ];
+    if let Some(value) = depth_value.as_deref() {
+        args.extend(["--depth", value]);
+    }
+    let output = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::Tree,
+        &args[1..],
+        &[],
+        Some(root),
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .with_context(|| format!("执行 cargo tree 失败：{}", assembly.cargo_label))?;
+    if !output.status.success() {
+        bail!(
+            "cargo tree 失败（{}）：{}",
+            assembly.cargo_label,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("cargo tree 输出不是 UTF-8：{}", assembly.cargo_label))?;
+    let mut domains = BTreeSet::new();
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| package_is_workspace_domain(root, metadata, package))
+    {
+        let Some(package_dir) = package.manifest_path.parent() else {
+            continue;
+        };
+        let path_marker = format!("({})", package_dir.display());
+        if stdout.lines().any(|line| {
+            line.starts_with(&format!("{} ", package.name)) && line.ends_with(&path_marker)
+        }) {
+            domains.insert(package.name.clone());
+        }
+    }
+    Ok(domains)
+}
+
+fn package_by_manifest<'a>(
+    metadata: &'a CargoMetadata,
+    manifest_path: &Path,
+) -> Option<&'a MetadataPackage> {
+    metadata
+        .packages
+        .iter()
+        .find(|package| package.manifest_path == manifest_path)
+}
+
+fn direct_normal_domain_deps(
+    root: &Path,
+    metadata: &CargoMetadata,
+    assembly: &MetadataPackage,
+) -> Result<BTreeSet<String>> {
+    let mut domains = BTreeSet::new();
+    for dependency in assembly
+        .dependencies
+        .iter()
+        .filter(|dep| dep.kind.is_none())
+    {
+        if dependency.rename.is_some() {
+            continue;
+        }
+        let Some(path) = &dependency.path else {
+            continue;
+        };
+        for package in metadata
+            .packages
+            .iter()
+            .filter(|package| package_is_workspace_domain(root, metadata, package))
+        {
+            let Some(package_dir) = package.manifest_path.parent() else {
+                continue;
+            };
+            if dependency.name == package.name && path == package_dir {
+                domains.insert(package.name.clone());
+            }
+        }
+    }
+    Ok(domains)
+}
+
+fn validate_domain_sets(
+    a: &DiscoveredAssembly,
+    direct_domains: BTreeSet<String>,
+    closure_domains: BTreeSet<String>,
 ) -> Result<Vec<Finding>> {
-    // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "verify", source = "code" } —
-    // assembly.toml `domains` 必须与 assembly Cargo normal dependency graph 闭合：active domain 是直接
-    // normal dependency；inactive domain 不得出现在 normal dependency closure。red/green tests 覆盖 alias、
-    // dev/build、direct/transitive inactive 与真实 runtime canary。
-    let assembly = package_by_manifest(metadata, &a.cargo_path).with_context(|| {
-        format!(
-            "{} 未出现在 cargo metadata packages 中；manifest_path={}",
-            a.cargo_label,
-            a.cargo_path.display()
-        )
-    })?;
-    let direct_domains = direct_normal_domain_deps(root, metadata, &assembly.id)?;
-    let closure_domains = normal_domain_closure(root, metadata, &assembly.id)?;
     let manifest_domains: BTreeSet<&str> = a
         .manifest
         .domains
         .iter()
         .map(AssemblyDomain::as_str)
         .collect();
-
     let mut findings = Vec::new();
     for domain in &manifest_domains {
         if !direct_domains.contains(*domain) {
@@ -821,86 +922,6 @@ fn validate_domain_closure(
         }
     }
     Ok(findings)
-}
-
-fn package_by_manifest<'a>(
-    metadata: &'a CargoMetadata,
-    manifest_path: &Path,
-) -> Option<&'a MetadataPackage> {
-    metadata
-        .packages
-        .iter()
-        .find(|package| package.manifest_path == manifest_path)
-}
-
-fn package_by_id<'a>(metadata: &'a CargoMetadata, id: &str) -> Result<&'a MetadataPackage> {
-    metadata
-        .packages
-        .iter()
-        .find(|package| package.id == id)
-        .with_context(|| format!("cargo metadata resolve 引用未知 package id `{id}`"))
-}
-
-fn node_by_id<'a>(metadata: &'a CargoMetadata, id: &str) -> Result<&'a MetadataNode> {
-    metadata
-        .resolve
-        .nodes
-        .iter()
-        .find(|node| node.id == id)
-        .with_context(|| format!("cargo metadata resolve 缺 package node `{id}`"))
-}
-
-fn direct_normal_domain_deps(
-    root: &Path,
-    metadata: &CargoMetadata,
-    package_id: &str,
-) -> Result<BTreeSet<String>> {
-    let mut domains = BTreeSet::new();
-    for dep in node_by_id(metadata, package_id)?
-        .deps
-        .iter()
-        .filter(|dep| is_normal_dep(dep))
-    {
-        let package = package_by_id(metadata, &dep.pkg)?;
-        if package_is_workspace_domain(root, metadata, package) && dep.name == package.name {
-            domains.insert(package.name.clone());
-        }
-    }
-    Ok(domains)
-}
-
-fn normal_domain_closure(
-    root: &Path,
-    metadata: &CargoMetadata,
-    package_id: &str,
-) -> Result<BTreeSet<String>> {
-    let mut domains = BTreeSet::new();
-    let mut seen = BTreeSet::new();
-    let mut stack = vec![package_id.to_owned()];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        for dep in node_by_id(metadata, &id)?
-            .deps
-            .iter()
-            .filter(|dep| is_normal_dep(dep))
-        {
-            let package = package_by_id(metadata, &dep.pkg)?;
-            if !metadata.workspace_members.contains(&package.id) {
-                continue;
-            }
-            if package_is_workspace_domain(root, metadata, package) {
-                domains.insert(package.name.clone());
-            }
-            stack.push(package.id.clone());
-        }
-    }
-    Ok(domains)
-}
-
-fn is_normal_dep(dep: &MetadataDep) -> bool {
-    dep.dep_kinds.iter().any(|kind| kind.kind.is_none())
 }
 
 fn package_is_workspace_domain(
@@ -1689,82 +1710,108 @@ purpose = "device-certificate-revocation"
         )
     }
 
-    fn cargo_runtime_manifest(extra: &str) -> String {
-        format!(
-            r#"[package]
-name = "runtime"
-
-{extra}
-"#
-        )
-    }
-
-    fn metadata_fixture(
-        root: &Path,
-        runtime_deps: &str,
-        extra_nodes: &str,
-    ) -> anyhow::Result<CargoMetadata> {
-        let runtime_manifest = root.join("assemblies/runtime/Cargo.toml");
-        let identity_manifest = root.join("crates/identity/Cargo.toml");
-        let settings_manifest = root.join("crates/settings/Cargo.toml");
-        let audit_manifest = root.join("crates/audit/Cargo.toml");
-        let postgres_manifest = root.join("adapters/postgres/Cargo.toml");
-        let metadata = serde_json::from_str(&format!(
-            r#"{{
-  "packages": [
-    {{"id": "runtime", "name": "runtime", "manifest_path": "{}"}},
-    {{"id": "identity", "name": "identity", "manifest_path": "{}"}},
-    {{"id": "settings", "name": "settings", "manifest_path": "{}"}},
-    {{"id": "audit", "name": "audit", "manifest_path": "{}"}},
-    {{"id": "postgres", "name": "postgres", "manifest_path": "{}"}}
-  ],
-  "workspace_members": ["runtime", "identity", "settings", "audit", "postgres"],
-  "resolve": {{
-    "nodes": [
-      {{"id": "runtime", "deps": [{}]}},
-      {{"id": "identity", "deps": []}},
-      {{"id": "settings", "deps": []}},
-      {{"id": "audit", "deps": []}}
-      {}
-    ]
-  }}
-}}"#,
-            runtime_manifest.display(),
-            identity_manifest.display(),
-            settings_manifest.display(),
-            audit_manifest.display(),
-            postgres_manifest.display(),
-            runtime_deps,
-            extra_nodes
-        ))?;
-        Ok(metadata)
-    }
-
     fn domain_findings(
         root: &Path,
         manifest: &str,
-        runtime_deps: &str,
-        extra_nodes: &str,
+        runtime_dependency_tables: &str,
+        postgres_dependencies: &str,
     ) -> anyhow::Result<Vec<Finding>> {
-        write_assembly(root, manifest, &cargo_runtime_manifest(""))?;
-        let (assemblies, discovery_findings) = discover(root)?;
-        assert!(
-            discovery_findings.is_empty(),
-            "domain fixture discovery should be clean: {discovery_findings:?}"
+        fs::create_dir_all(root)?;
+        write(
+            &root.join("Cargo.toml"),
+            r#"[workspace]
+members = [
+  "assemblies/runtime",
+  "crates/identity",
+  "crates/settings",
+  "crates/audit",
+  "adapters/postgres",
+]
+resolver = "2"
+"#,
+        )?;
+        write_assembly(
+            root,
+            manifest,
+            &format!(
+                r#"[package]
+name = "runtime"
+version = "0.0.0"
+edition = "2024"
+
+{runtime_dependency_tables}
+"#
+            ),
+        )?;
+        write_runtime_src(root, "lib.rs", "pub fn fixture() {}")?;
+
+        for domain in ["identity", "settings", "audit"] {
+            let dir = root.join("crates").join(domain);
+            fs::create_dir_all(dir.join("src"))?;
+            write(
+                &dir.join("Cargo.toml"),
+                &format!(
+                    r#"[package]
+name = "{domain}"
+version = "0.0.0"
+edition = "2024"
+"#
+                ),
+            )?;
+            write(&dir.join("src/lib.rs"), "pub fn fixture() {}")?;
+        }
+
+        let postgres_dir = root.join("adapters/postgres");
+        fs::create_dir_all(postgres_dir.join("src"))?;
+        write(
+            &postgres_dir.join("Cargo.toml"),
+            &format!(
+                r#"[package]
+name = "postgres"
+version = "0.0.0"
+edition = "2024"
+
+{postgres_dependencies}
+"#
+            ),
+        )?;
+        write(&postgres_dir.join("src/lib.rs"), "pub fn fixture() {}")?;
+
+        let manifest_path = root.join("Cargo.toml");
+        let manifest_arg = manifest_path.display().to_string();
+        let output = crate::cmd::cargo_cmd(
+            crate::cmd::CargoSubcommand::GenerateLockfile,
+            &["--manifest-path", manifest_arg.as_str()],
+            &[],
+            Some(root),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "generate fixture Cargo.lock failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        let assembly = assemblies
-            .first()
-            .context("domain fixture writes one assembly")?;
-        let metadata = metadata_fixture(root, runtime_deps, extra_nodes)?;
-        validate_domain_closure(root, assembly, &metadata)
+
+        let (_count, findings) = validate_root(root)?;
+        Ok(findings
+            .into_iter()
+            .filter(|finding| {
+                matches!(
+                    finding.rule,
+                    Rule::ActiveDomainDependency | Rule::InactiveDomainDependencyClosure
+                )
+            })
+            .collect())
     }
 
     #[test]
-    fn assembly_domain_metadata_uses_all_features_resolve() {
+    fn assembly_domain_metadata_indexes_all_workspace_features() {
         let args = cargo_metadata_args("/tmp/rss/Cargo.toml");
         assert!(
             args.contains(&"--all-features"),
-            "assembly domain closure metadata must match verify all-features compile surface: {args:?}"
+            "workspace package classification must see the full compile surface: {args:?}"
         );
     }
 
@@ -2674,7 +2721,9 @@ name = "runtime"
         let findings = domain_findings(
             &root,
             &manifest_with_domains(&["identity", "settings"]),
-            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]}"#,
+            r#"[dependencies]
+identity = { path = "../../crates/identity" }
+"#,
             "",
         )?;
         assert!(
@@ -2689,19 +2738,34 @@ name = "runtime"
     #[test]
     fn assembly_domain_dev_or_build_dependency_does_not_satisfy_active_domain() -> anyhow::Result<()>
     {
-        let root = unique_tmp("assembly-domain-dev-build");
-        let findings = domain_findings(
-            &root,
-            &manifest_with_domains(&["identity"]),
-            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": "dev"}, {"kind": "build"}]}"#,
-            "",
-        )?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::ActiveDomainDependency),
-            "dev/build domain dependencies must not satisfy active domain closure: {findings:?}"
-        );
+        for (case, dependency_table) in [
+            (
+                "dev",
+                r#"[dev-dependencies]
+identity = { path = "../../crates/identity" }
+"#,
+            ),
+            (
+                "build",
+                r#"[build-dependencies]
+identity = { path = "../../crates/identity" }
+"#,
+            ),
+        ] {
+            let root = unique_tmp(&format!("assembly-domain-{case}"));
+            let findings = domain_findings(
+                &root,
+                &manifest_with_domains(&["identity"]),
+                dependency_table,
+                "",
+            )?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.rule == Rule::ActiveDomainDependency),
+                "{case} domain dependency must not satisfy active domain closure: {findings:?}"
+            );
+        }
         Ok(())
     }
 
@@ -2711,7 +2775,9 @@ name = "runtime"
         let findings = domain_findings(
             &root,
             &manifest_with_domains(&["identity"]),
-            r#"{"name": "id", "pkg": "identity", "dep_kinds": [{"kind": null}]}"#,
+            r#"[dependencies]
+id = { package = "identity", path = "../../crates/identity" }
+"#,
             "",
         )?;
         assert!(
@@ -2724,13 +2790,36 @@ name = "runtime"
     }
 
     #[test]
+    fn assembly_domain_inactive_target_dependency_does_not_satisfy_active_domain()
+    -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-inactive-target");
+        let findings = domain_findings(
+            &root,
+            &manifest_with_domains(&["identity"]),
+            r#"[target.'cfg(any())'.dependencies]
+identity = { path = "../../crates/identity" }
+"#,
+            "",
+        )?;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ActiveDomainDependency),
+            "current-target-inactive domain dependency must not satisfy active domain closure: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn assembly_domain_inactive_direct_dependency_is_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-domain-inactive-direct");
         let findings = domain_findings(
             &root,
             &manifest_with_domains(&["identity"]),
-            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
-               {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null}]}"#,
+            r#"[dependencies]
+identity = { path = "../../crates/identity" }
+settings = { path = "../../crates/settings" }
+"#,
             "",
         )?;
         assert!(
@@ -2749,8 +2838,10 @@ name = "runtime"
         let findings = domain_findings(
             &root,
             &manifest_with_domains(&["identity"]),
-            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
-               {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null, "target": "cfg(feature = \"settings-domain\")"}]}"#,
+            r#"[dependencies]
+identity = { path = "../../crates/identity" }
+settings = { path = "../../crates/settings", optional = true }
+"#,
             "",
         )?;
         assert!(
@@ -2768,12 +2859,13 @@ name = "runtime"
         let findings = domain_findings(
             &root,
             &manifest_with_domains(&["identity"]),
-            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
-               {"name": "postgres", "pkg": "postgres", "dep_kinds": [{"kind": null}]}"#,
-            r#",
-      {"id": "postgres", "deps": [
-        {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null}]}
-      ]}"#,
+            r#"[dependencies]
+identity = { path = "../../crates/identity" }
+postgres = { path = "../../adapters/postgres" }
+"#,
+            r#"[dependencies]
+settings = { path = "../../crates/settings" }
+"#,
         )?;
         assert!(
             findings
@@ -2790,9 +2882,11 @@ name = "runtime"
         let findings = domain_findings(
             &root,
             &manifest_with_domains(&["identity", "settings", "audit"]),
-            r#"{"name": "identity", "pkg": "identity", "dep_kinds": [{"kind": null}]},
-               {"name": "settings", "pkg": "settings", "dep_kinds": [{"kind": null}]},
-               {"name": "audit", "pkg": "audit", "dep_kinds": [{"kind": null}]}"#,
+            r#"[dependencies]
+identity = { path = "../../crates/identity" }
+settings = { path = "../../crates/settings" }
+audit = { path = "../../crates/audit" }
+"#,
             "",
         )?;
         assert!(findings.is_empty(), "{findings:?}");
@@ -2800,20 +2894,29 @@ name = "runtime"
     }
 
     #[test]
-    fn assembly_domain_real_runtime_closure_excludes_inactive_domains() -> anyhow::Result<()> {
+    fn assembly_domain_real_workspace_closures_match_manifests() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let (assemblies, discovery_findings) = discover(&root)?;
         assert!(
             discovery_findings.is_empty(),
             "real workspace discovery should be clean: {discovery_findings:?}"
         );
-        let assembly = assemblies
-            .iter()
-            .find(|assembly| assembly.manifest.name == "runtime")
-            .context("runtime assembly exists")?;
         let metadata = load_workspace_metadata(&root)?.context("real workspace has Cargo.toml")?;
-        let findings = validate_domain_closure(&root, assembly, &metadata)?;
-        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            assemblies
+                .iter()
+                .map(|assembly| assembly.manifest.name.as_str())
+                .collect::<Vec<_>>(),
+            ["runtime", "settingsonly"]
+        );
+        for assembly in &assemblies {
+            let findings = validate_target_domain_closure(&root, assembly, &metadata)?;
+            assert!(
+                findings.is_empty(),
+                "{} target closure findings: {findings:?}",
+                assembly.manifest.name
+            );
+        }
         Ok(())
     }
 

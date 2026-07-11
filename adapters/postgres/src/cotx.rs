@@ -17,13 +17,16 @@
 //!
 //! ref: debezium outbox SMT / MassTransit Bus Outbox（业务写 + outbox 行同一本地事务，producer 侧 durable）
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use consistency::EventEntry;
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use diport::OutboxEmitError;
 use futures::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use vocab::TenantId;
 
 use crate::PgStore;
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -61,18 +64,21 @@ pub(crate) fn infra_tenant_scope(tenant: TenantId) -> InfraTenantScope {
     InfraTenantScope::from_infra_capability(tenant)
 }
 
+#[cfg(feature = "domain-settings")]
 impl TenantScopeHandle for settings::ports::TenantRepoScope {
     fn tenant(self) -> TenantId {
         settings::ports::TenantRepoScope::tenant(&self)
     }
 }
 
+#[cfg(feature = "domain-identity")]
 impl TenantScopeHandle for identity::ports::TenantRepoScope {
     fn tenant(self) -> TenantId {
         identity::ports::TenantRepoScope::tenant(&self)
     }
 }
 
+#[cfg(feature = "domain-audit")]
 impl TenantScopeHandle for audit::ports::TenantRepoScope {
     fn tenant(self) -> TenantId {
         audit::ports::TenantRepoScope::tenant(&self)
@@ -100,10 +106,12 @@ pub(crate) fn commit_unknown(source: sqlx::Error) -> sqlx::Error {
     sqlx::Error::AnyDriverError(Box::new(PgTxCommitError::new(source)))
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 #[derive(Debug, thiserror::Error)]
 #[error("outbox envelope tenant does not match tenant-scoped transaction")]
 struct OutboxTenantMismatch;
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 struct CoTxOutboxWrite<'a> {
     tenant: TenantId,
     entry: &'a EventEntry,
@@ -227,6 +235,7 @@ impl PgTenantPool {
     }
 
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
+    #[cfg(feature = "domain-identity")]
     pub(crate) async fn retry_write<S, T, F, E>(
         &self,
         scope: S,
@@ -244,6 +253,7 @@ impl PgTenantPool {
     }
 
     /// Run a tenant-scoped business write followed by outbox append in the same transaction.
+    #[cfg(feature = "domain-identity")]
     pub(crate) async fn co_tx_with_outbox<S, F, E>(
         &self,
         scope: S,
@@ -271,6 +281,7 @@ impl PgTenantPool {
     }
 
     /// Run a tenant-scoped co-transaction with a per-attempt lock wait bound.
+    #[cfg(feature = "domain-settings")]
     pub(crate) async fn retry_co_tx_with_outbox<S, F, E>(
         &self,
         scope: S,
@@ -504,6 +515,7 @@ async fn begin_tenant_scoped_write<'p, E>(
 ///     )
 ///     .await
 /// ```
+#[cfg(feature = "domain-identity")]
 async fn co_tx_with_outbox<F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
@@ -528,6 +540,7 @@ where
     .await
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 async fn co_tx_with_outbox_inner<F, E>(
     pool: &PgPool,
     projection_registry: ProjectionWriteRegistry,
@@ -579,6 +592,7 @@ where
 }
 
 /// 事务体：SET LOCAL tenant → 业务写 → `append_outbox`（任一步 Err 即冒泡，由调用方 rollback）。
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 async fn write_in_tx<F, E>(
     tx: &mut Transaction<'_, Postgres>,
     projection_registry: ProjectionWriteRegistry,
@@ -618,6 +632,7 @@ where
         .map_err(CoTxWriteError::AppendOutbox)
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 enum CoTxWriteError<E> {
     TenantScope(sqlx::Error),
     TenantMismatch(sqlx::Error),
@@ -626,16 +641,19 @@ enum CoTxWriteError<E> {
     AppendOutbox(OutboxAppendError),
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 pub(crate) trait MapOutboxAppendError {
     fn from_outbox_append(error: OutboxAppendError) -> Self;
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 impl MapOutboxAppendError for OutboxEmitError {
     fn from_outbox_append(error: OutboxAppendError) -> Self {
         error.into_emit_error()
     }
 }
 
+#[cfg(feature = "domain-settings")]
 impl MapOutboxAppendError for settings::ports::ConfigRepoError {
     fn from_outbox_append(error: OutboxAppendError) -> Self {
         match error {
@@ -645,6 +663,7 @@ impl MapOutboxAppendError for settings::ports::ConfigRepoError {
     }
 }
 
+#[cfg(feature = "domain-identity")]
 impl MapOutboxAppendError for identity::ports::IdentityError {
     fn from_outbox_append(error: OutboxAppendError) -> Self {
         match error {
@@ -654,6 +673,7 @@ impl MapOutboxAppendError for identity::ports::IdentityError {
     }
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 impl<E: MapOutboxAppendError> CoTxWriteError<E> {
     fn stage(&self) -> &'static str {
         match self {
@@ -689,6 +709,7 @@ impl<E: MapOutboxAppendError> CoTxWriteError<E> {
     }
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 fn log_cotx_write_error<E: MapOutboxAppendError>(
     entry: &EventEntry,
     env: &OutboxEnvelope,
@@ -706,6 +727,7 @@ fn log_cotx_write_error<E: MapOutboxAppendError>(
     }
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 fn log_cotx_identity_error(error: &OutboxAppendError) -> bool {
     let Some(reason) = error.identity_failure_reason() else {
         return false;
@@ -719,6 +741,7 @@ fn log_cotx_identity_error(error: &OutboxAppendError) -> bool {
     true
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 fn log_cotx_sqlx_error(
     entry: &EventEntry,
     env: &OutboxEnvelope,
@@ -736,6 +759,7 @@ fn log_cotx_sqlx_error(
     );
 }
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 fn log_cotx_domain_error(entry: &EventEntry, env: &OutboxEnvelope, stage: &'static str) {
     tracing::warn!(
         target: "postgres",

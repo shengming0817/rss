@@ -43,9 +43,10 @@ pub use infra::pg::{build_pg_audit_admin_config, build_pg_config, build_pg_migra
 pub use infra::redis::build_redis_runtime_deps;
 pub use infra::s3::build_s3_runtime_deps_from;
 pub use infra::vault::{
-    KEYPROVIDER_READY_PROBE_NAME, build_settings_config_value_key_name_from,
-    build_vault_runtime_deps, is_oidc_jwks_export_command, run_oidc_jwks_export_command,
+    build_settings_config_value_key_name_from, build_vault_runtime_deps,
+    is_oidc_jwks_export_command, run_oidc_jwks_export_command,
 };
+pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 
 /// Explicit integration-only seams for exercising typed domain wiring with hermetic providers.
 ///
@@ -55,11 +56,11 @@ pub use infra::vault::{
 pub mod test_support {
     use super::SharedRuntimeDeps;
 
-    /// Builds the settings domain and its module output for container-backed integration tests.
+    /// Builds the settings binding for container-backed integration tests.
     pub async fn wire_settings(
         deps: &SharedRuntimeDeps,
-    ) -> anyhow::Result<(settings::SettingsDomain, bootstrap::DomainModuleResult)> {
-        crate::domains::settings::wire_settings(deps).await
+    ) -> anyhow::Result<bootstrap::DomainBinding> {
+        crate::domains::settings::integration_binding(deps).await
     }
 
     /// Builds the identity domain with a hermetic configuration source for integration tests.

@@ -71,7 +71,7 @@ Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test 
 - [x] T030 [US1] Move `wire_settings`, `wire_identity`, and `wire_audit` into runtime domain modules.
 - [x] T031 [US1] Add `cargo xtask assembly generate-modules` and commit generated module output.
 - [x] T032 [US1] Switch runtime assembly to generated module list.
-- [ ] T033 [US1] Add settings-only assembly.
+- [x] T033 [US1] Add settings-only assembly.
 - [ ] T034 [US1] Add identity-audit assembly.
 
 ## Phase 5: Provider Bundle Standardization

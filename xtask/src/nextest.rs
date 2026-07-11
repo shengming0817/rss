@@ -171,11 +171,12 @@ pub(crate) enum CoreTestScope {
     OtelBackend,
     GrpcBackend,
     VaultBackend,
+    SettingsOnly,
 }
 
 impl CoreTestScope {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Workspace,
         Self::S3Backend,
         Self::RedisBackend,
@@ -184,6 +185,7 @@ impl CoreTestScope {
         Self::OtelBackend,
         Self::GrpcBackend,
         Self::VaultBackend,
+        Self::SettingsOnly,
     ];
 
     fn args(self, partitioned: bool) -> Vec<String> {
@@ -203,6 +205,7 @@ impl CoreTestScope {
             Self::OtelBackend => backend_args("otel"),
             Self::GrpcBackend => backend_args("grpc"),
             Self::VaultBackend => backend_args("vault"),
+            Self::SettingsOnly => ["-p", "settingsonly"].map(str::to_owned).to_vec(),
         }
     }
 }

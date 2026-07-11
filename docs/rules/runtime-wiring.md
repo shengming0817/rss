@@ -8,7 +8,7 @@ INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source
 
 - `SharedRuntimeDeps` is an inbound parameter object for shared infrastructure and provider value objects only.
 - Domain service, domain repo, and domain-owned runtime output types must not be added to `SharedRuntimeDeps`; keep domain services inside their `wire_X` function or expose cross-domain behavior only through contracts.
-- `cargo xtask runtime-deps guard` scans `assemblies/runtime/src/module.rs` with `syn` and fails if `SharedRuntimeDeps` is missing, unnamed, empty, or contains a disallowed field type.
+- `cargo xtask runtime-deps guard` discovers every `SharedRuntimeDeps` under `assemblies/*/src` with `syn` and fails if a carrier is missing, unnamed, empty, or contains a disallowed field type. New assemblies are covered automatically; an empty discovery set fails closed.
 - The allowlist source is `xtask/runtime-deps-guard.toml`. Missing, malformed, or schema-invalid config fails closed; there is no hardcoded fallback.
 - `allowedRoots` may name adapter crate roots that exist at `adapters/<root>/Cargo.toml`, or basis/engine/DI-infra crate roots from `xtask/src/layers.rs`. Domain roots, service roots, `std`, `core`, `alloc`, and broad `distributed` are forbidden.
 - `exactExceptions` is intentionally closed. The current exception is only `Arc<dyn distributed::DomainTransport>`; it does not allow the whole `distributed` root or other wrappers/bounds.
@@ -22,6 +22,6 @@ INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "verify", source
 
 ## Xtask And Dylint Boundary
 
-- `runtime-deps guard` is an xtask Medium gate because this rule is a declared-field policy over one known source file plus a small config file.
+- `runtime-deps guard` is an xtask Medium gate because this rule is a declared-field policy over discovered assembly carriers plus a small config file.
 - The guard is a Rust source scan, not rustc type analysis. It does not expand macros, resolve glob imports, inspect provider bundle internals, or prove constructor/callsite capture behavior.
 - Use dylint only for a future callsite/impl/macro-expanded rule that cannot be expressed as this field/config scan. Do not move this allowlist policy into dylint.

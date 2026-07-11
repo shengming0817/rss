@@ -16,7 +16,6 @@ use syn::{
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 
 const CONFIG_PATH: &str = "xtask/runtime-deps-guard.toml";
-const MODULE_PATH: &str = "assemblies/runtime/src/module.rs";
 const STRUCT_NAME: &str = "SharedRuntimeDeps";
 const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
 const FORBIDDEN_BROAD_ROOTS: &[&str] = &["std", "core", "alloc"];
@@ -41,16 +40,50 @@ impl GovernanceCheck for RuntimeDepsGuard {
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
         let root = crate::workspace_root()?;
         let policy = RuntimeDepsPolicy::from_workspace(&root)?;
-        let path = root.join(MODULE_PATH);
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("runtime-deps-guard: read {}: {e}", path.display()))?;
-        let findings = scan_source_with_policy(Path::new(MODULE_PATH), &content, &policy)?;
+        let paths = discover_shared_runtime_deps_paths(&root)?;
+        let mut findings = Vec::new();
+        for path in paths {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(path.as_path())
+                .to_path_buf();
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("runtime-deps-guard: read {}: {e}", path.display()))?;
+            findings.extend(scan_source_with_policy(&rel, &content, &policy)?);
+        }
         Ok((
             "SharedRuntimeDeps fields are restricted to infrastructure/value-object types"
                 .to_string(),
             findings,
         ))
     }
+}
+
+/// Discover every production `SharedRuntimeDeps` under `assemblies/*/src`.
+///
+/// New assemblies that introduce the carrier are covered automatically; an empty discovery set
+/// fails closed so the guard cannot go vacuous.
+fn discover_shared_runtime_deps_paths(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths = Vec::new();
+    for assembly_dir in crate::src_scan::member_dirs(&root.join("assemblies"))? {
+        for rs in crate::src_scan::rs_files(&assembly_dir.join("src"))? {
+            let content = std::fs::read_to_string(&rs)
+                .map_err(|e| anyhow::anyhow!("runtime-deps-guard: read {}: {e}", rs.display()))?;
+            if !content.contains(&format!("struct {STRUCT_NAME}")) {
+                continue;
+            }
+            let file = syn::parse_file(&content)
+                .with_context(|| format!("runtime-deps-guard: parse {}", rs.display()))?;
+            if shared_runtime_deps_struct(&file).is_some() {
+                paths.push(rs);
+            }
+        }
+    }
+    paths.sort();
+    if paths.is_empty() {
+        bail!("runtime-deps-guard: no `{STRUCT_NAME}` found under assemblies/*/src");
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -795,8 +828,47 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
 
     #[test]
     fn real_shared_runtime_deps_currently_passes() -> Result<()> {
-        let findings = findings(include_str!("../../assemblies/runtime/src/module.rs"))?;
-        assert!(findings.is_empty(), "{findings:?}");
+        let root = crate::workspace_root()?;
+        let paths = discover_shared_runtime_deps_paths(&root)?;
+        let labels: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap_or(path.as_path())
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|path| path.ends_with("assemblies/runtime/src/module.rs")),
+            "runtime carrier missing: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|path| path.ends_with("assemblies/settingsonly/src/lib.rs")),
+            "settingsonly carrier missing: {labels:?}"
+        );
+        let policy = RuntimeDepsPolicy::from_workspace(&root)?;
+        for path in paths {
+            let rel = path.strip_prefix(&root).unwrap_or(path.as_path());
+            let content = std::fs::read_to_string(&path)?;
+            let findings = scan_source_with_policy(rel, &content, &policy)?;
+            assert!(findings.is_empty(), "{}: {findings:?}", rel.display());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settingsonly_shaped_domain_service_field_is_rejected() -> Result<()> {
+        let findings = findings(include_str!(
+            "../tests/fixtures/runtime_deps_guard/settingsonly_service_red.rs"
+        ))?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::DisallowedFieldType);
+        assert!(findings[0].detail.contains("settings::SettingsService"));
         Ok(())
     }
 

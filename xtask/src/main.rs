@@ -33,7 +33,8 @@
 //!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
 //!   `cargo xtask verify [--fast] [--allow-missing-tools]`
 //!                                      本地全量治理门聚合入口（GitHub Actions 与本地共用同一门）：fmt + meta（contract
-//!                                      validate / assembly validate / layer-deps / codegen --check）+ build + clippy + nextest + deny + dylint；
+//!                                      validate / assembly validate / layer-deps / codegen --check）+ build + Postgres
+//!                                      feature compile matrix + clippy + nextest + deny + dylint；
 //!                                      `--fast` 只跑无需编译的步（fmt+meta+deny）；`--allow-missing-tools` 缺外部
 //!                                      工具时显式宽限（默认 fail-closed）。详见 `verify.rs`。
 //!   `cargo xtask public-api [--layer basis|engine|curated] [--check] [--allow-missing]`
@@ -83,6 +84,7 @@ mod migrations;
 mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
+mod postgres_feature_matrix;
 mod publicapi;
 mod reconcile_outbox_command_guard;
 mod repo_scope_guard;

@@ -17,16 +17,24 @@
 //! `identity::ports::RoleReadRepo`，roles 表 + tenant scope，#1250）承载——替换原 `#[cfg(test)]` `RoleRepoEdgeProof`
 //! 编译证明（body `todo!()`）。同 DIP 内向边另由 [`PgCredentialRepo`]（impl `identity::ports::CredentialRepo`，
 //! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
+//!
+//! INVARIANT: PG-DOMAIN-FEATURES-01 { level = "Hard", exec = "native-compile", source = "code", native = "Cargo optional dependencies and explicit domain features remove inactive domain APIs from the selected package graph" } ——
+//! `domain-settings` / `domain-identity` / `domain-audit` 是无默认值的闭合选择；未启用时对应 dependency、module 与 public API 均不进入 rustc 输入。
 
+#[cfg(feature = "domain-audit")]
 mod audit_repo;
+#[cfg(feature = "domain-audit")]
 mod auth_audit_sink;
 mod bundle;
 mod cas_store;
 mod checkpoint;
 mod command_journal;
+#[cfg(feature = "domain-settings")]
 mod config_repo;
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 mod consumer_tx;
 mod cotx;
+#[cfg(feature = "domain-identity")]
 mod credential_repo;
 mod dead_letter;
 mod dead_letter_payload;
@@ -38,40 +46,57 @@ mod inbox;
 mod migrator;
 mod outbox;
 mod outbox_cdc;
+#[cfg(feature = "domain-identity")]
 mod policy_repo;
 mod pool;
 mod projection_control;
 mod projection_events;
 mod readiness;
 mod reconcile;
+#[cfg(feature = "domain-identity")]
 mod refresh_token_store;
+#[cfg(feature = "domain-identity")]
 mod resource_attribute_repo;
+#[cfg(feature = "domain-identity")]
 mod role_binding_lifecycle;
+#[cfg(feature = "domain-identity")]
 mod role_repo;
 mod saga;
+#[cfg(feature = "domain-settings")]
 mod secret_repo;
 mod service_token_replay;
+#[cfg(feature = "domain-identity")]
 mod session_lifecycle;
 mod session_sweeper;
 mod tx;
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 mod tx_retry;
 
+#[cfg(feature = "domain-audit")]
 pub use audit_repo::{PgAuditAdminRepo, PgAuditRepo};
+#[cfg(feature = "domain-audit")]
 pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
+#[cfg(feature = "domain-settings")]
+pub use bundle::PgSettingsBundle;
 pub use bundle::{
     MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps,
-    PgProjectionReplayStores, PgRuntimeDeps, PgSettingsBundle, caps,
+    PgProjectionReplayStores, PgRuntimeDeps, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
 pub use command_journal::PgCommandJournal;
+#[cfg(feature = "domain-settings")]
 pub use config_repo::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
     ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
     ConfigValueProtections, PgConfigRepo, PgConfigValueMaintenance,
 };
-pub use consumer_tx::{AuditConsumerTxEffect, PgAuditConsumerTx, PgSettingsConsumerTx};
+#[cfg(feature = "domain-settings")]
+pub use consumer_tx::PgSettingsConsumerTx;
+#[cfg(feature = "domain-audit")]
+pub use consumer_tx::{AuditConsumerTxEffect, PgAuditConsumerTx};
+#[cfg(feature = "domain-identity")]
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use dead_letter_payload::DlxPayloadProtector;
@@ -79,6 +104,7 @@ pub use dlq::PgDlqStore;
 pub use emitter::PgEmitter;
 pub use outbox::{PgOutbox, PgOutboxMaintenance};
 pub use outbox_cdc::PgOutboxCdcEmitter;
+#[cfg(feature = "domain-identity")]
 pub use policy_repo::{PgPolicyLifecycle, PgPolicyRepo};
 pub use projection_control::{
     PgProjectionControl, ProjectionControlError, ProjectionPointerPrecondition,
@@ -94,13 +120,19 @@ pub use reconcile::{
     ReconcileLeaseOutcome, ReconcileLedgerId, ReconcileStoreError, ReconcileTarget,
     ReconcileTargetKey,
 };
+#[cfg(feature = "domain-identity")]
 pub use refresh_token_store::PgRefreshTokenStore;
+#[cfg(feature = "domain-identity")]
 pub use resource_attribute_repo::PgResourceAttributeRepo;
+#[cfg(feature = "domain-identity")]
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
+#[cfg(feature = "domain-identity")]
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaInstanceStore, PgSagaJournal};
+#[cfg(feature = "domain-settings")]
 pub use secret_repo::PgSecretRepo;
 pub use service_token_replay::PgServiceTokenReplayGuard;
+#[cfg(feature = "domain-identity")]
 pub use session_lifecycle::PgSessionLifecycle;
 pub use session_sweeper::PgSessionSweeper;
 
@@ -188,7 +220,12 @@ impl ManagedResource for PgStoreGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 mod smoke {
     //! build smoke：编译期断言冻结的 DI port trait——生产 `PgStore` impl `diport::ManagedResource`；
     //! adapter→域 DIP 内向边（postgres impl `identity::ports::RoleReadRepo`，命名其 pub 实体 Role/RoleId）由生产

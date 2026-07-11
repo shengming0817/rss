@@ -85,6 +85,8 @@ rss/
 │   └── rss/              # 薄 cli：只放 xtask/cargo 干不了的运行时命令（产品/二进制名仅此处保留）
 ├── contracts/            # ★ 跨边界单源：{kind}/{domain}/{version}/contract.toml + *.schema.json（typify 消费）
 ├── assemblies/           # ★ 物理打包（assembly.toml：static assembly intent + DI provider 声明）
+├── composition/          # ★ 可复用的域组合根接线（依赖域 + adapter；不承载 assembly intent）
+│   └── settings/         # settings PG/KeyProvider typed wiring + readiness 生命周期
 ├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml；亦承载验收 journey 组合根 crate（demo 组装根 + 集成测试，RW-G1）
 ├── fixtures/             # ★ 测试夹具（fixture-*.toml）
 ├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
@@ -104,8 +106,8 @@ rss/
 - **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。**服务→服务横向默认禁(同 diport 行所述),唯一受控例外 = ADR-009 sanctioned `bootstrap → httpserve` 单向路由类型边**(组合根 typed route funnel:`bootstrap::finalize_routes` 产 `httpserve::UnfinalizedRoutes` → 经 `httpserve::finalize_auth` 换可 bind 的 `AuthenticatedRoutes`;反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 边仍禁),由 `xtask layers::route_funnel_allows` 机器守(INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01,见下「静态强制」表 + ADR-009)。跨层另有且仅有 **`eventexec → generated`** command seam 编译边：eventexec 实现 generated 的 `CommandEmit`/`CommandJournal`，再在自身 crate 内构造私有 reviewed DTO；由 `command_generated_seam_allows` 精确 crate pair 守，不能推广成一般 Service→Generated。`testkit` 是同层 **test-support 库**(HTTP 契约测试 oneshot harness,#1136):出边全外部 crate(axum/tower/serde…,无内部边),经 `[dev-dependencies]` 被域/组合根消费写 per-contract 测试——**零 adapter 依赖**(满足「域单测不依赖平台 adapter crate」),分层登记在 `xtask layers.rs` `SERVICE_CRATES`。另带 `containers` feature(#1137):testcontainers self-provision postgres/redis/rabbitmq 容器 fixture,供 adapter 集成测试 + journeys durable journey 经 `[dev-dependencies]` 消费(testcontainers 树 feature-gated + dev-dep-only 不进产物;只准 dev-dep 由 LAYER-DEPS-08 `check_test_support_confinement` 守——任一 shipped 边指向 testkit 即报)。
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。**定义自身域形 repo/service DI port**(`pub mod ports`,签名引用域内实体,由 adapter 经 DIP 实现,ADR-005);为此可依赖 dynosaur/trait-variant(DIPORT-MACRO-CONFINE-02 白名单)。
-- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
-- **bins/**、**xtask/**、**assemblies/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖域、adapters 或 generated。`assemblies/{name}/assembly.toml`
+- **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。`postgres` 的域形实现由无默认值的 `domain-settings` / `domain-identity` / `domain-audit` Cargo feature 精确启用；assembly 必须显式选择，未选择的域依赖不进入目标 package 图。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
+- **bins/**、**xtask/**、**assemblies/**、**composition/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试；`composition/*` 为多个 assembly 复用的 typed domain wiring，不含 manifest 或启动入口)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖域、adapters 或 generated。`assemblies/{name}/assembly.toml`
   是 static assembly intent + DI provider 声明源：`name`/`profile`/`domains`/`topology`/`listeners`
   声明组合根 intent/surface，`[[diportProviders]]` 声明 provider 的 port / providerCrate /
   requiredFeatures / consumer / lifecycle / durability / purpose；字段细则见 `docs/rules/runtime-assembly-plan.md`
@@ -245,7 +247,8 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
 - **Assembly manifest intent + provider declaration**:`assemblies/{name}/assembly.toml` 声明组合根的静态 intent
   （`name`/`profile`/`domains`/`topology`/`listeners`）以及选择了哪个 DI provider 及其生命周期 / 持久性，不生成运行时接线，
   也不驱动 live topology、route mounting、auth scheme、provider construction 或 readiness；真实接线仍在 assembly Rust
-  代码里经构造器注入完成。active provider 必须与 assembly `Cargo.toml [dependencies]` + required features 对齐，且安全关键 port 可追加专门约束
+  代码里经构造器注入完成。active provider 必须与 assembly `Cargo.toml [dependencies]` + required features 对齐，且安全关键 port 可追加专门约束。
+  `ASSEMBLY-DOMAIN-CLOSURE-01` 对每个 assembly 的目标 package 独立执行 normal-edge Cargo tree（含该 package 全 features），active domain 必须是同名直接依赖，inactive domain 不得进入该 artifact 闭包；workspace 联合 all-features 编译由 CI 另行覆盖，不作为单个部署 artifact 的裁剪事实
   （当前 production `diport::RevocationStore` provider 必须 `durability=persistent`；draft/ephemeral 只允许
   demo/test assembly）。Phase 3 字段边界与验证 carrier 见 `docs/rules/runtime-assembly-plan.md`。
 - **Adapter sealed marker**:unit sealed-marker(`struct PgStore;`)以 native AFIT impl diport 已冻 DI port

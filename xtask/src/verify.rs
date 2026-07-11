@@ -7,14 +7,15 @@
 //!   1. `cargo fmt --all -- --check`
 //!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + localtx-coverage + local-only-effects + repo-scope-guard + tenancy-closeout
 //!   3. `cargo build --workspace`
-//!   4. `cargo clippy --workspace --all-targets -- -D warnings`
-//!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
-//!   6. feature-gated 行为测试门（确定性 mock / lazy）：`cargo nextest run -p s3 --features backend` +
+//!   4. Postgres feature compile matrix：core、三个单域、all-features
+//!   5. `cargo clippy --workspace --all-targets -- -D warnings`
+//!   6. `cargo nextest run --workspace --no-tests=pass`（外部工具）
+//!   7. feature-gated 行为测试门（确定性 mock / lazy）：`cargo nextest run -p s3 --features backend` +
 //!      `-p redis-adapter --features backend`（默认 feature workspace nextest 不编入这些 `#[cfg(feature)]`
 //!      测试模块；按 registry 的 Core gate 显式补跑——不用 `--all-features --workspace` 以免误触
 //!      postgres/redis 的 `integration`（需 live 后端）门）
-//!   7. `cargo deny check`（外部工具）
-//!   8. `cargo dylint --all`（外部工具；跑 `lints/` 嵌套 nightly workspace；`DYLINT_RUSTFLAGS=-D warnings`
+//!   8. `cargo deny check`（外部工具）
+//!   9. `cargo dylint --all`（外部工具；跑 `lints/` 嵌套 nightly workspace；`DYLINT_RUSTFLAGS=-D warnings`
 //!      把默认 `Warn` 的注册 lint 升为 fail-closed）
 //!
 //! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
@@ -148,6 +149,8 @@ enum InternalCheck {
     /// governed scope（docs/rules + docs/architecture + .claude/rules + 根 config）结构化 defer 完整性 + 经典注解门
     /// （DEFER-GATE-01；内容扫描 .md/.toml，no-compile）。
     DeferGate,
+    /// Postgres 无默认、三个单域及 all-features 编译矩阵；由 xtask 自管 cargo 子进程。
+    PostgresFeatureMatrix,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
     /// ci 专用：`public-api --check`（basis+engine+curated extras 封装面 baseline 漂移门 = 轴 A，见 `publicapi.rs`）。
@@ -513,6 +516,14 @@ fn step_build_workspace() -> Step {
         env: &[],
     }
 }
+fn step_postgres_feature_matrix() -> Step {
+    Step {
+        id: GateId::PostgresFeatureMatrix,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::PostgresFeatureMatrix),
+        env: &[],
+    }
+}
 /// F7 + #1137：postgres/redis/amqp 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的
 /// build/clippy/nextest 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep /
 /// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
@@ -642,6 +653,17 @@ fn step_vault_backend_tests() -> Step {
         env: &[],
     }
 }
+fn step_settingsonly_tests() -> Step {
+    // settingsonly 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly 自身的
+    // feature 选择图（postgres domain-settings only）。按包显式 nextest，不带 `--no-tests=pass`——
+    // 0 选中即漂移 fail-loud。
+    Step {
+        id: GateId::SettingsOnlyTests,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::SettingsOnly),
+        env: &[],
+    }
+}
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
 // public-api --check（轴 A）。
@@ -721,7 +743,10 @@ fn selected_for(target: PlanTarget, id: GateId) -> bool {
         }
         PlanTarget::Core(CoreExecution::Prerequisites) => matches!(
             id,
-            GateId::BuildAllFeatures | GateId::ClippyAllFeatures | GateId::Dylint
+            GateId::BuildAllFeatures
+                | GateId::ClippyAllFeatures
+                | GateId::Dylint
+                | GateId::PostgresFeatureMatrix
         ),
         PlanTarget::Core(CoreExecution::Tests) => matches!(
             id,
@@ -733,6 +758,7 @@ fn selected_for(target: PlanTarget, id: GateId) -> bool {
                 | GateId::OtelBackendTests
                 | GateId::GrpcBackendTests
                 | GateId::VaultBackendTests
+                | GateId::SettingsOnlyTests
         ),
         PlanTarget::Lane(lane) => spec.belongs_to(lane),
         PlanTarget::Verify => spec.verify_membership() == VerifyMembership::Included,
@@ -1073,6 +1099,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
             run_check(&reconcile_outbox_command_guard::ReconcileOutboxCommandGuard)
         }
         InternalCheck::DeferGate => run_check(&crate::defergate::DeferGate),
+        InternalCheck::PostgresFeatureMatrix => crate::postgres_feature_matrix::run(),
         InternalCheck::Coverage => crate::coverage::run(),
         // 轴 A 封装面：basis+engine+curated extras 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
@@ -1226,6 +1253,7 @@ mod tests {
         let core = labels(&plan_for(PlanTarget::Lane(CiLane::Core)));
         assert_eq!(core.first(), Some(&"build"));
         assert!(core.contains(&"default-test-runner"));
+        assert!(core.contains(&"settingsonly-tests"));
         assert!(!core.contains(&"coverage"));
         assert!(!core.contains(&"integration-compile"));
 
@@ -1265,8 +1293,8 @@ mod tests {
         let full = plan_for(PlanTarget::Core(CoreExecution::Full));
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
-        assert_eq!(prerequisites.len(), 3);
-        assert_eq!(tests.len(), 8);
+        assert_eq!(prerequisites.len(), 4);
+        assert_eq!(tests.len(), 9);
         let prereq_ids = prerequisites
             .iter()
             .map(|step| step.id as usize)
@@ -1295,14 +1323,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_43_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_45_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 43);
+        assert_eq!(plan.len(), 45);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 43);
+        assert_eq!(ids.len(), 45);
     }
 
     #[test]
@@ -1350,6 +1378,7 @@ mod tests {
                 "reconcile-outbox-command-guard",
                 "defer-gate",
                 "build",
+                "postgres-feature-matrix",
                 "integration-compile",
                 "clippy",
                 "default-test-runner",
@@ -1360,10 +1389,41 @@ mod tests {
                 "otel-backend-tests",
                 "grpc-backend-tests",
                 "vault-backend-tests",
+                "settingsonly-tests",
                 "deny",
                 "dylint",
             ]
         );
+    }
+
+    #[test]
+    fn postgres_feature_matrix_is_persistent_compile_gate_but_not_fast() -> anyhow::Result<()> {
+        for (name, plan) in [
+            ("verify", plan_for(PlanTarget::Verify)),
+            ("compatibility-ci", plan_for(PlanTarget::CompatibilityCi)),
+            ("ci-core", plan_for(PlanTarget::Lane(CiLane::Core))),
+        ] {
+            let step = plan
+                .iter()
+                .find(|step| step.id == GateId::PostgresFeatureMatrix)
+                .ok_or_else(|| anyhow::anyhow!("{name} plan lacks postgres feature matrix"))?;
+            assert!(
+                step.needs_compile(),
+                "{name} must classify matrix as compile"
+            );
+            assert_eq!(step.carrier_file(), None);
+            assert!(matches!(
+                step.kind,
+                StepKind::Internal(InternalCheck::PostgresFeatureMatrix)
+            ));
+        }
+        assert!(
+            !verify_plan(&opts(true, false))
+                .iter()
+                .any(|step| step.id == GateId::PostgresFeatureMatrix),
+            "verify --fast must skip compile gates"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1434,7 +1494,7 @@ mod tests {
             let plan = verify_plan(&opts(fast, false));
             let internals: Vec<_> = plan
                 .iter()
-                .filter(|s| matches!(s.kind, StepKind::Internal(_)))
+                .filter(|s| matches!(s.kind, StepKind::Internal(_)) && !s.needs_compile())
                 .map(|s| s.label())
                 .collect();
             assert_eq!(
@@ -1912,6 +1972,7 @@ mod tests {
                 "command-symmetry",
                 "reconcile-outbox-command-guard",
                 "defer-gate",
+                "postgres-feature-matrix",
                 "build",
                 "clippy",
                 "coverage",
@@ -1922,6 +1983,7 @@ mod tests {
                 "otel-backend-tests",
                 "grpc-backend-tests",
                 "vault-backend-tests",
+                "settingsonly-tests",
                 "deny",
                 "audit",
                 "dylint",

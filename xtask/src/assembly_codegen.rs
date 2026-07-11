@@ -412,6 +412,39 @@ purpose = "test"
     }
 
     #[test]
+    fn multiple_assemblies_generate_independent_targets() -> Result<()> {
+        let root = test_root("assembly-modules-multiple")?;
+        write_manifest(&root, r#""identity", "audit""#)?;
+        let settingsonly = root.join("assemblies/settingsonly");
+        fs::create_dir_all(&settingsonly)?;
+        fs::write(
+            settingsonly.join("assembly.toml"),
+            manifest(r#""settings""#).replace("name = \"runtime\"", "name = \"settingsonly\""),
+        )?;
+
+        generate_root(&root, false)?;
+        generate_root(&root, true)?;
+
+        let runtime = fs::read_to_string(output(&root))?;
+        let settings = fs::read_to_string(settingsonly.join("src/generated/modules_gen.rs"))?;
+        assert!(runtime.contains("domains::identity"));
+        assert!(runtime.contains("domains::audit"));
+        assert!(!runtime.contains("domains::settings"));
+        assert!(settings.contains("domains::settings"));
+        assert!(!settings.contains("domains::identity"));
+        assert!(!settings.contains("domains::audit"));
+
+        fs::write(
+            settingsonly.join("assembly.toml"),
+            manifest(r#""settings", "audit""#)
+                .replace("name = \"runtime\"", "name = \"settingsonly\""),
+        )?;
+        assert!(generate_root(&root, true).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn check_rejects_manifest_domain_drift() -> Result<()> {
         let root = test_root("assembly-modules-red")?;
         write_manifest(&root, r#""identity", "settings", "audit""#)?;

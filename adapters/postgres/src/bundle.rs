@@ -55,26 +55,40 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
-use diport::{Clock, DynCasStore, DynPublisher, ManagedResource};
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+use diport::DynPublisher;
+use diport::{Clock, DynCasStore, ManagedResource};
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use eventexec::TenantAuthority;
+#[cfg(feature = "domain-settings")]
 use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
 #[cfg(feature = "test-support")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+use crate::PgOutbox;
+#[cfg(feature = "domain-audit")]
 use crate::consumer_tx::PgAuditConsumerTx;
 use crate::projection_events::ProjectionWriteRegistry;
+#[cfg(feature = "domain-settings")]
 use crate::{
-    ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections,
-    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgAuditAdminRepo, PgAuditRepo,
-    PgAuthAuditSink, PgCheckpointStore, PgCommandJournal, PgConfig, PgConfigRepo,
-    PgConfigValueMaintenance, PgCredentialRepo, PgDbReadiness, PgDeadLetterStore, PgDlqStore,
-    PgEmitter, PgError, PgInboxStore, PgInboxSweeper, PgOutbox, PgOutboxCdcEmitter,
-    PgOutboxMaintenance, PgPolicyLifecycle, PgPolicyRepo, PgProjectionControl, PgProjectionEvents,
-    PgReadinessSampler, PgReconcileStore, PgRefreshTokenStore, PgResourceAttributeRepo,
-    PgRoleBindingLifecycle, PgRoleRepo, PgSagaInstanceStore, PgSagaJournal, PgSecretRepo,
-    PgServiceTokenReplayGuard, PgSessionLifecycle, PgSessionSweeper, PgSettingsConsumerTx, PgStore,
-    PgStoreGuard,
+    ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
+    PgConfigValueMaintenance, PgSecretRepo, PgSettingsConsumerTx,
+};
+use crate::{
+    DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgCheckpointStore, PgCommandJournal,
+    PgConfig, PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore,
+    PgInboxSweeper, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
+    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgSagaInstanceStore, PgSagaJournal,
+    PgServiceTokenReplayGuard, PgSessionSweeper, PgStore, PgStoreGuard,
+};
+#[cfg(feature = "domain-audit")]
+use crate::{PgAuditAdminRepo, PgAuditRepo, PgAuthAuditSink};
+#[cfg(feature = "domain-identity")]
+use crate::{
+    PgCredentialRepo, PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore,
+    PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleRepo, PgSessionLifecycle,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -94,18 +108,27 @@ pub trait PgDomain: sealed::Sealed {}
 /// 不与同名域 crate 冲突。变体随各域 durable 接线切片增加（当前 Settings + Identity + Audit）。
 pub mod caps {
     /// settings 域能力 marker。
+    #[cfg(feature = "domain-settings")]
     pub struct Settings;
     /// identity 域能力 marker。
+    #[cfg(feature = "domain-identity")]
     pub struct Identity;
     /// audit 域能力 marker。
+    #[cfg(feature = "domain-audit")]
     pub struct Audit;
 }
 
+#[cfg(feature = "domain-settings")]
 impl sealed::Sealed for caps::Settings {}
+#[cfg(feature = "domain-settings")]
 impl PgDomain for caps::Settings {}
+#[cfg(feature = "domain-identity")]
 impl sealed::Sealed for caps::Identity {}
+#[cfg(feature = "domain-identity")]
 impl PgDomain for caps::Identity {}
+#[cfg(feature = "domain-audit")]
 impl sealed::Sealed for caps::Audit {}
+#[cfg(feature = "domain-audit")]
 impl PgDomain for caps::Audit {}
 
 /// 组合根级 postgres 能力包：集中 connect + migration + readiness handle，派发 per-domain 受控句柄，
@@ -389,7 +412,12 @@ impl PgRuntimeDeps {
 
     /// 测试构造：从已建 `Arc<PgStore>`（lazy pool）旁路 `setup`（免真连 DB）。
     /// reason: 旁路 `verify_rls_capability`，测试假定能力已就绪（`rls_ready = true`）。
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    ))]
     pub(crate) fn from_store_for_test(store: Arc<PgStore>) -> Self {
         Self {
             store,
@@ -410,6 +438,7 @@ impl PgMaintenanceDeps {
 
     /// settings `ConfigValue` 存量 backfill/rewrap 执行器。
     #[must_use]
+    #[cfg(feature = "domain-settings")]
     pub fn config_value_maintenance(
         &self,
         protection: ConfigValueProtection,
@@ -558,6 +587,7 @@ impl PgMaintenanceDeps {
 
     /// audit ledger verify 专用只读 admin repo。未通过 audit-admin setup 时返回 `None`。
     #[must_use]
+    #[cfg(feature = "domain-audit")]
     pub fn audit_admin_repo<M>(
         &self,
         hasher: audit::ports::AuditChainHasher<M>,
@@ -687,6 +717,7 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
     }
 }
 
+#[cfg(feature = "domain-settings")]
 impl PgDomainDeps<caps::Settings> {
     /// settings 域 durable 接线包：单一 `(store, clock)` → read config 仓储（`DynConfigRepo`）+ write co-tx
     /// UoW（`DynConfigUnitOfWork`）+ secret 坐标仓储（`DynSecretRepo`），内部完成域形 DynX 包裹。取代已删除的
@@ -772,6 +803,7 @@ impl PgDomainDeps<caps::Settings> {
 ///     let _ = b.config_repo;
 /// }
 /// ```
+#[cfg(feature = "domain-settings")]
 #[must_use]
 pub struct PgSettingsBundle {
     config_repo: Box<DynConfigRepo<'static>>,
@@ -779,6 +811,7 @@ pub struct PgSettingsBundle {
     secret_repo: Box<DynSecretRepo<'static>>,
 }
 
+#[cfg(feature = "domain-settings")]
 impl PgSettingsBundle {
     /// 受控解包：移出三件已包裹域形 DI box——`(read config, write co-tx UoW, secret)`，typed 位置逐参注入
     /// 两个 service 构造器。三者类型互不可换（`DynConfigRepo` / `DynConfigUnitOfWork` / `DynSecretRepo`）⇒
@@ -795,6 +828,7 @@ impl PgSettingsBundle {
     }
 }
 
+#[cfg(feature = "domain-identity")]
 impl PgDomainDeps<caps::Identity> {
     /// 会话生命周期仓储（co-tx 创建 + durable find/revoke）。`clock` 为 envelope 时间源（构造器位置参）。
     #[must_use]
@@ -868,6 +902,7 @@ impl PgDomainDeps<caps::Identity> {
     }
 }
 
+#[cfg(feature = "domain-audit")]
 impl PgDomainDeps<caps::Audit> {
     /// audit 审计链仓储（append-only per-tenant keyed-HMAC chain + RLS）。
     ///
@@ -1107,7 +1142,12 @@ impl PgInfraDeps {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 mod tests {
     //! bundle 单元测：lazy pool 旁路 `setup`（免真连 DB），覆盖 funnel 派发 + per-domain accessor 构造。
     //! INVARIANT: PG-BUNDLE-FUNNEL-01 / PG-BUNDLE-DOMAIN-02 / PG-BUNDLE-POOL-03 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }（compile_fail doctest 见

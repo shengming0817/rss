@@ -4021,6 +4021,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tracewire",
  "tracing",
  "trybuild",
@@ -4754,6 +4755,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "settings-composition",
  "sha2 0.10.9",
  "sqlx",
  "testkit",
@@ -5274,6 +5276,45 @@ dependencies = [
  "trait-variant",
  "trybuild",
  "vocab",
+]
+
+[[package]]
+name = "settings-composition"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bootstrap",
+ "diport",
+ "postgres",
+ "primitives",
+ "reqwest",
+ "secure",
+ "settings",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "vault",
+ "vocab",
+]
+
+[[package]]
+name = "settingsonly"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bootstrap",
+ "diport",
+ "postgres",
+ "reqwest",
+ "secure",
+ "serde_json",
+ "settings",
+ "settings-composition",
+ "tokio",
+ "vault",
+ "vocab",
+ "wiremock",
 ]
 
 [[package]]

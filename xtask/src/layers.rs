@@ -4,7 +4,7 @@
 //! 与 `publicapi`（baseline 目标层）共用，消除分层成员重复（DRY）。
 //!
 //! 分类策略：`crates/*` 按 crate 名查五层 const 表（basis/engine/diport/service/domain）；
-//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `examples/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
+//! `adapters/*` / `bins/*` / `xtask` / `assemblies/*` / `composition/*` / `examples/*` / `journeys*` / `generated` 按成员**路径**判（不靠名，
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
@@ -112,7 +112,7 @@ pub(crate) enum Layer {
     Generated,
     /// 示例包（examples）：只准依赖基础 / 引擎 / DI-infra / 服务，不准直接依赖域 / adapter / generated。
     Example,
-    /// 组合根（bins / xtask / assemblies / journeys）：可依赖所有库 crate。
+    /// 组合根（bins / xtask / assemblies / composition / journeys）：可依赖所有库 crate。
     Root,
 }
 
@@ -126,6 +126,7 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
     if member_path == "xtask"
         || member_path.starts_with("bins/")
         || member_path.starts_with("assemblies/")
+        || member_path.starts_with("composition/")
         || member_path == "journeys"
         || member_path.starts_with("journeys/")
         || member_path == "journeys-fault-matrix"

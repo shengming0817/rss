@@ -20,7 +20,9 @@
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+#[cfg(feature = "domain-identity")]
+use std::time::Duration;
+use std::time::SystemTime;
 
 use consistency::{
     BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, EventEntry, IdemKey,
@@ -426,6 +428,7 @@ pub(crate) fn metadata_with_ambient(
 /// 持久化 epoch 秒（`extract(epoch ...)::bigint`）→ `SystemTime`：[`unix_secs`] 的**解码对称**（编码 / 解码
 /// 同源单向往返）。负值（早于 epoch，理论不可达）收口 epoch 0，不 panic。session / credential 等 adapter 读
 /// 路径共用此 decode 单源（避免各模块重复 decode helper；与 `unix_secs` encode 单源并列，#1316 review C-F1）。
+#[cfg(feature = "domain-identity")]
 pub(crate) fn epoch_secs_to_time(secs: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
@@ -952,6 +955,7 @@ impl PgOutbox {
     /// pool 从 `PgStore.pool`（`pub(crate)`，同 crate 可取）clone；DynPublisher 转移所有权。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::outbox` 收口。
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
     pub(crate) fn new(
         store: &PgStore,
         publisher: Box<DynPublisher<'static>>,

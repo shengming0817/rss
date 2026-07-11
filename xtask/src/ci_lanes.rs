@@ -435,6 +435,17 @@ macro_rules! gate_catalog {
                         VERIFY_ONLY,
                     )
             ),
+            PostgresFeatureMatrix => (step_postgres_feature_matrix, None,
+                gate(
+                        GateId::PostgresFeatureMatrix,
+                        "postgres-feature-matrix",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Check),
+                        EvidenceKind::Test,
+                        BOTH_INCLUDED,
+                    )
+            ),
             IntegrationCompile => (step_integration_compile, None,
                 gate(
                         GateId::IntegrationCompile,
@@ -571,6 +582,17 @@ macro_rules! gate_catalog {
                 gate(
                         GateId::VaultBackendTests,
                         "vault-backend-tests",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::Nextest,
+                        EvidenceKind::Test,
+                        BOTH_INCLUDED,
+                    )
+            ),
+            SettingsOnlyTests => (step_settingsonly_tests, None,
+                gate(
+                        GateId::SettingsOnlyTests,
+                        "settingsonly-tests",
                         CORE,
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,

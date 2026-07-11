@@ -29,6 +29,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - `domains`, `topology`, and `listeners` are declaration and validation inputs only. They do not replace contracts, Cargo dependencies, env/secrets, listener bind config, or Rust constructor wiring.
 - Manifest intent validation is carried by `ASSEMBLY-MANIFEST-INTENT-01` in `xtask/src/assembly.rs` and runs through `cargo xtask assembly validate`, `cargo xtask verify`, and CI.
 - Domain required capability validation is carried by `ASSEMBLY-REQUIRED-CAPABILITY-01` in `xtask/src/assembly.rs`: declared domains/topology must have the minimum provider/dependency facts needed by generated live composition.
+- Domain closure validation is evaluated per assembly target package, using its normal Cargo tree and explicitly selected dependency features. Workspace-wide feature unification is a CI compile surface, not an individual assembly deployment closure.
 - This phase must not make runtime read `assembly.toml` to decide topology, route mounting, auth scheme, provider construction, or live readiness.
 
 ### Phase 4
@@ -41,6 +42,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - The generated file contains the ordered async `domains::<name>::module(deps)` calls plus a `#[cfg(test)]` hermetic factory emitted by the same loop to exercise that exact order. It does not derive providers, environment access, features, compose/merge behavior, or a typed-handle sidecar; the test factory also returns ordinary `DomainBinding` values.
 - Defining the binding/output shape does not itself change live `runtime::run()` behavior. Moving wire functions, generating the module list, and switching the live path remain separate dependent changes with baseline verification.
 - The generated artifact is the live domain-order carrier. `RUNTIME-GENERATED-DOMAINS-LIVE-01` rejects handwritten fallback and requires `compose_bindings` plus output merge; typed route/subscriber declaration funnels preserve the single `RouteAuthorizer` / `SettingsService` instances without a service bag.
+- Reusable `composition/*` crates may own a domain's typed provider-to-`DomainBinding` construction when multiple assemblies consume it. They remain Root-layer code, use mandatory typed inputs, and must not introduce a DI container, generic bag, manifest reader, or launch entrypoint.
 
 ## PR Size Planning Budget
 

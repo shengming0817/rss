@@ -35,7 +35,7 @@ identity = path=../../crates/identity
 oidc = path=../../adapters/oidc; features=[backend]
 otel = path=../../adapters/otel; features=[backend]
 p256 = workspace=true; features=[ecdsa,pem]
-postgres = path=../../adapters/postgres
+postgres = path=../../adapters/postgres; features=[domain-settings,domain-identity,domain-audit]
 primitives = path=../../crates/primitives
 prometheus-adapter = path=../../adapters/prometheus; features=[backend]
 ratelimit = path=../../adapters/ratelimit
@@ -47,6 +47,7 @@ secure = path=../../crates/secure
 serde = workspace=true; features=[derive]
 serde_json = workspace=true
 settings = path=../../crates/settings; features=[seed-data]
+settings-composition = path=../../composition/settings
 thiserror = workspace=true
 tokio = workspace=true; features=[rt-multi-thread,macros,net,signal,time,sync]
 tokio-util = workspace=true

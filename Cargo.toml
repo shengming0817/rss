@@ -56,7 +56,9 @@ members = [
   # in-mem DI port provider（RW-G1 追踪弹验接缝；测试 / demo 注入用，被 journeys 组合根消费）
   "adapters/memory",
   # 组合根（可依赖所有库 crate）
+  "composition/settings",
   "assemblies/runtime",
+  "assemblies/settingsonly",
   "examples/iotdevice",
   "examples/tenancy-consumer",
   "bins/server",

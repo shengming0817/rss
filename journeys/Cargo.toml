@@ -49,7 +49,7 @@ anyhow = { workspace = true }
 # adapt 在 handler Err→Nack 处记录错误（兜底可观测，与 eventexec/audit 日志同链）。
 tracing = { workspace = true }
 # durable 拓扑 journey（`integration` feature）：PgStore/PgEmitter/PgOutbox/PgInboxStore 端到端闭环。
-postgres = { path = "../adapters/postgres" }
+postgres = { path = "../adapters/postgres", features = ["domain-settings", "domain-identity", "domain-audit"] }
 sqlx = { workspace = true }
 # #1171 §6：AMQP at-least-once journey（`integration` feature）——AmqpSubscriber/AmqpPublisher 真 broker
 # 驱动 run_consumer_ackable。无 integration feature 时 amqp 退化为 sealed-marker 签名壳（非本文件编译）。

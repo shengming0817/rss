@@ -1,9 +1,9 @@
-//! 接线契约 e2e（[PERSIST-001] #1422 + 单源装配 #1498 + #1430 durable module）：`wire_settings(&SharedRuntimeDeps)
-//! -> (SettingsDomain, DomainModuleResult)` 形态 + vault capability bundle 装配出口。
+//! 接线契约 e2e（[PERSIST-001] #1422 + 单源装配 #1498 + #1430 durable module）：
+//! `wire_settings(&SharedRuntimeDeps) -> DomainBinding` 形态 + vault capability bundle 装配出口。
 //!
 //! **正向集成（常态 CI 必跑，无 ambient env 依赖）**：用测试内 wiremock Vault Transit 构造 stub `VaultRuntimeDeps`
 //! （无外部 vault 也成功），与 pg testcontainer 组 `SharedRuntimeDeps`，验：
-//! - `wire_settings`（resolver 经 bundle dispatch 注入，env-独立）返回 `(SettingsDomain, DomainModuleResult)`，
+//! - `wire_settings`（resolver 经 bundle dispatch 注入，env-独立）返回 `DomainBinding`，
 //!   module 产物包含 `configs_ready` + `keyprovider_ready`，并注册 keyprovider readiness sampler；
 //! - bundle `runtime_resources()` 单源派生 resolver + keyprovider 两个 guard（#1498 D5 单源 rollback）。
 //!
@@ -19,14 +19,15 @@
 use std::time::Duration;
 
 use base64::Engine as _;
+use bootstrap::compose_bindings;
 use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
-use runtime::infra::vault::KEYPROVIDER_READY_PROBE_NAME;
 use runtime::test_support::wire_settings;
 use runtime::{
     CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_redis_runtime_deps,
     build_s3_runtime_deps_from,
 };
+use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
 use wiremock::matchers::{body_partial_json, method, path};
@@ -232,9 +233,11 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         domain_transport: noop_domain_transport(),
     };
 
-    // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回 (SettingsDomain, DomainModuleResult)；
-    // module 半边产物恰一条 configs_ready 探针（#1430：domain 半边经 run() compose 挂业务路由，此处只验 module 出向）。
-    let (_settings_domain, result) = wire_settings(&deps).await?;
+    // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回唯一 DomainBinding；
+    // compose_bindings 是 module output 的唯一转换出口。
+    let mut bindings = vec![wire_settings(&deps).await?];
+    let (_, result) = compose_bindings(&mut bindings)?;
+    assert!(bindings.is_empty(), "compose 后 binding 必须排空");
     assert_eq!(
         result.probes.len(),
         2,

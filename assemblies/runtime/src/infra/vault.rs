@@ -1,50 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
-use diport::{DynKeyProvider, KeyName, KeyProvider, ManagedResource, RedactedBytes, ShutdownError};
-use primitives::{HealthCheck, HealthStatus, ProbeName};
-use secure::{Plaintext, ProtectionContext};
-use tokio_util::sync::CancellationToken;
+use diport::KeyName;
 use vault::{
     TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver, VaultSigner,
-    caps as vault_caps,
 };
-
-/// 默认 KeyProvider readiness 采样周期（5 秒）。
-pub(crate) const DEFAULT_KEYPROVIDER_READINESS_INTERVAL: Duration = Duration::from_secs(5);
-/// KeyProvider 保护 settings 持久化读写，摘流延迟上限与 Redis 一样按运行期强依赖收紧。
-const MAX_KEYPROVIDER_READINESS_INTERVAL_SECS: u64 = 30;
-/// keyprovider_ready 采样周期（env `RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS`）。
-pub(crate) fn build_keyprovider_readiness_interval_from(
-    get: impl Fn(&str) -> Option<String>,
-) -> Duration {
-    match get("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS") {
-        None => DEFAULT_KEYPROVIDER_READINESS_INTERVAL,
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(n) if (1..=MAX_KEYPROVIDER_READINESS_INTERVAL_SECS).contains(&n) => {
-                Duration::from_secs(n)
-            }
-            _ => {
-                tracing::warn!(
-                    env = "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
-                    raw = %raw,
-                    max_secs = MAX_KEYPROVIDER_READINESS_INTERVAL_SECS,
-                    "invalid keyprovider readiness sample interval (need 1..=30s); using default 5s"
-                );
-                DEFAULT_KEYPROVIDER_READINESS_INTERVAL
-            }
-        },
-    }
-}
-
-pub(crate) fn build_keyprovider_readiness_interval() -> Duration {
-    build_keyprovider_readiness_interval_from(|n| std::env::var(n).ok())
-}
 
 // ── Vault secret resolver wiring ─────────────────────────────────────────────────────────────
 
@@ -424,164 +388,9 @@ fn write_jwks_atomic(path: &Path, jwks: &[u8]) -> anyhow::Result<()> {
     fs::rename(&tmp, path).context("rename temporary OIDC JWKS into place")
 }
 
-// ── KeyProviderReadyProbe ─────────────────────────────────────────────────────────────────────
-
-/// Vault Transit KeyProvider readiness probe stable name.
-pub const KEYPROVIDER_READY_PROBE_NAME: &str = "keyprovider_ready";
-
-const KEYPROVIDER_READINESS_TENANT: &str = "00000000-0000-4000-8000-000000000147";
-const KEYPROVIDER_READINESS_MISMATCH_TENANT: &str = "00000000-0000-4000-8000-000000000148";
-const KEYPROVIDER_READINESS_CONFIG_KEY: &str = "readiness.probe";
-pub(crate) const KEYPROVIDER_READINESS_VALUE: &[u8] = b"rss-keyprovider-ready";
-const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
-const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
-
-pub struct KeyProviderReadyProbe {
-    ready: Arc<std::sync::atomic::AtomicBool>,
-    name: ProbeName,
-}
-
-impl KeyProviderReadyProbe {
-    #[allow(clippy::expect_used)]
-    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
-        let name = ProbeName::parse(KEYPROVIDER_READY_PROBE_NAME).expect("valid probe name const");
-        Self { ready, name }
-    }
-}
-
-impl bootstrap::HealthProbe for KeyProviderReadyProbe {
-    fn check(&self) -> HealthCheck {
-        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
-            (HealthStatus::Healthy, "ready")
-        } else {
-            (HealthStatus::Unhealthy, "down")
-        };
-        HealthCheck::new(self.name.clone(), status, detail)
-    }
-}
-
-fn keyprovider_readiness_aad() -> anyhow::Result<secure::DerivedAad> {
-    let tenant = vocab::TenantId::parse(KEYPROVIDER_READINESS_TENANT)
-        .context("keyprovider readiness tenant constant is invalid")?;
-    ProtectionContext::authenticated_request(
-        tenant,
-        KEYPROVIDER_READINESS_CONFIG_KEY,
-        KEYPROVIDER_CONFIG_FIELD,
-        KEYPROVIDER_CONFIG_SCHEME,
-    )
-    .map(|ctx| ctx.derive())
-    .context("keyprovider readiness aad")
-}
-
-fn keyprovider_readiness_mismatch_aad() -> anyhow::Result<secure::DerivedAad> {
-    let tenant = vocab::TenantId::parse(KEYPROVIDER_READINESS_MISMATCH_TENANT)
-        .context("keyprovider readiness mismatch tenant constant is invalid")?;
-    ProtectionContext::authenticated_request(
-        tenant,
-        KEYPROVIDER_READINESS_CONFIG_KEY,
-        KEYPROVIDER_CONFIG_FIELD,
-        KEYPROVIDER_CONFIG_SCHEME,
-    )
-    .map(|ctx| ctx.derive())
-    .context("keyprovider readiness mismatch aad")
-}
-
-pub(crate) async fn verify_keyprovider_ready(
-    provider: &DynKeyProvider<'static>,
-    key_name: KeyName,
-) -> anyhow::Result<()> {
-    let aad = keyprovider_readiness_aad()?;
-    let encrypted = provider
-        .encrypt(
-            key_name,
-            Plaintext::new(KEYPROVIDER_READINESS_VALUE.to_vec()),
-            aad.clone(),
-        )
-        .await
-        .context("key provider readiness encrypt")?;
-    let key_ref = encrypted.key().clone();
-    let plaintext = provider
-        .decrypt(
-            RedactedBytes::new(encrypted.ciphertext().to_vec()),
-            key_ref.clone(),
-            aad,
-        )
-        .await
-        .context("key provider readiness decrypt")?;
-    anyhow::ensure!(
-        plaintext.expose() == KEYPROVIDER_READINESS_VALUE,
-        "key provider readiness plaintext mismatch"
-    );
-    let mismatch_aad = keyprovider_readiness_mismatch_aad()?;
-    match provider
-        .decrypt(
-            RedactedBytes::new(encrypted.ciphertext().to_vec()),
-            key_ref,
-            mismatch_aad,
-        )
-        .await
-    {
-        Ok(_) => anyhow::bail!("key provider accepted mismatched readiness aad"),
-        Err(err) if err.kind() == diport::key_provider::KeyProviderErrorKind::Rejected => {}
-        Err(err) => return Err(err).context("key provider readiness mismatched aad decrypt"),
-    }
-    Ok(())
-}
-
-pub(crate) struct KeyProviderReadinessSampler {
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    token: CancellationToken,
-}
-
-impl ManagedResource for KeyProviderReadinessSampler {
-    fn name(&self) -> &str {
-        "keyprovider-readiness-sampler"
-    }
-
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.token.cancel();
-        let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take()
-            && let Err(err) = handle.await
-        {
-            tracing::warn!(error = %err, "keyprovider readiness sampler join failed");
-        }
-        Ok(())
-    }
-}
-
-pub(crate) fn spawn_keyprovider_readiness_sampler(
-    vault: VaultRuntimeDeps,
-    key_name: KeyName,
-    period: Duration,
-    token: CancellationToken,
-    ready: Arc<std::sync::atomic::AtomicBool>,
-) -> KeyProviderReadinessSampler {
-    let child = token.child_token();
-    let worker_token = child.clone();
-    let provider = vault.for_domain::<vault_caps::Settings>().key_provider();
-    let handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = worker_token.cancelled() => break,
-                () = tokio::time::sleep(period) => {
-                    let is_ready = verify_keyprovider_ready(&provider, key_name.clone()).await.is_ok();
-                    ready.store(is_ready, std::sync::atomic::Ordering::Release);
-                }
-            }
-        }
-    });
-    KeyProviderReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(handle)),
-        token: child,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diport::{DynKeyProvider, KeyName};
-    use std::sync::Arc;
 
     static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -595,135 +404,6 @@ mod tests {
         let path = unique_temp_path(name);
         std::fs::write(&path, contents).expect("write temp file");
         path
-    }
-
-    /// KeyProviderReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("down")`（fail-closed）。
-    #[test]
-    fn keyprovider_ready_probe_maps_flag_to_health() {
-        use bootstrap::HealthProbe;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let flag = Arc::new(AtomicBool::new(true));
-        let probe = KeyProviderReadyProbe::new(Arc::clone(&flag));
-        let ready = probe.check();
-        assert_eq!(ready.status(), HealthStatus::Healthy);
-        assert_eq!(ready.detail(), "ready");
-        assert_eq!(ready.name().as_str(), KEYPROVIDER_READY_PROBE_NAME);
-
-        flag.store(false, Ordering::Release);
-        let down = probe.check();
-        assert_eq!(down.status(), HealthStatus::Unhealthy);
-        assert_eq!(down.detail(), "down");
-    }
-
-    struct FailingKeyProvider;
-
-    impl diport::KeyProvider for FailingKeyProvider {
-        async fn encrypt(
-            &self,
-            _key: diport::KeyName,
-            _plaintext: secure::Plaintext,
-            _aad: secure::DerivedAad,
-        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
-            Err(keyprovider_unavailable())
-        }
-
-        async fn decrypt(
-            &self,
-            _ciphertext: diport::RedactedBytes,
-            _key: diport::KeyRef,
-            _aad: secure::DerivedAad,
-        ) -> Result<secure::Plaintext, diport::KeyProviderError> {
-            Err(keyprovider_unavailable())
-        }
-
-        async fn rewrap(
-            &self,
-            _ciphertext: diport::RedactedBytes,
-            _key: diport::KeyRef,
-            _aad: secure::DerivedAad,
-        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
-            Err(keyprovider_unavailable())
-        }
-
-        async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
-            Ok(())
-        }
-    }
-
-    struct AadBlindKeyProvider;
-
-    impl diport::KeyProvider for AadBlindKeyProvider {
-        async fn encrypt(
-            &self,
-            key: diport::KeyName,
-            _plaintext: secure::Plaintext,
-            _aad: secure::DerivedAad,
-        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
-            Ok(diport::EncryptOutput::new(
-                b"vault:v1:test".to_vec(),
-                diport::KeyRef::new(key, diport::KeyVersion::new(1)),
-            ))
-        }
-
-        async fn decrypt(
-            &self,
-            _ciphertext: diport::RedactedBytes,
-            _key: diport::KeyRef,
-            _aad: secure::DerivedAad,
-        ) -> Result<secure::Plaintext, diport::KeyProviderError> {
-            Ok(secure::Plaintext::new(KEYPROVIDER_READINESS_VALUE.to_vec()))
-        }
-
-        async fn rewrap(
-            &self,
-            _ciphertext: diport::RedactedBytes,
-            _key: diport::KeyRef,
-            _aad: secure::DerivedAad,
-        ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
-            Err(keyprovider_unavailable())
-        }
-
-        async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
-            Ok(())
-        }
-    }
-
-    fn keyprovider_unavailable() -> diport::KeyProviderError {
-        diport::KeyProviderError::new(
-            diport::key_provider::KeyProviderErrorKind::Unavailable,
-            std::io::Error::other("test keyprovider unavailable"),
-        )
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn keyprovider_startup_self_check_failure_is_error() {
-        let provider = DynKeyProvider::new_box(FailingKeyProvider);
-        let key = KeyName::try_new("settings-config").expect("valid key");
-
-        let err = verify_keyprovider_ready(&provider, key)
-            .await
-            .expect_err("failing provider must fail readiness self-check");
-        assert!(
-            format!("{err:#}").contains("key provider readiness encrypt"),
-            "startup self-check error should preserve encrypt context: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn keyprovider_startup_self_check_rejects_aad_blind_provider() {
-        let provider = DynKeyProvider::new_box(AadBlindKeyProvider);
-        let key = KeyName::try_new("settings-config").expect("valid key");
-
-        let err = verify_keyprovider_ready(&provider, key)
-            .await
-            .expect_err("AAD-blind provider must fail readiness self-check");
-        assert!(
-            format!("{err:#}").contains("accepted mismatched readiness aad"),
-            "startup self-check should prove wrong AAD fails closed: {err:#}"
-        );
     }
 
     // #1498 vault capability bundle 构造（fail-closed 由 wire_settings 内联迁到 build_vault_runtime_deps，
@@ -791,24 +471,6 @@ mod tests {
             2,
             "vault bundle 单源派生 resolver + key-provider guard"
         );
-    }
-
-    #[test]
-    fn build_keyprovider_readiness_interval_uses_keyprovider_env_not_pg_env() {
-        let d = build_keyprovider_readiness_interval_from(|n| match n {
-            "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS" => Some("300".to_string()),
-            "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS" => Some("7".to_string()),
-            _ => None,
-        });
-        assert_eq!(d, Duration::from_secs(7));
-    }
-
-    #[test]
-    fn build_keyprovider_readiness_interval_rejects_pg_sized_upper_bound() {
-        let d = build_keyprovider_readiness_interval_from(|n| {
-            (n == "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS").then(|| "300".to_string())
-        });
-        assert_eq!(d, DEFAULT_KEYPROVIDER_READINESS_INTERVAL);
     }
 
     // ── build_vault_signer_with fail-fast 测试 ───────────────────────────────────────────────

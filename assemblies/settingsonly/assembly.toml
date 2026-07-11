@@ -1,0 +1,17 @@
+name = "settingsonly"
+profile = "demo"
+domains = ["settings"]
+topology = "demo"
+
+[[listeners]]
+kind = "primary"
+
+[[diportProviders]]
+port = "diport::KeyProvider"
+provider = "vault::VaultKeyProvider"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "settings"
+lifecycle = "active"
+durability = "persistent"
+purpose = "settings-configvalue-at-rest-encryption"

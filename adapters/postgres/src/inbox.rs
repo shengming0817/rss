@@ -264,6 +264,7 @@ fn inbox_db_error(operation: &'static str, error: sqlx::Error) -> EngineError {
 ///
 /// This is the ConsumerTx commit leg: callers must execute business writes and outbox appends on
 /// the same [`TxCapability`] before calling this helper, then commit the surrounding transaction.
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) async fn commit_in_tx(
     tx: &mut TxCapability<'_>,
     ctx: &InboxReceiptContext,

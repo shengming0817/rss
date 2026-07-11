@@ -6,23 +6,28 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "domain-audit")]
 use audit::ports::{
     AuditChainHasher, AuditEventKind, AuditEventRecordError, AuditRecord,
     audit_record_from_event_message,
 };
+#[cfg(feature = "domain-settings")]
 use bootstrap::SubscriberEffect;
 use consistency::idempotency::LeaseOutcome;
-use consistency::{
-    Disposition, EngineErrorKind, HandleResult, IdemKey, InboxReceiptContext, LeaseToken,
-};
+#[cfg(feature = "domain-settings")]
+use consistency::{Disposition, HandleResult};
+use consistency::{EngineErrorKind, IdemKey, InboxReceiptContext, LeaseToken};
 use eventexec::{ConsumerTxHandlerFn, ConsumerTxOutcome};
+#[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 
 use crate::PgStore;
+#[cfg(feature = "domain-audit")]
 use crate::audit_repo::{advisory_lock_key, append_in_tx, tenant_str};
 use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::inbox::commit_in_tx;
 
+#[cfg(feature = "domain-audit")]
 /// Postgres-backed ConsumerTx audit handler.
 pub struct PgAuditConsumerTx<M: MacVerifier> {
     pool: PgTenantPool,
@@ -30,6 +35,7 @@ pub struct PgAuditConsumerTx<M: MacVerifier> {
     kind: AuditEventKind,
 }
 
+#[cfg(feature = "domain-audit")]
 mod audit_consumer_tx_effect_sealed {
     pub trait Sealed {}
 }
@@ -40,6 +46,7 @@ mod audit_consumer_tx_effect_sealed {
 /// The trait is sealed by the postgres adapter, so downstream composition roots can erase a
 /// [`PgAuditConsumerTx`] into an event handler only after the compiler has proved that the typed
 /// capability carries [`diport::WriteEffect`].
+#[cfg(feature = "domain-audit")]
 pub trait AuditConsumerTxEffect: audit_consumer_tx_effect_sealed::Sealed {
     /// Strongest effect exposed by the durable consumer transaction.
     type Effect: diport::PortEffectClass;
@@ -51,6 +58,7 @@ pub trait AuditConsumerTxEffect: audit_consumer_tx_effect_sealed::Sealed {
         Self: Sized + AuditConsumerTxEffect<Effect = diport::WriteEffect>;
 }
 
+#[cfg(feature = "domain-audit")]
 impl<M> PgAuditConsumerTx<M>
 where
     M: MacVerifier + Send + Sync + 'static,
@@ -160,8 +168,10 @@ where
     }
 }
 
+#[cfg(feature = "domain-audit")]
 impl<M> audit_consumer_tx_effect_sealed::Sealed for PgAuditConsumerTx<M> where M: MacVerifier {}
 
+#[cfg(feature = "domain-audit")]
 impl<M> AuditConsumerTxEffect for PgAuditConsumerTx<M>
 where
     M: MacVerifier + Send + Sync + 'static,
@@ -173,12 +183,14 @@ where
     }
 }
 
+#[cfg(feature = "domain-settings")]
 /// Postgres-backed ConsumerTx handler for settings config-version-changed.
 pub struct PgSettingsConsumerTx {
     pool: PgTenantPool,
     effect: SubscriberEffect,
 }
 
+#[cfg(feature = "domain-settings")]
 impl PgSettingsConsumerTx {
     pub(crate) fn config_version_changed(store: &PgStore, effect: SubscriberEffect) -> Self {
         Self {
@@ -260,6 +272,7 @@ fn pg_consumer_tx_outcome(
     }
 }
 
+#[cfg(feature = "domain-audit")]
 fn reject_audit_payload(
     message: &diport::Message,
     error: &AuditEventRecordError,
@@ -274,6 +287,7 @@ fn reject_audit_payload(
     }
 }
 
+#[cfg(feature = "domain-audit")]
 fn reject_audit_tenant_mismatch(
     message: &diport::Message,
     record: &AuditRecord,
@@ -290,6 +304,7 @@ fn reject_audit_tenant_mismatch(
     }
 }
 
+#[cfg(feature = "domain-settings")]
 fn settings_refresh_outcome(
     message_id: &str,
     result: HandleResult,
@@ -323,6 +338,7 @@ enum PgConsumerTxError {
     #[error("consumer transaction storage failed")]
     Storage(#[source] sqlx::Error),
     #[error("consumer transaction audit append failed")]
+    #[cfg(feature = "domain-audit")]
     Audit(#[source] audit::ports::AuditError),
     #[error("consumer transaction inbox commit failed")]
     Inbox(#[source] consistency::EngineError),

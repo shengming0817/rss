@@ -94,33 +94,33 @@ deny = [
   #   adapter wrapper 经 LAYER-DEPS-06 反向②补强：必须有真实 adapter→domain source edge。
   # postgres impl RoleRepo + SessionLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   SessionLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
-  { crate = "identity", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },
+  { crate = "identity", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },
   # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
   # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
-  { crate = "settings", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
+  { crate = "settings", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
   # postgres impl AuditWriteRepo + AuditReadRepo（per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
-  { crate = "audit", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
-  { crate = "contractreg", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "syshealth", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "audit", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
+  { crate = "contractreg", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "syshealth", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
   # adapter crate 只能被组合根依赖（不被域 / 服务依赖；组合根注入）。ban 按 **package 名** 匹配——
   # adapter package 名须与其依赖的同名 crates.io crate 区分（redis adapter package = `redis-adapter`、
   # prometheus adapter package = `prometheus-adapter`，见各自 Cargo.toml），避免误伤同名 crates.io crate。
-  { crate = "postgres", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "redis-adapter", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "amqp", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "mqtt", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "s3", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "oidc", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "grpc", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "postgres", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "redis-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "amqp", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "mqtt", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "s3", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "oidc", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "grpc", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
   # httpd HTTP 传输 adapter（#1320 运行时入口）：HttpServer + ManagedResource，只被组合根依赖。
-  { crate = "httpd", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "otel", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "prometheus-adapter", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "vault", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "softca", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
-  { crate = "ratelimit", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "httpd", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "otel", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "prometheus-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "vault", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "softca", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "ratelimit", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
   # MacVerifier 生产 backend（package = `crypto-adapter`，lib = `crypto`；#1230）：只被组合根注入。
-  { crate = "crypto-adapter", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "crypto-adapter", wrappers = ["server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
   # in-mem DI port provider adapter（RW-G1 追踪弹）：dev/test-only——**禁生产 bin（server/rss）依赖**，
   # 只准验收 journey + tooling（DEV_ADAPTER_ROOTS）依赖。机器边界 = xtask layers.rs DEV_ADAPTERS +
   # layer-deps LAYER-DEPS-07（正向收窄 required + 反向排除生产 bin）。wrapper 须恰为 dev 组合根。
@@ -131,7 +131,7 @@ deny = [
   # `containers` feature + dev-dep-only 不进产物。
   # generated（contract 派生 wire 类型）只能被域 crate + 组合根，以及实现 private command seam 的 eventexec 依赖。
   # eventexec → generated 是 exact crate edge；其它 Service→Generated 仍由 layer-deps 拒绝。
-  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "eventexec", "postgres", "server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
+  { crate = "generated", wrappers = ["identity", "settings", "audit", "contractreg", "syshealth", "eventexec", "postgres", "server", "rss", "runtime", "settings-composition", "settingsonly", "xtask", "journeys", "journeys-fault-matrix"] },
 ]
 
 # 注意：cargo-deny 只扫描本（根 stable）workspace。`lints/` 是独立嵌套 workspace（根 Cargo.toml

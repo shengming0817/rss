@@ -101,7 +101,7 @@ No Rust source, migrations, generated code, or assembly schema files are in scop
 | PR-015 | #1670 | Phase 4 | Move `wire_settings`, `wire_identity`, `wire_audit` | PR-014 | wire function tests |
 | PR-016 | future | Phase 4 | Generate runtime modules file | PR-015 | codegen check |
 | PR-017 | #1672 | Phase 4 | Use generated modules in runtime run path | PR-016 | runtime tests |
-| PR-018 | future | Phase 4 | Add settings-only assembly | PR-017 | assembly validate + smoke test |
+| PR-018 | #1674 | Phase 4 | Add settings-only assembly | PR-017 | assembly validate + smoke test |
 | PR-019 | future | Phase 4 | Add identity-audit assembly | PR-018 | assembly validate + smoke test |
 | PR-020 | future | Phase 5 | Introduce ProviderBundle standardization | PR-019 | provider bundle tests |
 | PR-021 | future | Phase 5 | Standardize PG runtime deps outputs | PR-020 | postgres/runtime tests |

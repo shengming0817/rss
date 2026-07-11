@@ -1,0 +1,33 @@
+[package]
+name = "settingsonly"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "settingsonly"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+bootstrap = { path = "../../crates/bootstrap" }
+diport = { path = "../../crates/diport" }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings"] }
+settings = { path = "../../crates/settings", features = ["seed-data"] }
+settings-composition = { path = "../../composition/settings" }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+
+[dev-dependencies]
+base64 = { workspace = true }
+postgres = { path = "../../adapters/postgres", features = ["domain-settings", "test-support"] }
+reqwest = { workspace = true }
+secure = { path = "../../crates/secure" }
+serde_json = { workspace = true }
+settings-composition = { path = "../../composition/settings", features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+vocab = { path = "../../crates/vocab" }
+wiremock = { workspace = true }

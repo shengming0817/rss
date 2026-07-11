@@ -116,8 +116,9 @@ impl ExternalProgram {
 pub(crate) enum CargoSubcommand {
     Metadata,
     Tree,
-    #[cfg(test)]
     Check,
+    #[cfg(test)]
+    GenerateLockfile,
     Fmt,
     Build,
     Test,
@@ -134,8 +135,9 @@ impl CargoSubcommand {
         match self {
             Self::Metadata => "metadata",
             Self::Tree => "tree",
-            #[cfg(test)]
             Self::Check => "check",
+            #[cfg(test)]
+            Self::GenerateLockfile => "generate-lockfile",
             Self::Fmt => "fmt",
             Self::Build => "build",
             Self::Test => "test",
