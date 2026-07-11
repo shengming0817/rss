@@ -5,6 +5,8 @@
 //!   `cargo xtask cdc-config debezium`   输出 Debezium PostgreSQL outbox_log CDC connector JSON skeleton（只读）
 //!   `cargo xtask contract validate`     契约元数据校验（多规则，编号见 `contract::validate` 的 `Rule`，CI 门）
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
+//!   `cargo xtask assembly generate-modules [--check]`
+//!                                      assembly.toml domains → committed modules_gen.rs（--check 为漂移门）
 //!   `cargo xtask archrules list|verify|matrix [--write|--check]`
 //!                                      ArchRules 派生索引与持久化 funnel 单源矩阵；verify/matrix --check 为 CI 门
 //!   `cargo xtask contract breaking [--against <git-ref>] [--deny]`
@@ -58,6 +60,7 @@
 //!                                      **已接入 GitHub Actions PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
 mod archrules;
 mod assembly;
+mod assembly_codegen;
 mod cdc_config;
 mod ci_lanes;
 mod cmd;
@@ -112,6 +115,9 @@ enum Command {
     CdcConfigDebezium,
     ContractValidate,
     AssemblyValidate,
+    AssemblyGenerateModules {
+        check: bool,
+    },
     ArchRulesList,
     ArchRulesVerify,
     ArchRulesMatrix(archrules::MatrixAction),
@@ -212,7 +218,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly <validate | generate-modules [--check]> | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -286,7 +292,11 @@ fn parse_contract(args: &[&str]) -> Result<Command> {
 fn parse_assembly(args: &[&str]) -> Result<Command> {
     match args {
         ["validate"] => Ok(Command::AssemblyValidate),
-        other => bail!("未知 assembly 子命令: {other:?}；用法: cargo xtask assembly validate"),
+        ["generate-modules"] => Ok(Command::AssemblyGenerateModules { check: false }),
+        ["generate-modules", "--check"] => Ok(Command::AssemblyGenerateModules { check: true }),
+        other => bail!(
+            "未知 assembly 子命令: {other:?}；用法: cargo xtask assembly <validate | generate-modules [--check]>"
+        ),
     }
 }
 
@@ -459,6 +469,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::CdcConfigDebezium => cdc_config::run_debezium(),
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
+        Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
         Command::ArchRulesMatrix(action) => archrules::matrix(action),
@@ -592,6 +603,25 @@ mod tests {
             Command::AssemblyValidate
         );
         Ok(())
+    }
+
+    #[test]
+    fn parse_command_assembly_generate_modules() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["assembly", "generate-modules"]))?,
+            Command::AssemblyGenerateModules { check: false }
+        );
+        assert_eq!(
+            parse_command(&s(&["assembly", "generate-modules", "--check"]))?,
+            Command::AssemblyGenerateModules { check: true }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_assembly_generate_modules_rejects_bad_args() {
+        assert!(parse_command(&s(&["assembly", "generate-modules", "--bogus"])).is_err());
+        assert!(parse_command(&s(&["assembly", "generate-modules", "--check", "extra"])).is_err());
     }
 
     #[test]

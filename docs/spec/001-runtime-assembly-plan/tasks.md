@@ -69,7 +69,7 @@ Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test 
 - [x] T028 [US1] Define domain binding/output shape without introducing a runtime DI container.
 - [x] T029 [US1] Add merge/extend helpers while preserving probes/resources/workers semantics.
 - [x] T030 [US1] Move `wire_settings`, `wire_identity`, and `wire_audit` into runtime domain modules.
-- [ ] T031 [US1] Add `cargo xtask assembly generate-modules` and commit generated module output.
+- [x] T031 [US1] Add `cargo xtask assembly generate-modules` and commit generated module output.
 - [ ] T032 [US1] Switch runtime assembly to generated module list.
 - [ ] T033 [US1] Add settings-only assembly.
 - [ ] T034 [US1] Add identity-audit assembly.

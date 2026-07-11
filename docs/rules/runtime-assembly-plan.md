@@ -37,7 +37,10 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - `compose_bindings` is the only public output transition: it borrows domains in declared manifest order, drains and extends outputs only after compose succeeds, and leaves bindings/outputs unchanged on failure.
 - `DomainModuleResult` remains the sole probes/resources/workers output. Merge/extend preserves manifest order and each domain's internal order, including duplicates; generators must not lexically sort domains.
 - Domain services and routes remain typed and are captured by the domain/route funnel; they must not enter `SharedRuntimeDeps` or `DomainModuleResult`.
+- `cargo xtask assembly generate-modules` derives each assembly's committed `src/generated/modules_gen.rs` from the manifest domain order. `ASSEMBLY-MODULES-CODEGEN-01` is the Hard codegen/golden carrier; `--check` runs in verify/CI and fails on missing, changed, hand-edited, or owned orphan outputs.
+- The generated file contains only ordered async `domains::<name>::module(deps)` calls. It does not derive providers, environment access, features, compose/merge behavior, or a typed-handle sidecar.
 - Defining the binding/output shape does not itself change live `runtime::run()` behavior. Moving wire functions, generating the module list, and switching the live path remain separate dependent changes with baseline verification.
+- The generated artifact is not a live-runtime carrier until the dependent cutover resolves the single-instance `SettingsService` / `RouteAuthorizer` ownership and the current handwritten-vs-manifest initialization order; the codegen Hard claim covers artifact freshness only.
 
 ## PR Size Planning Budget
 

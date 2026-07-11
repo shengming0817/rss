@@ -24,6 +24,8 @@ cargo xtask verify --allow-missing-tools   # 缺外部工具时显式宽限（�
 ```bash
 cargo fmt --all -- --check                             # 格式
 cargo xtask contract validate                          # 契约元数据校验
+cargo xtask assembly validate                          # assembly 声明与依赖闭包校验
+cargo xtask assembly generate-modules --check          # domain modules 生成物漂移门
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门
 cargo build --workspace                                # 编译全 workspace（分层有环即失败）
