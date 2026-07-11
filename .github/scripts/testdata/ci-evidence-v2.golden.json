@@ -8,9 +8,25 @@
     "runnerOs": "<string>",
     "workflow": "<string>"
   },
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "snapshots": [
     {
+      "cache": {
+        "build": {
+          "candidateSizeBytes": 4096,
+          "restoreResult": "miss",
+          "restoredFootprintBytes": 0,
+          "saveMode": "writer",
+          "saveOutcome": "eligible"
+        },
+        "tools": {
+          "candidateSizeBytes": 2048,
+          "restoreResult": "exact",
+          "restoredFootprintBytes": 2048,
+          "saveMode": "read-only",
+          "saveOutcome": "skipped"
+        }
+      },
       "directories": [
         {
           "path": "cargo-git",
@@ -48,7 +64,7 @@
       "outcome": null,
       "recordedAt": "<utc>",
       "stage": "start",
-      "tools": {
+      "toolVersions": {
         "cargo": "<string-or-null>",
         "git": "<string-or-null>",
         "rustc": "<string-or-null>"

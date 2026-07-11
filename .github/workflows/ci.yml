@@ -1,7 +1,3 @@
-# .github/workflows/ci.yml — RSS GitHub Actions CI lane.
-#
-# Thin shell: CI gate logic lives in `cargo xtask ci`; this workflow installs the
-# pinned toolchain/tools and delegates to that single command.
 name: CI
 
 on:
@@ -14,60 +10,8 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  RSS_NIGHTLY_PINNED: nightly-2026-04-16
-  RSS_CI_EVIDENCE_FILE: ci-evidence.json
-
 jobs:
   ci:
-    name: cargo xtask ci
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - name: Capture start evidence
-        run: |
-          set -euo pipefail
-          .github/scripts/ci-evidence.sh snapshot start --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE"
-          .github/scripts/ci-disk-budget.sh --stage start --path "$GITHUB_WORKSPACE"
-
-      - name: Setup RSS Rust CI
-        uses: ./.github/actions/setup-rss-ci
-        with:
-          evidence-enabled: true
-          nightly: ${{ env.RSS_NIGHTLY_PINNED }}
-          cache-prefix: cargo-ci
-          tools: >-
-            cargo-nextest@0.9.137 cargo-deny@0.19.9 cargo-dylint@6.0.1 dylint-link@6.0.1
-            cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0 cargo-audit@0.22.2
-
-      - name: cargo xtask ci
-        id: xtask
-        run: cargo run --locked -p xtask -- ci
-
-      - name: Capture after-build evidence
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          .github/scripts/ci-evidence.sh snapshot after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome "${{ steps.xtask.outcome }}"
-          .github/scripts/ci-disk-budget.sh --stage after-build --path "$GITHUB_WORKSPACE"
-
-      - name: Capture before-save evidence
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          .github/scripts/ci-evidence.sh snapshot before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE"
-
-      - name: Upload CI evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}
-          if-no-files-found: error
-          retention-days: 7
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci

@@ -40,9 +40,12 @@
 //! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow 只调 `cargo xtask ci`、不逐条重列门 run
 //!   命令（门逻辑单源在 xtask）；由 `github_ci_workflow_delegates_to_xtask_ci` 治理测试守。
 //! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code" }—— CI / Integration workflow
-//!   须按 checkout → start → cache/after-cache → xtask → after-build → before-save → artifact 的唯一有序生命周期
+//!   须按 checkout → start → cache/after-cache → xtask → after-build → cleanup/measure → before-save → explicit save → after-save → artifact 的唯一有序生命周期
 //!   采集资源证据，且在昂贵构建前 fail-closed 检查磁盘预算。该约束无法用 Rust 类型系统
 //!   表达，由结构化 YAML 谓词、synthetic red / anti-vacuity 与脚本 selftest 联合承载。
+//! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "verify", source = "code" }—— cache writer 资格必须由
+//!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
+//!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
 
 use crate::ci_lanes::{
     CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
@@ -61,7 +64,6 @@ use std::process::Stdio;
 
 #[cfg(test)]
 const CI_TOOL_SPECS: &[&str] = &[
-    "cargo-binstall@1.20.1",
     "cargo-nextest@0.9.137",
     "cargo-deny@0.19.9",
     "cargo-dylint@6.0.1",
@@ -2291,280 +2293,192 @@ mod tests {
         })
     }
 
-    fn block_has_line(block: &[&str], expected: &str) -> bool {
-        block
-            .iter()
-            .any(|raw| raw.strip_prefix("- ").map(str::trim).unwrap_or(raw).trim() == expected)
+    #[derive(Debug, Default)]
+    struct TypedStep {
+        id: Option<String>,
+        name: Option<String>,
+        uses: Option<String>,
+        if_expr: Option<String>,
+        continue_on_error: Option<String>,
+        with: Vec<(String, Vec<String>)>,
+        env: Vec<(String, Vec<String>)>,
+        run: Vec<String>,
     }
 
-    fn unique_block_index(
-        blocks: &[Vec<&str>],
-        predicate: impl Fn(&[&str]) -> bool,
-    ) -> Option<usize> {
-        let matches = blocks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, block)| predicate(block).then_some(index))
-            .collect::<Vec<_>>();
-        (matches.len() == 1).then(|| matches[0])
-    }
-
-    const EVIDENCE_FILE_ENV: &str = "RSS_CI_EVIDENCE_FILE: ci-evidence.json";
-    const EVIDENCE_OUTPUT_ARG: &str = "--output \"$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE\"";
-    const WORKSPACE_PATH_ARG: &str = "--path \"$GITHUB_WORKSPACE\"";
-    const XTASK_OUTCOME_ARG: &str = "--outcome \"${{ steps.xtask.outcome }}\"";
-
-    fn block_has_evidence_snapshot(block: &[&str], stage: &str, with_outcome: bool) -> bool {
-        let outcome = if with_outcome {
-            format!(" {XTASK_OUTCOME_ARG}")
-        } else {
-            String::new()
-        };
-        block_has_line(
-            block,
-            &format!(
-                ".github/scripts/ci-evidence.sh snapshot {stage} {EVIDENCE_OUTPUT_ARG}{outcome}"
-            ),
-        )
-    }
-
-    fn block_has_disk_budget(block: &[&str], stage: &str) -> bool {
-        block_has_line(
-            block,
-            &format!(".github/scripts/ci-disk-budget.sh --stage {stage} {WORKSPACE_PATH_ARG}"),
-        )
-    }
-
-    fn block_is_always(block: &[&str]) -> bool {
-        block_has_line(block, "if: ${{ always() }}")
-    }
-
-    /// 只提取顶层 `jobs:` 下唯一 job 的 `steps:`，不允许多 job 间拼接必需步骤。
-    fn workflow_single_job_step_blocks(yaml: &str) -> Option<Vec<Vec<&str>>> {
-        let lines = yaml_indented_code_lines(yaml);
-        let jobs_index = lines
-            .iter()
-            .position(|(indent, text)| *indent == 0 && *text == "jobs:")?;
-        let jobs_end = lines
-            .iter()
-            .enumerate()
-            .skip(jobs_index + 1)
-            .find_map(|(index, (indent, _))| (*indent == 0).then_some(index))
-            .unwrap_or(lines.len());
-        let job_indices = lines[jobs_index + 1..jobs_end]
-            .iter()
-            .enumerate()
-            .filter_map(|(offset, (indent, text))| {
-                (*indent == 2 && text.ends_with(':')).then_some(jobs_index + 1 + offset)
-            })
-            .collect::<Vec<_>>();
-        if job_indices.len() != 1 {
-            return None;
-        }
-
-        let job_index = job_indices[0];
-        let steps_index = lines[job_index + 1..jobs_end].iter().enumerate().find_map(
-            |(offset, (indent, text))| {
-                (*indent == 4 && *text == "steps:").then_some(job_index + 1 + offset)
-            },
-        )?;
-        let mut blocks = Vec::<Vec<&str>>::new();
-        for (indent, text) in &lines[steps_index + 1..jobs_end] {
-            if *indent <= 4 {
-                break;
-            }
-            if *indent == 6 && text.starts_with("- ") {
-                blocks.push(Vec::new());
-            }
-            blocks.last_mut()?.push(text);
-        }
-        Some(blocks)
-    }
-
-    fn workflow_has_top_level_evidence_file_env(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        lines.iter().enumerate().any(|(index, (indent, text))| {
-            *indent == 0
-                && *text == "env:"
-                && lines.get(index + 1..).is_some_and(|rest| {
-                    rest.iter()
-                        .take_while(|(child_indent, _)| *child_indent > 0)
-                        .any(|(child_indent, child)| {
-                            *child_indent == 2 && *child == EVIDENCE_FILE_ENV
-                        })
-                })
-        })
-    }
-
-    /// CI-RESOURCE-EVIDENCE-01 workflow 结构谓词。故意采用严格的七步闭集：防止额外的
-    /// 前置昂贵步骤绕过 start/budget，也防止 artifact 之后再修改证据。YAML 只是文本配置，
-    /// 因此评级 Medium；synthetic red 逐项抽掉必需子句，anti-vacuity 证明谓词非恒真。
-    fn workflow_has_resource_evidence_lifecycle(yaml: &str, delegation_forms: &[&str]) -> bool {
-        let Some(blocks) = workflow_single_job_step_blocks(yaml) else {
-            return false;
-        };
-        if blocks.len() != 7 || !workflow_has_top_level_evidence_file_env(yaml) {
-            return false;
-        }
-
-        let expected = [
-            unique_block_index(&blocks, |b| block_uses_action(b, "actions/checkout@v4")),
-            unique_block_index(&blocks, |b| {
-                block_has_evidence_snapshot(b, "start", false) && block_has_disk_budget(b, "start")
-            }),
-            unique_block_index(&blocks, |b| {
-                block_uses_action(b, "./.github/actions/setup-rss-ci")
-                    && block_has_line(b, "evidence-enabled: true")
-            }),
-            unique_block_index(&blocks, |b| {
-                block_has_line(b, "id: xtask")
-                    && delegation_forms
-                        .iter()
-                        .any(|form| block_has_line(b, &format!("run: {form}")))
-            }),
-            unique_block_index(&blocks, |b| {
-                block_is_always(b)
-                    && block_has_evidence_snapshot(b, "after-build", true)
-                    && block_has_disk_budget(b, "after-build")
-            }),
-            unique_block_index(&blocks, |b| {
-                block_is_always(b) && block_has_evidence_snapshot(b, "before-save", false)
-            }),
-            unique_block_index(&blocks, |b| {
-                block_is_always(b)
-                    && block_uses_action(b, "actions/upload-artifact@v4")
-                    && block_has_line(
-                        b,
-                        "name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}",
-                    )
-                    && block_has_line(
-                        b,
-                        "path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}",
-                    )
-                    && block_has_line(b, "if-no-files-found: error")
-                    && block_has_line(b, "retention-days: 7")
-            }),
-        ];
-        expected
-            .iter()
-            .enumerate()
-            .all(|(index, actual)| *actual == Some(index))
-    }
-
-    /// Shared composite action 中 cache restore 必须先于 after-cache 采集/预算，且 Rust
-    /// toolchain 安装必须在其后。这把 workflow 里的 setup 边界绑到真实 cache 生命周期。
-    fn action_has_required_evidence_input(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(input_index) = lines
-            .iter()
-            .position(|(indent, text)| *indent == 2 && *text == "evidence-enabled:")
-        else {
-            return false;
-        };
-        let input_lines = lines[input_index + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 2)
-            .collect::<Vec<_>>();
-        input_lines
-            .iter()
-            .any(|(indent, text)| *indent == 4 && *text == "required: true")
-            && !input_lines
+    impl TypedStep {
+        fn with_exact(&self, key: &str, values: &[&str]) -> bool {
+            let matches = self
+                .with
                 .iter()
-                .any(|(indent, text)| *indent == 4 && text.starts_with("default:"))
-    }
+                .filter(|(candidate, _)| candidate == key)
+                .collect::<Vec<_>>();
+            matches.len() == 1
+                && matches[0].1.iter().map(String::as_str).collect::<Vec<_>>() == values
+        }
 
-    fn setup_action_has_after_cache_gate(yaml: &str, cargo_target_dir: &str) -> bool {
-        let blocks = yaml_step_blocks(yaml);
-        let cache = unique_block_index(&blocks, |b| {
-            block_uses_action(b, "actions/cache@v4") && block_has_line(b, cargo_target_dir)
-        });
-        let after_cache = unique_block_index(&blocks, |b| {
-            block_has_line(b, "if: ${{ inputs.evidence-enabled == 'true' }}")
-                && block_has_evidence_snapshot(b, "after-cache", false)
-                && block_has_disk_budget(b, "after-cache")
-        });
-        let toolchain = unique_block_index(&blocks, |b| {
-            block_has_line(b, "rustup component add rustfmt clippy llvm-tools-preview")
-        });
-        action_has_required_evidence_input(yaml)
-            && matches!((cache, after_cache, toolchain), (Some(a), Some(b), Some(c)) if a < b && b < c)
-    }
-
-    fn workflow_setup_evidence_enabled(yaml: &str) -> Option<bool> {
-        let blocks = workflow_single_job_step_blocks(yaml)?;
-        let setup = unique_block_index(&blocks, |b| {
-            block_uses_action(b, "./.github/actions/setup-rss-ci")
-        })?;
-        match (
-            block_has_line(&blocks[setup], "evidence-enabled: true"),
-            block_has_line(&blocks[setup], "evidence-enabled: false"),
-        ) {
-            (true, false) => Some(true),
-            (false, true) => Some(false),
-            _ => None,
+        fn run_contains(&self, needle: &str) -> bool {
+            self.run.iter().any(|line| line.contains(needle))
         }
     }
 
-    fn workflow_uses_setup_action(yaml: &str) -> bool {
-        workflow_single_job_step_blocks(yaml).is_some_and(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block_uses_action(block, "./.github/actions/setup-rss-ci"))
-        })
-    }
-
-    fn workflow_has_evidence_stages_around_setup(yaml: &str) -> bool {
-        let Some(blocks) = workflow_single_job_step_blocks(yaml) else {
-            return false;
-        };
-        if !workflow_has_top_level_evidence_file_env(yaml) {
-            return false;
+    fn yaml_typed_steps(yaml: &str) -> Vec<TypedStep> {
+        let lines = yaml_indented_code_lines(yaml);
+        let mut steps = Vec::new();
+        for (steps_index, (steps_indent, text)) in lines.iter().enumerate() {
+            if *text != "steps:" || !matches!(*steps_indent, 2 | 4) {
+                continue;
+            }
+            let item_indent = steps_indent + 2;
+            let mut index = steps_index + 1;
+            while index < lines.len() && lines[index].0 > *steps_indent {
+                if lines[index].0 != item_indent || !lines[index].1.starts_with("- ") {
+                    index += 1;
+                    continue;
+                }
+                let end = lines[index + 1..]
+                    .iter()
+                    .position(|(indent, text)| {
+                        *indent <= *steps_indent
+                            || (*indent == item_indent && text.starts_with("- "))
+                    })
+                    .map_or(lines.len(), |offset| index + 1 + offset);
+                steps.push(parse_typed_step(&lines[index..end], item_indent));
+                index = end;
+            }
         }
-        let stages = [
-            unique_block_index(&blocks, |b| {
-                block_has_evidence_snapshot(b, "start", false) && block_has_disk_budget(b, "start")
-            }),
-            unique_block_index(&blocks, |b| {
-                block_uses_action(b, "./.github/actions/setup-rss-ci")
-            }),
-            unique_block_index(&blocks, |b| {
-                block_is_always(b)
-                    && block_has_evidence_snapshot(b, "after-build", true)
-                    && block_has_disk_budget(b, "after-build")
-            }),
-            unique_block_index(&blocks, |b| {
-                block_is_always(b) && block_has_evidence_snapshot(b, "before-save", false)
-            }),
-            unique_block_index(&blocks, |b| {
-                block_is_always(b) && block_uses_action(b, "actions/upload-artifact@v4")
-            }),
-        ];
-        matches!(
-            stages,
-            [Some(start), Some(setup), Some(after), Some(before), Some(upload)]
-                if start < setup && setup < after && after < before && before < upload
-        )
+        steps
     }
 
-    fn workflow_setup_evidence_contract_matches(yaml: &str) -> bool {
-        workflow_setup_evidence_enabled(yaml)
-            == Some(workflow_has_evidence_stages_around_setup(yaml))
-    }
-
-    fn cargo_target_dir_from_config(config: &str) -> Option<String> {
-        let parsed = config.parse::<toml::Value>().ok()?;
-        parsed
-            .get("build")?
-            .get("target-dir")?
-            .as_str()
-            .map(str::to_owned)
+    fn parse_typed_step(lines: &[(usize, &str)], item_indent: usize) -> TypedStep {
+        let mut step = TypedStep::default();
+        let field_indent = item_indent + 2;
+        let mut index = 0;
+        while index < lines.len() {
+            let (indent, raw) = lines[index];
+            let text = if index == 0 {
+                raw.strip_prefix("- ").map(str::trim).unwrap_or(raw)
+            } else {
+                raw
+            };
+            let effective_indent = if index == 0 { field_indent } else { indent };
+            if effective_indent != field_indent {
+                index += 1;
+                continue;
+            }
+            let Some((key, value)) = text.split_once(':') else {
+                index += 1;
+                continue;
+            };
+            let value = value.trim();
+            match key {
+                "id" => step.id = Some(value.to_owned()),
+                "name" => step.name = Some(value.to_owned()),
+                "uses" => step.uses = Some(value.to_owned()),
+                "if" => step.if_expr = Some(value.to_owned()),
+                "continue-on-error" => step.continue_on_error = Some(value.to_owned()),
+                "run" => {
+                    if is_yaml_block_scalar_marker(value) {
+                        let mut body = index + 1;
+                        while body < lines.len() && lines[body].0 > field_indent {
+                            step.run.push(lines[body].1.to_owned());
+                            body += 1;
+                        }
+                        index = body;
+                        continue;
+                    }
+                    step.run.push(value.to_owned());
+                }
+                "with" | "env" => {
+                    let target = if key == "with" {
+                        &mut step.with
+                    } else {
+                        &mut step.env
+                    };
+                    let mapping_indent = field_indent + 2;
+                    let mut child = index + 1;
+                    while child < lines.len() && lines[child].0 > field_indent {
+                        if lines[child].0 != mapping_indent {
+                            child += 1;
+                            continue;
+                        }
+                        let Some((child_key, child_value)) = lines[child].1.split_once(':') else {
+                            child += 1;
+                            continue;
+                        };
+                        let child_value = child_value.trim();
+                        let mut values = Vec::new();
+                        if is_yaml_block_scalar_marker(child_value) {
+                            let mut body = child + 1;
+                            while body < lines.len() && lines[body].0 > mapping_indent {
+                                values.push(lines[body].1.to_owned());
+                                body += 1;
+                            }
+                            child = body;
+                        } else {
+                            values.push(child_value.to_owned());
+                            child += 1;
+                        }
+                        target.push((child_key.to_owned(), values));
+                    }
+                    index = child;
+                    continue;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        step
     }
 
     /// 委托谓词（正向白名单）：YAML 的 PR/push 触发器绑定 develop，且 run/script 执行面只有安装步骤
     /// 和一个受限 prologue + 规范 xtask ci 委托命令。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
         workflow_pr_push_triggers_develop(yaml)
-            && workflow_delegates_to_xtask_lane(yaml, XTASK_CI_FORMS)
+            && (workflow_delegates_to_xtask_lane(yaml, XTASK_CI_FORMS)
+                || workflow_calls_reusable_lane(yaml, "ci"))
+    }
+
+    /// Thin callers may only select a literal member of the closed lane set.  Match the
+    /// `uses` and `with.lane` fields, never display names, comments, env, or run text.
+    fn workflow_calls_reusable_lane(yaml: &str, lane: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let jobs_start = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "jobs:");
+        let Some(jobs_start) = jobs_start else {
+            return false;
+        };
+        let jobs = &lines[jobs_start + 1..];
+        let job_fields = jobs
+            .iter()
+            .filter(|(indent, _)| *indent == 4)
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>();
+        let with_fields = jobs
+            .iter()
+            .filter(|(indent, _)| *indent == 6)
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>();
+        let permission_fields = lines
+            .iter()
+            .skip_while(|(indent, line)| !(*indent == 0 && *line == "permissions:"))
+            .skip(1)
+            .take_while(|(indent, _)| *indent > 0)
+            .collect::<Vec<_>>();
+        matches!(lane, "ci" | "integration" | "audit")
+            && !lines
+                .iter()
+                .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
+            && jobs
+                .iter()
+                .filter(|(indent, line)| *indent == 2 && line.ends_with(':'))
+                .count()
+                == 1
+            && job_fields == ["uses: ./.github/workflows/rss-rust-lane.yml", "with:"]
+            && with_fields == [format!("lane: {lane}")]
+            && permission_fields.len() == 1
+            && permission_fields[0].0 == 2
+            && permission_fields[0].1 == "contents: read"
     }
 
     /// 被 workflow 引用的本地 composite action 也是 CI 执行面。setup action 只能安装工具，不得把 build /
@@ -2575,266 +2489,41 @@ mod tests {
             .all(|script| command_script_is_setup_only(script))
     }
 
-    fn resource_evidence_workflow_fixture(delegate: &str) -> String {
-        [
-            "env:".to_owned(),
-            format!("  {EVIDENCE_FILE_ENV}"),
-            "jobs:\n  lane:\n    steps:".to_owned(),
-            "      - uses: actions/checkout@v4".to_owned(),
-            "      - name: Capture start evidence\n        run: |".to_owned(),
-            format!(
-                "          .github/scripts/ci-evidence.sh snapshot start {EVIDENCE_OUTPUT_ARG}"
-            ),
-            format!(
-                "          .github/scripts/ci-disk-budget.sh --stage start {WORKSPACE_PATH_ARG}"
-            ),
-            "      - uses: ./.github/actions/setup-rss-ci\n        with:\n          evidence-enabled: true"
-                .to_owned(),
-            format!("      - id: xtask\n        run: {delegate}"),
-            "      - name: Capture after-build evidence\n        if: ${{ always() }}\n        run: |"
-                .to_owned(),
-            format!(
-                "          .github/scripts/ci-evidence.sh snapshot after-build {EVIDENCE_OUTPUT_ARG} {XTASK_OUTCOME_ARG}"
-            ),
-            format!(
-                "          .github/scripts/ci-disk-budget.sh --stage after-build {WORKSPACE_PATH_ARG}"
-            ),
-            "      - name: Capture before-save evidence\n        if: ${{ always() }}\n        run: |"
-                .to_owned(),
-            format!(
-                "          .github/scripts/ci-evidence.sh snapshot before-save {EVIDENCE_OUTPUT_ARG}"
-            ),
-            "      - uses: actions/upload-artifact@v4\n        if: ${{ always() }}\n        with:\n          name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}\n          if-no-files-found: error\n          retention-days: 7"
-                .to_owned(),
-        ]
-        .join("\n")
-    }
-
-    /// CI-RESOURCE-EVIDENCE-01 synthetic green/red + anti-vacuity：完整七步形为真，每个
-    /// 生命周期子句缺失、乱序或仅出现在 display name 都为假。
-    #[test]
-    fn resource_evidence_lifecycle_predicate_green_red_and_anti_vacuity() {
-        let delegate = "cargo run --locked -p xtask -- ci";
-        let forms = [delegate];
-        let green = resource_evidence_workflow_fixture(delegate);
-        assert!(workflow_has_resource_evidence_lifecycle(&green, &forms));
-
-        let red_replacements = [
-            (EVIDENCE_FILE_ENV, "RSS_CI_EVIDENCE_FILE: other.json"),
-            ("snapshot start", "snapshot unknown"),
-            ("--stage start", "--stage other"),
-            ("uses: ./.github/actions/setup-rss-ci", "uses: ./other"),
-            ("id: xtask", "id: build"),
-            ("snapshot after-build", "snapshot before-save"),
-            ("--stage after-build", "--stage other"),
-            ("snapshot before-save", "snapshot unknown"),
-            ("actions/upload-artifact@v4", "actions/upload-artifact@v3"),
-            (
-                "name: ci-evidence-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}",
-                "name: ci-evidence",
-            ),
-            (
-                "path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}",
-                "path: ${{ runner.temp }}",
-            ),
-            ("if-no-files-found: error", "if-no-files-found: warn"),
-            ("retention-days: 7", "retention-days: 90"),
-        ];
-        for (required, replacement) in red_replacements {
-            assert!(
-                !workflow_has_resource_evidence_lifecycle(
-                    &green.replacen(required, replacement, 1),
-                    &forms
-                ),
-                "缺失或替换 `{required}` 必须 fail-closed"
-            );
-        }
-        for action in [
-            "actions/checkout@v4",
-            "./.github/actions/setup-rss-ci",
-            "actions/upload-artifact@v4",
-        ] {
-            for evil in [format!("evil-{action}"), format!("{action}-evil")] {
-                assert!(
-                    !workflow_has_resource_evidence_lifecycle(
-                        &green.replacen(action, &evil, 1),
-                        &forms
-                    ),
-                    "action 引用 `{evil}` 不得匹配 `{action}`"
-                );
-            }
-        }
-
-        let wrong_order = green
-            .replace("snapshot start", "snapshot swap")
-            .replace("snapshot after-build", "snapshot start")
-            .replace("snapshot swap", "snapshot after-build");
-        assert!(!workflow_has_resource_evidence_lifecycle(
-            &wrong_order,
-            &forms
-        ));
-        let display_name_only =
-            green.replace(&format!("run: {delegate}"), &format!("name: '{delegate}'"));
-        assert!(!workflow_has_resource_evidence_lifecycle(
-            &display_name_only,
-            &forms
-        ));
-        assert!(!workflow_has_resource_evidence_lifecycle(
-            "# snapshot start\n# actions/upload-artifact@v4\n",
-            &forms
-        ));
-        let cross_job = green.replacen(
-            "      - name: Capture after-build evidence",
-            "  second:\n    steps:\n      - name: Capture after-build evidence",
-            1,
-        );
-        assert!(
-            !workflow_has_resource_evidence_lifecycle(&cross_job, &forms),
-            "不得把不同 job 的步骤拼成证据生命周期"
-        );
-    }
-
-    #[test]
-    fn setup_after_cache_predicate_green_red_and_anti_vacuity() {
-        let green = [
-            "inputs:\n  evidence-enabled:\n    required: true\nruns:\n  steps:".to_owned(),
-            "    - uses: actions/cache@v4\n      with:\n        path: |\n          .cache/cargo-target"
-                .to_owned(),
-            "    - name: Capture after-cache evidence\n      if: ${{ inputs.evidence-enabled == 'true' }}\n      run: |"
-                .to_owned(),
-            format!(
-                "        .github/scripts/ci-evidence.sh snapshot after-cache {EVIDENCE_OUTPUT_ARG}"
-            ),
-            format!(
-                "        .github/scripts/ci-disk-budget.sh --stage after-cache {WORKSPACE_PATH_ARG}"
-            ),
-            "    - name: Rust toolchain\n      run: |\n        rustup component add rustfmt clippy llvm-tools-preview"
-                .to_owned(),
-        ]
-        .join("\n");
-        assert!(setup_action_has_after_cache_gate(
-            &green,
-            ".cache/cargo-target"
-        ));
-        for required in [
-            "evidence-enabled:",
-            "required: true",
-            ".cache/cargo-target",
-            "if: ${{ inputs.evidence-enabled == 'true' }}",
-            "actions/cache@v4",
-            "snapshot after-cache",
-            "--stage after-cache",
-            "rustup component add rustfmt clippy llvm-tools-preview",
-        ] {
-            assert!(
-                !setup_action_has_after_cache_gate(
-                    &green.replacen(required, "missing", 1),
-                    ".cache/cargo-target"
-                ),
-                "缺 `{required}` 必须 fail-closed"
-            );
-        }
-        for evil in ["evil-actions/cache@v4", "actions/cache@v4-evil"] {
-            assert!(
-                !setup_action_has_after_cache_gate(
-                    &green.replacen("actions/cache@v4", evil, 1),
-                    ".cache/cargo-target"
-                ),
-                "action 引用 `{evil}` 不得匹配 `actions/cache@v4`"
-            );
-        }
-        let wrong_order = [
-            "runs:\n  steps:".to_owned(),
-            "    - name: Rust toolchain\n      run: |\n        rustup component add rustfmt clippy llvm-tools-preview"
-                .to_owned(),
-            "    - name: Capture after-cache evidence\n      run: |".to_owned(),
-            format!(
-                "        .github/scripts/ci-evidence.sh snapshot after-cache {EVIDENCE_OUTPUT_ARG}"
-            ),
-            format!(
-                "        .github/scripts/ci-disk-budget.sh --stage after-cache {WORKSPACE_PATH_ARG}"
-            ),
-            "    - uses: actions/cache@v4".to_owned(),
-        ]
-        .join("\n");
-        assert!(!setup_action_has_after_cache_gate(
-            &wrong_order,
-            ".cache/cargo-target"
-        ));
-        assert!(!setup_action_has_after_cache_gate(
-            "# actions/cache@v4\n# snapshot after-cache\n# rustup component add rustfmt clippy llvm-tools-preview\n",
-            ".cache/cargo-target"
-        ));
-    }
-
-    #[test]
-    fn setup_action_callers_explicitly_match_evidence_lifecycle() {
-        let evidence = resource_evidence_workflow_fixture("cargo run --locked -p xtask -- ci");
-        assert!(workflow_setup_evidence_contract_matches(&evidence));
-        let audit = "jobs:\n  audit:\n    steps:\n      - uses: ./.github/actions/setup-rss-ci\n        with:\n          evidence-enabled: false\n      - run: cargo xtask audit\n";
-        assert!(workflow_setup_evidence_contract_matches(audit));
-        assert!(!workflow_setup_evidence_contract_matches(
-            &evidence.replace("evidence-enabled: true", "evidence-enabled: false")
-        ));
-        assert!(!workflow_setup_evidence_contract_matches(
-            &audit.replace("evidence-enabled: false", "evidence-enabled: true")
-        ));
-        assert!(!workflow_setup_evidence_contract_matches(
-            &evidence.replace("snapshot start", "snapshot missing")
-        ));
-    }
-
-    /// 真实 committed 执行面：两个 workflow 共用同一个七阶段证据合约，composite
-    /// action 证明 after-cache 位于真实 cache restore 与 Rust toolchain 之间。
+    /// 真实 committed 执行面：三个 caller 只绑定 literal lane，生命周期只存在于 reusable workflow。
     #[test]
     fn github_resource_evidence_workflows_have_lifecycle() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        for (workflow, forms) in [
-            ("ci.yml", XTASK_CI_FORMS),
-            ("integration.yml", XTASK_INTEGRATION_FORMS),
+        for (workflow, lane) in [
+            ("ci.yml", "ci"),
+            ("integration.yml", "integration"),
+            ("audit.yml", "audit"),
         ] {
             let path = root.join(".github/workflows").join(workflow);
             let yaml = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
             assert!(
-                workflow_has_resource_evidence_lifecycle(&yaml, forms),
-                "{} 须满足 CI-RESOURCE-EVIDENCE-01 七步有序证据生命周期",
+                workflow_calls_reusable_lane(&yaml, lane),
+                "{} 须以 literal lane 调用唯一 reusable workflow",
                 path.display()
             );
         }
+        let reusable_path = root.join(".github/workflows/rss-rust-lane.yml");
+        let reusable = std::fs::read_to_string(&reusable_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", reusable_path.display()))?;
+        assert!(
+            reusable_rust_lane_is_hardened(&reusable),
+            "{} 须闭合 lane/writer 并保持 tool-before-xtask、build-after-xtask lifecycle",
+            reusable_path.display()
+        );
         let action_path = root.join(".github/actions/setup-rss-ci/action.yml");
         let action_yaml = std::fs::read_to_string(&action_path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", action_path.display()))?;
-        let cargo_config_path = root.join(".cargo/config.toml");
-        let cargo_config = std::fs::read_to_string(&cargo_config_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", cargo_config_path.display()))?;
-        let cargo_target_dir = cargo_target_dir_from_config(&cargo_config)
-            .ok_or_else(|| anyhow::anyhow!(".cargo/config.toml 缺 build.target-dir"))?;
         assert!(
-            setup_action_has_after_cache_gate(&action_yaml, &cargo_target_dir),
-            "{} 须用 Cargo target-dir `{cargo_target_dir}`，并按 cache restore → opt-in after-cache evidence/budget → Rust toolchain 排序",
+            setup_action_has_exact_split_cache_contract(&action_yaml),
+            "{} 须用三个隔离 restore 与 exact cache contract",
             action_path.display()
         );
 
-        let workflows_dir = root.join(".github/workflows");
-        let mut setup_callers = 0;
-        for entry in std::fs::read_dir(&workflows_dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("yml") {
-                continue;
-            }
-            let yaml = std::fs::read_to_string(&path)?;
-            if !workflow_uses_setup_action(&yaml) {
-                continue;
-            }
-            setup_callers += 1;
-            assert!(
-                workflow_setup_evidence_contract_matches(&yaml),
-                "{} 的 evidence-enabled 必须显式等于是否具有完整有序 evidence 生命周期",
-                path.display()
-            );
-        }
-        assert!(setup_callers > 0, "至少须发现一个 setup-rss-ci caller");
         Ok(())
     }
 
@@ -2851,6 +2540,39 @@ mod tests {
         .status()
         .map_err(|e| anyhow::anyhow!("启动 ci-evidence shell selftest 失败: {e}"))?;
         assert!(status.success(), "ci-evidence shell selftest 必须通过");
+        Ok(())
+    }
+
+    #[test]
+    fn ci_cache_maintenance_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::clean_cmd(
+            "bash",
+            &[".github/scripts/ci-cache-maintain.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 ci-cache-maintain shell selftest 失败: {e}"))?;
+        assert!(
+            status.success(),
+            "ci-cache-maintain shell selftest 必须通过"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ci_cache_result_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::clean_cmd(
+            "bash",
+            &[".github/scripts/ci-cache-result.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 ci-cache-result shell selftest 失败: {e}"))?;
+        assert!(status.success(), "ci-cache-result shell selftest 必须通过");
         Ok(())
     }
 
@@ -3084,6 +2806,7 @@ mod tests {
             ".github/workflows/ci.yml",
             ".github/workflows/integration.yml",
             ".github/workflows/audit.yml",
+            ".github/workflows/rss-rust-lane.yml",
         ]
         .iter()
         .map(|rel| read(rel))
@@ -3095,13 +2818,15 @@ mod tests {
                 "GitHub CI surface 须包含钉版工具 `{spec}`"
             );
         }
+        assert!(
+            ci_surface
+                .contains("cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65")
+                && ci_surface.contains("version: 1.20.1"),
+            "cargo-binstall action 与工具版本必须分别不可变钉选"
+        );
 
         let readme = read("README.md")?;
-        for spec in CI_TOOL_SPECS
-            .iter()
-            .copied()
-            .filter(|spec| !spec.starts_with("cargo-binstall"))
-        {
+        for spec in CI_TOOL_SPECS.iter().copied() {
             assert!(readme.contains(spec), "README 治理工具须钉版 `{spec}`");
         }
         Ok(())
@@ -3143,7 +2868,8 @@ mod tests {
     fn github_audit_workflow_has_scheduled_lane(yaml: &str) -> bool {
         workflow_has_top_level_on_event(yaml, "schedule")
             && workflow_has_top_level_on_event(yaml, "workflow_dispatch")
-            && workflow_delegates_to_xtask_lane(yaml, XTASK_AUDIT_FORMS)
+            && (workflow_delegates_to_xtask_lane(yaml, XTASK_AUDIT_FORMS)
+                || workflow_calls_reusable_lane(yaml, "audit"))
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
@@ -3242,7 +2968,8 @@ mod tests {
     /// 都是完整 xtask integration 委托形，其他 cargo 子命令仅限安装（不内联门）。
     fn github_integration_workflow_has_lane(yaml: &str) -> bool {
         workflow_pr_push_triggers_develop(yaml)
-            && workflow_delegates_to_xtask_lane(yaml, XTASK_INTEGRATION_FORMS)
+            && (workflow_delegates_to_xtask_lane(yaml, XTASK_INTEGRATION_FORMS)
+                || workflow_calls_reusable_lane(yaml, "integration"))
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
@@ -3322,6 +3049,719 @@ mod tests {
             github_integration_workflow_has_lane(&yaml),
             ".github/workflows/integration.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
         );
+        Ok(())
+    }
+
+    // ---- CI-CACHE-WRITER-01：restore/save ownership 与显式 cache 生命周期（#1728）----
+
+    fn setup_action_has_exact_split_cache_contract(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let steps = yaml_typed_steps(yaml);
+        let input_required = |name: &str| {
+            let starts = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (indent, line))| {
+                    (*indent == 2 && *line == format!("{name}:")).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let [start] = starts.as_slice() else {
+                return false;
+            };
+            lines[*start + 1..]
+                .iter()
+                .take_while(|(indent, _)| *indent > 2)
+                .any(|(indent, line)| *indent == 4 && *line == "required: true")
+        };
+        let output_value = |name: &str, value: &str| {
+            let starts = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (indent, line))| {
+                    (*indent == 2 && *line == format!("{name}:")).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let [start] = starts.as_slice() else {
+                return false;
+            };
+            lines[*start + 1..]
+                .iter()
+                .take_while(|(indent, _)| *indent > 2)
+                .any(|(indent, line)| *indent == 4 && *line == format!("value: {value}"))
+        };
+        let restore = |id: &str, paths: &[&str], key: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| {
+                    (step.id.as_deref() == Some(id)
+                        && step.uses.as_deref() == Some("actions/cache/restore@v4")
+                        && step.with_exact("path", paths)
+                        && step.with_exact("key", &[key])
+                        && !step.with.iter().any(|(name, _)| name == "restore-keys"))
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+        let download = restore(
+            "download-cache",
+            &[
+                "~/.cargo/registry/cache",
+                "~/.cargo/registry/index",
+                "~/.cargo/git/db",
+            ],
+            "${{ steps.cache-keys.outputs.download-primary-key }}",
+        );
+        let target = restore(
+            "target-cache",
+            &[".cache/cargo-target"],
+            "${{ steps.cache-keys.outputs.target-primary-key }}",
+        );
+        let tools = restore(
+            "tools-cache",
+            &[".cache/ci-tools/${{ inputs.profile }}"],
+            "${{ steps.cache-keys.outputs.tools-primary-key }}",
+        );
+        [
+            "lane",
+            "profile",
+            "toolchain",
+            "tool-cache-epoch",
+            "writer-mode",
+            "evidence-enabled",
+        ]
+        .iter()
+        .all(|name| input_required(name))
+            && [
+                (
+                    "download-primary-key",
+                    "${{ steps.cache-keys.outputs.download-primary-key }}",
+                ),
+                (
+                    "download-matched-key",
+                    "${{ steps.download-cache.outputs.cache-matched-key }}",
+                ),
+                (
+                    "download-hit",
+                    "${{ steps.download-cache.outputs.cache-hit }}",
+                ),
+                (
+                    "target-primary-key",
+                    "${{ steps.cache-keys.outputs.target-primary-key }}",
+                ),
+                (
+                    "target-matched-key",
+                    "${{ steps.target-cache.outputs.cache-matched-key }}",
+                ),
+                ("target-hit", "${{ steps.target-cache.outputs.cache-hit }}"),
+                (
+                    "tools-primary-key",
+                    "${{ steps.cache-keys.outputs.tools-primary-key }}",
+                ),
+                (
+                    "tools-matched-key",
+                    "${{ steps.tools-cache.outputs.cache-matched-key }}",
+                ),
+                ("tools-hit", "${{ steps.tools-cache.outputs.cache-hit }}"),
+                (
+                    "build-restore-result",
+                    "${{ steps.after-cache.outputs.build-result }}",
+                ),
+                (
+                    "build-restored-footprint-bytes",
+                    "${{ steps.after-cache.outputs.build-bytes }}",
+                ),
+                (
+                    "tools-restore-result",
+                    "${{ steps.after-cache.outputs.tools-result }}",
+                ),
+                (
+                    "tools-restored-footprint-bytes",
+                    "${{ steps.after-cache.outputs.tools-bytes }}",
+                ),
+            ]
+            .iter()
+            .all(|(name, value)| output_value(name, value))
+            && !lines.iter().any(|(_, line)| {
+                matches!(
+                    *line,
+                    "build-primary-key:" | "build-matched-key:" | "build-hit:"
+                )
+            })
+            && steps
+                .iter()
+                .filter(|step| step.uses.as_deref() == Some("actions/cache/restore@v4"))
+                .count()
+                == 3
+            && matches!((download, target, tools), (Some(a), Some(b), Some(c)) if a < b && b < c)
+            && !lines
+                .iter()
+                .any(|(_, line)| line.starts_with("restore-keys:"))
+            && steps.iter().any(|step| {
+                step.id.as_deref() == Some("cache-keys")
+                    && step.run_contains("tree-identity --workspace")
+                    && step.run_contains(
+                        "target-primary-key=rss-target-v3-$common-$source_hash-$tree_identity",
+                    )
+                    && step.run_contains("tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH")
+                    && step.run_contains("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]")
+            })
+            && steps.iter().any(|step| {
+                step.id.as_deref() == Some("after-cache")
+                    && step.if_expr.as_deref()
+                        == Some("${{ always() && inputs.evidence-enabled == 'true' }}")
+                    && step.run_contains("ci-cache-result.sh aggregate")
+                    && step.run_contains("snapshot after-cache")
+            })
+    }
+
+    fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
+        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
+        let lines = yaml_indented_code_lines(yaml);
+        let steps = yaml_typed_steps(yaml);
+        let index = |id: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.id.as_deref() == Some(id)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+        let name_index = |name: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+        let checkout = name_index("Checkout");
+        let start = name_index("Capture start evidence");
+        let policy = index("policy");
+        let setup = index("setup");
+        let measure_tools = index("measure-tools");
+        let tools_budget = index("tools-budget");
+        let save_tools = index("save-tools");
+        let xtask = index("xtask");
+        let cleanup = index("cleanup");
+        let measure_build = index("measure-build");
+        let before_save = index("before-save");
+        let save_download = index("save-download");
+        let save_target = index("save-target");
+        let checkout_ok = checkout.is_some_and(|i| {
+            steps[i].uses.as_deref() == Some("actions/checkout@v4")
+                && steps[i].with_exact("persist-credentials", &["false"])
+                && steps[i].with_exact("fetch-depth", &["0"])
+        });
+        let tool_save_ok = save_tools.is_some_and(|i| {
+            let step = &steps[i];
+            step.uses.as_deref() == Some("actions/cache/save@v4")
+                && step.continue_on_error.as_deref() == Some("true")
+                && step.with_exact(
+                    "path",
+                    &[".cache/ci-tools/${{ steps.policy.outputs.profile }}"],
+                )
+                && step.with_exact(
+                    "key",
+                    &["${{ steps.setup.outputs.tools-primary-key }}"],
+                )
+                && step.if_expr.as_deref()
+                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.measure-tools.outcome == 'success' && steps.tools-budget.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}")
+        });
+        let download_save_ok = save_download.is_some_and(|i| {
+            let step = &steps[i];
+            step.uses.as_deref() == Some("actions/cache/save@v4")
+                && step.continue_on_error.as_deref() == Some("true")
+                && step.with_exact(
+                    "path",
+                    &[
+                        "~/.cargo/registry/cache",
+                        "~/.cargo/registry/index",
+                        "~/.cargo/git/db",
+                    ],
+                )
+                && step.with_exact(
+                    "key",
+                    &["${{ steps.setup.outputs.download-primary-key }}"],
+                )
+                && step.if_expr.as_deref()
+                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}")
+        });
+        let target_save_ok = save_target.is_some_and(|i| {
+            let step = &steps[i];
+            step.uses.as_deref() == Some("actions/cache/save@v4")
+                && step.continue_on_error.as_deref() == Some("true")
+                && step.with_exact("path", &[".cache/cargo-target"])
+                && step.with_exact(
+                    "key",
+                    &["${{ steps.setup.outputs.target-primary-key }}"],
+                )
+                && step.if_expr.as_deref()
+                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.target-hit != 'true' }}")
+        });
+        let setup_ok = setup.is_some_and(|i| {
+            let step = &steps[i];
+            step.uses.as_deref() == Some("./.github/actions/setup-rss-ci")
+                && step.with_exact("lane", &["${{ inputs.lane }}"])
+                && step.with_exact("profile", &["${{ steps.policy.outputs.profile }}"])
+                && step.with_exact("tool-cache-epoch", &["v3"])
+                && step.with_exact("writer-mode", &["${{ env.RSS_CACHE_WRITER }}"])
+                && step.with_exact("evidence-enabled", &["true"])
+        });
+        let policy_ok = policy.is_some_and(|i| {
+            let step = &steps[i];
+            step.run_contains("case \"$RSS_LANE\" in")
+                && step.run_contains("ci)")
+                && step.run_contains("integration)")
+                && step.run_contains("audit)")
+                && step.run_contains("*) exit 64")
+                && step.run_contains("profile=ci")
+                && step.run_contains("profile=integration")
+                && step.run_contains("profile=audit")
+        });
+        let xtask_ok = xtask.is_some_and(|i| {
+            let step = &steps[i];
+            step.run_contains("case \"$RSS_LANE\" in")
+                && step.run_contains("cargo run --locked -p xtask -- ci")
+                && step.run_contains("cargo run --locked -p xtask -- integration")
+                && step.run_contains("cargo run --locked -p xtask -- audit")
+                && step.run_contains("*) exit 64")
+        });
+        let evidence_step = |name: &str, commands: &[&str]| {
+            let matches = steps
+                .iter()
+                .filter(|step| {
+                    step.name.as_deref() == Some(name)
+                        && step.if_expr.as_deref() == Some("${{ always() }}")
+                        && commands.iter().all(|command| step.run_contains(command))
+                })
+                .count();
+            matches == 1
+        };
+        let evidence_ok = evidence_step(
+            "Capture start evidence",
+            &["snapshot start", "ci-disk-budget.sh --stage start"],
+        ) && evidence_step(
+            "Capture after-build evidence",
+            &[
+                "ensure after-cache",
+                "snapshot after-build",
+                "ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
+            ],
+        ) && evidence_step(
+            "Capture before-save evidence and enforce build budget",
+            &[
+                "ensure after-build",
+                "snapshot before-save",
+                "[ \"$budget_conclusion\" != failure ]",
+            ],
+        ) && evidence_step(
+            "Capture after-save evidence",
+            &["ensure before-save", "snapshot after-save"],
+        ) && steps
+            .iter()
+            .filter(|step| {
+                step.name.as_deref() == Some("Upload CI evidence")
+                    && step.if_expr.as_deref() == Some("${{ always() }}")
+                    && step.uses.as_deref() == Some("actions/upload-artifact@v4")
+            })
+            .count()
+            == 1;
+        let intermediate_conditions_ok = measure_tools.is_some_and(|i| {
+            steps[i].if_expr.as_deref()
+                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}")
+        }) && tools_budget.is_some_and(|i| {
+            steps[i].if_expr.as_deref()
+                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.measure-tools.outcome == 'success' }}")
+        }) && cleanup.is_some_and(|i| {
+            steps[i].if_expr.as_deref()
+                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && (steps.setup.outputs.download-hit != 'true' || steps.setup.outputs.target-hit != 'true') }}")
+        }) && measure_build.is_some_and(|i| {
+            steps[i].if_expr.as_deref()
+                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' }}")
+        }) && before_save.is_some_and(|i| {
+            steps[i].if_expr.as_deref() == Some("${{ always() }}")
+        });
+        lines
+            .iter()
+            .any(|(indent, line)| *indent == 2 && *line == "workflow_call:")
+            && lines
+                .iter()
+                .any(|(indent, line)| *indent == 8 && *line == "required: true")
+            && lines
+                .iter()
+                .any(|(indent, line)| *indent == 8 && *line == "type: string")
+            && lines
+                .iter()
+                .any(|(indent, line)| *indent == 2 && *line == "contents: read")
+            && lines
+                .iter()
+                .any(|(indent, line)| *indent == 2 && *line == "CARGO_INCREMENTAL: 0")
+            && lines
+                .iter()
+                .filter(|(indent, line)| *indent == 2 && *line == WRITER)
+                .count()
+                == 1
+            && policy_ok
+            && checkout_ok
+            && setup_ok
+            && tool_save_ok
+            && download_save_ok
+            && target_save_ok
+            && xtask_ok
+            && evidence_ok
+            && intermediate_conditions_ok
+            && steps
+                .iter()
+                .filter(|step| step.uses.as_deref() == Some("actions/cache/save@v4"))
+                .count()
+                == 3
+            && matches!((checkout, start, policy, setup, measure_tools, tools_budget, save_tools, xtask, cleanup, measure_build, before_save, save_download, save_target),
+                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l), Some(m))
+                    if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && g < h && h < i && i < j && j < k && k < l && l < m)
+    }
+
+    fn camouflage_step_run(yaml: &str, id: &str, field: &str) -> anyhow::Result<String> {
+        camouflage_step_run_marker(yaml, &format!("id: {id}"), field)
+    }
+
+    fn camouflage_named_step_run(yaml: &str, name: &str, field: &str) -> anyhow::Result<String> {
+        camouflage_step_run_marker(yaml, &format!("name: {name}"), field)
+    }
+
+    fn camouflage_step_run_marker(yaml: &str, marker: &str, field: &str) -> anyhow::Result<String> {
+        let id_marker = marker.to_owned();
+        let id_token = yaml
+            .find(&id_marker)
+            .ok_or_else(|| anyhow::anyhow!("synthetic step `{marker}` missing"))?;
+        let id_index = yaml[..id_token].rfind('\n').map_or(0, |index| index + 1);
+        let field_indent = yaml[id_index..id_token].len();
+        let field_spaces = " ".repeat(field_indent);
+        let item_spaces = " ".repeat(field_indent - 2);
+        let run_marker = format!("{field_spaces}run: |");
+        let run_offset = yaml[id_index..]
+            .find(&run_marker)
+            .ok_or_else(|| anyhow::anyhow!("synthetic step `{marker}` has no block run"))?;
+        let run_index = id_index + run_offset;
+        let end = yaml[run_index + 1..]
+            .find(&format!("\n{item_spaces}- name:"))
+            .map_or(yaml.len(), |offset| run_index + 1 + offset);
+        let body = &yaml[run_index + run_marker.len()..end];
+        let camouflage = match field {
+            "name" => format!(
+                "{field_spaces}run: true\n{field_spaces}name: {}",
+                body.lines().map(str::trim).collect::<Vec<_>>().join(" ")
+            ),
+            "env" => {
+                let indented = body
+                    .lines()
+                    .map(|line| format!("{}{line}", " ".repeat(field_indent + 4)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "{field_spaces}run: true\n{field_spaces}env:\n{field_spaces}  CAMOUFLAGE: |\n{indented}"
+                )
+            }
+            _ => unreachable!(),
+        };
+        Ok(format!(
+            "{}{}{}",
+            &yaml[..run_index],
+            camouflage,
+            &yaml[end..]
+        ))
+    }
+
+    fn camouflage_step_if(yaml: &str, id: &str, field: &str) -> anyhow::Result<String> {
+        let id_marker = format!("id: {id}");
+        let id_token = yaml
+            .find(&id_marker)
+            .ok_or_else(|| anyhow::anyhow!("synthetic step `{id}` missing"))?;
+        let id_index = yaml[..id_token].rfind('\n').map_or(0, |index| index + 1);
+        let field_indent = yaml[id_index..id_token].len();
+        let field_spaces = " ".repeat(field_indent);
+        let if_offset = yaml[id_index..]
+            .find(&format!("{field_spaces}if: "))
+            .ok_or_else(|| anyhow::anyhow!("synthetic step `{id}` has no if field"))?;
+        let if_index = id_index + if_offset;
+        let end = yaml[if_index..]
+            .find('\n')
+            .map_or(yaml.len(), |offset| if_index + offset);
+        let expression = yaml[if_index + field_indent + "if: ".len()..end].trim();
+        let replacement = match field {
+            "name" => format!("{field_spaces}name: {expression}"),
+            "env" => format!("{field_spaces}env:\n{field_spaces}  CAMOUFLAGE_IF: {expression}"),
+            _ => unreachable!(),
+        };
+        Ok(format!(
+            "{}{}{}",
+            &yaml[..if_index],
+            replacement,
+            &yaml[end..]
+        ))
+    }
+
+    #[test]
+    fn typed_steps_ignore_nested_steps_text_in_run_and_env() {
+        let synthetic = r#"jobs:
+  lane:
+    steps:
+      - id: real-run
+        run: |
+          steps:
+            - id: fake-run
+              uses: actions/cache/save@v4
+      - id: real-env
+        env:
+          SCRIPT: |
+            steps:
+              - id: fake-env
+                if: true
+        run: true
+"#;
+        let steps = yaml_typed_steps(synthetic);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].id.as_deref(), Some("real-run"));
+        assert_eq!(steps[1].id.as_deref(), Some("real-env"));
+        assert!(
+            steps
+                .iter()
+                .all(|step| { !matches!(step.id.as_deref(), Some("fake-run" | "fake-env")) })
+        );
+    }
+
+    #[test]
+    fn reusable_rust_lane_guard_rejects_semantic_weakening() -> anyhow::Result<()> {
+        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
+        let green = std::fs::read_to_string(&path)?;
+        assert!(reusable_rust_lane_is_hardened(&green));
+        for (needle, replacement) in [
+            ("required: true", "required: false"),
+            (" && github.ref_protected", ""),
+            ("profile=ci", "profile=shared"),
+            ("tool-cache-epoch: v3", "tool-cache-epoch: v2"),
+            (
+                "steps.setup.outputs.tools-primary-key",
+                "steps.setup.outputs.target-primary-key",
+            ),
+            ("path: .cache/cargo-target", "path: .cache/ci-tools/ci"),
+            ("~/.cargo/registry/cache", "~/.cargo/registry"),
+            ("evidence-enabled: true", "evidence-enabled: false"),
+        ] {
+            let red = green.replacen(needle, replacement, 1);
+            assert!(
+                !reusable_rust_lane_is_hardened(&red),
+                "weakening `{needle}` must fail closed"
+            );
+        }
+        let post_execution_tools = green.replacen(
+            "      - name: Save verified tool cache before repository execution",
+            "      - name: Run closed xtask lane copy\n        id: xtask-copy\n        run: cargo run --locked -p xtask -- ci\n\n      - name: Save verified tool cache before repository execution",
+            1,
+        );
+        assert!(
+            !reusable_rust_lane_is_hardened(&post_execution_tools),
+            "arbitrary repository execution before tool save must be rejected"
+        );
+        for id in ["policy", "xtask", "before-save"] {
+            for field in ["name", "env"] {
+                assert!(
+                    !reusable_rust_lane_is_hardened(&camouflage_step_run(&green, id, field)?),
+                    "{id} commands in {field} with run:true must fail closed"
+                );
+            }
+        }
+        for id in ["save-tools", "before-save"] {
+            for field in ["name", "env"] {
+                assert!(
+                    !reusable_rust_lane_is_hardened(&camouflage_step_if(&green, id, field)?),
+                    "{id} if expression in {field} must fail closed"
+                );
+            }
+        }
+        for (index, camouflage) in [
+            green.replace("id: save-tools", "name: save-tools"),
+            green.replace("uses: actions/cache/save@v4", "name: actions/cache/save@v4"),
+            green.replace(
+                "key: ${{ steps.setup.outputs.tools-primary-key }}",
+                "run: echo 'key: ${{ steps.setup.outputs.tools-primary-key }}'",
+            ),
+            green.lines().map(|line| format!("# {line}\n")).collect(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                !reusable_rust_lane_is_hardened(&camouflage),
+                "camouflage {index}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reusable_guard_locks_start_order_and_after_build_budget() -> anyhow::Result<()> {
+        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
+        let green = std::fs::read_to_string(&path)?;
+        let start_after_policy = green
+            .replacen(
+                "name: Validate lane and derive closed policy",
+                "name: TEMP policy",
+                1,
+            )
+            .replacen(
+                "name: Capture start evidence",
+                "name: Validate lane and derive closed policy",
+                1,
+            )
+            .replacen("name: TEMP policy", "name: Capture start evidence", 1);
+        assert!(
+            !reusable_rust_lane_is_hardened(&start_after_policy),
+            "start evidence must be the first repository-owned post-checkout step"
+        );
+        let missing_budget = green.replacen(
+            "ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
+            "missing-after-build-budget",
+            1,
+        );
+        assert!(!reusable_rust_lane_is_hardened(&missing_budget));
+        for field in ["name", "env"] {
+            assert!(
+                !reusable_rust_lane_is_hardened(&camouflage_named_step_run(
+                    &green,
+                    "Capture after-build evidence",
+                    field,
+                )?),
+                "after-build evidence and budget in {field} with run:true must fail closed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn thin_lane_callers_reject_dynamic_or_expanded_execution() -> anyhow::Result<()> {
+        let root = workspace_root()?.join(".github/workflows");
+        for (file, lane) in [
+            ("ci.yml", "ci"),
+            ("integration.yml", "integration"),
+            ("audit.yml", "audit"),
+        ] {
+            let green = std::fs::read_to_string(root.join(file))?;
+            assert!(workflow_calls_reusable_lane(&green, lane));
+            for (index, red) in [
+                green.replace(&format!("lane: {lane}"), "lane: ${{ inputs.lane }}"),
+                green.replace(
+                    "uses: ./.github/workflows/rss-rust-lane.yml",
+                    "name: ./.github/workflows/rss-rust-lane.yml",
+                ),
+                green.replace("contents: read", "contents: write"),
+                format!("{green}\nenv:\n  RSS_CACHE_WRITER: true\n"),
+                format!("{green}\nsteps:\n  - run: true\n"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert!(
+                    !workflow_calls_reusable_lane(&red, lane),
+                    "caller red {index}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn split_cache_action_guard_rejects_field_camouflage_and_prefix_restore() -> anyhow::Result<()>
+    {
+        let path = workspace_root()?.join(".github/actions/setup-rss-ci/action.yml");
+        let green = std::fs::read_to_string(path)?;
+        assert!(setup_action_has_exact_split_cache_contract(&green));
+        for (needle, replacement) in [
+            ("required: true", "required: false"),
+            (
+                "value: ${{ steps.download-cache.outputs.cache-hit }}",
+                "value: false",
+            ),
+            ("path: .cache/cargo-target", "path: .cache/ci-tools/ci"),
+            (
+                "key: ${{ steps.cache-keys.outputs.target-primary-key }}",
+                "key: wrong",
+            ),
+            ("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]", "true"),
+        ] {
+            assert!(
+                !setup_action_has_exact_split_cache_contract(&green.replacen(
+                    needle,
+                    replacement,
+                    1
+                )),
+                "action weakening `{needle}` must fail closed"
+            );
+        }
+        let target_prefix = green.replacen(
+            "        key: ${{ steps.cache-keys.outputs.target-primary-key }}",
+            "        key: ${{ steps.cache-keys.outputs.target-primary-key }}\n        restore-keys: rss-target-v3-",
+            1,
+        );
+        assert!(!setup_action_has_exact_split_cache_contract(&target_prefix));
+        let tools_prefix = green.replacen(
+            "        key: ${{ steps.cache-keys.outputs.tools-primary-key }}",
+            "        key: ${{ steps.cache-keys.outputs.tools-primary-key }}\n        restore-keys: rss-tools-v3-",
+            1,
+        );
+        assert!(!setup_action_has_exact_split_cache_contract(&tools_prefix));
+        for invalid_download_paths in [
+            green.replacen("          ~/.cargo/registry/index\n", "", 1),
+            green.replacen(
+                "          ~/.cargo/git/db\n",
+                "          ~/.cargo/git/db\n          ~/.cargo/git/checkouts\n",
+                1,
+            ),
+            green.replacen(
+                "          ~/.cargo/registry/cache\n",
+                "          ~/.cargo/registry\n",
+                1,
+            ),
+        ] {
+            assert!(
+                !setup_action_has_exact_split_cache_contract(&invalid_download_paths),
+                "download restore path set must be exact"
+            );
+        }
+        for id in ["cache-keys", "after-cache"] {
+            for field in ["name", "env"] {
+                assert!(
+                    !setup_action_has_exact_split_cache_contract(&camouflage_step_run(
+                        &green, id, field
+                    )?),
+                    "action {id} commands in {field} with run:true must fail closed"
+                );
+            }
+        }
+        for field in ["name", "env"] {
+            assert!(
+                !setup_action_has_exact_split_cache_contract(&camouflage_step_if(
+                    &green,
+                    "after-cache",
+                    field,
+                )?),
+                "after-cache if expression in {field} must fail closed"
+            );
+        }
+        for camouflage in [
+            green.replace("id: target-cache", "name: target-cache"),
+            green.replace(
+                "uses: actions/cache/restore@v4",
+                "name: actions/cache/restore@v4",
+            ),
+            green.replace(
+                "key: ${{ steps.cache-keys.outputs.download-primary-key }}",
+                "run: echo 'key: ${{ steps.cache-keys.outputs.download-primary-key }}'",
+            ),
+        ] {
+            assert!(!setup_action_has_exact_split_cache_contract(&camouflage));
+        }
         Ok(())
     }
 

@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 EVIDENCE="$SCRIPT_DIR/ci-evidence.sh"
 BUDGET="$SCRIPT_DIR/ci-disk-budget.sh"
-GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v1.golden.json"
+GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v2.golden.json"
 TMP_ROOT=${TMPDIR:-/tmp}/ci-evidence-selftest.$$
 FAILURES=0
 
@@ -63,7 +63,13 @@ run_evidence() {
     GITHUB_REPOSITORY='owner/repo' GITHUB_WORKFLOW='CI' GITHUB_JOB='test' \
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
     SECRET_CANARY='must-not-leak-7f3a' \
-    "$EVIDENCE" "$@"
+    "$EVIDENCE" "$@" \
+    --build-restore-result "${TEST_BUILD_RESTORE_RESULT:-miss}" --build-restored-footprint-bytes "${TEST_BUILD_RESTORED_BYTES:-0}" \
+    --build-save-mode writer --build-candidate-size-bytes 4096 \
+    --build-save-outcome "${TEST_BUILD_SAVE_OUTCOME:-eligible}" \
+    --tools-restore-result exact --tools-restored-footprint-bytes 2048 \
+    --tools-save-mode read-only --tools-candidate-size-bytes 2048 \
+    --tools-save-outcome "${TEST_TOOLS_SAVE_OUTCOME:-skipped}"
 }
 
 run_evidence_with_path() {
@@ -74,16 +80,25 @@ run_evidence_with_path() {
     GITHUB_REPOSITORY='owner/repo' GITHUB_WORKFLOW='CI' GITHUB_JOB='test' \
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
     SECRET_CANARY='must-not-leak-7f3a' \
-    "$EVIDENCE" "$@"
+    "$EVIDENCE" "$@" \
+    --build-restore-result "${TEST_BUILD_RESTORE_RESULT:-miss}" --build-restored-footprint-bytes "${TEST_BUILD_RESTORED_BYTES:-0}" \
+    --build-save-mode writer --build-candidate-size-bytes 4096 \
+    --build-save-outcome "${TEST_BUILD_SAVE_OUTCOME:-eligible}" \
+    --tools-restore-result exact --tools-restored-footprint-bytes 2048 \
+    --tools-save-mode read-only --tools-candidate-size-bytes 2048 \
+    --tools-save-outcome "${TEST_TOOLS_SAVE_OUTCOME:-skipped}"
 }
 
 expect_success 'start snapshot is created' run_evidence snapshot start --output "$OUTPUT"
 assert_jq 'start snapshot is valid and closed' "$OUTPUT" '
   keys == ["job","schemaVersion","snapshots"] and
+  .schemaVersion == 2 and
   (.job | keys == ["job","repository","runAttempt","runId","runnerArch","runnerOs","workflow"]) and
-  (.snapshots[0] | keys == ["directories","errors","filesystem","largestDirectories","outcome","recordedAt","stage","tools"]) and
+  (.snapshots[0] | keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","stage","toolVersions"]) and
+  (.snapshots[0].cache | keys == ["build","tools"]) and
+  ([.snapshots[0].cache[] | keys == ["candidateSizeBytes","restoreResult","restoredFootprintBytes","saveMode","saveOutcome"]] | all) and
   (.snapshots[0].filesystem | keys == ["availableBytes","capacityBytes","usedBytes"]) and
-  (.snapshots[0].tools | keys == ["cargo","git","rustc"])'
+  (.snapshots[0].toolVersions | keys == ["cargo","git","rustc"])'
 
 jq -S '(.job[] |= "<string>") |
   .snapshots[0].recordedAt = "<utc>" |
@@ -91,7 +106,7 @@ jq -S '(.job[] |= "<string>") |
   (.snapshots[0].directories[]?.sizeBytes = 0) |
   .snapshots[0].directories |= sort_by(.path) |
   .snapshots[0].largestDirectories = (if (.snapshots[0].largestDirectories | length) > 0 then [{"path":"<relative>","sizeBytes":0}] else [] end) |
-  .snapshots[0].tools |= with_entries(.value = "<string-or-null>")' "$OUTPUT" >"$TMP_ROOT/normalized.json"
+  .snapshots[0].toolVersions |= with_entries(.value = "<string-or-null>")' "$OUTPUT" >"$TMP_ROOT/normalized.json"
 if diff -u "$GOLDEN" "$TMP_ROOT/normalized.json" >"$TMP_ROOT/golden.diff"; then
   pass 'schema matches executable golden'
 else
@@ -102,14 +117,49 @@ fi
 expect_success 'after-cache appends atomically' run_evidence snapshot after-cache --output "$OUTPUT"
 expect_success 'after-build appends outcome' run_evidence snapshot after-build --output "$OUTPUT" --outcome success
 expect_success 'before-save completes four stages' run_evidence snapshot before-save --output "$OUTPUT"
-assert_jq 'four stages retain order and outcome' "$OUTPUT" '[.snapshots[].stage] == ["start","after-cache","after-build","before-save"] and .snapshots[2].outcome == "success"'
+expect_success 'after-save completes five stages' run_evidence snapshot after-save --output "$OUTPUT"
+assert_jq 'five stages retain order and outcome' "$OUTPUT" '[.snapshots[].stage] == ["start","after-cache","after-build","before-save","after-save"] and .snapshots[2].outcome == "success"'
+
+EARLY_FAILURE_OUTPUT="$TMP_ROOT/early-failure.json"
+expect_success 'ensure closes phases through after-cache when setup is skipped' run_evidence ensure after-cache --output "$EARLY_FAILURE_OUTPUT"
+expect_success 'ensure is idempotent for an already closed phase' run_evidence ensure after-cache --output "$EARLY_FAILURE_OUTPUT"
+expect_success 'ensure fills later missing phases after an early failure' run_evidence ensure before-save --output "$EARLY_FAILURE_OUTPUT"
+assert_jq 'early failure evidence remains ordered and marks the synthetic build skipped' "$EARLY_FAILURE_OUTPUT" '
+  [.snapshots[].stage] == ["start","after-cache","after-build","before-save"] and
+  .snapshots[2].outcome == "skipped"'
+
+BUDGET_FAILURE_OUTPUT="$TMP_ROOT/budget-failure.json"
+expect_success 'budget fixture starts evidence' run_evidence snapshot start --output "$BUDGET_FAILURE_OUTPUT"
+expect_success 'budget fixture records cache restore' run_evidence snapshot after-cache --output "$BUDGET_FAILURE_OUTPUT"
+expect_success 'budget fixture records successful build' run_evidence snapshot after-build --output "$BUDGET_FAILURE_OUTPUT" --outcome success
+record_budget_failure() {
+  budget_conclusion=success
+  if ! "$BUDGET" --stage before-save --path "$WORKSPACE" --min-free-gib 999999999; then
+    budget_conclusion=failure
+  fi
+  TEST_BUILD_SAVE_OUTCOME=ineligible TEST_TOOLS_SAVE_OUTCOME=ineligible \
+    run_evidence snapshot before-save --output "$BUDGET_FAILURE_OUTPUT"
+  [ "$budget_conclusion" = success ]
+}
+expect_failure 'budget failure returns nonzero only after evidence is recorded' record_budget_failure
+assert_jq 'budget failure makes both cache candidates ineligible' "$BUDGET_FAILURE_OUTPUT" '
+  .snapshots[-1].stage == "before-save" and
+  .snapshots[-1].cache.build.saveOutcome == "ineligible" and
+  .snapshots[-1].cache.tools.saveOutcome == "ineligible"'
 
 cp "$OUTPUT" "$TMP_ROOT/before-failure.json"
-expect_failure 'duplicate stage is rejected' run_evidence snapshot before-save --output "$OUTPUT"
+expect_failure 'duplicate stage is rejected' run_evidence snapshot after-save --output "$OUTPUT"
 if cmp -s "$OUTPUT" "$TMP_ROOT/before-failure.json"; then pass 'failed append preserves previous output'; else fail 'failed append preserves previous output'; fi
 expect_failure 'unknown stage is rejected' run_evidence snapshot mystery --output "$OUTPUT"
 expect_failure 'out-of-order initial stage is rejected' run_evidence snapshot after-cache --output "$TMP_ROOT/out-of-order.json"
 expect_failure 'outcome outside after-build is rejected' run_evidence snapshot start --output "$TMP_ROOT/bad-outcome.json" --outcome failure
+run_bad_restore_result() { TEST_BUILD_RESTORE_RESULT=hit run_evidence snapshot start --output "$TMP_ROOT/bad-restore.json"; }
+run_bad_byte_count() { TEST_BUILD_RESTORED_BYTES=-1 run_evidence snapshot start --output "$TMP_ROOT/bad-bytes.json"; }
+expect_failure 'unknown restore result is rejected' run_bad_restore_result
+expect_failure 'negative cache byte count is rejected' run_bad_byte_count
+
+jq '.schemaVersion = 1 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v1.json"
+expect_failure 'schema v1 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v1.json"
 
 printf '{broken' >"$TMP_ROOT/corrupt.json"
 cp "$TMP_ROOT/corrupt.json" "$TMP_ROOT/corrupt.before"
@@ -124,6 +174,8 @@ if grep -R -F 'must-not-leak-7f3a' "$OUTPUT" "$TMP_ROOT/stdout" "$TMP_ROOT/stder
 else
   pass 'secret canary is absent from all outputs'
 fi
+assert_jq 'evidence excludes raw cache and identity fields' "$OUTPUT" '
+  [.. | objects | keys[]] | all(. != "key" and . != "ref" and . != "actor" and . != "environment" and . != "home")'
 assert_jq 'newline paths remain valid JSON and symlinks are excluded' "$OUTPUT" '
   ([.snapshots[].largestDirectories[].path | contains("line\nbreak")] | any) and
   ([.snapshots[].largestDirectories[].path | contains("outside-link")] | any | not)'
@@ -171,13 +223,13 @@ mkdir "$NO_DU_BIN"
 for command_name in bash dirname jq mktemp mv rm date find git cargo rustc df; do
   ln -s "$TOOL_BIN/$command_name" "$NO_DU_BIN/$command_name"
 done
-expect_success 'missing du degrades to recorded errors' env -i PATH="$NO_DU_BIN" HOME="$HOME_DIR" CARGO_HOME="$HOME_DIR/.cargo" RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/no-du.json"
+expect_success 'missing du degrades to recorded errors' env -i PATH="$NO_DU_BIN" HOME="$HOME_DIR" CARGO_HOME="$HOME_DIR/.cargo" RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/no-du.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
 assert_jq 'du degradation remains schema-valid' "$TMP_ROOT/no-du.json" '(.snapshots[0].errors | length) >= 5 and ([.snapshots[0].directories[].sizeBytes] | all(. == null))'
 
 EMPTY_HOME="$TMP_ROOT/empty-home"
 EMPTY_WORKSPACE="$TMP_ROOT/empty-workspace"
 mkdir "$EMPTY_HOME" "$EMPTY_WORKSPACE"
-expect_success 'missing logical directories degrade to recorded errors' env -i PATH="$TOOL_BIN" HOME="$EMPTY_HOME" GITHUB_WORKSPACE="$EMPTY_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/missing-dirs.json"
+expect_success 'missing logical directories degrade to recorded errors' env -i PATH="$TOOL_BIN" HOME="$EMPTY_HOME" GITHUB_WORKSPACE="$EMPTY_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/missing-dirs.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
 assert_jq 'missing directory degradation retains fixed logical entries' "$TMP_ROOT/missing-dirs.json" '
   [.snapshots[0].directories[] | select(.sizeBytes == null) | .path] == ["target","cargo-registry","cargo-git","rustup"] and
   (.snapshots[0].errors | length) == 4'

@@ -1,0 +1,201 @@
+name: RSS Rust lane
+
+on:
+  workflow_call:
+    inputs:
+      lane:
+        description: Closed CI lane identifier.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RSS_NIGHTLY_PINNED: nightly-2026-04-16
+  RSS_CI_EVIDENCE_FILE: ci-evidence.json
+  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
+
+jobs:
+  lane:
+    name: cargo xtask ${{ inputs.lane }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Capture start evidence
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          save_mode=read-only
+          if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
+          .github/scripts/ci-evidence.sh snapshot start --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode "$save_mode" --tools-candidate-size-bytes 0 --tools-save-outcome unknown
+          .github/scripts/ci-disk-budget.sh --stage start --path "$GITHUB_WORKSPACE"
+
+      - name: Validate lane and derive closed policy
+        id: policy
+        env:
+          RSS_LANE: ${{ inputs.lane }}
+        run: |
+          set -euo pipefail
+          case "$RSS_LANE" in
+            ci)
+              echo 'profile=ci'
+              echo "nightly=$RSS_NIGHTLY_PINNED"
+              echo 'prebuilt-tools=cargo-nextest@0.9.137,cargo-deny@0.19.9,cargo-llvm-cov@0.8.7,cargo-audit@0.22.2'
+              echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0'
+              ;;
+            integration)
+              echo 'profile=integration'
+              echo 'nightly='
+              echo 'prebuilt-tools=cargo-nextest@0.9.137'
+              echo 'fallback-tools='
+              ;;
+            audit)
+              echo 'profile=audit'
+              echo 'nightly='
+              echo 'prebuilt-tools=cargo-deny@0.19.9,cargo-audit@0.22.2'
+              echo 'fallback-tools='
+              ;;
+            *) exit 64 ;;
+          esac >> "$GITHUB_OUTPUT"
+
+      - name: Setup RSS Rust CI
+        id: setup
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          lane: ${{ inputs.lane }}
+          profile: ${{ steps.policy.outputs.profile }}
+          toolchain: 1.96.0
+          nightly: ${{ steps.policy.outputs.nightly }}
+          prebuilt-tools: ${{ steps.policy.outputs.prebuilt-tools }}
+          fallback-tools: ${{ steps.policy.outputs.fallback-tools }}
+          tool-cache-epoch: v3
+          writer-mode: ${{ env.RSS_CACHE_WRITER }}
+          evidence-enabled: true
+
+      - name: Measure tool cache candidate
+        id: measure-tools
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}
+        run: echo "bytes=$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/ci-tools/${{ steps.policy.outputs.profile }}")" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce pre-execution tool cache budget
+        id: tools-budget
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.measure-tools.outcome == 'success' }}
+        run: .github/scripts/ci-disk-budget.sh --stage before-save --path "$GITHUB_WORKSPACE"
+
+      - name: Save verified tool cache before repository execution
+        id: save-tools
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.measure-tools.outcome == 'success' && steps.tools-budget.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/ci-tools/${{ steps.policy.outputs.profile }}
+          key: ${{ steps.setup.outputs.tools-primary-key }}
+
+      - name: Run closed xtask lane
+        id: xtask
+        env:
+          RSS_LANE: ${{ inputs.lane }}
+        run: |
+          set -euo pipefail
+          case "$RSS_LANE" in
+            ci) cargo run --locked -p xtask -- ci ;;
+            integration) cargo run --locked -p xtask -- integration ;;
+            audit) cargo run --locked -p xtask -- audit ;;
+            *) exit 64 ;;
+          esac
+
+      - name: Capture after-build evidence
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          save_mode=read-only
+          if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
+          .github/scripts/ci-evidence.sh ensure after-cache --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome unknown
+          .github/scripts/ci-evidence.sh snapshot after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome "${{ steps.xtask.outcome || 'skipped' }}" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+          .github/scripts/ci-disk-budget.sh --stage after-build --path "$GITHUB_WORKSPACE"
+
+      - name: Clean build cache candidates
+        id: cleanup
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && (steps.setup.outputs.download-hit != 'true' || steps.setup.outputs.target-hit != 'true') }}
+        run: .github/scripts/ci-cache-maintain.sh cleanup --workspace "$GITHUB_WORKSPACE" --target "$GITHUB_WORKSPACE/.cache/cargo-target"
+
+      - name: Measure build cache candidates
+        id: measure-build
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          registry_cache="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/registry/cache")"
+          registry_index="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/registry/index")"
+          git_db="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/git/db")"
+          target="$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/cargo-target")"
+          {
+            echo "download-bytes=$((registry_cache + registry_index + git_db))"
+            echo "target-bytes=$target"
+            echo "build-bytes=$((registry_cache + registry_index + git_db + target))"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Capture before-save evidence and enforce build budget
+        id: before-save
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          save_mode=read-only
+          if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
+          .github/scripts/ci-evidence.sh ensure after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome skipped --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome unknown
+          budget_conclusion=skipped
+          if [ "$RSS_CACHE_WRITER" = true ] && [ "${{ steps.xtask.outcome }}" = success ] && [ "${{ steps.cleanup.outcome }}" = success ] && [ "${{ steps.measure-build.outcome }}" = success ]; then
+            if .github/scripts/ci-disk-budget.sh --stage before-save --path "$GITHUB_WORKSPACE"; then budget_conclusion=success; else budget_conclusion=failure; fi
+          fi
+          build_save_outcome=ineligible
+          if [ "$budget_conclusion" = success ] && { [ "${{ steps.setup.outputs.download-hit }}" != true ] || [ "${{ steps.setup.outputs.target-hit }}" != true ]; }; then build_save_outcome=eligible; fi
+          .github/scripts/ci-evidence.sh snapshot before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome "$build_save_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+          [ "$budget_conclusion" != failure ]
+
+      - name: Save Cargo download cache
+        id: save-download
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: ${{ steps.setup.outputs.download-primary-key }}
+
+      - name: Save Cargo target cache
+        id: save-target
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.target-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/cargo-target
+          key: ${{ steps.setup.outputs.target-primary-key }}
+
+      - name: Capture after-save evidence
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          save_mode=read-only
+          if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
+          .github/scripts/ci-evidence.sh ensure before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome ineligible --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+          build_outcome=skipped
+          if [ "${{ steps.save-download.outcome }}" = failure ] || [ "${{ steps.save-target.outcome }}" = failure ]; then build_outcome=attempted-failure; elif [ "${{ steps.save-download.outcome }}" = success ] || [ "${{ steps.save-target.outcome }}" = success ]; then build_outcome=attempted-success; fi
+          .github/scripts/ci-evidence.sh snapshot after-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome "$build_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+
+      - name: Upload CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-evidence-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}
+          if-no-files-found: error
+          retention-days: 7

@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  printf 'usage: %s snapshot <start|after-cache|after-build|before-save> --output <file> [--outcome <success|failure|cancelled|skipped>]\n' "$0" >&2
+  printf 'usage: %s <snapshot|ensure> <start|after-cache|after-build|before-save|after-save> --output <file> [--outcome <success|failure|cancelled|skipped>] <build/tools cache state options>\n' "$0" >&2
   exit 2
 }
 
@@ -11,19 +11,30 @@ die() {
   exit 1
 }
 
-[ "${1:-}" = snapshot ] || usage
+[ "${1:-}" = snapshot ] || [ "${1:-}" = ensure ] || usage
 [ "$#" -ge 4 ] || usage
+operation=$1
 stage=$2
 shift 2
 
 case "$stage" in
-  start|after-cache|after-build|before-save) ;;
+  start|after-cache|after-build|before-save|after-save) ;;
   *) usage ;;
 esac
 
 output=
 outcome=
 outcome_set=false
+build_restore_result=
+build_restored_footprint_bytes=
+build_save_mode=
+build_candidate_size_bytes=
+build_save_outcome=
+tools_restore_result=
+tools_restored_footprint_bytes=
+tools_save_mode=
+tools_candidate_size_bytes=
+tools_save_outcome=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output)
@@ -37,6 +48,16 @@ while [ "$#" -gt 0 ]; do
       outcome_set=true
       shift 2
       ;;
+    --build-restore-result) [ "$#" -ge 2 ] || usage; build_restore_result=$2; shift 2 ;;
+    --build-restored-footprint-bytes) [ "$#" -ge 2 ] || usage; build_restored_footprint_bytes=$2; shift 2 ;;
+    --build-save-mode) [ "$#" -ge 2 ] || usage; build_save_mode=$2; shift 2 ;;
+    --build-candidate-size-bytes) [ "$#" -ge 2 ] || usage; build_candidate_size_bytes=$2; shift 2 ;;
+    --build-save-outcome) [ "$#" -ge 2 ] || usage; build_save_outcome=$2; shift 2 ;;
+    --tools-restore-result) [ "$#" -ge 2 ] || usage; tools_restore_result=$2; shift 2 ;;
+    --tools-restored-footprint-bytes) [ "$#" -ge 2 ] || usage; tools_restored_footprint_bytes=$2; shift 2 ;;
+    --tools-save-mode) [ "$#" -ge 2 ] || usage; tools_save_mode=$2; shift 2 ;;
+    --tools-candidate-size-bytes) [ "$#" -ge 2 ] || usage; tools_candidate_size_bytes=$2; shift 2 ;;
+    --tools-save-outcome) [ "$#" -ge 2 ] || usage; tools_save_outcome=$2; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -49,6 +70,22 @@ if [ "$outcome_set" = true ]; then
     *) usage ;;
   esac
 fi
+
+validate_restore_result() { case "$1" in not-attempted|exact|prefix|miss|unknown) return 0 ;; *) usage ;; esac; }
+validate_save_mode() { case "$1" in writer|read-only) return 0 ;; *) usage ;; esac; }
+validate_save_outcome() { case "$1" in unknown|ineligible|eligible|skipped|attempted-success|attempted-failure) return 0 ;; *) usage ;; esac; }
+validate_bytes() { case "$1" in ''|*[!0-9]*) usage ;; esac; [ "$1" -le 9007199254740991 ] 2>/dev/null || usage; }
+
+validate_restore_result "$build_restore_result"
+validate_restore_result "$tools_restore_result"
+validate_save_mode "$build_save_mode"
+validate_save_mode "$tools_save_mode"
+validate_save_outcome "$build_save_outcome"
+validate_save_outcome "$tools_save_outcome"
+validate_bytes "$build_restored_footprint_bytes"
+validate_bytes "$build_candidate_size_bytes"
+validate_bytes "$tools_restored_footprint_bytes"
+validate_bytes "$tools_candidate_size_bytes"
 
 for dependency in jq mktemp mv date df; do
   command -v "$dependency" >/dev/null 2>&1 || die "required command unavailable: $dependency"
@@ -67,22 +104,30 @@ trap cleanup EXIT HUP INT TERM
 validate_document() {
   jq -e '
     keys == ["job","schemaVersion","snapshots"] and
-    .schemaVersion == 1 and
+    .schemaVersion == 2 and
     (.job | type == "object" and keys == ["job","repository","runAttempt","runId","runnerArch","runnerOs","workflow"] and ([.[] | type == "string"] | all)) and
     (.snapshots | type == "array") and
     ([.snapshots[] |
       type == "object" and
-      (keys == ["directories","errors","filesystem","largestDirectories","outcome","recordedAt","stage","tools"]) and
-      (.stage == "start" or .stage == "after-cache" or .stage == "after-build" or .stage == "before-save") and
+      (keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","stage","toolVersions"]) and
+      (.stage == "start" or .stage == "after-cache" or .stage == "after-build" or .stage == "before-save" or .stage == "after-save") and
       ((.stage == "after-build" and (.outcome == null or .outcome == "success" or .outcome == "failure" or .outcome == "cancelled" or .outcome == "skipped")) or (.stage != "after-build" and .outcome == null)) and
       (.recordedAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
       (.filesystem | type == "object" and keys == ["availableBytes","capacityBytes","usedBytes"] and ([.[] | type == "number" and . >= 0 and floor == .] | all)) and
       (.directories | type == "array" and ([.[].path] == ["workspace","target","cargo-registry","cargo-git","rustup"]) and ([.[] | keys == ["path","sizeBytes"] and (.sizeBytes == null or ((.sizeBytes | type == "number") and .sizeBytes >= 0 and (.sizeBytes | floor) == .sizeBytes))] | all)) and
       (.largestDirectories | type == "array" and length <= 20 and ([.[] | keys == ["path","sizeBytes"] and (.path | type == "string" and ((startswith("workspace/") and (startswith("workspace//") | not)) or (startswith("target/") and (startswith("target//") | not)))) and (.sizeBytes | type == "number") and .sizeBytes >= 0 and (.sizeBytes | floor) == .sizeBytes] | all)) and
-      (.tools | type == "object" and keys == ["cargo","git","rustc"] and ([.[] | . == null or type == "string"] | all)) and
+      (.cache | type == "object" and keys == ["build","tools"] and ([.[] |
+        type == "object" and keys == ["candidateSizeBytes","restoreResult","restoredFootprintBytes","saveMode","saveOutcome"] and
+        (.restoreResult == "not-attempted" or .restoreResult == "exact" or .restoreResult == "prefix" or .restoreResult == "miss" or .restoreResult == "unknown") and
+        (.restoredFootprintBytes | type == "number" and . >= 0 and floor == .) and
+        (.saveMode == "writer" or .saveMode == "read-only") and
+        (.candidateSizeBytes | type == "number" and . >= 0 and floor == .) and
+        (.saveOutcome == "unknown" or .saveOutcome == "ineligible" or .saveOutcome == "eligible" or .saveOutcome == "skipped" or .saveOutcome == "attempted-success" or .saveOutcome == "attempted-failure")
+      ] | all)) and
+      (.toolVersions | type == "object" and keys == ["cargo","git","rustc"] and ([.[] | . == null or type == "string"] | all)) and
       (.errors | type == "array" and ([.[] | type == "string"] | all))
     ] | all) and
-    ([.snapshots[].stage] == (["start","after-cache","after-build","before-save"][:(.snapshots | length)]))
+    ([.snapshots[].stage] == (["start","after-cache","after-build","before-save","after-save"][:(.snapshots | length)]))
   ' "$1" >/dev/null 2>&1
 }
 
@@ -94,8 +139,46 @@ else
   current_stages=
 fi
 
+if [ "$operation" = ensure ]; then
+  current_count=0
+  if [ -e "$output" ]; then
+    current_count=$(jq -r '.snapshots | length' "$output" 2>/dev/null) || die 'cannot inspect existing evidence'
+  fi
+  case "$stage" in
+    start) target_count=1 ;;
+    after-cache) target_count=2 ;;
+    after-build) target_count=3 ;;
+    before-save) target_count=4 ;;
+    after-save) target_count=5 ;;
+  esac
+  [ "$current_count" -le "$target_count" ] || exit 0
+  stages=(start after-cache after-build before-save after-save)
+  while [ "$current_count" -lt "$target_count" ]; do
+    missing_stage=${stages[$current_count]}
+    snapshot_args=(
+      snapshot "$missing_stage" --output "$output"
+      --build-restore-result "$build_restore_result"
+      --build-restored-footprint-bytes "$build_restored_footprint_bytes"
+      --build-save-mode "$build_save_mode"
+      --build-candidate-size-bytes "$build_candidate_size_bytes"
+      --build-save-outcome "$build_save_outcome"
+      --tools-restore-result "$tools_restore_result"
+      --tools-restored-footprint-bytes "$tools_restored_footprint_bytes"
+      --tools-save-mode "$tools_save_mode"
+      --tools-candidate-size-bytes "$tools_candidate_size_bytes"
+      --tools-save-outcome "$tools_save_outcome"
+    )
+    if [ "$missing_stage" = after-build ]; then
+      snapshot_args+=(--outcome "${outcome:-skipped}")
+    fi
+    "$0" "${snapshot_args[@]}"
+    current_count=$((current_count + 1))
+  done
+  exit 0
+fi
+
 case "$stage:$current_stages" in
-  start:|after-cache:start|after-build:start,after-cache|before-save:start,after-cache,after-build) ;;
+  start:|after-cache:start|after-build:start,after-cache|before-save:start,after-cache,after-build|after-save:start,after-cache,after-build,before-save) ;;
   *) die "stage is duplicate or out of order: $stage" ;;
 esac
 
@@ -241,7 +324,17 @@ snapshot=$(jq -cn \
   --argjson cargo "$cargo_version" \
   --argjson git "$git_version" \
   --argjson errors "$errors" \
-  '{stage:$stage,outcome:$outcome,recordedAt:$recordedAt,filesystem:{capacityBytes:$capacity,usedBytes:$used,availableBytes:$available},directories:$directories,largestDirectories:$largest,tools:{rustc:$rustc,cargo:$cargo,git:$git},errors:$errors}') || die 'cannot construct snapshot'
+  --arg buildRestoreResult "$build_restore_result" \
+  --argjson buildRestoredFootprintBytes "$build_restored_footprint_bytes" \
+  --arg buildSaveMode "$build_save_mode" \
+  --argjson buildCandidateSizeBytes "$build_candidate_size_bytes" \
+  --arg buildSaveOutcome "$build_save_outcome" \
+  --arg toolsRestoreResult "$tools_restore_result" \
+  --argjson toolsRestoredFootprintBytes "$tools_restored_footprint_bytes" \
+  --arg toolsSaveMode "$tools_save_mode" \
+  --argjson toolsCandidateSizeBytes "$tools_candidate_size_bytes" \
+  --arg toolsSaveOutcome "$tools_save_outcome" \
+  '{stage:$stage,outcome:$outcome,recordedAt:$recordedAt,filesystem:{capacityBytes:$capacity,usedBytes:$used,availableBytes:$available},directories:$directories,largestDirectories:$largest,cache:{build:{restoreResult:$buildRestoreResult,restoredFootprintBytes:$buildRestoredFootprintBytes,saveMode:$buildSaveMode,candidateSizeBytes:$buildCandidateSizeBytes,saveOutcome:$buildSaveOutcome},tools:{restoreResult:$toolsRestoreResult,restoredFootprintBytes:$toolsRestoredFootprintBytes,saveMode:$toolsSaveMode,candidateSizeBytes:$toolsCandidateSizeBytes,saveOutcome:$toolsSaveOutcome}},toolVersions:{rustc:$rustc,cargo:$cargo,git:$git},errors:$errors}') || die 'cannot construct snapshot'
 
 if [ -e "$output" ]; then
   jq --argjson snapshot "$snapshot" '.snapshots += [$snapshot]' "$output" 2>/dev/null >"$tmp" || die 'cannot append snapshot'
@@ -255,7 +348,7 @@ else
     --arg runnerOs "${RUNNER_OS:-}" \
     --arg runnerArch "${RUNNER_ARCH:-}" \
     --argjson snapshot "$snapshot" \
-    '{schemaVersion:1,job:{repository:$repository,workflow:$workflow,job:$job,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
+    '{schemaVersion:2,job:{repository:$repository,workflow:$workflow,job:$job,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
 fi
 
 validate_document "$tmp" || die 'constructed evidence failed validation'
