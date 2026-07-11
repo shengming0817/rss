@@ -1,7 +1,8 @@
 //! `cargo xtask verify` —— 本地全量治理门聚合入口。
 //!
-//! RSS 本地全量治理门。GitHub Actions 调 `cargo xtask ci` 作为合入阻断门；本命令保留为
-//! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
+//! RSS 本地全量治理门。GitHub Actions 以 `ci-meta` / `ci-core` / `ci-security` /
+//! `ci-coverage` 四条 xtask lane 作为合入阻断门；本命令保留为 stable-only 本地快门。
+//! 聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
 //!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + localtx-coverage + local-only-effects + repo-scope-guard + tenancy-closeout
@@ -19,11 +20,11 @@
 //! `--fast` 只跑无需编译的步（fmt + meta + deny），供快速迭代。`--allow-missing-tools` 在缺
 //! 外部工具时显式宽限（默认 fail-closed）。
 //!
-//! **`cargo xtask ci`（[`run_ci`]）= CI lane 超集**（issue #1132，GitHub Actions 薄壳唯一调用入口）：
+//! **`cargo xtask ci`（[`run_ci`]）= 本地兼容 CI 聚合**（issue #1132）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
-//! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 是 **CI 全工具超集**——二者经
-//! [`plan_for`] 从 registry 派生 verify、兼容 CI 与独立 lane，杜绝多份计划漂移。
+//! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 只供本地一次性跑全部
+//! CI 门。二者与四条 GitHub lane 均经 [`plan_for`] 从 Hard 闭集 registry 派生，杜绝门集漂移。
 //!
 //! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
@@ -37,8 +38,10 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow 只调 `cargo xtask ci`、不逐条重列门 run
-//!   命令（门逻辑单源在 xtask）；由 `github_ci_workflow_delegates_to_xtask_ci` 治理测试守。
+//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow
+//!   精确委托四条 literal xtask lane，Meta/Security 并行且 Core/Coverage 仅依赖 Meta；门归属由
+//!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
+//!   `github_ci_workflow_delegates_to_split_xtask_lanes` 强制。
 //! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code" }—— CI / Integration workflow
 //!   须按 checkout → start → cache/after-cache → xtask → after-build → cleanup/measure → before-save → explicit save → after-save → artifact 的唯一有序生命周期
 //!   采集资源证据，且在昂贵构建前 fail-closed 检查磁盘预算。该约束无法用 Rust 类型系统
@@ -1135,8 +1138,8 @@ pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
     Ok(())
 }
 
-/// ci 入口（issue #1132 CI lane 超集）：按 [`plan_for`] 的兼容计划顺序跑每步，fail-fast。CI 由 GitHub Actions
-/// 调 `cargo xtask ci`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01）；本地全工具机器亦可 `make ci`。
+/// ci 本地兼容聚合入口（issue #1132）：按 [`plan_for`] 的兼容计划顺序跑每步，
+/// fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]；本地全工具机器可 `make ci`。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
 pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -2053,14 +2056,10 @@ mod tests {
         Ok(())
     }
 
-    // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托 `cargo xtask ci`、不逐条重列门 ----
+    // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托四条 split xtask lane ----
 
     /// setup / workflow 安装步骤只允许 cargo 安装工具；`cargo xtask` 只能作为 lane 委托命令出现。
     const SETUP_CARGO_SUBCOMMANDS: &[&str] = &["install", "binstall"];
-
-    /// xtask ci 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形（本地/文档）与 CI 锁定入口
-    /// 形（`--locked` 锁 xtask 子树依赖解析，与内部 `--workspace --locked` 门共同锁全链，codex F2）。
-    const XTASK_CI_FORMS: &[&str] = &["cargo xtask ci", "cargo run --locked -p xtask -- ci"];
 
     /// 剥 `#` 注释 + 去缩进后的 YAML「代码行」（注释行 → 空串）。委托守卫据此**绑定结构**而非裸全文匹配——
     /// 散文注释（已剥）与 displayName/name 等字符串字段值都不能满足守卫（fail-closed，对标 codex F1：
@@ -2362,6 +2361,19 @@ mod tests {
         fn run_contains(&self, needle: &str) -> bool {
             self.run.iter().any(|line| line.contains(needle))
         }
+
+        fn run_has_line(&self, expected: &str) -> bool {
+            self.run.iter().any(|line| line == expected)
+        }
+
+        fn run_has_sequence(&self, expected: &[&str]) -> bool {
+            self.run.windows(expected.len()).any(|window| {
+                window
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected.iter().copied())
+            })
+        }
     }
 
     fn yaml_typed_steps(yaml: &str) -> Vec<TypedStep> {
@@ -2473,12 +2485,226 @@ mod tests {
         step
     }
 
-    /// 委托谓词（正向白名单）：YAML 的 PR/push 触发器绑定 develop，且 run/script 执行面只有安装步骤
-    /// 和一个受限 prologue + 规范 xtask ci 委托命令。
+    #[derive(Debug, Default)]
+    struct ReusableCallerJob {
+        id: String,
+        fields: Vec<String>,
+        needs: Option<String>,
+        uses: Option<String>,
+        lane: Option<String>,
+        with_fields: Vec<String>,
+    }
+
+    fn reusable_caller_jobs(yaml: &str) -> Vec<ReusableCallerJob> {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(jobs_start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
+        else {
+            return Vec::new();
+        };
+        let jobs_end = lines[jobs_start + 1..]
+            .iter()
+            .position(|(indent, _)| *indent == 0)
+            .map_or(lines.len(), |offset| jobs_start + 1 + offset);
+        let body = &lines[jobs_start + 1..jobs_end];
+        let starts = body
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (indent, line))| {
+                (*indent == 2)
+                    .then(|| line.strip_suffix(':'))
+                    .flatten()
+                    .map(|id| (index, id))
+            })
+            .collect::<Vec<_>>();
+        starts
+            .iter()
+            .enumerate()
+            .map(|(position, (start, id))| {
+                let end = starts
+                    .get(position + 1)
+                    .map_or(body.len(), |(next, _)| *next);
+                parse_reusable_caller_job(id, &body[start + 1..end])
+            })
+            .collect()
+    }
+
+    fn parse_reusable_caller_job(id: &str, lines: &[(usize, &str)]) -> ReusableCallerJob {
+        let mut job = ReusableCallerJob {
+            id: id.to_owned(),
+            ..ReusableCallerJob::default()
+        };
+        for (indent, line) in lines {
+            if *indent == 4 {
+                let Some((key, value)) = line.split_once(':') else {
+                    job.fields.push((*line).to_owned());
+                    continue;
+                };
+                job.fields.push(key.to_owned());
+                match key {
+                    "needs" => job.needs = Some(value.trim().to_owned()),
+                    "uses" => job.uses = Some(value.trim().to_owned()),
+                    _ => {}
+                }
+            } else if *indent == 6
+                && let Some((key, value)) = line.split_once(':')
+            {
+                job.with_fields.push(key.to_owned());
+                if key == "lane" {
+                    job.lane = Some(value.trim().to_owned());
+                }
+            }
+        }
+        job
+    }
+
+    fn workflow_has_exact_read_permissions(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "permissions:")
+        else {
+            return false;
+        };
+        let fields = lines[start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 0)
+            .collect::<Vec<_>>();
+        fields.len() == 1 && fields[0] == &(2, "contents: read")
+    }
+
+    fn workflow_event_has_exact_branches(
+        lines: &[(usize, &str)],
+        event: &str,
+        expected: &[&str],
+    ) -> bool {
+        let event_key = format!("{event}:");
+        let Some((event_idx, event_indent)) =
+            lines.iter().enumerate().find_map(|(idx, (indent, line))| {
+                (*indent == 2 && *line == event_key).then_some((idx, *indent))
+            })
+        else {
+            return false;
+        };
+        let body = lines[event_idx + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > event_indent)
+            .copied()
+            .collect::<Vec<_>>();
+        let Some((field_indent, field)) = body.first().copied() else {
+            return false;
+        };
+        if field_indent != event_indent + 2 {
+            return false;
+        }
+        let Some(value) = field.strip_prefix("branches:") else {
+            return false;
+        };
+        let value = value.trim();
+        let actual = if let Some(inline) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']'))
+        {
+            if body.len() != 1 {
+                return false;
+            }
+            inline
+                .split(',')
+                .map(|item| item.trim().trim_matches(|c| c == '"' || c == '\''))
+                .collect::<Vec<_>>()
+        } else if value.is_empty() {
+            let mut items = Vec::new();
+            for (indent, line) in &body[1..] {
+                if *indent != field_indent + 2 {
+                    return false;
+                }
+                let Some(item) = line.strip_prefix("- ") else {
+                    return false;
+                };
+                items.push(item.trim().trim_matches(|c| c == '"' || c == '\''));
+            }
+            items
+        } else {
+            return false;
+        };
+        actual == expected
+    }
+
+    fn workflow_dispatch_is_empty(lines: &[(usize, &str)]) -> bool {
+        let Some((event_idx, event_indent)) =
+            lines.iter().enumerate().find_map(|(idx, (indent, line))| {
+                (*indent == 2 && *line == "workflow_dispatch:").then_some((idx, *indent))
+            })
+        else {
+            return false;
+        };
+        lines[event_idx + 1..]
+            .first()
+            .is_none_or(|(indent, _)| *indent <= event_indent)
+    }
+
+    fn workflow_has_only_safe_ci_events(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "on:")
+        else {
+            return false;
+        };
+        let on_body = lines[start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 0)
+            .copied()
+            .collect::<Vec<_>>();
+        let mut events = on_body
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 2).then_some(*line))
+            .collect::<Vec<_>>();
+        events.sort_unstable();
+        events == ["pull_request:", "push:", "workflow_dispatch:"]
+            && workflow_event_has_exact_branches(&on_body, "pull_request", &["develop"])
+            && workflow_event_has_exact_branches(
+                &on_body,
+                "push",
+                &["develop", "codex/**", "feature/**", "fix/**"],
+            )
+            && workflow_dispatch_is_empty(&on_body)
+    }
+
+    fn reusable_job_matches(job: &ReusableCallerJob, lane: &str, needs_meta: bool) -> bool {
+        let mut actual_fields = job.fields.iter().map(String::as_str).collect::<Vec<_>>();
+        actual_fields.sort_unstable();
+        let expected_fields = if needs_meta {
+            &["needs", "uses", "with"][..]
+        } else {
+            &["uses", "with"][..]
+        };
+        job.id == lane
+            && actual_fields == expected_fields
+            && job.needs.as_deref() == needs_meta.then_some("ci-meta")
+            && job.uses.as_deref() == Some("./.github/workflows/rss-rust-lane.yml")
+            && job.lane.as_deref() == Some(lane)
+            && job.with_fields == ["lane"]
+    }
+
+    /// CI caller 的结构化闭集谓词：四个 literal job 直接调唯一 reusable workflow，
+    /// Core/Coverage 仅依赖 Meta，Meta/Security 无依赖，不允许额外 job/field 或宽权限。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
-        workflow_pr_push_triggers_develop(yaml)
-            && (workflow_delegates_to_xtask_lane(yaml, XTASK_CI_FORMS)
-                || workflow_calls_reusable_lane(yaml, "ci"))
+        let jobs = reusable_caller_jobs(yaml);
+        workflow_has_only_safe_ci_events(yaml)
+            && workflow_has_exact_read_permissions(yaml)
+            && jobs.len() == 4
+            && [
+                ("ci-meta", false),
+                ("ci-core", true),
+                ("ci-security", false),
+                ("ci-coverage", true),
+            ]
+            .iter()
+            .all(|(lane, needs_meta)| {
+                jobs.iter()
+                    .find(|job| job.id == *lane)
+                    .is_some_and(|job| reusable_job_matches(job, lane, *needs_meta))
+            })
     }
 
     /// Thin callers may only select a literal member of the closed lane set.  Match the
@@ -2508,10 +2734,12 @@ mod tests {
             .skip(1)
             .take_while(|(indent, _)| *indent > 0)
             .collect::<Vec<_>>();
-        matches!(lane, "ci" | "integration" | "audit")
-            && !lines
-                .iter()
-                .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
+        matches!(
+            lane,
+            "ci-meta" | "ci-core" | "ci-security" | "ci-coverage" | "integration" | "audit"
+        ) && !lines
+            .iter()
+            .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
             && jobs
                 .iter()
                 .filter(|(indent, line)| *indent == 2 && line.ends_with(':'))
@@ -2536,11 +2764,15 @@ mod tests {
     #[test]
     fn github_resource_evidence_workflows_have_lifecycle() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        for (workflow, lane) in [
-            ("ci.yml", "ci"),
-            ("integration.yml", "integration"),
-            ("audit.yml", "audit"),
-        ] {
+        let ci_path = root.join(".github/workflows/ci.yml");
+        let ci_yaml = std::fs::read_to_string(&ci_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", ci_path.display()))?;
+        assert!(
+            pipeline_delegates_to_xtask_ci(&ci_yaml),
+            "{} 须以四个 literal jobs 调用唯一 reusable workflow",
+            ci_path.display()
+        );
+        for (workflow, lane) in [("integration.yml", "integration"), ("audit.yml", "audit")] {
             let path = root.join(".github/workflows").join(workflow);
             let yaml = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
@@ -2619,105 +2851,64 @@ mod tests {
         Ok(())
     }
 
-    fn develop_triggers() -> &'static str {
-        "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\n"
-    }
-
-    /// 谓词绿/红例（anti-vacuity）：委托=真；不委托或重列**任一**门（含黑名单曾漏的 build/llvm-cov/
-    /// public-api）=假。
-    #[test]
-    // reason: 表驱动 anti-vacuity 用例集中覆盖正反例；本轮只补 workspace clippy 门，不拆验证语义。
-    #[allow(clippy::cognitive_complexity)]
-    fn pipeline_delegate_predicate_green_and_red() {
-        let triggers = develop_triggers();
-        assert!(pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo xtask ci\n"
-        )));
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo clippy --workspace\n"
-        )));
-    }
-
-    #[test]
-    fn pipeline_delegate_accepts_allowed_delegation_forms() {
-        let triggers = develop_triggers();
-        // 绿：安装形（install/binstall）豁免，连字符 arg 不误判。
-        assert!(pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo install cargo-binstall\n  - script: cargo binstall -y cargo-nextest cargo-deny\n  - script: cargo xtask ci\n"
-        )));
-        // 绿：散文注释里的 `cargo <词>`（如「cargo 默认 target …」/「cargo build 历史」）不计入门 run 判定。
-        assert!(pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}  # cargo 默认 target 在 repo 根；曾用 cargo build 直跑\nsteps:\n  - script: cargo xtask ci\n"
-        )));
-        // 绿：CI 锁定入口形 `cargo run --locked -p xtask -- ci`（run 跑 xtask 非门）+ 安装形（codex F2）。
-        assert!(pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo install cargo-binstall@1.20.1 --locked\n  - script: cargo run --locked -p xtask -- ci\n"
-        )));
+    fn split_ci_caller_fixture() -> &'static str {
+        r#"name: CI
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop, "codex/**", "feature/**", "fix/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ci-meta:
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-meta
+  ci-core:
+    needs: ci-meta
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-core
+  ci-security:
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-security
+  ci-coverage:
+    needs: ci-meta
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-coverage
+"#
     }
 
     #[test]
-    fn pipeline_delegate_rejects_wrong_develop_triggers() {
-        // 红：PR/push 触发未绑定 develop。
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "on:\n  pull_request:\n  push:\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
-        ));
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "on:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
-        ));
-        // 红：分支名必须精确等于 develop，不能用 substring 命中 development / not-develop。
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "on:\n  pull_request:\n    branches: [development]\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
-        ));
-        assert!(!pipeline_delegates_to_xtask_ci(
-            "on:\n  pull_request:\n    branches:\n      - not-develop\n  push:\n    branches: [develop]\nsteps:\n  - script: cargo run --locked -p xtask -- ci\n"
-        ));
-    }
-
-    #[test]
-    fn pipeline_delegate_rejects_unsafe_or_missing_delegation() {
-        let triggers = develop_triggers();
-        // 红：run 形入口但仍重列门（build）——run 放行不削弱门捕获。
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo build --workspace\n"
-        )));
-        // 红：`cargo run` 不是 xtask 委托形。
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo run --locked -p xtask -- ci\n  - script: cargo run -p server\n"
-        )));
-        // 红：未委托。
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo clippy --workspace\n"
-        )));
-        // 红（codex F1）：xtask ci 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足。
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}# cargo xtask ci\nsteps:\n  - script: cargo install cargo-binstall\n"
-        )));
-        // 红（codex F1）：xtask ci 形仅在 **displayName**（字符串字段值）、无真实 script 委托 → 不满足。
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - script: cargo install cargo-binstall\n    displayName: 'cargo xtask ci'\n"
-        )));
-    }
-
-    #[test]
-    fn pipeline_delegate_rejects_relisted_gates() {
-        let triggers = develop_triggers();
-        // 红：调了 xtask ci 但仍重列门——逐一覆盖（含黑名单曾漏的 build / llvm-cov / public-api / fmt）。
-        for gate in [
-            "cargo clippy -- -D warnings",
-            "cargo fmt --check",
-            "cargo nextest run --workspace",
-            "cargo deny check",
-            "cargo dylint --all",
-            "cargo build --workspace",
-            "cargo llvm-cov nextest",
-            "cargo public-api --check",
+    fn split_ci_caller_predicate_green_and_synthetic_red() {
+        let green = split_ci_caller_fixture();
+        assert!(pipeline_delegates_to_xtask_ci(green), "anti-vacuity");
+        for (name, red) in [
+            ("missing", green.replacen("  ci-security:\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: ci-security\n", "", 1)),
+            ("extra", format!("{green}  ci-extra:\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: ci-meta\n")),
+            ("rename", green.replacen("ci-security:", "security:", 1)),
+            ("lane-swap", green.replacen("lane: ci-core", "lane: ci-coverage", 1)),
+            ("wrong-needs", green.replacen("needs: ci-meta", "needs: ci-security", 1)),
+            ("dynamic-lane", green.replacen("lane: ci-meta", "lane: ${{ inputs.lane }}", 1)),
+            ("inline-run", green.replacen("    uses: ./.github/workflows/rss-rust-lane.yml", "    run: cargo build --workspace\n    uses: ./.github/workflows/rss-rust-lane.yml", 1)),
+            ("always", green.replacen("    needs: ci-meta", "    needs: ci-meta\n    if: ${{ always() }}", 1)),
+            ("permission", green.replacen("contents: read", "contents: write", 1)),
+            ("unsafe-trigger", green.replacen("  workflow_dispatch:", "  pull_request_target:\n  workflow_dispatch:", 1)),
+            ("pr-activity-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    types: [closed]", 1)),
+            ("pr-path-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    paths: [\"src/**\"]", 1)),
+            ("push-path-ignore", green.replacen("  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]", "  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]\n    paths-ignore: [\"docs/**\"]", 1)),
+            ("push-branches-ignore", green.replacen("  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]", "  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]\n    branches-ignore: [\"release/**\"]", 1)),
+            ("manual-input", green.replacen("  workflow_dispatch:", "  workflow_dispatch:\n    inputs:\n      lane:\n        required: false", 1)),
+            ("missing-develop", green.replacen("branches: [develop]", "branches: []", 1)),
+            ("wrong-develop", green.replacen("branches: [develop]", "branches: [main]", 1)),
+            ("extra-push-branch", green.replacen("\"fix/**\"]", "\"fix/**\", \"release/**\"]", 1)),
+            ("field-camouflage", format!("env:\n  pull_request:\n    branches: [develop]\n{}", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    types: [closed]", 1))),
         ] {
-            let yaml =
-                format!("{triggers}steps:\n  - script: cargo xtask ci\n  - script: {gate}\n");
-            assert!(
-                !pipeline_delegates_to_xtask_ci(&yaml),
-                "重列门 `{gate}` 应被谓词捕获"
-            );
+            assert!(!pipeline_delegates_to_xtask_ci(&red), "caller weakening `{name}` must fail closed");
         }
     }
 
@@ -2725,73 +2916,18 @@ mod tests {
     fn setup_action_delegate_predicate_green_and_red() {
         let green = "runs:\n  using: composite\n  steps:\n    - run: cargo install cargo-binstall@1.20.1 --locked\n    - run: cargo binstall -y --locked cargo-nextest@0.9.137\n";
         assert!(setup_action_contains_only_setup_cargo_commands(green));
-        assert!(!setup_action_contains_only_setup_cargo_commands(
-            "runs:\n  using: composite\n  steps:\n    - run: cargo nextest run --workspace\n"
-        ));
-        assert!(!setup_action_contains_only_setup_cargo_commands(
-            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p server\n"
-        ));
-        assert!(!setup_action_contains_only_setup_cargo_commands(
-            "runs:\n  using: composite\n  steps:\n    - run: cargo xtask ci\n"
-        ));
-        assert!(!setup_action_contains_only_setup_cargo_commands(
-            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p xtask -- ci\n"
-        ));
-    }
-
-    #[test]
-    fn pipeline_delegate_rejects_echoed_commands() {
-        let triggers = develop_triggers();
-
-        // 红（#1643）：真实 run/script 行只是 echo/printf 委托命令文本，不等于执行委托命令。
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - run: echo cargo run --locked -p xtask -- ci\n"
-        )));
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - run: printf 'cargo xtask ci'\n"
-        )));
-    }
-
-    #[test]
-    fn pipeline_delegate_rejects_delegation_prefix_false_positives() {
-        let triggers = develop_triggers();
-
-        for command in [
-            "cargo xtask ci-fake",
-            "cargo xtask ci || true",
-            "cargo run --locked -p xtask -- ci-fake",
-            "cargo run --locked -p xtask -- ci || true",
+        for red in [
+            "runs:\n  using: composite\n  steps:\n    - run: cargo nextest run --workspace\n",
+            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p server\n",
+            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p xtask -- ci\n",
         ] {
-            let yaml = format!("{triggers}steps:\n  - run: {command}\n");
-            assert!(
-                !pipeline_delegates_to_xtask_ci(&yaml),
-                "`{command}` must not satisfy xtask CI delegation"
-            );
+            assert!(!setup_action_contains_only_setup_cargo_commands(red));
         }
     }
 
+    /// 真实 committed 文件必须已切换为四个 literal reusable jobs。
     #[test]
-    fn pipeline_delegate_rejects_allow_missing_tools_and_unreachable_blocks() {
-        let triggers = develop_triggers();
-
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - run: cargo run --locked -p xtask -- ci --allow-missing-tools\n"
-        )));
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - run: cargo xtask ci --allow-missing-tools\n"
-        )));
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - run: |\n      exit 0\n      cargo run --locked -p xtask -- ci\n"
-        )));
-        assert!(!pipeline_delegates_to_xtask_ci(&format!(
-            "{triggers}steps:\n  - run: |\n      set -euo pipefail\n      if true; then\n        cargo run --locked -p xtask -- ci\n      fi\n"
-        )));
-    }
-
-    /// 真实 committed 文件：GitHub CI workflow 委托 `cargo xtask ci`、不重列门；被引用的本地 setup action
-    /// 也只能安装工具，不能承载门命令（INVARIANT CI-PIPELINE-DELEGATE-01）。
-    #[test]
-    fn github_ci_workflow_delegates_to_xtask_ci() -> anyhow::Result<()> {
+    fn github_ci_workflow_delegates_to_split_xtask_lanes() -> anyhow::Result<()> {
         let path = workspace_root()?
             .join(".github")
             .join("workflows")
@@ -2800,7 +2936,7 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             pipeline_delegates_to_xtask_ci(&yaml),
-            ".github/workflows/ci.yml 须只调 `cargo xtask ci` 且不逐条重列门 run 命令"
+            ".github/workflows/ci.yml 须精确声明 ci-meta/core/security/coverage 四个 literal reusable jobs 与 Meta DAG"
         );
         let action_path = workspace_root()?
             .join(".github")
@@ -3248,6 +3384,12 @@ mod tests {
                         "target-primary-key=rss-target-v3-$common-$source_hash-$tree_identity",
                     )
                     && step.run_contains("tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH")
+                    && step.run_has_line(
+                        "case \"$RSS_LANE\" in ci-meta|ci-core|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
+                    )
+                    && step.run_has_line(
+                        "case \"$RSS_PROFILE\" in ci-meta|ci-core|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
+                    )
                     && step.run_contains("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]")
             })
             && steps.iter().any(|step| {
@@ -3260,7 +3402,7 @@ mod tests {
     }
 
     fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
-        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
+        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
         let lines = yaml_indented_code_lines(yaml);
         let steps = yaml_typed_steps(yaml);
         let index = |id: &str| {
@@ -3355,21 +3497,71 @@ mod tests {
         let policy_ok = policy.is_some_and(|i| {
             let step = &steps[i];
             step.run_contains("case \"$RSS_LANE\" in")
-                && step.run_contains("ci)")
-                && step.run_contains("integration)")
-                && step.run_contains("audit)")
-                && step.run_contains("*) exit 64")
-                && step.run_contains("profile=ci")
-                && step.run_contains("profile=integration")
-                && step.run_contains("profile=audit")
+                && [
+                    [
+                        "ci-meta)",
+                        "echo 'profile=ci-meta'",
+                        "echo 'nightly='",
+                        "echo 'prebuilt-tools='",
+                        "echo 'fallback-tools='",
+                        ";;",
+                    ]
+                    .as_slice(),
+                    [
+                        "ci-core)",
+                        "echo 'profile=ci-core'",
+                        "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
+                        "echo 'prebuilt-tools=cargo-nextest@0.9.137'",
+                        "echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1'",
+                        ";;",
+                    ]
+                    .as_slice(),
+                    [
+                        "ci-security)",
+                        "echo 'profile=ci-security'",
+                        "echo 'nightly='",
+                        "echo 'prebuilt-tools=cargo-deny@0.19.9,cargo-audit@0.22.2'",
+                        "echo 'fallback-tools='",
+                        ";;",
+                    ]
+                    .as_slice(),
+                    [
+                        "ci-coverage)",
+                        "echo 'profile=ci-coverage'",
+                        "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
+                        "echo 'prebuilt-tools=cargo-llvm-cov@0.8.7'",
+                        "echo 'fallback-tools=cargo-public-api@0.52.0'",
+                        ";;",
+                    ]
+                    .as_slice(),
+                ]
+                .iter()
+                .all(|branch| step.run_has_sequence(branch))
+                && step.run.iter().filter(|line| line.ends_with(')')).count() == 6
+                && step.run_has_line("integration)")
+                && step.run_has_line("audit)")
+                && step.run_has_line("*) exit 64 ;;")
         });
         let xtask_ok = xtask.is_some_and(|i| {
             let step = &steps[i];
             step.run_contains("case \"$RSS_LANE\" in")
-                && step.run_contains("cargo run --locked -p xtask -- ci")
-                && step.run_contains("cargo run --locked -p xtask -- integration")
-                && step.run_contains("cargo run --locked -p xtask -- audit")
-                && step.run_contains("*) exit 64")
+                && [
+                    "ci-meta) cargo run --locked -p xtask -- ci-meta ;;",
+                    "ci-core) cargo run --locked -p xtask -- ci-core ;;",
+                    "ci-security) cargo run --locked -p xtask -- ci-security ;;",
+                    "ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;",
+                    "integration) cargo run --locked -p xtask -- integration ;;",
+                    "audit) cargo run --locked -p xtask -- audit ;;",
+                ]
+                .iter()
+                .all(|line| step.run_has_line(line))
+                && step
+                    .run
+                    .iter()
+                    .filter(|line| line.contains(") cargo run --locked -p xtask -- "))
+                    .count()
+                    == 6
+                && step.run_has_line("*) exit 64 ;;")
         });
         let evidence_step = |name: &str, commands: &[&str]| {
             let matches = steps
@@ -3408,6 +3600,16 @@ mod tests {
                 step.name.as_deref() == Some("Upload CI evidence")
                     && step.if_expr.as_deref() == Some("${{ always() }}")
                     && step.uses.as_deref() == Some("actions/upload-artifact@v4")
+                    && step.with_exact(
+                        "name",
+                        &["ci-evidence-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}"],
+                    )
+                    && step.with_exact(
+                        "path",
+                        &["${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}"],
+                    )
+                    && step.with_exact("if-no-files-found", &["error"])
+                    && step.with_exact("retention-days", &["7"])
             })
             .count()
             == 1;
@@ -3583,6 +3785,10 @@ mod tests {
             ("required: true", "required: false"),
             (" && github.ref_protected", ""),
             ("profile=ci", "profile=shared"),
+            (
+                "ci-core)\n              echo 'profile=ci-core'\n              echo \"nightly=$RSS_NIGHTLY_PINNED\"",
+                "ci-core)\n              echo 'profile=ci-core'\n              echo 'nightly='",
+            ),
             ("tool-cache-epoch: v3", "tool-cache-epoch: v2"),
             (
                 "steps.setup.outputs.tools-primary-key",
@@ -3591,6 +3797,11 @@ mod tests {
             ("path: .cache/cargo-target", "path: .cache/ci-tools/ci"),
             ("~/.cargo/registry/cache", "~/.cargo/registry"),
             ("evidence-enabled: true", "evidence-enabled: false"),
+            ("retention-days: 7", "retention-days: 8"),
+            (
+                "name: ci-evidence-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}",
+                "name: ci-evidence-${{ github.run_id }}",
+            ),
         ] {
             let red = green.replacen(needle, replacement, 1);
             assert!(
@@ -3685,11 +3896,7 @@ mod tests {
     #[test]
     fn thin_lane_callers_reject_dynamic_or_expanded_execution() -> anyhow::Result<()> {
         let root = workspace_root()?.join(".github/workflows");
-        for (file, lane) in [
-            ("ci.yml", "ci"),
-            ("integration.yml", "integration"),
-            ("audit.yml", "audit"),
-        ] {
+        for (file, lane) in [("integration.yml", "integration"), ("audit.yml", "audit")] {
             let green = std::fs::read_to_string(root.join(file))?;
             assert!(workflow_calls_reusable_lane(&green, lane));
             for (index, red) in [
@@ -3732,6 +3939,10 @@ mod tests {
                 "key: wrong",
             ),
             ("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]", "true"),
+            (
+                "ci-meta|ci-core|ci-security|ci-coverage|integration|audit",
+                "ci|integration|audit",
+            ),
         ] {
             assert!(
                 !setup_action_has_exact_split_cache_contract(&green.replacen(

@@ -89,8 +89,8 @@ runs:
         RSS_FALLBACK_TARGET: ${{ runner.temp }}/rss-tool-build-target
       run: |
         set -euo pipefail
-        case "$RSS_LANE" in ci|integration|audit) ;; *) exit 64 ;; esac
-        case "$RSS_PROFILE" in ci|integration|audit) ;; *) exit 64 ;; esac
+        case "$RSS_LANE" in ci-meta|ci-core|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac
+        case "$RSS_PROFILE" in ci-meta|ci-core|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac
         [ "$RSS_PROFILE" = "$RSS_LANE" ] || exit 64
         case "$RSS_WRITER_MODE" in true|false) ;; *) exit 64 ;; esac
         RSS_NIGHTLY_ID="${RSS_NIGHTLY:-none}"

@@ -11,7 +11,24 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  ci-meta:
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
-      lane: ci
+      lane: ci-meta
+
+  ci-core:
+    needs: ci-meta
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-core
+
+  ci-security:
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-security
+
+  ci-coverage:
+    needs: ci-meta
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-coverage

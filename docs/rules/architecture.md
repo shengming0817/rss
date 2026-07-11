@@ -175,11 +175,16 @@ rss/
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
 `.claude/rules/rss/ai-robust.md`)。
 
-这些 Medium(CI 门)由 **GitHub Actions CI lane**(`.github/workflows/ci.yml` 薄壳 → `cargo xtask ci`,issue #1132)在 PR 上自动跑、
-失败阻断合入(INVARIANT CI-PIPELINE-DELEGATE-01:YAML 只调一条聚合命令、不逐条重列门)——把治理从 Soft「人记得
-本地 `make verify`」上移到 Medium「CI 门」。`ci` = `verify` 全门(build/clippy 升 `--all-features --all-targets`)
-+ 覆盖率门(`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外) + `public-api --check`
-(轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) + cargo-audit(供应链漏洞,#1133)。
+这些 Medium(CI 门)由 **GitHub Actions split CI lanes** 在 PR 上自动跑并阻断合入：
+`.github/workflows/ci.yml` 精确声明 `ci-meta` / `ci-core` / `ci-security` / `ci-coverage` 四个
+literal reusable jobs；Meta 与 Security 为 root，Core 与 Coverage 仅 `needs: ci-meta`。
+INVARIANT CI-PIPELINE-DELEGATE-01 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定 job、lane、DAG、
+权限和唯一 xtask 委托，不允许 workflow 重列低层门。gate registry 的闭枚举、穷举 dispatch 与唯一/完整断言由
+Rust 编译期证明（Hard），YAML 边界由 xtask/CI 守卫证明（Medium），无依赖人工记忆的 Soft 约束。
+本地仍可用 `cargo xtask ci` 兼容聚合四条 lane 的 43 个唯一 gate；它不是 GitHub workflow lane 或 required check。
+门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
+(`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外)、`public-api --check`
+(轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) 与 cargo-audit(供应链漏洞,#1133)。
 **供应链门**(#1133):`cargo deny check`(advisories/RustSec+licenses+bans+sources)+ cargo-audit 在 PR 门阻断合入;
 另有每日 GitHub Actions `schedule:` cron 定时刷新 lane(`cargo xtask audit`=advisory-scoped deny+cargo-audit),捕「未变依赖」新披露
 CVE(PR 门覆盖不到的时间维度,告警语义)。Azure Pipelines 不再作为 RSS 的 CI carrier；Azure PR/check 状态同步不在

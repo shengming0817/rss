@@ -16,7 +16,7 @@ env:
   CARGO_INCREMENTAL: 0
   RSS_NIGHTLY_PINNED: nightly-2026-04-16
   RSS_CI_EVIDENCE_FILE: ci-evidence.json
-  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
+  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
   lane:
@@ -45,11 +45,29 @@ jobs:
         run: |
           set -euo pipefail
           case "$RSS_LANE" in
-            ci)
-              echo 'profile=ci'
+            ci-meta)
+              echo 'profile=ci-meta'
+              echo 'nightly='
+              echo 'prebuilt-tools='
+              echo 'fallback-tools='
+              ;;
+            ci-core)
+              echo 'profile=ci-core'
               echo "nightly=$RSS_NIGHTLY_PINNED"
-              echo 'prebuilt-tools=cargo-nextest@0.9.137,cargo-deny@0.19.9,cargo-llvm-cov@0.8.7,cargo-audit@0.22.2'
-              echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0'
+              echo 'prebuilt-tools=cargo-nextest@0.9.137'
+              echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1'
+              ;;
+            ci-security)
+              echo 'profile=ci-security'
+              echo 'nightly='
+              echo 'prebuilt-tools=cargo-deny@0.19.9,cargo-audit@0.22.2'
+              echo 'fallback-tools='
+              ;;
+            ci-coverage)
+              echo 'profile=ci-coverage'
+              echo "nightly=$RSS_NIGHTLY_PINNED"
+              echo 'prebuilt-tools=cargo-llvm-cov@0.8.7'
+              echo 'fallback-tools=cargo-public-api@0.52.0'
               ;;
             integration)
               echo 'profile=integration'
@@ -106,7 +124,10 @@ jobs:
         run: |
           set -euo pipefail
           case "$RSS_LANE" in
-            ci) cargo run --locked -p xtask -- ci ;;
+            ci-meta) cargo run --locked -p xtask -- ci-meta ;;
+            ci-core) cargo run --locked -p xtask -- ci-core ;;
+            ci-security) cargo run --locked -p xtask -- ci-security ;;
+            ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;
             integration) cargo run --locked -p xtask -- integration ;;
             audit) cargo run --locked -p xtask -- audit ;;
             *) exit 64 ;;

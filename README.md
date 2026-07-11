@@ -10,13 +10,26 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 构建与本地验证
 
-单一聚合入口（GitHub Actions 与本地共用同一 `cargo xtask` 门）：
+本地保留聚合验证入口；GitHub Actions 将合入门拆为 `ci-meta`、`ci-core`、`ci-security`、
+`ci-coverage` 四条 literal lane，并分别委托同名 `cargo xtask` 命令。`ci-meta` 与 `ci-security`
+并行启动，`ci-core`、`ci-coverage` 只依赖 `ci-meta`：
 
 ```bash
 make verify              # == cargo xtask verify（薄 alias）
 cargo xtask verify       # fmt + 契约/分层/codegen meta + build + clippy + nextest + deny + dylint，fail-fast
 cargo xtask verify --fast            # 只跑无需编译的步（fmt + meta + deny），快速迭代
 cargo xtask verify --allow-missing-tools   # 缺外部工具时显式宽限（默认 fail-closed）
+cargo xtask ci           # 本地去重兼容聚合：43 个唯一 gate；Coverage 取代 Core 的 default-nextest
+```
+
+`cargo xtask ci` 覆盖四条 lane 的兼容 gate 联集，但不复现四个真实 check 的完整执行语义：
+它不重复运行 Core 的 default profile nextest，而 Coverage 使用 CI profile。需要本地复现真实 checks 时分别运行：
+
+```bash
+cargo xtask ci-meta
+cargo xtask ci-core
+cargo xtask ci-security
+cargo xtask ci-coverage
 ```
 
 `verify` 串联的逐条命令（也可单独跑）：
