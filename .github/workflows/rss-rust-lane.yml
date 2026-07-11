@@ -7,6 +7,11 @@ on:
         description: Closed CI lane identifier.
         required: true
         type: string
+      shard:
+        description: Closed integration capability shard; empty for every other lane.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -16,7 +21,7 @@ env:
   CARGO_INCREMENTAL: 0
   RSS_NIGHTLY_PINNED: nightly-2026-04-16
   RSS_CI_EVIDENCE_FILE: ci-evidence.json
-  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
+  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
   lane:
@@ -42,8 +47,17 @@ jobs:
         id: policy
         env:
           RSS_LANE: ${{ inputs.lane }}
+          RSS_SHARD: ${{ inputs.shard }}
         run: |
           set -euo pipefail
+          if [ "$RSS_LANE" = integration ]; then
+            case "$RSS_SHARD" in
+              postgres-domain|event-transport|runtime-http-auth|consistency-fault|cdc-projection-saga) ;;
+              *) exit 64 ;;
+            esac
+          elif [ -n "$RSS_SHARD" ]; then
+            exit 64
+          fi
           case "$RSS_LANE" in
             ci-meta)
               echo 'profile=ci-meta'
@@ -121,6 +135,7 @@ jobs:
         id: xtask
         env:
           RSS_LANE: ${{ inputs.lane }}
+          RSS_SHARD: ${{ inputs.shard }}
         run: |
           set -euo pipefail
           case "$RSS_LANE" in
@@ -128,7 +143,7 @@ jobs:
             ci-core) cargo run --locked -p xtask -- ci-core ;;
             ci-security) cargo run --locked -p xtask -- ci-security ;;
             ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;
-            integration) cargo run --locked -p xtask -- integration ;;
+            integration) cargo run --locked -p xtask -- ci-integration --shard "$RSS_SHARD" ;;
             audit) cargo run --locked -p xtask -- audit ;;
             *) exit 64 ;;
           esac
@@ -216,7 +231,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: ci-evidence-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.lane == 'integration' && format('ci-evidence-{0}-{1}-{2}-{3}', inputs.lane, inputs.shard, github.run_id, github.run_attempt) || format('ci-evidence-{0}-{1}-{2}', inputs.lane, github.run_id, github.run_attempt) }}
           path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}
           if-no-files-found: error
           retention-days: 7

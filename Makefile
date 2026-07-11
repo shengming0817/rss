@@ -11,12 +11,6 @@
 #                     需全套工具 + nightly。
 #   make audit        供应链漏洞刷新 lane（= GitHub Actions schedule 调的同一条 `cargo xtask audit`，
 #                     #1133）：advisory-scoped `deny check advisories` + cargo-audit（皆 no-compile、快）。
-#   make integration  真集成 lane（#1137，opt-in，不入 verify/ci）：testcontainers self-provision
-#                     postgres/redis/rabbitmq/mosquitto 跑 --features integration 测试。**docker-gated**（无 docker
-#                     且未设 env URL 即 fail-closed）；设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES +
-#                     PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL +
-#                     RSS_MQTT_TEST_URL 指向长存服务可免 docker。
-#                     GitHub Actions runner 需 docker；本地/手动可用同一 `cargo xtask integration`。
 #   make docker-build server 多阶段镜像构建（#1134）：cargo-chef + distroless/cc:nonroot → rss-server:dev。
 #   make docker-smoke 容器冒烟验收（#1134，**docker-gated**）：build → compose up → /readyz 200 → 非 root /
 #                     只读 rootfs 断言 → down -v。逻辑在 deploy/smoke.sh（机器可判定 acceptance harness）。
@@ -24,7 +18,7 @@
 # CI lane = GitHub Actions workflows（issue #1132）：PR/push 触发 + GitHub required checks 阻断合入。
 # 门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci audit integration docker-build docker-smoke
+.PHONY: verify verify-fast ci audit docker-build docker-smoke
 
 RSS_CARGO ?= ./hack/cargo.sh
 
@@ -39,9 +33,6 @@ ci:
 
 audit:
 	$(RSS_CARGO) xtask audit
-
-integration:
-	$(RSS_CARGO) xtask integration
 
 docker-build:
 	docker build -t rss-server:dev .

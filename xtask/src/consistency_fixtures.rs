@@ -4,7 +4,7 @@
 //! matrix machine-visible. This is a no-compile governance gate: it validates
 //! fixture shape, redaction boundaries, ready-case coverage, and journey runner
 //! mappings. Real backend recovery is executed by the opt-in
-//! `consistency-fault-matrix` lane.
+//! `ci-integration --shard consistency-fault` lane.
 //!
 //! INVARIANT: CONSISTENCY-CRASH-FIXTURE-01 { level = "Medium", exec = "verify", source = "code" } -- consistency crash fixture ids must be unique and fixtures must parse as the closed TOML DSL.
 //! INVARIANT: CONSISTENCY-FAULT-MATRIX-01 { level = "Medium", exec = "verify", source = "code" } -- N-028 ready cases must cover all consistency mechanisms and each ready fixture must have a real journey runner mapping.

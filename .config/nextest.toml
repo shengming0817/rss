@@ -13,9 +13,11 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 leak-timeout = "200ms"
 final-status-level = "slow"
 
-# 真集成 lane profile（#1137，`cargo xtask integration` / `cargo nextest run --profile integration`）：
+# 真集成 lane profile（#1137，`cargo xtask ci-integration --shard <name>`）：
 # testcontainers self-provision 容器冷启动（尤其 rabbitmq-management ~250MB 首拉）可超默认 60s slow-timeout，
-# 故放宽到 300s；fail-fast=false 跑全集（一处挂不掩盖其余）。串行调度沿用下方 integration test-group。
+# 故放宽到 300s；fail-fast=false 让当前 shard 的其它测试继续产出故障证据。
+# 危险 target 的串行批次只由 xtask integration shard registry 派生，并在 CLI 传 `--test-threads 1`；
+# 本 profile 不维护第二份调度 selector。
 [profile.integration]
 slow-timeout = { period = "300s", terminate-after = 2 }
 leak-timeout = "200ms"
@@ -24,9 +26,6 @@ fail-fast = false
 # 仅重跑失败测试；确定性断言失败仍会稳定红。
 retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" }
 
-# 集成测试两个正交轴：编译期 feature 门 #[cfg(feature = "integration")] 决定是否编入二进制；
-# 下面 filter 仅在已编入的集成测试上做运行期串行调度（按测试名匹配，非 feature 门）。
-#
 # trybuild：各 trybuild UI 测试（`#[test] fn ui()`，分布在 authn/diport/eventexec::trybuild、
 # httpserve::funnel_ui 等多个测试二进制）内部各自 spawn `cargo`（trybuild 调 cargo build/run 编译
 # compile-fail/pass 用例）。nextest 默认每测试独立进程并发跑 ⇒ 多个 trybuild 二进制同时调 cargo 会争用
@@ -34,12 +33,7 @@ retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" 
 # 锁等待被 slow-timeout 杀 ⇒ 偶发 "execution unsuccessful but no output"（与代码无关的调度竞态）。
 # max-threads=1 串行化全部 trybuild ui 测试，消除 cargo 锁竞争（azure 无 CI ⇒ make verify 是唯一 gate，须稳定绿）。
 [test-groups]
-integration = { max-threads = 1 }
 trybuild = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = 'test(/integration/)'
-test-group = "integration"
 
 [[profile.default.overrides]]
 filter = 'test(/^ui$/)'
@@ -48,11 +42,3 @@ test-group = "trybuild"
 [[profile.ci.overrides]]
 filter = 'test(/^ui$/)'
 test-group = "trybuild"
-
-# integration profile 全部测试纳入串行 group（`cargo xtask integration` 仅跑 --features integration
-# 真后端测试，全部串行正确且安全——避免共享 postgres 的 setup_outbox DELETE 全表竞态）。
-# 注：此处 all() 覆盖比 default profile 的 test(/integration/) 宽，因 integration profile 仅
-# 由 integration lane 调用、其内全部测试均为真后端集成测试，不存在无辜非集成测试被卷入的问题。
-[[profile.integration.overrides]]
-filter = 'all()'
-test-group = "integration"

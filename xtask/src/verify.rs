@@ -49,12 +49,14 @@
 //! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "verify", source = "code" }—— cache writer 资格必须由
 //!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
+//! INVARIANT: CI-INTEGRATION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_matrix_predicate_green_and_red", anti_vacuity = "github_integration_workflow_has_integration_shard_matrix" }—— Integration caller 必须是精确五值 matrix，逐 shard 委托 reusable workflow，不内联低层门。
 
 use crate::ci_lanes::{
     CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
     VerifyMembership,
 };
 use crate::diagnostic::run_check;
+use crate::integration_shards::{self, IntegrationShard, Scheduling};
 use crate::workspace_root;
 use crate::{
     archrules, assembly, codegen, consistency_effects, consistency_fixtures, contract,
@@ -509,8 +511,9 @@ fn step_build_workspace() -> Step {
 /// F7 + #1137：postgres/redis/amqp 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的
 /// build/clippy/nextest 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep /
 /// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
-/// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经 `cargo xtask integration`
-/// 行实跑（[`integration_plan`]）。ci lane 经 `--all-features --all-targets` 已覆盖该编译面，故仅入
+/// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经
+/// `cargo xtask ci-integration --shard <name>` 按 target 实跑。ci lane 经 `--all-features --all-targets`
+/// 已覆盖该编译面，故仅入
 /// `Verify` 计划、不入 `CompatibilityCi` 计划。
 fn step_integration_compile() -> Step {
     Step {
@@ -538,66 +541,6 @@ fn step_integration_compile() -> Step {
     }
 }
 
-/// #1137：真集成 lane 实跑步——nextest 跑 postgres/redis/amqp 的 `integration` 测试（self-provision
-/// 容器 / 对接 env URL），N-028 fault matrix 由独立 [`step_consistency_fault_matrix_run`] 显式承载。
-/// 专用 `--profile integration`（放宽 slow-timeout，容器冷启动；见 .config/nextest.toml）。
-/// **仅** [`integration_plan`]（opt-in `cargo xtask integration`）——不入 verify/ci（默认门只 `--no-run` 编译，
-/// 须无 docker 可跑；实跑需 docker / 长存后端，由 [`run_integration`] 的 docker 门把守）。
-fn step_integration_run() -> Step {
-    Step {
-        id: GateId::IntegrationRun,
-        args: &[
-            "nextest",
-            "run",
-            "--profile",
-            "integration",
-            "-p",
-            "postgres",
-            "-p",
-            "redis-adapter",
-            "-p",
-            "amqp",
-            "-p",
-            "mqtt",
-            "-p",
-            "journeys",
-            "-p",
-            "runtime",
-            "--features",
-            "integration",
-            "-E",
-            "not test(consistency_fault_matrix)",
-        ],
-        kind: StepKind::Cargo,
-        // Production ConsumerTx wiring fail-closes without an audit chain key. The integration
-        // lane gives each nextest-isolated process a deterministic 32-byte test key instead of
-        // mutating ambient env from a multi-threaded Rust test.
-        env: &[(
-            "RSS_AUDIT_CHAIN_KEY_B64URL",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        )],
-    }
-}
-
-fn step_consistency_fault_matrix_run() -> Step {
-    Step {
-        id: GateId::ConsistencyFaultMatrix,
-        args: &[
-            "nextest",
-            "run",
-            "--profile",
-            "integration",
-            "-p",
-            "journeys-fault-matrix",
-            "--features",
-            "integration",
-            "-E",
-            "test(consistency_fault_matrix)",
-        ],
-        kind: StepKind::Cargo,
-        env: &[],
-    }
-}
 fn step_clippy_workspace() -> Step {
     Step {
         id: GateId::ClippyWorkspace,
@@ -817,51 +760,6 @@ fn audit_plan() -> Vec<Step> {
     plan_for(PlanTarget::Lane(CiLane::Nightly))
 }
 
-/// #1137：真集成 lane 门步计划（opt-in `cargo xtask integration`）。先跑常规 integration tests，再显式跑
-/// N-028 consistency fault matrix；与 verify/ci 完全隔离（默认门只编译 integration 代码、不实跑——见
-/// [`step_integration_compile`]）。
-fn integration_plan() -> Vec<Step> {
-    plan_for(PlanTarget::Lane(CiLane::Integration))
-}
-
-fn consistency_fault_matrix_plan() -> Vec<Step> {
-    vec![step_consistency_fault_matrix_run()]
-}
-
-/// 四资源 env URL 全在 ⇒ 对接长存外部 pg/redis/rabbitmq/mosquitto，无需 docker self-provision（testkit 的
-/// `env_or_*` resolver 同款判据）。任一缺则容器路径，需 docker。
-///
-/// **postgres 外部路径**：须同时满足：
-/// 1. `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` 存在（非空，显式 opt-in，
-///    与 `testkit::env_or_postgres` fail-closed 语义一致）；
-/// 2. 5 元组 `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD` 全在。
-///
-/// 仅满足其一不足以跳过 docker（testkit 会用容器路径或报缺失 key 错误）。
-///
-/// redis / amqp / mqtt 路径：`REDIS_TEST_URL` / `RSS_AMQP_TEST_URL` / `RSS_MQTT_TEST_URL` 存在（不变）。
-fn all_integration_env_urls_present() -> bool {
-    let pg_opt_in = std::env::var_os("RSS_TEST_ALLOW_EXTERNAL_POSTGRES").is_some();
-    let pg_five_tuple = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]
-        .iter()
-        .all(|k| std::env::var_os(k).is_some());
-    let pg_all = pg_opt_in && pg_five_tuple;
-    let redis = std::env::var_os("REDIS_TEST_URL").is_some();
-    let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
-    let mqtt = std::env::var_os("RSS_MQTT_TEST_URL").is_some();
-    pg_all && redis && amqp && mqtt
-}
-
-fn fault_matrix_env_urls_present() -> bool {
-    let pg_opt_in = std::env::var_os("RSS_TEST_ALLOW_EXTERNAL_POSTGRES").is_some();
-    let pg_five_tuple = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]
-        .iter()
-        .all(|k| std::env::var_os(k).is_some());
-    let pg_all = pg_opt_in && pg_five_tuple;
-    let redis = std::env::var_os("REDIS_TEST_URL").is_some();
-    let amqp = std::env::var_os("RSS_AMQP_TEST_URL").is_some();
-    pg_all && redis && amqp
-}
-
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::clean_cmd`]
 /// 漏斗构造（CMD-FUNNEL-01；docker 非 cargo 子命令，故不走 [`crate::cmd::tool_available`]）。
 fn docker_available() -> bool {
@@ -873,91 +771,102 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// integration 入口（#1137 真集成 lane，opt-in）：docker 门把守后按 [`integration_plan`] 跑。
-/// **docker-gated（fail-closed，对齐 VERIFY-TOOL-GATE-01）**：三 env URL 全在 → 跳过 docker 探测（env 路径
-/// 不 self-provision）；否则探测 docker，缺 + 未宽限 → fail-closed（清晰指引），缺 + `--allow-missing-tools`
-/// → 警告跳过。**不入** verify/ci（默认门须无 docker 可跑）；**已接入 GitHub Actions PR/push lane**（#1145，
-/// CI-INTEGRATION-LANE-01；ubuntu-latest runner 预装 docker ⇒ testkit self-provision，由 `github_integration_workflow_has_integration_lane` 守）。
-pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
-    let opts = VerifyOpts {
-        fast: false,
-        allow_missing_tools,
-    };
-    let root = workspace_root()?;
-    // docker 门：env URL 全在则跳过（env 路径不需 docker）。
-    if !all_integration_env_urls_present() {
-        match resolve_tool(docker_available(), allow_missing_tools) {
-            ToolAction::Run => {}
-            ToolAction::SkipWarn => {
-                eprintln!(
-                    "integration: [跳过] docker daemon 不可达（--allow-missing-tools 宽限）。\
-                     外部路径需四资源全在（与 all_integration_env_urls_present 逐项对齐）：\
-                     RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（PG 5 元组）；\
-                     + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 指向长存 pg/redis/rabbitmq/mosquitto 可免 docker。"
-                );
-                return Ok(());
-            }
-            ToolAction::Fail => bail!(
-                "integration: docker daemon 不可达（容器 self-provision 需 docker）。\
-                 启动 Docker，或同时设四资源 env（与 all_integration_env_urls_present 逐项对齐）：\
-                 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD（PG 5 元组）\
-                 + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 指向运行中的 pg/redis/rabbitmq/mosquitto；\
-                 确需跳过用 --allow-missing-tools。"
-            ),
-        }
-    }
-    let plan = integration_plan();
-    eprintln!(
-        "integration：{} 步（真集成 lane；docker self-provision 或 env URL）",
-        plan.len()
-    );
-    for (i, step) in plan.iter().enumerate() {
-        eprintln!("integration: [{}/{}] {}", i + 1, plan.len(), step.label());
-        run_one(
-            "integration",
-            step,
-            &opts,
-            &root,
-            crate::cmd::tool_available,
+const INTEGRATION_ENV: &[(&str, &str)] = &[(
+    "RSS_AUDIT_CHAIN_KEY_B64URL",
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+)];
+
+fn run_integration_batches(shard: IntegrationShard, root: &Path) -> Result<()> {
+    let lane = shard.as_str();
+    let batches = integration_shards::batches(shard);
+    for (index, batch) in batches.iter().enumerate() {
+        let args = integration_batch_args(batch);
+        let borrowed: Vec<_> = args.iter().map(String::as_str).collect();
+        let mode = match batch.scheduling {
+            Scheduling::Serial => "serial",
+            Scheduling::Parallel => "parallel",
+        };
+        eprintln!(
+            "ci-integration/{lane}: [{}/{}] {mode}",
+            index + 1,
+            batches.len()
+        );
+        run_step(
+            &format!("ci-integration/{lane}"),
+            mode,
+            &borrowed,
+            INTEGRATION_ENV,
+            root,
         )?;
     }
-    eprintln!("integration：全部通过");
     Ok(())
 }
 
-/// N-028 consistency fault matrix runner（opt-in）：Postgres + RabbitMQ + Redis.
-pub(crate) fn run_consistency_fault_matrix(allow_missing_tools: bool) -> Result<()> {
-    let opts = VerifyOpts {
-        fast: false,
-        allow_missing_tools,
-    };
-    let root = workspace_root()?;
-    if !fault_matrix_env_urls_present() {
-        match resolve_tool(docker_available(), allow_missing_tools) {
-            ToolAction::Run => {}
-            ToolAction::SkipWarn => {
-                eprintln!(
-                    "consistency-fault-matrix: [跳过] docker daemon 不可达（--allow-missing-tools 宽限）。\
-                     外部路径需同时设置：RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD；\
-                     + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向长存 Redis/RabbitMQ base broker URL；并预建 vhost rss_fault_matrix 且授权该 URL 用户。"
-                );
-                return Ok(());
+fn integration_batch_args(batch: &integration_shards::ShardBatch) -> Vec<String> {
+    let mut args = vec![
+        "nextest".to_owned(),
+        "run".to_owned(),
+        "--profile".to_owned(),
+        "integration".to_owned(),
+        "--features".to_owned(),
+        "integration".to_owned(),
+        "--no-tests=fail".to_owned(),
+    ];
+    if batch.scheduling == Scheduling::Serial {
+        args.extend(["--test-threads".to_owned(), "1".to_owned()]);
+    }
+    args.extend(["-p".to_owned(), batch.package.to_owned()]);
+    match batch.kind {
+        integration_shards::TargetKind::Lib => args.push("--lib".to_owned()),
+        integration_shards::TargetKind::Test => {
+            for target in &batch.targets {
+                args.extend(["--test".to_owned(), (*target).to_owned()]);
             }
-            ToolAction::Fail => bail!(
-                "consistency-fault-matrix: docker daemon 不可达（容器 self-provision 需 docker）。\
-                 启动 Docker，或同时设置 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST+PGPORT+PGDATABASE+PGUSER+PGPASSWORD \
-                 + REDIS_TEST_URL + RSS_AMQP_TEST_URL 指向运行中的 Postgres/Redis/RabbitMQ；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权；\
-                 确需跳过用 --allow-missing-tools。"
-            ),
         }
     }
-    let plan = consistency_fault_matrix_plan();
-    eprintln!(
-        "consistency-fault-matrix：{} 步（N-028 real-backend crash matrix）",
-        plan.len()
-    );
-    run_labeled_plan("consistency-fault-matrix", &plan, &opts, &root)?;
-    eprintln!("consistency-fault-matrix：全部通过");
+    args.extend(["-E".to_owned(), batch.filter.clone()]);
+    args
+}
+
+/// Capability-sharded integration entrypoint. Target coverage is checked from Cargo metadata
+/// before execution; resource requirements and serial/parallel batches come from the same typed
+/// registry. Missing tools and Docker fail closed unless the local-only allowance is explicit.
+pub(crate) fn run_ci_integration(shard: IntegrationShard, allow_missing_tools: bool) -> Result<()> {
+    let root = workspace_root()?;
+    integration_shards::validate_workspace(&root)?;
+    let missing = integration_shards::missing_external_resources(shard);
+    if !missing.is_empty() && !docker_available() {
+        let labels = missing
+            .iter()
+            .map(|resource| resource.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if allow_missing_tools {
+            eprintln!(
+                "ci-integration/{shard}: [跳过] docker daemon 不可达，且缺少外部资源: {labels}"
+            );
+            return Ok(());
+        }
+        bail!(
+            "ci-integration/{shard}: docker daemon 不可达，且缺少 shard 所需外部资源: {labels}; \
+             启动 Docker、提供该 shard 的外部测试资源，或本地显式使用 --allow-missing-tools"
+        );
+    }
+    let nextest_available = crate::cmd::tool_available("nextest");
+    run_tool_gated(
+        &format!("ci-integration/{shard}"),
+        nextest_available,
+        allow_missing_tools,
+        "nextest",
+        "cargo install cargo-nextest --locked",
+        "integration shard",
+        || run_integration_batches(shard, &root),
+    )?;
+    if nextest_available {
+        eprintln!("ci-integration/{shard}: 全部通过");
+    } else {
+        eprintln!("ci-integration/{shard}: 执行完成（缺 nextest，shard 已跳过）");
+    }
     Ok(())
 }
 
@@ -1583,6 +1492,48 @@ mod tests {
         assert_eq!(resolve_tool(false, false), ToolAction::Fail);
     }
 
+    #[test]
+    fn integration_batch_args_scope_targets_and_threads() {
+        for shard in IntegrationShard::ALL {
+            for batch in integration_shards::batches(*shard) {
+                let args = integration_batch_args(&batch);
+                assert!(args.iter().any(|arg| arg == "--no-tests=fail"));
+                assert_eq!(
+                    args.windows(2)
+                        .filter(|pair| pair[0] == "--test-threads" && pair[1] == "1")
+                        .count(),
+                    usize::from(batch.scheduling == Scheduling::Serial)
+                );
+                let selected_packages: Vec<_> = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "-p")
+                    .map(|pair| pair[1].as_str())
+                    .collect();
+                assert_eq!(selected_packages, [batch.package]);
+                match batch.kind {
+                    integration_shards::TargetKind::Lib => {
+                        assert!(args.iter().any(|arg| arg == "--lib"));
+                        assert!(!args.iter().any(|arg| arg == "--test"));
+                    }
+                    integration_shards::TargetKind::Test => {
+                        assert!(!args.iter().any(|arg| arg == "--lib"));
+                        let selected: Vec<_> = args
+                            .windows(2)
+                            .filter(|pair| pair[0] == "--test")
+                            .map(|pair| pair[1].as_str())
+                            .collect();
+                        assert_eq!(selected, batch.targets);
+                    }
+                }
+                assert!(
+                    args.windows(2).any(|pair| {
+                        pair[0] == "-E" && pair[1].as_str() == batch.filter.as_str()
+                    })
+                );
+            }
+        }
+    }
+
     /// anti-vacuity 红例（INVARIANT VERIFY-AGGREGATE-01）：门步非零退出 ⇒ `Err`，证明门真会 fail。
     #[test]
     fn run_step_nonzero_is_err() -> anyhow::Result<()> {
@@ -1849,108 +1800,6 @@ mod tests {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
     }
 
-    /// #1137：integration lane 与 verify/ci **完全隔离**——常规 integration-tests + N-028 fault matrix 都不出现在
-    /// verify/ci（默认门只 `--no-run` 编译 integration 代码、不实跑；实跑需 docker，由 run_integration 门把守）。
-    #[test]
-    fn integration_plan_isolated_from_verify_and_ci() {
-        assert_eq!(
-            labels(&integration_plan()),
-            vec!["integration-tests", "consistency-fault-matrix"]
-        );
-        assert!(!labels(&verify_plan(&opts(false, false))).contains(&"integration-tests"));
-        assert!(!labels(&plan_for(PlanTarget::CompatibilityCi)).contains(&"integration-tests"));
-        assert!(!labels(&verify_plan(&opts(false, false))).contains(&"consistency-fault-matrix"));
-        assert!(
-            !labels(&plan_for(PlanTarget::CompatibilityCi)).contains(&"consistency-fault-matrix")
-        );
-    }
-
-    #[test]
-    fn consistency_fault_matrix_plan_isolated_from_verify_and_ci() {
-        assert_eq!(
-            labels(&consistency_fault_matrix_plan()),
-            vec!["consistency-fault-matrix"]
-        );
-        assert!(!labels(&verify_plan(&opts(false, false))).contains(&"consistency-fault-matrix"));
-        assert!(
-            !labels(&plan_for(PlanTarget::CompatibilityCi)).contains(&"consistency-fault-matrix")
-        );
-    }
-
-    #[test]
-    fn consistency_fault_matrix_step_targets_journeys_matrix_test() {
-        let step = step_consistency_fault_matrix_run();
-        assert_eq!(step.label(), "consistency-fault-matrix");
-        assert!(matches!(
-            step.id.spec().tool(),
-            ToolRequirement::CargoTool {
-                probe: "nextest",
-                ..
-            }
-        ));
-        assert!(
-            step.args
-                .windows(2)
-                .any(|w| w == ["--profile", "integration"]),
-            "须 --profile integration，实际 {:?}",
-            step.args
-        );
-        assert!(step.args.contains(&"-p") && step.args.contains(&"journeys-fault-matrix"));
-        assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
-        assert!(
-            step.args
-                .windows(2)
-                .any(|w| w == ["-E", "test(consistency_fault_matrix)"]),
-            "须只跑 consistency fault matrix targeted test，实际 {:?}",
-            step.args
-        );
-    }
-
-    /// integration 实跑步：`--profile integration`（放宽 timeout）+ `--features integration` + 全包覆盖
-    /// （postgres/redis-adapter/amqp/mqtt/journeys + runtime）；Tool gate probe `nextest`（缺工具 fail-closed）。
-    #[test]
-    fn integration_run_step_profile_feature_and_coverage() {
-        let step = step_integration_run();
-        assert_eq!(step.label(), "integration-tests");
-        assert!(matches!(
-            step.id.spec().tool(),
-            ToolRequirement::CargoTool {
-                probe: "nextest",
-                ..
-            }
-        ));
-        assert!(
-            step.args
-                .windows(2)
-                .any(|w| w == ["--profile", "integration"]),
-            "须 --profile integration，实际 {:?}",
-            step.args
-        );
-        assert!(step.args.contains(&"--features") && step.args.contains(&"integration"));
-        assert!(
-            step.args
-                .windows(2)
-                .any(|w| w == ["-E", "not test(consistency_fault_matrix)"]),
-            "常规 integration step 须排除独立 fault matrix，实际 {:?}",
-            step.args
-        );
-        for p in [
-            "postgres",
-            "redis-adapter",
-            "amqp",
-            "mqtt",
-            "journeys",
-            "runtime",
-        ] {
-            assert!(step.args.contains(&p), "integration 实跑须覆盖 {p}");
-        }
-        assert!(
-            step.env
-                .iter()
-                .any(|(key, value)| { *key == "RSS_AUDIT_CHAIN_KEY_B64URL" && value.len() == 43 })
-        );
-    }
-
     /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey
     /// （F7 + #1137：原仅 postgres；#1010 加 mqtt；#1298 加 runtime assembly integration 测试）。
     #[test]
@@ -2180,11 +2029,6 @@ mod tests {
         false
     }
 
-    fn workflow_pr_push_triggers_develop(yaml: &str) -> bool {
-        workflow_event_has_develop_branch(yaml, "pull_request")
-            && workflow_event_has_develop_branch(yaml, "push")
-    }
-
     fn command_matches_delegation_form(command: &str, form: &str) -> bool {
         command == form
     }
@@ -2351,6 +2195,16 @@ mod tests {
         fn with_exact(&self, key: &str, values: &[&str]) -> bool {
             let matches = self
                 .with
+                .iter()
+                .filter(|(candidate, _)| candidate == key)
+                .collect::<Vec<_>>();
+            matches.len() == 1
+                && matches[0].1.iter().map(String::as_str).collect::<Vec<_>>() == values
+        }
+
+        fn env_exact(&self, key: &str, values: &[&str]) -> bool {
+            let matches = self
+                .env
                 .iter()
                 .filter(|(candidate, _)| candidate == key)
                 .collect::<Vec<_>>();
@@ -2776,8 +2630,13 @@ mod tests {
             let path = root.join(".github/workflows").join(workflow);
             let yaml = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
+            let delegates = if lane == "integration" {
+                github_integration_workflow_has_shard_matrix(&yaml)
+            } else {
+                workflow_calls_reusable_lane(&yaml, lane)
+            };
             assert!(
-                workflow_calls_reusable_lane(&yaml, lane),
+                delegates,
                 "{} 须以 literal lane 调用唯一 reusable workflow",
                 path.display()
             );
@@ -3134,90 +2993,124 @@ jobs:
         Ok(())
     }
 
-    // ---- 集成测试 lane 守卫（issue #1145 第②项；INVARIANT CI-INTEGRATION-LANE-01）----
+    // ---- capability shard matrix guard (INVARIANT CI-INTEGRATION-MATRIX-01) ----
 
-    /// xtask integration 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形与 CI 锁定入口形。
-    const XTASK_INTEGRATION_FORMS: &[&str] = &[
-        "cargo xtask integration",
-        "cargo run --locked -p xtask -- integration",
-    ];
-
-    /// GitHub integration workflow 谓词（**结构绑定**，fail-closed）。YAML 须同时满足——① `pull_request:` +
-    /// `push:` 触发且都绑定 develop；② integration 委托形在真实 run/script 命令；③ 每个 `cargo run`
-    /// 都是完整 xtask integration 委托形，其他 cargo 子命令仅限安装（不内联门）。
-    fn github_integration_workflow_has_lane(yaml: &str) -> bool {
-        workflow_pr_push_triggers_develop(yaml)
-            && (workflow_delegates_to_xtask_lane(yaml, XTASK_INTEGRATION_FORMS)
-                || workflow_calls_reusable_lane(yaml, "integration"))
+    fn expected_integration_shards() -> Vec<&'static str> {
+        IntegrationShard::ALL
+            .iter()
+            .map(|shard| shard.as_str())
+            .collect()
     }
 
-    /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
-    #[test]
-    fn integration_lane_predicate_green_and_red() {
-        let green = "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- integration\n";
-        assert!(
-            github_integration_workflow_has_lane(green),
-            "完整集成 lane 应为真"
-        );
-        // 红：缺 integration 委托形（只剩 ci 步）。
-        assert!(
-            !github_integration_workflow_has_lane(
-                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- ci\n"
-            ),
-            "缺 integration 委托形"
-        );
-        // 红：缺 pull_request 触发。
-        assert!(
-            !github_integration_workflow_has_lane(
-                &green.replace("pull_request:", "x_pull_request:")
-            ),
-            "缺 pull_request 触发"
-        );
-        assert!(
-            !github_integration_workflow_has_lane(
-                &green.replace("branches: [develop]", "branches: [main]")
-            ),
-            "触发器未绑定 develop"
-        );
-        // 红（codex F1）：integration 形仅在**注释**里、无真实 script 委托 → 结构绑定不满足。
-        assert!(
-            !github_integration_workflow_has_lane(
-                "# cargo run --locked -p xtask -- integration\non:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\nsteps:\n  - run: cargo install cargo-binstall\n"
-            ),
-            "integration 形仅在注释不应满足守卫（fail-closed）"
-        );
-        // 红（codex F1）：integration 形仅在 **displayName**（字符串字段值）、无真实 script → 不满足。
-        assert!(
-            !github_integration_workflow_has_lane(
-                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\nsteps:\n  - run: cargo install cargo-binstall\n    name: 'cargo run --locked -p xtask -- integration'\n"
-            ),
-            "integration 形仅在 displayName 不应满足守卫（fail-closed）"
-        );
-        // 红：内联集成门命令（`cargo nextest`，不委托 xtask）——门逻辑须单源在 xtask。
-        assert!(
-            !github_integration_workflow_has_lane(&format!(
-                "{green}  - script: cargo nextest run --features integration\n"
-            )),
-            "内联 nextest 集成门命令"
-        );
-        assert!(
-            !github_integration_workflow_has_lane(
-                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: cargo run --locked -p xtask -- integration --allow-missing-tools\n"
-            ),
-            "integration lane 不得在 workflow 中宽限缺工具"
-        );
-        assert!(
-            !github_integration_workflow_has_lane(
-                "on:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop]\njobs:\n  integration:\n    steps:\n      - run: |\n          exit 0\n          cargo run --locked -p xtask -- integration\n"
-            ),
-            "integration 委托命令不可被前置控制流绕过"
-        );
+    fn integration_matrix_shards(yaml: &str) -> Option<Vec<&str>> {
+        let lines = yaml_indented_code_lines(yaml);
+        let start = lines
+            .iter()
+            .position(|(indent, line)| *indent == 8 && *line == "shard:")?;
+        lines[start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 8)
+            .map(|(indent, line)| {
+                (*indent == 10)
+                    .then(|| line.strip_prefix("- "))
+                    .flatten()
+                    .map(str::trim)
+            })
+            .collect()
     }
 
-    /// 真实 committed 文件：GitHub integration workflow 含集成测试 lane，经 `cargo xtask integration` 委托
-    /// （issue #1145 第②项：真集成测试入 PR lane；门逻辑单源在 xtask，不内联）。
+    fn github_integration_workflow_has_shard_matrix_for(
+        yaml: &str,
+        expected_shards: &[&str],
+    ) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(jobs_start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
+        else {
+            return false;
+        };
+        let jobs_body = lines[jobs_start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 0)
+            .copied()
+            .collect::<Vec<_>>();
+        let jobs = jobs_body
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 2).then(|| line.strip_suffix(':')).flatten())
+            .collect::<Vec<_>>();
+        let top_fields = jobs_body
+            .iter()
+            .filter_map(|(indent, line)| {
+                (*indent == 4)
+                    .then(|| line.split_once(':').map(|(key, _)| key))
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        workflow_has_only_safe_ci_events(yaml)
+            && workflow_has_exact_read_permissions(yaml)
+            && jobs == ["integration"]
+            && top_fields == ["name", "strategy", "uses", "with"]
+            && lines.contains(&(4, "name: integration / ${{ matrix.shard }}"))
+            && lines.contains(&(6, "fail-fast: false"))
+            && integration_matrix_shards(yaml).as_deref() == Some(expected_shards)
+            && lines.contains(&(4, "uses: ./.github/workflows/rss-rust-lane.yml"))
+            && lines.contains(&(6, "lane: integration"))
+            && lines.contains(&(6, "shard: ${{ matrix.shard }}"))
+            && !yaml.contains("continue-on-error")
+            && !yaml.contains("cargo nextest")
+            && !yaml.contains("--allow-missing-tools")
+            && !yaml.contains("fromJSON")
+            && !lines
+                .iter()
+                .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
+    }
+
+    fn github_integration_workflow_has_shard_matrix(yaml: &str) -> bool {
+        github_integration_workflow_has_shard_matrix_for(yaml, &expected_integration_shards())
+    }
+
+    fn integration_policy_shards(yaml: &str) -> Option<Vec<&str>> {
+        let lines = yaml
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>();
+        let case = lines
+            .iter()
+            .position(|line| *line == "case \"$RSS_SHARD\" in")?;
+        let allowlist = lines.get(case + 1)?.strip_suffix(") ;;")?;
+        let shards = allowlist.split('|').collect::<Vec<_>>();
+        (!shards.is_empty() && shards.iter().all(|shard| !shard.is_empty())).then_some(shards)
+    }
+
+    fn integration_policy_matches_catalog(yaml: &str, expected_shards: &[&str]) -> bool {
+        integration_policy_shards(yaml).as_deref() == Some(expected_shards)
+    }
+
     #[test]
-    fn github_integration_workflow_has_integration_lane() -> anyhow::Result<()> {
+    fn integration_matrix_predicate_green_and_red() {
+        let green = "name: Integration Tests\non:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  integration:\n    name: integration / ${{ matrix.shard }}\n    strategy:\n      fail-fast: false\n      matrix:\n        shard:\n          - postgres-domain\n          - event-transport\n          - runtime-http-auth\n          - consistency-fault\n          - cdc-projection-saga\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: integration\n      shard: ${{ matrix.shard }}\n";
+        assert!(github_integration_workflow_has_shard_matrix(green));
+        let mut future_catalog = expected_integration_shards();
+        future_catalog.push("future-shard");
+        assert!(
+            !github_integration_workflow_has_shard_matrix_for(green, &future_catalog),
+            "catalog 新增 shard 而 committed matrix 未同步时必须 red"
+        );
+        for red in [
+            green.replacen("          - postgres-domain\n", "", 1),
+            green.replace("fail-fast: false", "fail-fast: true"),
+            green.replace("shard: ${{ matrix.shard }}", "shard: fromJSON(env.SHARDS)"),
+            format!("{green}    continue-on-error: true\n"),
+            format!("{green}    run: cargo nextest run\n"),
+        ] {
+            assert!(!github_integration_workflow_has_shard_matrix(&red));
+        }
+    }
+
+    #[test]
+    fn github_integration_workflow_has_integration_shard_matrix() -> anyhow::Result<()> {
         let path = workspace_root()?
             .join(".github")
             .join("workflows")
@@ -3225,8 +3118,8 @@ jobs:
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
-            github_integration_workflow_has_lane(&yaml),
-            ".github/workflows/integration.yml 须含集成测试 lane 且经 `cargo xtask integration` 委托"
+            github_integration_workflow_has_shard_matrix(&yaml),
+            ".github/workflows/integration.yml must contain the exact closed shard matrix"
         );
         Ok(())
     }
@@ -3402,7 +3295,7 @@ jobs:
     }
 
     fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
-        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || inputs.lane == 'integration') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
+        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
         let lines = yaml_indented_code_lines(yaml);
         let steps = yaml_typed_steps(yaml);
         let index = |id: &str| {
@@ -3496,7 +3389,12 @@ jobs:
         });
         let policy_ok = policy.is_some_and(|i| {
             let step = &steps[i];
-            step.run_contains("case \"$RSS_LANE\" in")
+            step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
+                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
+                && step.run_contains("if [ \"$RSS_LANE\" = integration ]")
+                && integration_policy_matches_catalog(yaml, &expected_integration_shards())
+                && step.run_contains("elif [ -n \"$RSS_SHARD\" ]")
+                && step.run_contains("case \"$RSS_LANE\" in")
                 && [
                     [
                         "ci-meta)",
@@ -3544,13 +3442,15 @@ jobs:
         });
         let xtask_ok = xtask.is_some_and(|i| {
             let step = &steps[i];
-            step.run_contains("case \"$RSS_LANE\" in")
+            step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
+                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
+                && step.run_contains("case \"$RSS_LANE\" in")
                 && [
                     "ci-meta) cargo run --locked -p xtask -- ci-meta ;;",
                     "ci-core) cargo run --locked -p xtask -- ci-core ;;",
                     "ci-security) cargo run --locked -p xtask -- ci-security ;;",
                     "ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;",
-                    "integration) cargo run --locked -p xtask -- integration ;;",
+                    "integration) cargo run --locked -p xtask -- ci-integration --shard \"$RSS_SHARD\" ;;",
                     "audit) cargo run --locked -p xtask -- audit ;;",
                 ]
                 .iter()
@@ -3602,7 +3502,7 @@ jobs:
                     && step.uses.as_deref() == Some("actions/upload-artifact@v4")
                     && step.with_exact(
                         "name",
-                        &["ci-evidence-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}"],
+                        &["${{ inputs.lane == 'integration' && format('ci-evidence-{0}-{1}-{2}-{3}', inputs.lane, inputs.shard, github.run_id, github.run_attempt) || format('ci-evidence-{0}-{1}-{2}', inputs.lane, github.run_id, github.run_attempt) }}"],
                     )
                     && step.with_exact(
                         "path",
@@ -3781,6 +3681,17 @@ jobs:
         let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
         let green = std::fs::read_to_string(&path)?;
         assert!(reusable_rust_lane_is_hardened(&green));
+        assert_eq!(
+            integration_policy_shards(&green),
+            Some(expected_integration_shards()),
+            "reusable policy allowlist 必须与 typed catalog 精确一致"
+        );
+        let mut future_catalog = expected_integration_shards();
+        future_catalog.push("future-shard");
+        assert!(
+            !integration_policy_matches_catalog(&green, &future_catalog),
+            "catalog 新增 shard 而 reusable allowlist 未同步时必须 red"
+        );
         for (needle, replacement) in [
             ("required: true", "required: false"),
             (" && github.ref_protected", ""),
@@ -3798,10 +3709,7 @@ jobs:
             ("~/.cargo/registry/cache", "~/.cargo/registry"),
             ("evidence-enabled: true", "evidence-enabled: false"),
             ("retention-days: 7", "retention-days: 8"),
-            (
-                "name: ci-evidence-${{ inputs.lane }}-${{ github.run_id }}-${{ github.run_attempt }}",
-                "name: ci-evidence-${{ github.run_id }}",
-            ),
+            ("inputs.shard, github.run_id", "github.run_id"),
         ] {
             let red = green.replacen(needle, replacement, 1);
             assert!(
@@ -3898,7 +3806,14 @@ jobs:
         let root = workspace_root()?.join(".github/workflows");
         for (file, lane) in [("integration.yml", "integration"), ("audit.yml", "audit")] {
             let green = std::fs::read_to_string(root.join(file))?;
-            assert!(workflow_calls_reusable_lane(&green, lane));
+            let delegates = |yaml: &str| {
+                if lane == "integration" {
+                    github_integration_workflow_has_shard_matrix(yaml)
+                } else {
+                    workflow_calls_reusable_lane(yaml, lane)
+                }
+            };
+            assert!(delegates(&green));
             for (index, red) in [
                 green.replace(&format!("lane: {lane}"), "lane: ${{ inputs.lane }}"),
                 green.replace(
@@ -3912,10 +3827,7 @@ jobs:
             .into_iter()
             .enumerate()
             {
-                assert!(
-                    !workflow_calls_reusable_lane(&red, lane),
-                    "caller red {index}"
-                );
+                assert!(!delegates(&red), "caller red {index}");
             }
         }
         Ok(())

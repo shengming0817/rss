@@ -12,6 +12,17 @@ permissions:
 
 jobs:
   integration:
+    name: integration / ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - postgres-domain
+          - event-transport
+          - runtime-http-auth
+          - consistency-fault
+          - cdc-projection-saga
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
       lane: integration
+      shard: ${{ matrix.shard }}

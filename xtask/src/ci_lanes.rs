@@ -13,7 +13,6 @@ pub(crate) enum CiLane {
     Core,
     Security,
     Coverage,
-    Integration,
     Nightly,
 }
 
@@ -24,7 +23,6 @@ impl CiLane {
             Self::Core => "ci-core",
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
-            Self::Integration => "integration",
             Self::Nightly => "audit",
         }
     }
@@ -41,7 +39,6 @@ pub(crate) enum CostClass {
 pub(crate) enum CompileKind {
     NoCompile,
     Workspace,
-    Container,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +79,6 @@ pub(crate) enum LaneAssignment {
 pub(crate) enum StandaloneReason {
     VerifyOnly,
     ScheduledAdvisory,
-    IntegrationOptIn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,34 +679,6 @@ macro_rules! gate_catalog {
                         NIGHTLY_ONLY,
                     )
             ),
-            IntegrationRun => (step_integration_run, None,
-                gate(
-                        GateId::IntegrationRun,
-                        "integration-tests",
-                        CiLane::Integration,
-                        CompileKind::Container,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: INTEGRATION_HINT,
-                        },
-                        EvidenceKind::Test,
-                        INTEGRATION_ONLY,
-                    )
-            ),
-            ConsistencyFaultMatrix => (step_consistency_fault_matrix_run, None,
-                gate(
-                        GateId::ConsistencyFaultMatrix,
-                        "consistency-fault-matrix",
-                        CiLane::Integration,
-                        CompileKind::Container,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: INTEGRATION_HINT,
-                        },
-                        EvidenceKind::Test,
-                        INTEGRATION_ONLY,
-                    )
-            ),
         }
     };
 }
@@ -802,8 +770,6 @@ const DENY_HINT: &str = "cargo install cargo-deny@0.19.9 --locked";
 const AUDIT_HINT: &str = "cargo install cargo-audit@0.22.2 --locked";
 const DYLINT_HINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
 const NEXTEST_HINT: &str = "cargo install cargo-nextest@0.9.137 --locked";
-const INTEGRATION_HINT: &str =
-    "cargo install cargo-nextest@0.9.137 --locked（并提供 docker 或完整外部服务 env）";
 const LLVM_COV_HINT: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
 const PUBLIC_API_HINT: &str =
     "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
@@ -820,7 +786,6 @@ const fn gate(
     let cost = match compile {
         CompileKind::NoCompile => CostClass::Fast,
         CompileKind::Workspace => CostClass::Standard,
-        CompileKind::Container => CostClass::Expensive,
     };
     GateSpec {
         id,
@@ -871,10 +836,6 @@ const NIGHTLY_ONLY: GateMembership = GateMembership {
     verify: VerifyMembership::Excluded,
     compat: CompatMembership::Standalone(StandaloneReason::ScheduledAdvisory),
 };
-const INTEGRATION_ONLY: GateMembership = GateMembership {
-    verify: VerifyMembership::Excluded,
-    compat: CompatMembership::Standalone(StandaloneReason::IntegrationOptIn),
-};
 const SOURCE: EvidenceKind = EvidenceKind::Source;
 const INTERNAL: ToolRequirement = ToolRequirement::InProcess;
 
@@ -902,7 +863,6 @@ const fn registry_const_valid() -> bool {
             CompileKind::Workspace => {
                 matches!(spec.cost, CostClass::Standard | CostClass::Expensive)
             }
-            CompileKind::Container => matches!(spec.cost, CostClass::Expensive),
         };
         let evidence_classified = matches!(
             spec.evidence,
@@ -1046,21 +1006,20 @@ mod tests {
         let mut missing_target = REGISTRY.to_vec();
         missing_target.pop();
         missing_target[GateId::DefaultNextest as usize].compat =
-            CompatMembership::SupersededBy(GateId::ConsistencyFaultMatrix);
+            CompatMembership::SupersededBy(GateId::DenyAdvisories);
         assert!(validate_registry(&missing_target).is_err());
     }
 
     #[test]
     fn ci_lane_registry_rejects_compat_gate_outside_split_lanes_red() {
-        for invalid_lane in [CiLane::Nightly, CiLane::Integration] {
-            let mut wrong_lane = REGISTRY.to_vec();
-            wrong_lane[GateId::BuildAllFeatures as usize].assignment =
-                LaneAssignment::Primary(invalid_lane);
-            assert!(
-                validate_registry(&wrong_lane).is_err(),
-                "compatibility gate assigned to {invalid_lane:?} escaped split-lane validation"
-            );
-        }
+        let invalid_lane = CiLane::Nightly;
+        let mut wrong_lane = REGISTRY.to_vec();
+        wrong_lane[GateId::BuildAllFeatures as usize].assignment =
+            LaneAssignment::Primary(invalid_lane);
+        assert!(
+            validate_registry(&wrong_lane).is_err(),
+            "compatibility gate assigned to {invalid_lane:?} escaped split-lane validation"
+        );
     }
 
     #[test]

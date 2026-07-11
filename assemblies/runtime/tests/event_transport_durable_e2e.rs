@@ -10,7 +10,8 @@
 //!
 //! `#![cfg(feature = "integration")]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
-//! `cargo nextest run -p runtime --features integration` 或 `cargo xtask integration` 运行实际测试。
+//! `cargo nextest run -p runtime --features integration` 或
+//! `cargo xtask ci-integration --shard event-transport` 运行实际测试。
 
 #![cfg(feature = "integration")]
 

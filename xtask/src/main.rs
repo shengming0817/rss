@@ -21,8 +21,6 @@
 //!   `cargo xtask consistency local-only-effects`
 //!                                      active LocalOnly HTTP effect profile 治理门（#1689，CI 门）
 //!   `cargo xtask localtx-coverage`       active LocalTx manifest/generated/route/test closure 门（CI 门）
-//!   `cargo xtask consistency-fault-matrix [--allow-missing-tools]`
-//!                                      N-028 consistency fault crash matrix 真后端 opt-in runner（Postgres+RabbitMQ）。
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
@@ -54,11 +52,9 @@
 //!                                      供应链漏洞**定时刷新** lane（issue #1133，GitHub Actions `schedule:`
 //!                                      cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit`
 //!                                      两门（皆 no-compile、快），捕获「未变依赖」新披露 CVE。详见 `verify.rs`。
-//!   `cargo xtask integration [--allow-missing-tools]`
-//!                                      真集成 lane（issue #1137，**opt-in**，不入 verify/ci）：testcontainers
-//!                                      self-provision postgres/redis/rabbitmq 跑 `--features integration` 测试。
-//!                                      **docker-gated**（fail-closed；env URL 全在则对接长存服务免 docker）。
-//!                                      **已接入 GitHub Actions PR/push lane**（#1145，CI-INTEGRATION-LANE-01）。详见 `verify.rs`。
+//!   `cargo xtask ci-integration --shard <name> [--allow-missing-tools]`
+//!                                      按 capability shard 运行真集成 target；typed registry 单源派生
+//!                                      target filter、资源门与串/并行批次。
 mod archrules;
 mod assembly;
 mod assembly_codegen;
@@ -78,6 +74,7 @@ mod diffcov;
 mod doc_contracts;
 mod event_transport_guard;
 mod inbox_cutover_guard;
+mod integration_shards;
 mod layerdeps;
 mod layers;
 mod localtx_coverage;
@@ -157,10 +154,8 @@ enum Command {
     Audit {
         allow_missing_tools: bool,
     },
-    Integration {
-        allow_missing_tools: bool,
-    },
-    ConsistencyFaultMatrix {
+    CiIntegration {
+        shard: integration_shards::IntegrationShard,
         allow_missing_tools: bool,
     },
     SchemaRls,
@@ -209,8 +204,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["ci-security", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Security, rest),
         ["ci-coverage", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Coverage, rest),
         ["audit", rest @ ..] => parse_audit(rest),
-        ["integration", rest @ ..] => parse_integration(rest),
-        ["consistency-fault-matrix", rest @ ..] => parse_consistency_fault_matrix(rest),
+        ["ci-integration", rest @ ..] => parse_ci_integration(rest),
         ["schema-rls"] => Ok(Command::SchemaRls),
         ["inbox-cutover-guard"] => Ok(Command::InboxCutoverGuard),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
@@ -222,7 +216,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly <validate | generate-modules [--check]> | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | localtx-coverage | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly <validate | generate-modules [--check]> | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | localtx-coverage | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | ci-integration --shard <name> [--allow-missing-tools]>"
             )
         }
     }
@@ -398,38 +392,32 @@ fn parse_audit(args: &[&str]) -> Result<Command> {
     })
 }
 
-/// 解析 `integration` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`integration` 无 `--fast`——真集成 lane 恒全量跑。
-fn parse_integration(args: &[&str]) -> Result<Command> {
+/// 解析闭合 `ci-integration --shard <name>`；未知、缺失、重复或尾参均 fail-closed。
+fn parse_ci_integration(args: &[&str]) -> Result<Command> {
+    let mut shard = None;
     let mut allow_missing_tools = false;
-    for &tok in args {
+    let mut iter = args.iter().copied();
+    while let Some(tok) = iter.next() {
         match tok {
-            "--allow-missing-tools" => allow_missing_tools = true,
+            "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
+            "--shard" if shard.is_none() => {
+                let raw = iter.next().ok_or_else(|| {
+                    anyhow::anyhow!("--shard 缺少值；用法: cargo xtask ci-integration --shard <name> [--allow-missing-tools]")
+                })?;
+                shard = Some(raw.parse()?);
+            }
             other => {
                 bail!(
-                    "integration 未知参数: {other}；用法: cargo xtask integration [--allow-missing-tools]"
+                    "ci-integration 未知或重复参数: {other}；用法: cargo xtask ci-integration --shard <name> [--allow-missing-tools]"
                 )
             }
         }
     }
-    Ok(Command::Integration {
-        allow_missing_tools,
-    })
-}
-
-/// 解析 `consistency-fault-matrix` 的可选 flag（fail-closed：未知 flag 即 `Err`）。
-fn parse_consistency_fault_matrix(args: &[&str]) -> Result<Command> {
-    let mut allow_missing_tools = false;
-    for &tok in args {
-        match tok {
-            "--allow-missing-tools" => allow_missing_tools = true,
-            other => {
-                bail!(
-                    "consistency-fault-matrix 未知参数: {other}；用法: cargo xtask consistency-fault-matrix [--allow-missing-tools]"
-                )
-            }
-        }
-    }
-    Ok(Command::ConsistencyFaultMatrix {
+    let shard = shard.ok_or_else(|| {
+        anyhow::anyhow!("ci-integration 缺少 --shard；用法: cargo xtask ci-integration --shard <name> [--allow-missing-tools]")
+    })?;
+    Ok(Command::CiIntegration {
+        shard,
         allow_missing_tools,
     })
 }
@@ -519,12 +507,10 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Audit {
             allow_missing_tools,
         } => verify::run_audit(allow_missing_tools),
-        Command::Integration {
+        Command::CiIntegration {
+            shard,
             allow_missing_tools,
-        } => verify::run_integration(allow_missing_tools),
-        Command::ConsistencyFaultMatrix {
-            allow_missing_tools,
-        } => verify::run_consistency_fault_matrix(allow_missing_tools),
+        } => verify::run_ci_integration(shard, allow_missing_tools),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::InboxCutoverGuard => {
             diagnostic::run_check(&inbox_cutover_guard::InboxCutoverGuard)
@@ -1065,62 +1051,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_command_integration_bare() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["integration"]))?,
-            Command::Integration {
-                allow_missing_tools: false
-            }
-        );
-        Ok(())
-    }
+    fn parse_command_ci_integration_shards_and_fail_closed() {
+        for shard in [
+            "postgres-domain",
+            "event-transport",
+            "runtime-http-auth",
+            "consistency-fault",
+            "cdc-projection-saga",
+        ] {
+            assert!(
+                parse_command(&s(&["ci-integration", "--shard", shard])).is_ok(),
+                "valid shard {shard} must parse"
+            );
+            assert!(
+                parse_command(&s(&[
+                    "ci-integration",
+                    "--allow-missing-tools",
+                    "--shard",
+                    shard,
+                ]))
+                .is_ok(),
+                "local missing-tool allowance must compose with {shard}"
+            );
+        }
 
-    #[test]
-    fn parse_command_integration_allow_missing_tools() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["integration", "--allow-missing-tools"]))?,
-            Command::Integration {
-                allow_missing_tools: true
-            }
+        assert!(parse_command(&s(&["ci-integration"])).is_err());
+        assert!(parse_command(&s(&["ci-integration", "--shard"])).is_err());
+        assert!(parse_command(&s(&["ci-integration", "--all"])).is_err());
+        assert!(parse_command(&s(&["ci-integration", "--shard", "POSTGRES-DOMAIN"])).is_err());
+        assert!(
+            parse_command(&s(&[
+                "ci-integration",
+                "--shard",
+                "postgres-domain",
+                "--shard",
+                "event-transport",
+            ]))
+            .is_err()
         );
-        Ok(())
-    }
-
-    /// integration flag fail-closed：未知 flag / 尾参 / 误用 `--fast`（无此 flag）均 `Err`。
-    #[test]
-    fn parse_command_integration_rejects_unknown_flag() {
+        assert!(parse_command(&s(&["integration"])).is_err());
         assert!(parse_command(&s(&["integration", "--bogus"])).is_err());
-        assert!(parse_command(&s(&["integration", "--fast"])).is_err());
-        assert!(parse_command(&s(&["integration", "extra"])).is_err());
     }
 
     #[test]
-    fn parse_command_consistency_fault_matrix_bare() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["consistency-fault-matrix"]))?,
-            Command::ConsistencyFaultMatrix {
-                allow_missing_tools: false
-            }
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn parse_command_consistency_fault_matrix_allow_missing_tools() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&["consistency-fault-matrix", "--allow-missing-tools"]))?,
-            Command::ConsistencyFaultMatrix {
-                allow_missing_tools: true
-            }
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn parse_command_consistency_fault_matrix_rejects_unknown_flag() {
+    fn removed_integration_entrypoints_fail_closed() {
+        assert!(parse_command(&s(&["consistency-fault-matrix"])).is_err());
         assert!(parse_command(&s(&["consistency-fault-matrix", "--bogus"])).is_err());
-        assert!(parse_command(&s(&["consistency-fault-matrix", "--fast"])).is_err());
-        assert!(parse_command(&s(&["consistency-fault-matrix", "extra"])).is_err());
+        assert!(parse_command(&s(&["integration"])).is_err());
     }
 
     #[test]

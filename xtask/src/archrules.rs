@@ -691,6 +691,29 @@ fn scan_xtask(root: &Path, index: &mut Index) -> Result<()> {
             }
             continue;
         }
+        if path.ends_with("xtask/src/integration_shards.rs") {
+            let found_invariants = extract_invariants(root, &path)?;
+            record_invalid_invariants(index, &found_invariants);
+            validate_closed_invariant_bindings(
+                index,
+                &path,
+                &found_invariants,
+                INTEGRATION_SHARD_INVARIANT_BINDINGS,
+            );
+            for binding in INTEGRATION_SHARD_INVARIANT_BINDINGS {
+                debug_assert_eq!(binding.path, rel(root, &path));
+                scan_extracted_invariant_rules_filtered(
+                    root,
+                    index,
+                    &found_invariants,
+                    binding.carrier,
+                    binding.evidence,
+                    Some(binding.gates),
+                    |rule| binding.matches(rule) && binding.accepts(rule),
+                )?;
+            }
+            continue;
+        }
         let gate = xtask_gate(root, &path);
         scan_invariant_file(root, index, &path, "xtask", xtask_evidence(&path), gate)?;
     }
@@ -743,6 +766,49 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "xtask",
         evidence: "bound synthetic red and anti-vacuity tests",
         gates: "verify,ci,ci-core,ci-coverage",
+    },
+];
+
+const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "INTEGRATION-SHARD-REGISTRY-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "catalog macro generated closed enum, registry, and exhaustive lookup",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "INTEGRATION-SHARD-SELECTOR-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "typed execution units are the only filterset construction path",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "INTEGRATION-SHARD-COVERAGE-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "Cargo metadata closure with synthetic red and real-workspace anti-vacuity",
+        gates: "integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "INTEGRATION-SHARD-SCHEDULING-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "exact resource and target scheduling plan with rendered argv proof",
+        gates: "integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "INTEGRATION-SHARD-NEXTEST-CONFIG-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "parsed committed nextest config with synthetic selector-reflow red",
+        gates: "integration",
     },
 ];
 
@@ -1976,6 +2042,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
     GateDeclaration {
         path: "xtask/src/ci_lanes.rs",
         tokens: "native-compile,verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
+    },
+    GateDeclaration {
+        path: "xtask/src/integration_shards.rs",
+        tokens: "native-compile,integration",
         role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
     },
     GateDeclaration {
