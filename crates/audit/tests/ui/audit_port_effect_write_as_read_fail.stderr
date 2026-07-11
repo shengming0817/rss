@@ -1,0 +1,11 @@
+error[E0271]: type mismatch resolving `<DynAuditWriteRepo<'static> as AuditPortEffect>::Effect == ReadEffect`
+ --> tests/ui/audit_port_effect_write_as_read_fail.rs:7:20
+  |
+7 |     require_read::<DynAuditWriteRepo<'static>>();
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ReadEffect`, found `WriteEffect`
+  |
+note: required by a bound in `require_read`
+ --> tests/ui/audit_port_effect_write_as_read_fail.rs:4:36
+  |
+4 | fn require_read<T: AuditPortEffect<Effect = ReadEffect> + ?Sized>() {}
+  |                                    ^^^^^^^^^^^^^^^^^^^ required by this bound in `require_read`

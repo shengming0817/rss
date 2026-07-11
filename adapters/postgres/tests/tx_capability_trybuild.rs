@@ -1,6 +1,6 @@
 //! TxCapability 外部边界编译锁。
 //!
-//! INVARIANT: PG-TX-CAPABILITY-SEAL-01 { level = "Hard", exec = "verify", source = "trybuild" }：
+//! INVARIANT: PG-TX-CAPABILITY-SEAL-01 · AUDIT-CONSUMER-WRITE-ERASURE-01 { level = "Hard", exec = "verify", source = "trybuild" }：
 //! 外部 crate 不能构造 / mint postgres 事务能力令牌；只能由 postgres adapter 在真实
 //! `sqlx::Transaction` 内部铸造。
 
@@ -13,5 +13,6 @@ fn tx_capability_ui() {
     t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_fields_private_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_capability_required_fail.rs");
+    t.compile_fail("tests/ui/audit_consumer_read_erasure_fail.rs");
     t.pass("tests/ui/pg_public_funnels_pass.rs");
 }

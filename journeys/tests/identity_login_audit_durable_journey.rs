@@ -24,7 +24,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use audit::ports::{
-    AuditEventKind, AuditRepo as _, DynAuditRepo, TenantRepoScope, audit_record_from_event_message,
+    AuditEventKind, AuditWriteRepo as _, DynAuditWriteRepo, TenantRepoScope,
+    audit_record_from_event_message,
 };
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
@@ -201,7 +202,7 @@ impl DeadLetterStore for NoopDlx {
 /// Journey-local audit decode/repo append → run_consumer HandleResult handler。
 /// `captured` 记录每条消费消息的 envelope metadata（#1160 端到端 occurred_at/subjectId/correlation 保真断言）。
 fn consumer_handler(
-    repo: Arc<DynAuditRepo<'static>>,
+    repo: Arc<DynAuditWriteRepo<'static>>,
     captured: Arc<Mutex<Vec<EnvelopeMetadata>>>,
 ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
     move |message: Message| {

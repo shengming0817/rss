@@ -585,6 +585,82 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     ) -> Result<(), IdentityError>;
 }
 
+mod identity_port_effect_sealed {
+    pub trait Sealed {}
+}
+
+/// Closed, owner-defined effect classification for identity domain DI ports.
+///
+/// Only the canonical dyn wrappers owned by this module are classified. The private supertrait
+/// prevents downstream crates from assigning an effect to another type or overriding one of these
+/// assignments. [`Arc`](std::sync::Arc) and [`Box`] preserve the wrapped port's classification.
+#[allow(private_bounds)]
+pub trait IdentityPortEffect: identity_port_effect_sealed::Sealed {
+    type Effect: diport::PortEffectClass;
+    type Privilege: diport::PortPrivilegeClass;
+}
+
+macro_rules! classify_identity_ports {
+    ($($port:ident => $effect:ty),+ $(,)?) => {
+        $(
+            impl<'a> identity_port_effect_sealed::Sealed for $port<'a> {}
+
+            impl<'a> IdentityPortEffect for $port<'a> {
+                type Effect = $effect;
+                type Privilege = diport::LocalPrivilege;
+            }
+        )+
+
+        const _: fn() = || {
+            fn assert_effect<T, E>()
+            where
+                T: IdentityPortEffect<Effect = E, Privilege = diport::LocalPrivilege> + ?Sized,
+                E: diport::PortEffectClass,
+            {
+            }
+
+            $(assert_effect::<$port<'static>, $effect>();)+
+        };
+    };
+}
+
+classify_identity_ports! {
+    DynPolicyRepo => diport::AuthEffect,
+    DynResourceAttributeRepo => diport::WriteEffect,
+    DynRoleRepo => diport::WriteEffect,
+    DynCredentialRepo => diport::WriteEffect,
+    DynRefreshTokenStore => diport::WriteEffect,
+    DynPolicyLifecycle => diport::OutboxEffect,
+    DynRoleBindingLifecycle => diport::OutboxEffect,
+    DynSessionLifecycle => diport::OutboxEffect,
+}
+
+impl<T> identity_port_effect_sealed::Sealed for std::sync::Arc<T> where
+    T: identity_port_effect_sealed::Sealed + ?Sized
+{
+}
+
+impl<T> IdentityPortEffect for std::sync::Arc<T>
+where
+    T: IdentityPortEffect + ?Sized,
+{
+    type Effect = T::Effect;
+    type Privilege = T::Privilege;
+}
+
+impl<T> identity_port_effect_sealed::Sealed for Box<T> where
+    T: identity_port_effect_sealed::Sealed + ?Sized
+{
+}
+
+impl<T> IdentityPortEffect for Box<T>
+where
+    T: IdentityPortEffect + ?Sized,
+{
+    type Effect = T::Effect;
+    type Privilege = T::Privilege;
+}
+
 #[cfg(test)]
 mod smoke {
     //! build smoke：域形 async repo port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经

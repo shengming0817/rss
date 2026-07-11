@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use audit::AuditDomain;
-use audit::ports::{AuditChainHasher, DynAuditRepo};
+use audit::ports::{AuditChainHasher, DynAuditReadRepo};
 use base64::Engine as _;
 use bootstrap::{Domain, DomainBinding, DomainModuleResult};
 use crypto::RustCryptoMacVerifier;
@@ -99,8 +99,8 @@ fn wire_audit_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<AuditDomain<PgAuthAuditSink>> {
     let hasher = build_audit_hasher(|name| get(name)).context("audit chain key")?;
-    let repo = audit_deps.audit_repo(hasher);
-    let dyn_repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(repo));
+    let repo = Arc::new(audit_deps.audit_repo(hasher));
+    let read_repo: Arc<DynAuditReadRepo<'static>> = Arc::from(DynAuditReadRepo::new_box(repo));
     let admin_repo = build_audit_hasher(get)
         .context("audit admin chain key")
         .map(|hasher| {
@@ -109,7 +109,7 @@ fn wire_audit_from(
                 .map(|repo| Arc::from(audit::ports::DynAuditAdminRepo::new_box(repo)))
         })?;
     Ok(AuditDomain::new(
-        dyn_repo,
+        read_repo,
         admin_repo,
         audit_deps.auth_audit_sink(),
         Arc::new(SystemClock),

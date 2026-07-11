@@ -87,6 +87,7 @@ pub mod cas_store;
 pub mod checkpoint_store;
 pub mod clock;
 pub mod dead_letter_store;
+mod effect;
 pub mod envelope;
 pub mod fenced_writer;
 pub mod key_provider;
@@ -129,6 +130,10 @@ pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterStore,
     DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+};
+pub use effect::{
+    AuthEffect, CrossTenantPrivilege, DiPortEffect, LocalPrivilege, OutboxEffect, PortEffectClass,
+    PortPrivilegeClass, ReadEffect, WorkflowEffect, WriteEffect,
 };
 pub use envelope::{
     EnvelopeHeader, EnvelopeHeaderError, EnvelopeMetadata, EnvelopeSchemaHash,

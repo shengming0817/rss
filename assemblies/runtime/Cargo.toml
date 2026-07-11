@@ -35,7 +35,7 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
 # seed-data feature 开：empty_flag_store（in-mem 空 flag store）可用——生产 flag store 待 #1120，
 # 当前空 store 满足 fail-closed 语义（未知 flag 返回 false）。
 settings = { path = "../../crates/settings", features = ["seed-data"] }
-# audit 域（AuditDomain + AuditChainHasher/DynAuditRepo port；#1230 wire_audit）。
+# audit 域（AuditDomain + AuditChainHasher/read-write ports；#1230 wire_audit）。
 audit = { path = "../../crates/audit" }
 # identity 域（LoginService + IdentityDomain；identity.login active serving）。
 identity = { path = "../../crates/identity" }

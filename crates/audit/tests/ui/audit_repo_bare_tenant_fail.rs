@@ -1,6 +1,6 @@
-use audit::ports::{AuditPage, AuditRepo, TenantId};
+use audit::ports::{AuditPage, AuditReadRepo, TenantId};
 
-async fn bad<R: AuditRepo>(repo: &R, tenant: TenantId) {
+async fn bad<R: AuditReadRepo>(repo: &R, tenant: TenantId) {
     let page = AuditPage {
         limit: vocab::Limit::new(10).unwrap(),
         cursor: None,

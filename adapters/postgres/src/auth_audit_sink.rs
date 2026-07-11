@@ -1,6 +1,6 @@
 //! `PgAuthAuditSink` —— httpserve auth decision flat audit sink.
 //!
-//! This adapter intentionally targets `diport::AuditSink` directly instead of `audit::AuditRepo`: auth decision
+//! This adapter intentionally targets `diport::AuditSink` directly instead of audit ledger ports: auth decision
 //! principals can be users, services, super-admins, or anonymous-like rejected subjects, while the hash-chain audit
 //! domain currently keys actors as `ids::UserId`.
 

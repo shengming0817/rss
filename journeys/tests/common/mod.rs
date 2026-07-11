@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use audit::ports::{AuditChainHasher, DynAuditRepo};
+use audit::ports::{AuditChainHasher, DynAuditReadRepo, DynAuditWriteRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use consistency::EventEntry;
 use diport::{
@@ -254,26 +254,23 @@ pub fn dlx_payload_protector() -> postgres::DlxPayloadProtector {
 /// 构造 journey 用 audit 域 + 共享捕获句柄（注入捕获 verifier + 固定 32B key）。
 ///
 /// API：经 `AuditChainHasher::new`（`Option`，弱 key → `None`）+
-/// `InMemAuditRepo::new` + `Arc::from(DynAuditRepo::new_box(...))` 装配后经 `AuditDomain::new`
+/// `InMemAuditRepo::new` + 共享 provider 的 read/write wrappers 装配后经 `AuditDomain::new`
 /// （不可失败）注入——组合根装配路径与生产 `PgAuditRepo` 同形。
 #[allow(clippy::expect_used)]
 pub fn audit_domain() -> (
     AuditDomain<NoopAuditSink>,
     CapturingVerifier,
-    Arc<DynAuditRepo<'static>>,
+    Arc<DynAuditWriteRepo<'static>>,
 ) {
     let verifier = CapturingVerifier::default();
     let hasher = AuditChainHasher::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
         .expect("32B audit key satisfies MIN_KEY_LEN");
-    let repo: Arc<DynAuditRepo<'static>> =
-        Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)));
-    let domain = AuditDomain::new(
-        Arc::clone(&repo),
-        None,
-        NoopAuditSink,
-        Arc::new(FixedAuditClock),
-    );
-    (domain, verifier, repo)
+    let provider = Arc::new(InMemAuditRepo::new(hasher));
+    let write_repo: Arc<DynAuditWriteRepo<'static>> =
+        Arc::from(DynAuditWriteRepo::new_box(Arc::clone(&provider)));
+    let read_repo: Arc<DynAuditReadRepo<'static>> = Arc::from(DynAuditReadRepo::new_box(provider));
+    let domain = AuditDomain::new(read_repo, None, NoopAuditSink, Arc::new(FixedAuditClock));
+    (domain, verifier, write_repo)
 }
 
 struct NoopRoleRepo;

@@ -18496,8 +18496,8 @@ async fn t24_rls_refresh_tokens_enforces_tenant_isolation() -> TestResult {
 // TA11: RLS NULL tenant fail-closed——未设 rss.tenant_id → 0 行
 // TA12: 空租户链 list + verify_tail 均 Ok
 
-// trait AuditRepo/AuditAdminRepo 须在 scope 才能调用 append / list / verify_tail / verify_tenant 方法。
-use audit::ports::{AuditAdminRepo as _, AuditRepo as _};
+// read/write/admin traits 须在 scope 才能调用 append / list / verify_tail / verify_tenant 方法。
+use audit::ports::{AuditAdminRepo as _, AuditReadRepo as _, AuditWriteRepo as _};
 // base64::Engine::encode 须在 scope（URL_SAFE_NO_PAD.encode(...)）。
 use base64::Engine as _;
 
@@ -18539,6 +18539,38 @@ fn audit_page(limit: u16, cursor: Option<vocab::Cursor>) -> audit::ports::AuditP
         limit: vocab::Limit::new(limit).unwrap(),
         cursor,
     }
+}
+
+/// 独立 read/write dyn capability 从同一个 provider 派生后必须观察同一 durable 链状态。
+#[cfg(feature = "integration")]
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration happy-path uses generated UUIDs and fixed valid test values.
+async fn audit_dyn_read_write_wrappers_share_postgres_provider() -> TestResult {
+    use std::sync::Arc;
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let provider = Arc::new(make_audit_repo(&store));
+    let write: Arc<audit::ports::DynAuditWriteRepo<'static>> = Arc::from(
+        audit::ports::DynAuditWriteRepo::new_box(Arc::clone(&provider)),
+    );
+    let read: Arc<audit::ports::DynAuditReadRepo<'static>> =
+        Arc::from(audit::ports::DynAuditReadRepo::new_box(provider));
+
+    write
+        .append(audit_scope(tenant), make_audit_record(tenant, 7))
+        .await?;
+    let result = read
+        .list(audit_scope(tenant), audit_page(500, None))
+        .await?;
+    assert_eq!(result.entries.len(), 1);
+    assert_eq!(result.entries[0].tenant(), tenant);
+    read.verify_tail(audit_scope(tenant), 1).await?;
+
+    store.shutdown().await?;
+    Ok(())
 }
 
 /// TA1: genesis 条目 seq=0，连续 append seq 单调递增。

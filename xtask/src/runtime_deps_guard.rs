@@ -928,7 +928,7 @@ type AliasB = AliasA;
     pub struct SharedRuntimeDeps {
         pub optional: diport::Boxed<Option<Arc<settings::SettingsService>>>,
         pub repo_result: diport::Boxed<Result<Box<dyn identity::CredentialRepo>, vocab::Error>>,
-        pub tupled: diport::Boxed<(contractreg::ContractRegistryService, &'static audit::AuditRepo)>,
+        pub tupled: diport::Boxed<(contractreg::ContractRegistryService, &'static audit::AuditWriteRepo)>,
         pub callback: diport::Boxed<fn() -> syshealth::HealthRepo>,
         pub alias: diport::Boxed<RuntimeSettings>,
         pub domain_output: diport::Boxed<settings::SettingsDomain>,

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
-use audit::ports::{AuditChainHasher, DynAuditRepo};
+use audit::ports::{AuditChainHasher, DynAuditReadRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
 use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload, OutboxSource};
@@ -275,9 +275,9 @@ fn audit_domain() -> (AuditDomain<TracingAuthAuditSink>, CapturingVerifier) {
     let verifier = CapturingVerifier::default();
     let hasher = AuditChainHasher::new(verifier.clone(), MacKey::from_bytes(AUDIT_KEY.to_vec()))
         .expect("32B audit key satisfies MIN_KEY_LEN");
-    let repo: Arc<DynAuditRepo<'static>> =
-        Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)));
-    let domain = AuditDomain::new(repo, None, TracingAuthAuditSink, Arc::new(SystemClock));
+    let provider = Arc::new(InMemAuditRepo::new(hasher));
+    let read_repo: Arc<DynAuditReadRepo<'static>> = Arc::from(DynAuditReadRepo::new_box(provider));
+    let domain = AuditDomain::new(read_repo, None, TracingAuthAuditSink, Arc::new(SystemClock));
     (domain, verifier)
 }
 

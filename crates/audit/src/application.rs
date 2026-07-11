@@ -60,8 +60,8 @@ use primitives::ListenerKind;
 
 use crate::domain::{AuditEntry, AuditError, AuditOutcome, ResourceRef};
 use crate::ports::{
-    AuditAdminRepo, AuditListResult, AuditPage, AuditRecord, AuditRepo, CrossTenantReadScope,
-    DynAuditAdminRepo, DynAuditRepo, TenantRepoScope,
+    AuditAdminRepo, AuditListResult, AuditPage, AuditReadRepo, AuditRecord, CrossTenantReadScope,
+    DynAuditAdminRepo, DynAuditReadRepo, TenantRepoScope,
 };
 
 /// 本域 DomainId（在 generated event spec 中筛选本域那条订阅；非 wire 元数据，是本域身份）。
@@ -493,7 +493,7 @@ fn target_page_from_request(
 
 /// Tenant-scoped admin read. Target tenant input is not part of this wire shape.
 async fn list_entries(
-    repo: Arc<DynAuditRepo<'static>>,
+    repo: Arc<DynAuditReadRepo<'static>>,
     authenticated: Option<httpserve::Authenticated>,
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
     request: AuditListEntriesRequest,
@@ -815,18 +815,17 @@ fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(),
     reg.subscriber(event.contract_id(), event.topic(), spec.consumer(), group)
 }
 
-/// audit 域 bootstrap 生命周期：声明 session-created 订阅 + admin 读路由组。
+/// audit 域 bootstrap 生命周期：声明 durable 订阅元数据 + admin 读路由组。
 ///
-/// 持 erased [`Arc<DynAuditRepo>`](crate::ports::DynAuditRepo)（ADR-005 Option 2 域形 repo port 注入；组合根选
-/// provider：prod postgres `PgAuditRepo` / demo in-mem [`crate::internal::mem::InMemAuditRepo`]）——订阅 handler +
-/// admin 读路由 clone 共享**同一链 store**（故 `Arc`，`DynAuditRepo: Send + Sync`）。链 HMAC key 强度 fail-fast
+/// 本 ambient domain 只持 erased read capability；真实 durable append 由 postgres adapter 的 classified
+/// ConsumerTx capability 执行，并与 inbox commit 保持同一事务。链 HMAC key 强度 fail-fast
 /// 在组合根构造 [`AuditChainHasher`](crate::ports::AuditChainHasher) 时收口（`new` 返回 `Option`，弱 key → `None`），
 /// 不在本域——本域只消费已装配的 erased provider。
 pub struct AuditDomain<S>
 where
     S: diport::AuditSink + Send + Sync + 'static,
 {
-    repo: Arc<DynAuditRepo<'static>>,
+    read_repo: Arc<DynAuditReadRepo<'static>>,
     admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
     audit_sink: Arc<S>,
     audit_clock: Arc<dyn diport::Clock>,
@@ -841,13 +840,13 @@ where
     /// `admin_repo=None` 表示未配置 `rss_audit_admin` pool；普通 scoped read 不受影响，独立
     /// `/tenants/{tenantId}/entries` privileged route fail-closed 为 501。
     pub fn new(
-        repo: Arc<DynAuditRepo<'static>>,
+        read_repo: Arc<DynAuditReadRepo<'static>>,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         audit_sink: S,
         audit_clock: Arc<dyn diport::Clock>,
     ) -> Self {
         Self {
-            repo,
+            read_repo,
             admin_repo,
             audit_sink: Arc::new(audit_sink),
             audit_clock,
@@ -868,7 +867,7 @@ where
         register_audit_subscriber(reg, POLICY_UPDATED_SPEC)?;
 
         // admin 读路由组（Admin listener，typed marker；operator/管理面，非业务对外 Primary）。
-        let scoped_repo = self.repo.clone();
+        let scoped_repo = self.read_repo.clone();
         let target_deps = TargetAuditReadDeps {
             admin_repo: self.admin_repo.clone(),
             audit_sink: self.audit_sink.clone(),
@@ -947,6 +946,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::{AuditWriteRepo, DynAuditWriteRepo};
 
     use axum::http::StatusCode;
     use std::future::Future;
@@ -969,15 +969,67 @@ mod tests {
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
     const AUDIT_TENANT_ENTRIES_PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";
 
-    /// erased in-mem 审计仓储（订阅 + 路由共享形：`Arc<DynAuditRepo>`，同生产装配路径）。
-    fn repo() -> Arc<DynAuditRepo<'static>> {
-        Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(keyed_hasher(
-            0x5a,
-        ))))
+    #[derive(Clone)]
+    struct TestRepo {
+        read: Arc<DynAuditReadRepo<'static>>,
+        write: Arc<DynAuditWriteRepo<'static>>,
+    }
+
+    impl TestRepo {
+        fn from_provider<T>(provider: Arc<T>) -> Self
+        where
+            T: AuditReadRepo + AuditWriteRepo + 'static,
+        {
+            Self {
+                read: Arc::from(DynAuditReadRepo::new_box(Arc::clone(&provider))),
+                write: Arc::from(DynAuditWriteRepo::new_box(provider)),
+            }
+        }
+
+        fn read_only<T>(provider: T) -> Self
+        where
+            T: AuditReadRepo + 'static,
+        {
+            struct NoopWrite;
+            impl AuditWriteRepo for NoopWrite {
+                async fn append(
+                    &self,
+                    _scope: TenantRepoScope,
+                    _record: AuditRecord,
+                ) -> Result<(), AuditError> {
+                    Ok(())
+                }
+            }
+            Self {
+                read: Arc::from(DynAuditReadRepo::new_box(provider)),
+                write: Arc::from(DynAuditWriteRepo::new_box(NoopWrite)),
+            }
+        }
+
+        async fn append(
+            &self,
+            scope: TenantRepoScope,
+            record: AuditRecord,
+        ) -> Result<(), AuditError> {
+            self.write.append(scope, record).await
+        }
+
+        async fn list(
+            &self,
+            scope: TenantRepoScope,
+            page: AuditPage,
+        ) -> Result<AuditListResult, AuditError> {
+            self.read.list(scope, page).await
+        }
+    }
+
+    /// Shared provider exposed through independent read and write capability wrappers.
+    fn repo() -> TestRepo {
+        TestRepo::from_provider(Arc::new(InMemAuditRepo::new(keyed_hasher(0x5a))))
     }
 
     async fn append_event_for_test(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         kind: AuditEventKind,
         message: Message,
     ) -> Result<(), String> {
@@ -1015,16 +1067,16 @@ mod tests {
         Arc::new(TestClock)
     }
 
-    fn domain(repo: Arc<DynAuditRepo<'static>>) -> AuditDomain<NoopAuditSink> {
-        AuditDomain::new(repo, None, audit_sink(), audit_clock())
+    fn domain(repo: TestRepo) -> AuditDomain<NoopAuditSink> {
+        AuditDomain::new(repo.read, None, audit_sink(), audit_clock())
     }
 
     struct DelegatingAdminRepo {
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: Arc<DynAuditReadRepo<'static>>,
     }
 
     impl DelegatingAdminRepo {
-        fn new(repo: Arc<DynAuditRepo<'static>>) -> Self {
+        fn new(repo: Arc<DynAuditReadRepo<'static>>) -> Self {
             Self { repo }
         }
     }
@@ -1077,8 +1129,10 @@ mod tests {
         }
     }
 
-    fn admin_repo(repo: Arc<DynAuditRepo<'static>>) -> Arc<DynAuditAdminRepo<'static>> {
-        Arc::from(DynAuditAdminRepo::new_box(DelegatingAdminRepo::new(repo)))
+    fn admin_repo(repo: TestRepo) -> Arc<DynAuditAdminRepo<'static>> {
+        Arc::from(DynAuditAdminRepo::new_box(DelegatingAdminRepo::new(
+            repo.read,
+        )))
     }
 
     #[derive(Default)]
@@ -1808,13 +1862,13 @@ mod tests {
 
     /// 在注入 ctx tenant 的 Router 上 oneshot 一个 GET（参数绑定 + 状态码 + 响应体）。
     #[allow(clippy::expect_used)]
-    async fn get_entries(repo: Arc<DynAuditRepo<'static>>, query: &str) -> (StatusCode, Vec<u8>) {
+    async fn get_entries(repo: TestRepo, query: &str) -> (StatusCode, Vec<u8>) {
         get_entries_with(repo, None, Some(default_admin_principal()), query).await
     }
 
     #[allow(clippy::expect_used)]
     async fn get_entries_with(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         principal: Option<Arc<authn::Principal>>,
         query: &str,
@@ -1824,7 +1878,7 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     async fn get_entries_with_sink<S>(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         principal: Option<Arc<authn::Principal>>,
         audit_sink: S,
@@ -1847,7 +1901,7 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     async fn get_entries_with_sink_and_authorizer<S>(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         principal: Option<Arc<authn::Principal>>,
         audit_sink: S,
@@ -1882,7 +1936,7 @@ mod tests {
                 axum::routing::get(
                     move |headers: axum::http::HeaderMap,
                           q: Result<Query<AuditListEntriesRequest>, QueryRejection>| {
-                        let repo = repo.clone();
+                        let repo = repo.read.clone();
                         let authenticated = scoped_authenticated.clone();
                         let authorizer = scoped_authorizer.clone();
                         let request_id = headers
@@ -1960,7 +2014,7 @@ mod tests {
     }
 
     async fn get_target_entries_with(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         principal: Option<Arc<authn::Principal>>,
         target: &str,
@@ -1970,7 +2024,7 @@ mod tests {
     }
 
     async fn get_target_entries_with_sink<S>(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         principal: Option<Arc<authn::Principal>>,
         audit_sink: S,
@@ -1993,7 +2047,7 @@ mod tests {
     }
 
     async fn get_target_entries_with_sink_and_authorizer<S>(
-        repo: Arc<DynAuditRepo<'static>>,
+        repo: TestRepo,
         admin_repo: Option<Arc<DynAuditAdminRepo<'static>>>,
         principal: Option<Arc<authn::Principal>>,
         audit_sink: S,
@@ -2142,15 +2196,7 @@ mod tests {
             list_calls: Arc<std::sync::atomic::AtomicUsize>,
         }
 
-        impl AuditRepo for ReadFailsRepo {
-            async fn append(
-                &self,
-                _scope: TenantRepoScope,
-                _record: AuditRecord,
-            ) -> Result<(), AuditError> {
-                Ok(())
-            }
-
+        impl AuditReadRepo for ReadFailsRepo {
             async fn list(
                 &self,
                 _scope: TenantRepoScope,
@@ -2175,10 +2221,9 @@ mod tests {
             ("denied authorizer", Some(denying_authorizer())),
         ] {
             let list_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let repo: Arc<DynAuditRepo<'static>> =
-                Arc::from(DynAuditRepo::new_box(ReadFailsRepo {
-                    list_calls: list_calls.clone(),
-                }));
+            let repo = TestRepo::read_only(ReadFailsRepo {
+                list_calls: list_calls.clone(),
+            });
 
             let (status, body) = get_entries_with_sink_and_authorizer(
                 repo,
@@ -2263,7 +2308,7 @@ mod tests {
         let sink = RecordingAuditSink::ok();
         let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
         let domain = AuditDomain::new(
-            repo.clone(),
+            repo.read.clone(),
             Some(admin_repo(repo)),
             sink.clone(),
             audit_clock(),
@@ -2879,19 +2924,12 @@ mod tests {
     ///
     /// 经 `FailingAuditRepo` 双 直接验 handler 的 `AuditError`→500 映射（repo 层篡改→`HashMismatch` 的实证由
     /// `internal::mem` 的 `list_returns_error_when_chain_tampered` 覆盖；inherent `corrupt_first_entry_hash`
-    /// 在 erased `DynAuditRepo` 不可达，故此处用 typed 双更直接测 handler 行为）。
+    /// 在 erased read wrapper 不可达，故此处用 typed 双更直接测 handler 行为）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn admin_read_fails_closed_when_list_errors() {
         struct FailingAuditRepo;
-        impl AuditRepo for FailingAuditRepo {
-            async fn append(
-                &self,
-                _scope: TenantRepoScope,
-                _record: AuditRecord,
-            ) -> Result<(), AuditError> {
-                Ok(())
-            }
+        impl AuditReadRepo for FailingAuditRepo {
             async fn list(
                 &self,
                 _scope: TenantRepoScope,
@@ -2907,7 +2945,7 @@ mod tests {
                 Err(AuditError::HashMismatch)
             }
         }
-        let repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(FailingAuditRepo));
+        let repo = TestRepo::read_only(FailingAuditRepo);
         let (status, body) = get_entries(repo, "").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
@@ -2919,7 +2957,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn admin_read_without_ctx_fails_closed() {
         let response = list_entries(
-            repo(),
+            repo().read,
             None,
             None,
             AuditListEntriesRequest {

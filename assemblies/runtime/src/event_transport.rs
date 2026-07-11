@@ -39,7 +39,7 @@ use eventexec::{
     backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
 use generated::event::{EventSpec, SubscriberReadiness, SubscriptionSpec};
-use postgres::{DlxPayloadProtector, PgRuntimeDeps, caps};
+use postgres::{AuditConsumerTxEffect as _, DlxPayloadProtector, PgRuntimeDeps, caps};
 use primitives::{HealthCheck, MacKey, ProbeName};
 use settings::SettingsService;
 use vault::VaultKeyProvider;

@@ -1,0 +1,11 @@
+error[E0271]: type mismatch resolving `<DynRoleRepo<'static> as IdentityPortEffect>::Effect == AuthEffect`
+ --> tests/ui/identity_port_effect_role_auth_fail.rs:7:20
+  |
+7 |     require_auth::<DynRoleRepo<'static>>();
+  |                    ^^^^^^^^^^^^^^^^^^^^ expected `AuthEffect`, found `WriteEffect`
+  |
+note: required by a bound in `require_auth`
+ --> tests/ui/identity_port_effect_role_auth_fail.rs:4:39
+  |
+4 | fn require_auth<T: IdentityPortEffect<Effect = AuthEffect> + ?Sized>() {}
+  |                                       ^^^^^^^^^^^^^^^^^^^ required by this bound in `require_auth`

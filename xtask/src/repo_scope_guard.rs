@@ -662,7 +662,7 @@ mod tests {
             pub trait AuditAdminRepoLocal {
                 async fn list_tenant(&self, tenant: TenantId) -> Result<(), Error>;
             }
-            pub trait AuditRepoLocal {
+            pub trait AuditReadRepoLocal {
                 async fn list(&self, scope: TenantRepoScope) -> Result<(), Error>;
             }
             "#,

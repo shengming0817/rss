@@ -24,7 +24,7 @@ steps = [
   "Registry 只声明 generated subscription identity；journey 复用 audit decode + repo append 构造测试 handler，ConsumerBase 驱动 MemBus 订阅流（claim→handle→commit/release 幂等）",
   "LoginService 校验凭据 → mint Session（authn::SessionId::generate 桥接域 SessionId）→ 构造 EventEntry（EventId=独立 opaque UUID，非 session_id）→ 经 SessionLifecycle co-tx 把 session 行 + outbox 行落同一本地事务",
   "（durable）relay CAS 中继 outbox entry 到 broker，message_id=EventId；（demo）MemSessionLifecycle 直发 MemBus，Message.id=EventId",
-  "audit 消费路径以 EventId 幂等去重（ConsumerBase claim）后解码 payload → AuditRecord → AuditRepo.append",
+  "audit 消费路径以 EventId 幂等去重（ConsumerBase claim）后解码 payload → AuditRecord → AuditWriteRepo.append",
 ]
 
 # 验收断言（通过判据）。

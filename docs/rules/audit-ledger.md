@@ -57,9 +57,12 @@ entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
 
 ## 持久化与跨租户读
 
-本 crate 以 in-mem 每租户子链 store 实现仓储 I/O 类型（`InMemAuditRepo` in `internal/mem`，无 port trait，YAGNI）+ 确定性测试 verifier。
+本 crate 以 in-mem 每租户子链 store 实现 `AuditWriteRepo` + `AuditReadRepo`（`InMemAuditRepo` in `internal/mem`）+ 确定性测试 verifier。
 生产持久化由 `adapters/postgres` provider 承载：每租户 genesis、advisory-lock 串行 append、FORCE RLS、
 `(tenant_id, seq)` 唯一，读路径复用同一 keyed HMAC 链验证语义。
+普通仓储入口通过共享 `Arc<PgAuditRepo>` 分别擦除为 `DynAuditWriteRepo` / `DynAuditReadRepo`；生产事件
+订阅不经过 ambient `AuditDomain` 的仓储字段，而由 owner-sealed `PgAuditConsumerTx` 在同一个 PostgreSQL
+事务内完成链 append 与 inbox commit，其公开 handler 擦除路径固定分类为 `WriteEffect`。
 
 **跨租户 admin 读**只支持“指定租户”读取
 （`GET /api/v1/audit/tenants/{tenantId}/entries`），不提供全租户全局列表。旧
@@ -88,8 +91,8 @@ rss audit-ledger verify \
 该命令只验证一个指定 tenant 的完整链，不提供 `--all-tenants`、`--namespace` 或旧 alias。当前
 `audit_entries` schema 没有 namespace 维度；接受 namespace flag 会制造虚假隔离语义，因此必须 fail-closed。
 
-命令使用 `AuditAdminRepo::verify_tenant(tenant: TenantId, batch: vocab::Limit)`，而不是 append-capable
-`AuditRepo`。Postgres 实现只经 `rss_audit_admin` 只读池分页扫描整条 tenant chain：任何 seq gap / dup、
+命令使用 `AuditAdminRepo::verify_tenant(tenant: TenantId, batch: vocab::Limit)`，而不是 tenant-scoped
+`AuditReadRepo` / `AuditWriteRepo`。Postgres 实现只经 `rss_audit_admin` 只读池分页扫描整条 tenant chain：任何 seq gap / dup、
 prev 链接错误、entry_hash mismatch 或混租户行进入窗口都返回 `AuditError`。`verify_tail` 仍只是 bootstrap /
 诊断用的尾部窗口验证，不能代表 full-chain verify。
 

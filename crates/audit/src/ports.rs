@@ -6,11 +6,10 @@
 //! 单向）。派发与 `identity` / `settings` 域形 port 同范式：`#[trait_variant::make(X: Send)]` Send 变体 +
 //! `#[dynosaur(...)]` `DynX`。
 //!
-//! **注入用 `Arc<DynAuditRepo>`（非 `Box`）**：订阅 handler（session→链 append）与 admin 读路由 clone 共享**同一
-//! 链 store**（in-mem 同一 `Mutex<State>` / postgres 同一池），故基 trait 带 `Send + Sync` 超 trait ⇒ erased
-//! `DynAuditRepo` 须 `Send + Sync` 以使 `Arc<DynAuditRepo>` 可被 spawn 的订阅 future / axum handler 闭包持有。
+//! **注入用独立 `Arc<DynAuditWriteRepo>` / `Arc<DynAuditReadRepo>`**：组合根从同一 `Arc<Provider>` 构造
+//! wrapper，共享链 store，同时静态收窄订阅与路由能力。
 //! 跨租户 admin read 使用独立 [`AuditAdminRepo`] port，只暴露 target-tenant 读能力，不复用 append-capable
-//! [`AuditRepo`]，避免把 SuperAdmin 读路径误接到可写 provider。
+//! tenant-scoped ports，避免把 SuperAdmin 读路径误接到普通 provider。
 //!
 //! 跨 crate 可见性：port 须 `pub`（独立 adapter crate impl）；签名实体（[`AuditEntry`] / [`EntryHash`] /
 //! [`ResourceRef`] / [`AuditOutcome`] / [`AuditError`] / [`AuditChainHasher`] + DB funnel）经下方 `pub use`
@@ -121,7 +120,7 @@ impl CrossTenantReadScope {
 // 仓储 I/O 类型（跨 in-mem / postgres provider 共用；字段已 typed 自校验 ⇒ pub 字段无需二次 funnel）
 // ---------------------------------------------------------------------------
 
-/// 未封链的审计内容（handler 构造 → [`AuditRepo::append`] 时原子封链：分配 seq、链接 prev、算 entry_hash）。
+/// 未封链的审计内容（handler 构造 → [`AuditWriteRepo::append`] 时原子封链：分配 seq、链接 prev、算 entry_hash）。
 ///
 /// 字段 `pub`——各字段已 typed 自校验（`TenantId`/`Action`/`UserId` 经各自 funnel），无 raw `String` 需二次
 /// 构造 funnel；append impl 直接读字段封链。
@@ -170,38 +169,24 @@ pub struct AuditLedgerVerifyReport {
 }
 
 // ---------------------------------------------------------------------------
-// AuditRepo —— 域形 repo DI port（trait_variant Send 变体 + dynosaur DynAuditRepo）
+// AuditWriteRepo / AuditReadRepo —— 最小能力域形 DI ports
 // ---------------------------------------------------------------------------
 
-/// 审计仓储域形 DI port（async；provider 可换：prod `postgres` / test in-mem）。
-///
-/// 公开 [`AuditRepo`] 是 **Send 变体**（adapter `impl AuditRepo for ...`），[`DynAuditRepo`] 是其
-/// dyn-compatible wrapper（组合根经 `Arc<DynAuditRepo>` 注入——订阅 handler + admin 读路由 clone 共享同一链
-/// store）。基 trait [`AuditRepoLocal`] 带 `Send + Sync` 超 trait：erased `DynAuditRepo` 须 `Send + Sync`，使
-/// `Arc<DynAuditRepo>` 可被 spawn 的订阅 future / axum handler 闭包持有（[`crate::AuditDomain`] 注入即此形）。
-///
-/// **租户隔离由签名承载（fail-closed）**：[`list`](AuditRepoLocal::list) / [`verify_tail`](AuditRepoLocal::verify_tail)
-/// 接 [`TenantRepoScope`] 作 store scope（postgres 经 `SET LOCAL` + FORCE RLS）。**读路径完整性 fail-closed**：
-/// `list` 内增量 [`verify_window`](AuditChainHasher::verify_window)（窗口 + 1 前驱，非全扫），篡改 → `Err`
-/// （handler 映 500，不下发脏数据）。
-///
-/// dyn-safe（ADR-003 §4.6）：方法 `&self`、参数/返回为具体类型、supertrait `Send + Sync`。归属为域形 port
-/// （签名引用 [`AuditRecord`] / [`AuditEntry`]）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
-///
-/// ⚠ **方法集 = 本轮生产接缝**（append 订阅写 / list admin 读 / verify_tail bootstrap 自检）。点查
-/// `get_by_id`（per-entry 可寻址 id）随框架 manifest 多端点扩展 + get-by-id 端点 follow-up 落地（YAGNI：本轮
-/// 无 handler 消费方）。
-#[trait_variant::make(AuditRepo: Send)]
-#[dynosaur(pub DynAuditRepo = dyn(box) AuditRepo, bridge(dyn))]
+/// 审计追加能力。订阅路径只接收该 capability，不能读取链内容。
+#[trait_variant::make(AuditWriteRepo: Send)]
+#[dynosaur(pub DynAuditWriteRepo = dyn(box) AuditWriteRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `AuditRepo` 变体 + dynosaur
-// `DynAuditRepo` 承载（DI 注入走 Send wrapper）。`Send + Sync` 超 trait 使 `Arc<DynAuditRepo>` 可共享
-// （订阅 + 路由），与 identity/settings 域形 port 同范式（ADR-003/ADR-005）。
-pub trait AuditRepoLocal: Send + Sync {
+pub trait AuditWriteRepoLocal: Send + Sync {
     /// **原子封链 append**：分配 seq、链接 prev、算 entry_hash、持久化（provider 内串行——in-mem `Mutex` /
     /// postgres advisory-lock + `(tenant, seq)` 唯一兜底）。
     async fn append(&self, scope: TenantRepoScope, record: AuditRecord) -> Result<(), AuditError>;
+}
 
+/// 审计读取能力。LocalOnly ambient 路由只接收该 capability，不能追加记录。
+#[trait_variant::make(AuditReadRepo: Send)]
+#[dynosaur(pub DynAuditReadRepo = dyn(box) AuditReadRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait AuditReadRepoLocal: Send + Sync {
     /// 按租户分页列出审计条目（读路径**增量验证**返回窗口 + 1 前驱，篡改 fail-closed → `Err`）。
     async fn list(
         &self,
@@ -213,13 +198,89 @@ pub trait AuditRepoLocal: Send + Sync {
     async fn verify_tail(&self, scope: TenantRepoScope, limit: u32) -> Result<(), AuditError>;
 }
 
+impl<T> AuditWriteRepo for std::sync::Arc<T>
+where
+    T: AuditWriteRepo + ?Sized,
+{
+    async fn append(&self, scope: TenantRepoScope, record: AuditRecord) -> Result<(), AuditError> {
+        T::append(self, scope, record).await
+    }
+}
+
+impl<T> AuditReadRepo for std::sync::Arc<T>
+where
+    T: AuditReadRepo + ?Sized,
+{
+    async fn list(
+        &self,
+        scope: TenantRepoScope,
+        page: AuditPage,
+    ) -> Result<AuditListResult, AuditError> {
+        T::list(self, scope, page).await
+    }
+
+    async fn verify_tail(&self, scope: TenantRepoScope, limit: u32) -> Result<(), AuditError> {
+        T::verify_tail(self, scope, limit).await
+    }
+}
+
+mod effect_sealed {
+    pub trait Sealed {}
+}
+
+/// Canonical audit port effect classification. Implementations are owner-sealed.
+pub trait AuditPortEffect: effect_sealed::Sealed {
+    /// Strongest capability exposed by this injected port.
+    type Effect: diport::PortEffectClass;
+    /// Whether the injected port can cross a tenant boundary.
+    type Privilege: diport::PortPrivilegeClass;
+}
+
+macro_rules! classify_audit_port {
+    ($port:ty => $effect:ty, $privilege:ty) => {
+        impl effect_sealed::Sealed for $port {}
+        impl AuditPortEffect for $port {
+            type Effect = $effect;
+            type Privilege = $privilege;
+        }
+
+        const _: fn() = || {
+            fn assert_effect<T, E, P>()
+            where
+                T: AuditPortEffect<Effect = E, Privilege = P> + ?Sized,
+                E: diport::PortEffectClass,
+                P: diport::PortPrivilegeClass,
+            {
+            }
+
+            assert_effect::<$port, $effect, $privilege>();
+        };
+    };
+}
+
+classify_audit_port!(DynAuditReadRepo<'_> => diport::ReadEffect, diport::LocalPrivilege);
+classify_audit_port!(DynAuditWriteRepo<'_> => diport::WriteEffect, diport::LocalPrivilege);
+classify_audit_port!(DynAuditAdminRepo<'_> => diport::ReadEffect, diport::CrossTenantPrivilege);
+
+impl<T: AuditPortEffect + ?Sized> effect_sealed::Sealed for std::sync::Arc<T> {}
+impl<T: AuditPortEffect + ?Sized> AuditPortEffect for std::sync::Arc<T> {
+    type Effect = T::Effect;
+    type Privilege = T::Privilege;
+}
+
+impl<T: AuditPortEffect + ?Sized> effect_sealed::Sealed for Box<T> {}
+impl<T: AuditPortEffect + ?Sized> AuditPortEffect for Box<T> {
+    type Effect = T::Effect;
+    type Privilege = T::Privilege;
+}
+
 // ---------------------------------------------------------------------------
 // AuditAdminRepo —— 跨租户指定租户只读 port
 // ---------------------------------------------------------------------------
 
 /// 跨租户 admin audit read 的只读 provider。
 ///
-/// 与 [`AuditRepo`] 分开是刻意的 capability 收窄：SuperAdmin target-tenant HTTP read 只需要读取指定租户
+/// 与 tenant-scoped read/write ports 分开是刻意的 capability 收窄：SuperAdmin target-tenant HTTP read 只需要读取指定租户
 /// 审计链并做完整性校验；operator ledger verify 需要全链验证；二者都不需要 append / write 能力。
 /// postgres provider 使用专用 `rss_audit_admin` pool，经 `SET LOCAL rss.tenant_id = targetTenant` 复用现有
 /// FORCE RLS policy。
@@ -244,18 +305,18 @@ pub trait AuditAdminRepoLocal: Send + Sync {
 
 #[cfg(test)]
 mod smoke {
-    //! build smoke：域形 async repo port 可 native-AFIT impl，经 `Arc<DynAuditRepo>` 装入且 wrapper
+    //! build smoke：域形 async repo port 可 native-AFIT impl，经独立 read/write wrapper 装入且
     //! **`Send + Sync`**（订阅 future / axum handler 闭包跨线程共享所必需，PORT-SHAPE 同 identity）。
     use std::sync::Arc;
 
     use super::{
         AuditAdminRepo, AuditError, AuditLedgerVerifyReport, AuditListResult, AuditPage,
-        AuditRecord, AuditRepo, CrossTenantReadScope, DynAuditAdminRepo, DynAuditRepo, TenantId,
-        TenantRepoScope,
+        AuditReadRepo, AuditRecord, AuditWriteRepo, CrossTenantReadScope, DynAuditAdminRepo,
+        DynAuditReadRepo, DynAuditWriteRepo, TenantId, TenantRepoScope,
     };
 
     struct NoopAuditRepo;
-    impl AuditRepo for NoopAuditRepo {
+    impl AuditWriteRepo for NoopAuditRepo {
         async fn append(
             &self,
             _scope: TenantRepoScope,
@@ -263,6 +324,8 @@ mod smoke {
         ) -> Result<(), AuditError> {
             todo!()
         }
+    }
+    impl AuditReadRepo for NoopAuditRepo {
         async fn list(
             &self,
             _scope: TenantRepoScope,
@@ -300,11 +363,15 @@ mod smoke {
 
     fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
-    // PORT-SHAPE：native-AFIT impl 经 `new_box` → `Arc<DynAuditRepo>`，wrapper `Send + Sync`（不调方法 → 不触 `todo!()`）。
+    // PORT-SHAPE：native-AFIT impl 经 `new_box` 装入两个最小能力 wrapper。
     #[test]
     fn audit_repo_impl_loads_into_arc_dyn_send_sync() {
-        let repo: Arc<DynAuditRepo<'static>> = Arc::from(DynAuditRepo::new_box(NoopAuditRepo));
-        assert_send_sync(&repo);
+        let write: Arc<DynAuditWriteRepo<'static>> =
+            Arc::from(DynAuditWriteRepo::new_box(NoopAuditRepo));
+        let read: Arc<DynAuditReadRepo<'static>> =
+            Arc::from(DynAuditReadRepo::new_box(NoopAuditRepo));
+        assert_send_sync(&write);
+        assert_send_sync(&read);
     }
 
     #[test]

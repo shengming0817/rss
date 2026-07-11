@@ -1,4 +1,4 @@
-//! audit::internal::mem — in-mem 每租户子链 store（`AuditRepo` 实现）。
+//! audit::internal::mem — in-mem 每租户子链 store（read/write ports 实现）。
 //!
 //! 单进程占位实现（域 crate + 测试自洽）：每租户一条 `Vec<AuditEntry>` append-only 子链，`Mutex` 串行化
 //! append（防并发 seq 竞争）。生产 postgres provider 使用 advisory-lock 串行 + FORCE RLS + optional
@@ -11,7 +11,9 @@ use base64::Engine as _;
 use primitives::MacVerifier;
 
 use crate::domain::{AuditChainHasher, AuditEntry, AuditError, EntryHash};
-use crate::ports::{AuditListResult, AuditPage, AuditRecord, AuditRepo, TenantRepoScope};
+use crate::ports::{
+    AuditListResult, AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo, TenantRepoScope,
+};
 
 /// in-mem 状态：每租户 append-only 子链。
 #[derive(Default)]
@@ -19,9 +21,9 @@ struct State {
     chains: HashMap<vocab::TenantId, Vec<AuditEntry>>,
 }
 
-/// in-mem 审计仓储（持 hasher，`Mutex` 串行化 append）——`AuditRepo` 的**in-mem 参考 provider**（demo /
+/// in-mem 审计仓储（持 hasher，`Mutex` 串行化 append）——read/write ports 的**in-mem 参考 provider**（demo /
 /// journeys / 域单测）。生产 durable provider 是 `adapters/postgres` 的 `PgAuditRepo`；组合根经
-/// `Arc::from(DynAuditRepo::new_box(InMemAuditRepo::new(hasher)))` 装配（与 Pg provider 同注入路径）。
+/// 共享 `Arc<Provider>` 分别装入 read/write wrapper（与 Pg provider 同注入路径）。
 pub struct InMemAuditRepo<M: MacVerifier> {
     hasher: AuditChainHasher<M>,
     state: Mutex<State>,
@@ -91,9 +93,8 @@ fn decode_cursor(cursor: &vocab::Cursor) -> Result<usize, AuditError> {
         .map_err(|_| AuditError::InvalidCursor)
 }
 
-// `AuditRepo` 域形 repo port 实现（ADR-005 Option 2，#1230）。futures 在 `M: Send + Sync` 下为 `Send`
-// （trait_variant Send 变体；被订阅 handler / axum handler 跨 await 持有，经 `Arc<DynAuditRepo>` 共享）。
-impl<M> AuditRepo for InMemAuditRepo<M>
+// 域形 repo ports 实现（ADR-005 Option 2，#1230）。futures 在 `M: Send + Sync` 下为 `Send`。
+impl<M> AuditWriteRepo for InMemAuditRepo<M>
 where
     M: MacVerifier + Send + Sync,
 {
@@ -150,11 +151,12 @@ where
         chain.push(sealed);
         Ok(())
     }
+}
 
-    /// 分页列出某租户审计条目（读时全链完整性验证，篡改即 fail-closed 返回 Err）。
-    ///
-    /// **性能注意**：读时对整条租户链 O(n) 全扫验证是本 in-mem 实现的占位语义；
-    /// postgres provider 实现时应做增量尾部验证而非全扫（不应复制本实现的全扫逻辑，见 [`Self::verify_tail`]）。
+impl<M> AuditReadRepo for InMemAuditRepo<M>
+where
+    M: MacVerifier + Send + Sync,
+{
     async fn list(
         &self,
         scope: TenantRepoScope,

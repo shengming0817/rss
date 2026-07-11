@@ -1,0 +1,11 @@
+error[E0271]: type mismatch resolving `<DynRoleRepo<'static> as IdentityPortEffect>::Effect == ReadEffect`
+ --> tests/ui/identity_port_effect_alias_fail.rs:9:20
+  |
+9 |     require_read::<AllegedlyRead>();
+  |                    ^^^^^^^^^^^^^ expected `ReadEffect`, found `WriteEffect`
+  |
+note: required by a bound in `require_read`
+ --> tests/ui/identity_port_effect_alias_fail.rs:6:39
+  |
+6 | fn require_read<T: IdentityPortEffect<Effect = ReadEffect> + ?Sized>() {}
+  |                                       ^^^^^^^^^^^^^^^^^^^ required by this bound in `require_read`

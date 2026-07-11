@@ -3591,7 +3591,8 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     ) = phase_result(
         RuntimePhase::WireDomains,
         async {
-            // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → erased AuditDomain。
+            // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → 独立 read/write wrappers → AuditDomain。
+            // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本接线只收窄 request/subscriber capability。
             let audit_domain = wire_audit(&deps).context("wire audit")?;
             let identity_domain = wire_identity(&deps).context("wire identity")?;
             // settings durable module（#1430 PERSIST-009）：domain 实例持 config 服务 + secret 仓储端口（挂 config-publish /
@@ -3729,7 +3730,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             use crate::routes::{AssembledListener, assemble_authed_routers};
 
             // 装配域路由认证接线（drain registry 路由组，借 &mut——probe 留存供下方 readyz）。
-            // Auth decision audit is a flat durable sink, not the `audit::AuditRepo` hash-chain actor model.
+            // Auth decision audit is a flat durable sink, not the audit ledger hash-chain actor model.
             let auth_audit_sink =
                 httpserve::AuditSinkHandle::new(pg.for_domain::<caps::Audit>().auth_audit_sink());
             let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
@@ -4426,7 +4427,7 @@ mod tests {
     }
 
     struct DelegatingAuditAdminRepo {
-        repo: Arc<audit::ports::DynAuditRepo<'static>>,
+        repo: Arc<audit::ports::DynAuditReadRepo<'static>>,
     }
 
     impl audit::ports::AuditAdminRepo for DelegatingAuditAdminRepo {
@@ -4435,7 +4436,7 @@ mod tests {
             scope: audit::ports::CrossTenantReadScope,
             page: audit::ports::AuditPage,
         ) -> Result<audit::ports::AuditListResult, audit::ports::AuditError> {
-            use audit::ports::AuditRepo as _;
+            use audit::ports::AuditReadRepo as _;
 
             let tenant = scope.target();
 
@@ -4449,7 +4450,7 @@ mod tests {
             tenant: vocab::TenantId,
             batch: vocab::Limit,
         ) -> Result<audit::ports::AuditLedgerVerifyReport, audit::ports::AuditError> {
-            use audit::ports::AuditRepo as _;
+            use audit::ports::AuditReadRepo as _;
 
             let mut cursor = None;
             let mut checked_entries = 0u64;
@@ -4567,20 +4568,29 @@ mod tests {
         })
     }
 
+    struct TestAuditRepos {
+        read: Arc<audit::ports::DynAuditReadRepo<'static>>,
+        write: Arc<audit::ports::DynAuditWriteRepo<'static>>,
+    }
+
     #[allow(clippy::expect_used)]
-    fn test_audit_repo() -> Arc<audit::ports::DynAuditRepo<'static>> {
+    fn test_audit_repo() -> TestAuditRepos {
         let hasher = audit::ports::AuditChainHasher::new(
             RustCryptoMacVerifier,
             MacKey::from_bytes(vec![0x5a; 32]),
         )
         .expect("audit chain hasher");
-        Arc::from(audit::ports::DynAuditRepo::new_box(
-            audit::InMemAuditRepo::new(hasher),
-        ))
+        let provider = Arc::new(audit::InMemAuditRepo::new(hasher));
+        TestAuditRepos {
+            read: Arc::from(audit::ports::DynAuditReadRepo::new_box(Arc::clone(
+                &provider,
+            ))),
+            write: Arc::from(audit::ports::DynAuditWriteRepo::new_box(provider)),
+        }
     }
 
     fn test_audit_admin_repo(
-        repo: Arc<audit::ports::DynAuditRepo<'static>>,
+        repo: Arc<audit::ports::DynAuditReadRepo<'static>>,
     ) -> Arc<audit::ports::DynAuditAdminRepo<'static>> {
         Arc::from(audit::ports::DynAuditAdminRepo::new_box(
             DelegatingAuditAdminRepo { repo },
@@ -4589,10 +4599,10 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     async fn append_sensitive_audit_record(
-        repo: &Arc<audit::ports::DynAuditRepo<'static>>,
+        repo: &Arc<audit::ports::DynAuditWriteRepo<'static>>,
         tenant: vocab::TenantId,
     ) {
-        use audit::ports::AuditRepo as _;
+        use audit::ports::AuditWriteRepo as _;
 
         repo.append(
             AuditTenantRepoScope::for_test(tenant),
@@ -4669,11 +4679,11 @@ mod tests {
         let tenant =
             vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
         let audit_repo = test_audit_repo();
-        append_sensitive_audit_record(&audit_repo, tenant).await;
+        append_sensitive_audit_record(&audit_repo.write, tenant).await;
         let identity_domain = test_identity_domain_with_audit_role(tenant);
         let audit_domain = audit::AuditDomain::new(
-            Arc::clone(&audit_repo),
-            Some(test_audit_admin_repo(Arc::clone(&audit_repo))),
+            Arc::clone(&audit_repo.read),
+            Some(test_audit_admin_repo(Arc::clone(&audit_repo.read))),
             TracingAuthAuditSink,
             Arc::new(SystemClock),
         );

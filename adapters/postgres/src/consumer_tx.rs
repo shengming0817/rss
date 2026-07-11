@@ -29,6 +29,27 @@ pub struct PgAuditConsumerTx<M: MacVerifier> {
     kind: AuditEventKind,
 }
 
+mod audit_consumer_tx_effect_sealed {
+    pub trait Sealed {}
+}
+
+/// Canonical effect classification and the only public erasure path for the durable audit
+/// consumer transaction capability.
+///
+/// The trait is sealed by the postgres adapter, so downstream composition roots can erase a
+/// [`PgAuditConsumerTx`] into an event handler only after the compiler has proved that the typed
+/// capability carries [`diport::WriteEffect`].
+pub trait AuditConsumerTxEffect: audit_consumer_tx_effect_sealed::Sealed {
+    /// Strongest effect exposed by the durable consumer transaction.
+    type Effect: diport::PortEffectClass;
+
+    /// Erase this classified transaction capability into the event executor handler shape.
+    #[must_use]
+    fn into_handler(self) -> ConsumerTxHandlerFn
+    where
+        Self: Sized + AuditConsumerTxEffect<Effect = diport::WriteEffect>;
+}
+
 impl<M> PgAuditConsumerTx<M>
 where
     M: MacVerifier + Send + Sync + 'static,
@@ -57,8 +78,7 @@ where
         }
     }
 
-    #[must_use]
-    pub fn into_handler(self) -> ConsumerTxHandlerFn {
+    fn erase_into_handler(self) -> ConsumerTxHandlerFn {
         let this = Arc::new(self);
         Box::new(move |message, ctx, key, lease| {
             let this = Arc::clone(&this);
@@ -136,6 +156,19 @@ where
             return Err(reject_audit_tenant_mismatch(message, &record, ctx));
         }
         Ok(record)
+    }
+}
+
+impl<M> audit_consumer_tx_effect_sealed::Sealed for PgAuditConsumerTx<M> where M: MacVerifier {}
+
+impl<M> AuditConsumerTxEffect for PgAuditConsumerTx<M>
+where
+    M: MacVerifier + Send + Sync + 'static,
+{
+    type Effect = diport::WriteEffect;
+
+    fn into_handler(self) -> ConsumerTxHandlerFn {
+        self.erase_into_handler()
     }
 }
 

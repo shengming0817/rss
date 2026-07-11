@@ -1,6 +1,6 @@
 //! `PgAuditRepo` —— audit 审计链仓储的 PostgreSQL adapter（#1230 Part A step 5）。
 //!
-//! impl `audit::ports::AuditRepo`（append / list / verify_tail），作 per-tenant keyed-HMAC 链的
+//! impl `audit::ports::AuditWriteRepo` + `AuditReadRepo`，作 per-tenant keyed-HMAC 链的
 //! durable provider（替换 in-mem `InMemAuditRepo` 于生产路径）。adapter→域 DIP 内向边（postgres 依赖 audit，
 //! 经 deny.toml audit wrapper + `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）。
 //!
@@ -26,8 +26,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use audit::ports::{
     AuditAdminRepo, AuditChainHasher, AuditEntry, AuditError, AuditLedgerVerifyReport,
-    AuditListResult, AuditOutcome, AuditPage, AuditRecord, AuditRepo, CrossTenantReadScope,
-    EntryHash, ResourceRef, TenantId, TenantRepoScope, actor_kind_from_db, actor_kind_to_db,
+    AuditListResult, AuditOutcome, AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo,
+    CrossTenantReadScope, EntryHash, ResourceRef, TenantId, TenantRepoScope, actor_kind_from_db,
+    actor_kind_to_db,
 };
 use base64::Engine as _;
 use primitives::MacVerifier;
@@ -52,7 +53,7 @@ const TABLE: &str = "audit_entries";
 // PgAuditRepo
 // ---------------------------------------------------------------------------
 
-/// audit 审计链仓储的 PostgreSQL adapter（impl [`AuditRepo`]，#1230）。
+/// audit 审计链仓储的 PostgreSQL adapter（impl read/write ports，#1230）。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，同 [`crate::PgRoleRepo`]）clone 构造。
 /// `hasher` 持 keyed HMAC verifier + key（构造器必填，无 key 不可造 hasher，防篡改属性类型层成立）。
@@ -509,10 +510,10 @@ async fn verify_full_in_tx<M: MacVerifier>(
 }
 
 // ---------------------------------------------------------------------------
-// AuditRepo impl
+// AuditWriteRepo / AuditReadRepo impl
 // ---------------------------------------------------------------------------
 
-impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
+impl<M: MacVerifier + Send + Sync + 'static> AuditWriteRepo for PgAuditRepo<M> {
     /// **原子封链 append**：advisory-lock 串行化 → 读 tail → 链接 → INSERT（单事务原子）。
     async fn append(&self, scope: TenantRepoScope, record: AuditRecord) -> Result<(), AuditError> {
         let tenant = scope.tenant();
@@ -536,7 +537,9 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditRepo for PgAuditRepo<M> {
             )
             .await
     }
+}
 
+impl<M: MacVerifier + Send + Sync + 'static> AuditReadRepo for PgAuditRepo<M> {
     /// 按租户分页列出审计条目（读路径**增量验证**窗口+1前驱，篡改 fail-closed → `Err`）。
     async fn list(
         &self,

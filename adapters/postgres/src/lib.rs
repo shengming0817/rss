@@ -71,7 +71,7 @@ pub use config_repo::{
     ConfigValueMaintenanceOptions, ConfigValueMaintenanceReport, ConfigValueProtection,
     ConfigValueProtections, PgConfigRepo, PgConfigValueMaintenance,
 };
-pub use consumer_tx::{PgAuditConsumerTx, PgSettingsConsumerTx};
+pub use consumer_tx::{AuditConsumerTxEffect, PgAuditConsumerTx, PgSettingsConsumerTx};
 pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::{DEAD_LETTER_RETENTION_SECONDS, PgDeadLetterStore};
 pub use dead_letter_payload::DlxPayloadProtector;
@@ -201,7 +201,7 @@ mod smoke {
     //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
     //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
     //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
-    //! AuditRepo on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
+    //! read/write ports on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
     //! PgSessionSweeper concrete maintenance type（#1233，不新增 identity 域端口）；
     //! 去掉任一即编译失败（anti-vacuity）。
     //! INVARIANT: PG-BUNDLE-DOMAIN-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— `caps::Settings` / `caps::Identity` / `caps::Audit` 均满足 sealed `PgDomain`
@@ -228,7 +228,15 @@ mod smoke {
     }
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
     fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
-    fn assert_audit_repo<T: audit::ports::AuditRepo>(_: PhantomData<T>) {}
+    fn assert_audit_repo<T: audit::ports::AuditReadRepo + audit::ports::AuditWriteRepo>(
+        _: PhantomData<T>,
+    ) {
+    }
+    fn assert_audit_consumer_tx_effect<T>(_: PhantomData<T>)
+    where
+        T: super::AuditConsumerTxEffect<Effect = diport::WriteEffect>,
+    {
+    }
     fn assert_send_sync<T: Send + Sync>(_: PhantomData<T>) {}
 
     #[test]
@@ -263,10 +271,14 @@ mod smoke {
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);
         // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
         assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
-        // `PgAuditRepo<TestVerifier>: AuditRepo` 真实 impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。
+        // `PgAuditRepo<TestVerifier>` 真实 read/write impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。
         // TestVerifier 是本地确定性 FNV-1a verifier（MacVerifier impl），足以证明 trait 满足；不执行 body。
         assert_audit_repo(
             PhantomData::<super::PgAuditRepo<super::audit_repo::test_support::TestVerifier>>,
+        );
+        // 真实 durable audit subscriber 在擦除为 ConsumerTxHandlerFn 前必须携带 WriteEffect。
+        assert_audit_consumer_tx_effect(
+            PhantomData::<super::PgAuditConsumerTx<super::audit_repo::test_support::TestVerifier>>,
         );
         // `PgSessionSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke
         // 锁住可进入 runtime worker 的形状。

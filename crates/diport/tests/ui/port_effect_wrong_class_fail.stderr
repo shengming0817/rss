@@ -1,0 +1,11 @@
+error[E0271]: type mismatch resolving `<DynAcker<'static> as DiPortEffect>::Effect == ReadEffect`
+ --> tests/ui/port_effect_wrong_class_fail.rs:6:20
+  |
+6 |     require_read::<DynAcker<'static>>();
+  |                    ^^^^^^^^^^^^^^^^^ expected `ReadEffect`, found `WriteEffect`
+  |
+note: required by a bound in `require_read`
+ --> tests/ui/port_effect_wrong_class_fail.rs:3:42
+  |
+3 | fn require_read<T: ?Sized + DiPortEffect<Effect = ReadEffect>>() {}
+  |                                          ^^^^^^^^^^^^^^^^^^^ required by this bound in `require_read`

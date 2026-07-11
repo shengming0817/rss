@@ -872,7 +872,7 @@ impl PgDomainDeps<caps::Audit> {
 
     /// Flat durable auth decision audit sink (`diport::AuditSink`) for httpserve enforcement.
     ///
-    /// This deliberately stays outside the hash-chain [`audit::ports::AuditRepo`] actor model because auth principals
+    /// This deliberately stays outside the hash-chain audit repository actor model because auth principals
     /// are generic subjects, not only `ids::UserId`.
     #[must_use]
     pub fn auth_audit_sink(&self) -> PgAuthAuditSink {

@@ -98,7 +98,7 @@ deny = [
   # postgres impl ConfigRepo + ConfigUnitOfWork（co-tx，#1249）+ SecretRepo（#1274）——adapter→域 DIP 内向边（Option 2/ADR-005），故加入 settings wrapper；
   # memory impl SecretResolver 是 diport::SecretResolver provider（provider-agnostic infra port）——impl 归 adapter/组合根，与 settings 域形 SecretRepo 不同 crate。
   { crate = "settings", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
-  # postgres impl AuditRepo（append-only per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
+  # postgres impl AuditWriteRepo + AuditReadRepo（per-tenant keyed-HMAC chain + RLS，#1230）——adapter→域 DIP 内向边，故加入 audit wrapper。
   { crate = "audit", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix", "postgres"] },
   { crate = "contractreg", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },
   { crate = "syshealth", wrappers = ["server", "rss", "runtime", "xtask", "journeys", "journeys-fault-matrix"] },

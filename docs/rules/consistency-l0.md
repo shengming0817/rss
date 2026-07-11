@@ -54,11 +54,34 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
 `cargo xtask consistency local-only-effects` 扫描全部 active HTTP LocalOnly 契约。该门只允许
 `auth`/`read`/`projection`，其余 effect 均阻断，并接入 `verify --fast`、`verify` 与 `ci`。
 
+## Port effect classification
+
+Route 声明之外，注入面 port 使用两个正交的闭合轴分类：`Effect` 按其公开方法所能触达的**最强能力**归入
+`read` / `auth` / `write` / `outbox` / `workflow`，`Privilege` 则区分普通本地能力与跨租户能力。混合读写
+port 不能因为包含读方法就降级为 `read`；需要用于 LocalOnly 的读侧必须拆成独立窄 capability。
+
+分类词汇由 `diport` 的 sealed `PortEffectClass` 与 `PortPrivilegeClass` 闭合；`diport`、`identity`、`audit`
+分别用 owner-sealed 分类 trait 为本 crate 当前的 canonical dyn wrapper 固定关联 effect 与 privilege。外部 crate
+不能为这些 wrapper 伪造、覆盖或扩展分类，`Arc` / `Box` 只透明继承内层分类。分类绑定 port 接口而非
+provider 实现，域形 repo 仍留在所属域，避免 `diport` 反向依赖域 crate。
+
+LocalOnly 注入面只允许 `read` 与 `auth`。`auth` 可包含限流、replay 防护等安全门控所必需的内部状态变化；
+业务持久化、撤销写、outbox、直接 publish 与 workflow 不属于该例外。跨租户 read capability 保持准确的
+`ReadEffect`，同时携带 `CrossTenantPrivilege`；LocalOnly 准入必须同时要求 `LocalPrivilege`，不能只检查
+effect 后把跨租户读取当作普通本地 read。
+
+该 marker 证明的是 canonical port 注入面，不声称覆盖 handler 直接使用文件系统、网络 client 或全局状态的
+副作用；route state 的 fail-closed 消费与非 port 副作用检查由 #1693/#1694 继续闭合。
+
 ## Audit route split
 
 `audit.list-entries` 只服务 ambient tenant scoped read，声明 `auth`/`read`/`projection`，不接受
 `tenantId` query。跨租户行为由独立 LocalTx `audit.list-tenant-entries` 承载，避免把 durable audit write
-藏在 L0 声明下。
+藏在 L0 声明下。ambient `AuditDomain` 只注入 `AuditReadRepo`；demo/tests 可显式持有窄
+`AuditWriteRepo`，生产 durable subscriber 则只能经 postgres-owner-sealed `AuditConsumerTxEffect`
+把固定为 `WriteEffect` 的 `PgAuditConsumerTx` 擦除成执行器 handler；擦除方法自身要求关联类型等式，不依赖
+旁路 smoke test。该 handler 保持 audit append 与 inbox commit 同一事务。两条路径均不向 ambient route
+暴露可同时读写的宽 capability。
 
 ## Follow-up boundary
 
@@ -75,4 +98,5 @@ closed enum + `deny_unknown_fields` 负责 Hard 化未知字段和未知 effect�
   consistency/effects；旧平行字段与 generated 镜像类型均已删除。
 - `GeneratedEndpoint` / `GeneratedPrimaryEndpoint` 把 evidence 与 handler 原子绑定，并原样传播到 `RouteMeta`。
 
-#1691/#1693 等继续在该 route proof 基础上补 port 与运行时的进一步可执行证明。
+#1691 已补 owner-sealed port effect 分类与 audit 读写 capability 拆分；#1693 等继续在该 route proof 基础上
+补 state 绑定与运行时的进一步可执行证明。

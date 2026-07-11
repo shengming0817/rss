@@ -32,7 +32,7 @@ authn = { path = "../../crates/authn" }
 # PgRoleRepo impl identity::ports::RoleRepo（roles 表 + tenant scope，#1250）——真实 impl（替换原 #[cfg(test)] RoleRepoEdgeProof）。
 identity = { path = "../../crates/identity" }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml audit wrapper + allows(Adapter,Domain) 放行）。
-# PgAuditRepo impl audit::ports::AuditRepo（append-only per-tenant keyed-HMAC chain + RLS，#1230）——真实 impl。
+# PgAuditRepo impl audit read/write ports（append-only per-tenant keyed-HMAC chain + RLS，#1230）——真实 impl。
 audit = { path = "../../crates/audit" }
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml settings wrapper + allows(Adapter,Domain) 放行）。
 # PgConfigRepo impl settings::ports::ConfigRepo + ConfigUnitOfWork（co-tx，#1249）——真实 impl（非 edge proof）。

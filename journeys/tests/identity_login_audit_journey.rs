@@ -39,7 +39,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use audit::ports::{
-    AuditEventKind, AuditRepo as _, DynAuditRepo, TenantRepoScope, audit_record_from_event_message,
+    AuditEventKind, AuditWriteRepo as _, DynAuditWriteRepo, TenantRepoScope,
+    audit_record_from_event_message,
 };
 use bootstrap::replaydeps::resolve;
 use bootstrap::shutdown::ShutdownStack;
@@ -95,7 +96,7 @@ fn demo_claimer() -> Result<InMemClaimer> {
 }
 
 fn audit_consumer_handler(
-    repo: Arc<DynAuditRepo<'static>>,
+    repo: Arc<DynAuditWriteRepo<'static>>,
 ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
     move |message| {
         let repo = Arc::clone(&repo);
