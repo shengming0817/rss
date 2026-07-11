@@ -1415,12 +1415,27 @@ mod tests {
             Ok(())
         }
 
+        fn cargo_check(&self) -> Result<std::process::Output> {
+            let target = self.0.join("target");
+            crate::cmd::cargo_cmd(
+                crate::cmd::CargoSubcommand::Check,
+                &["--offline"],
+                &[(
+                    "CARGO_TARGET_DIR",
+                    target
+                        .to_str()
+                        .ok_or_else(|| anyhow!("fixture target path is not UTF-8"))?,
+                )],
+                Some(&self.0),
+            )
+            .arg("--manifest-path")
+            .arg(self.0.join("Cargo.toml"))
+            .output()
+            .map_err(Into::into)
+        }
+
         fn assert_compiles_and_is_rejected(&self) -> Result<Vec<Finding>> {
-            let output =
-                crate::cmd::clean_cmd("cargo", &["check", "--offline"], &[], Some(&self.0))
-                    .arg("--manifest-path")
-                    .arg(self.0.join("Cargo.toml"))
-                    .output()?;
+            let output = self.cargo_check()?;
             assert!(
                 output.status.success(),
                 "{}",
@@ -1640,11 +1655,7 @@ mod tests {
     #[test]
     fn complete_green_workspace_compiles_and_closes_the_canonical_mount() -> Result<()> {
         let workspace = WorkspaceFixture::new()?;
-        let output =
-            crate::cmd::clean_cmd("cargo", &["check", "--offline"], &[], Some(&workspace.0))
-                .arg("--manifest-path")
-                .arg(workspace.0.join("Cargo.toml"))
-                .output()?;
+        let output = workspace.cargo_check()?;
         assert!(
             output.status.success(),
             "{}",
@@ -1849,11 +1860,7 @@ mod tests {
                     "ReadState {{ repo: unimplemented!(), #[cfg({cfg})] hidden: unimplemented!() }}"
                 ),
             )?;
-            let output =
-                crate::cmd::clean_cmd("cargo", &["check", "--offline"], &[], Some(&workspace.0))
-                    .arg("--manifest-path")
-                    .arg(workspace.0.join("Cargo.toml"))
-                    .output()?;
+            let output = workspace.cargo_check()?;
             assert!(
                 output.status.success(),
                 "{}",

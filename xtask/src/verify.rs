@@ -1,7 +1,7 @@
 //! `cargo xtask verify` —— 本地全量治理门聚合入口。
 //!
-//! RSS 本地全量治理门。GitHub Actions 以 `ci-meta` / `ci-core` / `ci-security` /
-//! `ci-coverage` 四条 xtask lane 作为合入阻断门；本命令保留为 stable-only 本地快门。
+//! RSS 本地全量治理门。GitHub Actions 以 Meta / Core / Security / Coverage 四类门作为合入阻断，
+//! 其中 Core 拆成单次 prerequisites 与两份 partition tests；本命令保留为 stable-only 本地快门。
 //! 聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
@@ -39,7 +39,7 @@
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow
-//!   精确委托四条 literal xtask lane，Meta/Security 并行且 Core/Coverage 仅依赖 Meta；门归属由
+//!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
 //!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
 //!   `github_ci_workflow_delegates_to_split_xtask_lanes` 强制。
 //! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "verify", source = "code" }—— CI / Integration workflow
@@ -49,7 +49,9 @@
 //! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "verify", source = "code" }—— cache writer 资格必须由
 //!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
-//! INVARIANT: CI-INTEGRATION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_matrix_predicate_green_and_red", anti_vacuity = "github_integration_workflow_has_integration_shard_matrix" }—— Integration caller 必须是精确五值 matrix，逐 shard 委托 reusable workflow，不内联低层门。
+//! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须是闭合、无重复的 committed matrix。
+//! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
+//! INVARIANT: CI-INTEGRATION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_matrix_predicate_green_and_red", anti_vacuity = "github_integration_workflow_has_integration_shard_matrix" }—— Integration caller 必须是精确七行 typed matrix，逐 shard 委托 reusable workflow，不内联低层门。
 
 use crate::ci_lanes::{
     CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
@@ -85,6 +87,8 @@ struct VerifyOpts {
     fast: bool,
     /// 缺外部工具时显式宽限（默认 fail-closed，唯一门不建议）。
     allow_missing_tools: bool,
+    partition: Option<crate::nextest::HashPartition>,
+    nextest_lane: crate::nextest::NextestLane,
 }
 
 /// in-process Rust 门（无外部进程 / 自管子进程）。
@@ -155,6 +159,7 @@ enum InternalCheck {
 enum StepKind {
     Internal(InternalCheck),
     Cargo,
+    Nextest(crate::nextest::CoreTestScope),
 }
 
 /// 单个门步。`program` 恒为 `cargo`，故只存 `args`。
@@ -559,8 +564,8 @@ fn step_clippy_workspace() -> Step {
 fn step_nextest() -> Step {
     Step {
         id: GateId::DefaultNextest,
-        args: &["nextest", "run", "--workspace", "--no-tests=pass"],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::Workspace),
         env: &[],
     }
 }
@@ -578,46 +583,32 @@ fn step_nextest() -> Step {
 fn step_s3_backend_tests() -> Step {
     Step {
         id: GateId::S3BackendTests,
-        args: &["nextest", "run", "-p", "s3", "--features", "backend"],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::S3Backend),
         env: &[],
     }
 }
 fn step_redis_backend_tests() -> Step {
     Step {
         id: GateId::RedisBackendTests,
-        args: &[
-            "nextest",
-            "run",
-            "-p",
-            "redis-adapter",
-            "--features",
-            "backend",
-        ],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::RedisBackend),
         env: &[],
     }
 }
 fn step_oidc_backend_tests() -> Step {
     Step {
         id: GateId::OidcBackendTests,
-        args: &["nextest", "run", "-p", "oidc", "--features", "backend"],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::OidcBackend),
         env: &[],
     }
 }
 fn step_prometheus_backend_tests() -> Step {
     Step {
         id: GateId::PrometheusBackendTests,
-        args: &[
-            "nextest",
-            "run",
-            "-p",
-            "prometheus-adapter",
-            "--features",
-            "backend",
-        ],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::PrometheusBackend),
         env: &[],
     }
 }
@@ -627,16 +618,16 @@ fn step_otel_backend_tests() -> Step {
     // workspace nextest 不编入，按包显式补跑——#1253 让 otel 成为 runtime 生产依赖后，确定性测试须入机器门（同 prometheus 范式）。
     Step {
         id: GateId::OtelBackendTests,
-        args: &["nextest", "run", "-p", "otel", "--features", "backend"],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::OtelBackend),
         env: &[],
     }
 }
 fn step_grpc_backend_tests() -> Step {
     Step {
         id: GateId::GrpcBackendTests,
-        args: &["nextest", "run", "-p", "grpc", "--features", "backend"],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::GrpcBackend),
         env: &[],
     }
 }
@@ -646,8 +637,8 @@ fn step_vault_backend_tests() -> Step {
     // 默认 workspace nextest 不编入，按包显式补跑——否则 azure 无 CI 下这些确定性测试不被任何 gate 实跑。
     Step {
         id: GateId::VaultBackendTests,
-        args: &["nextest", "run", "-p", "vault", "--features", "backend"],
-        kind: StepKind::Cargo,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::VaultBackend),
         env: &[],
     }
 }
@@ -710,16 +701,39 @@ pub(crate) enum PlanTarget {
     Verify,
     CompatibilityCi,
     Lane(CiLane),
+    Core(CoreExecution),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreExecution {
+    Full,
+    Prerequisites,
+    Tests,
 }
 
 fn selected_for(target: PlanTarget, id: GateId) -> bool {
     let spec = id.spec();
     match target {
         PlanTarget::CompatibilityCi => spec.compat() == CompatMembership::Included,
-        PlanTarget::Lane(CiLane::Core) => {
+        PlanTarget::Core(CoreExecution::Full) | PlanTarget::Lane(CiLane::Core) => {
             spec.belongs_to(CiLane::Core)
                 && spec.compat() != CompatMembership::Standalone(StandaloneReason::VerifyOnly)
         }
+        PlanTarget::Core(CoreExecution::Prerequisites) => matches!(
+            id,
+            GateId::BuildAllFeatures | GateId::ClippyAllFeatures | GateId::Dylint
+        ),
+        PlanTarget::Core(CoreExecution::Tests) => matches!(
+            id,
+            GateId::DefaultNextest
+                | GateId::S3BackendTests
+                | GateId::RedisBackendTests
+                | GateId::OidcBackendTests
+                | GateId::PrometheusBackendTests
+                | GateId::OtelBackendTests
+                | GateId::GrpcBackendTests
+                | GateId::VaultBackendTests
+        ),
         PlanTarget::Lane(lane) => spec.belongs_to(lane),
         PlanTarget::Verify => spec.verify_membership() == VerifyMembership::Included,
     }
@@ -760,10 +774,10 @@ fn audit_plan() -> Vec<Step> {
     plan_for(PlanTarget::Lane(CiLane::Nightly))
 }
 
-/// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::clean_cmd`]
+/// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::external_cmd`]
 /// 漏斗构造（CMD-FUNNEL-01；docker 非 cargo 子命令，故不走 [`crate::cmd::tool_available`]）。
 fn docker_available() -> bool {
-    crate::cmd::clean_cmd("docker", &["version"], &[], None)
+    crate::cmd::external_cmd(crate::cmd::ExternalProgram::Docker, &["version"], &[], None)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -776,12 +790,14 @@ const INTEGRATION_ENV: &[(&str, &str)] = &[(
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 )];
 
-fn run_integration_batches(shard: IntegrationShard, root: &Path) -> Result<()> {
+fn run_integration_batches(
+    shard: IntegrationShard,
+    partition: Option<crate::nextest::HashPartition>,
+    root: &Path,
+) -> Result<()> {
     let lane = shard.as_str();
     let batches = integration_shards::batches(shard);
     for (index, batch) in batches.iter().enumerate() {
-        let args = integration_batch_args(batch);
-        let borrowed: Vec<_> = args.iter().map(String::as_str).collect();
         let mode = match batch.scheduling {
             Scheduling::Serial => "serial",
             Scheduling::Parallel => "parallel",
@@ -791,47 +807,22 @@ fn run_integration_batches(shard: IntegrationShard, root: &Path) -> Result<()> {
             index + 1,
             batches.len()
         );
-        run_step(
-            &format!("ci-integration/{lane}"),
-            mode,
-            &borrowed,
-            INTEGRATION_ENV,
-            root,
-        )?;
+        let batch_id = crate::nextest::IntegrationBatchId::new(shard, index + 1)?;
+        crate::nextest::NextestInvocation::for_integration_batch(batch_id, partition)?
+            .run(root, INTEGRATION_ENV)?;
     }
     Ok(())
-}
-
-fn integration_batch_args(batch: &integration_shards::ShardBatch) -> Vec<String> {
-    let mut args = vec![
-        "nextest".to_owned(),
-        "run".to_owned(),
-        "--profile".to_owned(),
-        "integration".to_owned(),
-        "--features".to_owned(),
-        "integration".to_owned(),
-        "--no-tests=fail".to_owned(),
-    ];
-    if batch.scheduling == Scheduling::Serial {
-        args.extend(["--test-threads".to_owned(), "1".to_owned()]);
-    }
-    args.extend(["-p".to_owned(), batch.package.to_owned()]);
-    match batch.kind {
-        integration_shards::TargetKind::Lib => args.push("--lib".to_owned()),
-        integration_shards::TargetKind::Test => {
-            for target in &batch.targets {
-                args.extend(["--test".to_owned(), (*target).to_owned()]);
-            }
-        }
-    }
-    args.extend(["-E".to_owned(), batch.filter.clone()]);
-    args
 }
 
 /// Capability-sharded integration entrypoint. Target coverage is checked from Cargo metadata
 /// before execution; resource requirements and serial/parallel batches come from the same typed
 /// registry. Missing tools and Docker fail closed unless the local-only allowance is explicit.
-pub(crate) fn run_ci_integration(shard: IntegrationShard, allow_missing_tools: bool) -> Result<()> {
+pub(crate) fn run_ci_integration(
+    shard: IntegrationShard,
+    allow_missing_tools: bool,
+    partition: Option<crate::nextest::HashPartition>,
+) -> Result<()> {
+    shard.validate_partition(partition)?;
     let root = workspace_root()?;
     integration_shards::validate_workspace(&root)?;
     let missing = integration_shards::missing_external_resources(shard);
@@ -852,22 +843,31 @@ pub(crate) fn run_ci_integration(shard: IntegrationShard, allow_missing_tools: b
              启动 Docker、提供该 shard 的外部测试资源，或本地显式使用 --allow-missing-tools"
         );
     }
-    let nextest_available = crate::cmd::tool_available("nextest");
-    run_tool_gated(
+    let ran = crate::nextest::run_gated(
         &format!("ci-integration/{shard}"),
-        nextest_available,
         allow_missing_tools,
-        "nextest",
-        "cargo install cargo-nextest --locked",
         "integration shard",
-        || run_integration_batches(shard, &root),
+        || run_integration_batches(shard, partition, &root),
     )?;
-    if nextest_available {
+    if ran.is_some() {
         eprintln!("ci-integration/{shard}: 全部通过");
     } else {
         eprintln!("ci-integration/{shard}: 执行完成（缺 nextest，shard 已跳过）");
     }
     Ok(())
+}
+
+pub(crate) fn run_nextest_replay(
+    shard: IntegrationShard,
+    batch_number: usize,
+    partition: Option<crate::nextest::HashPartition>,
+) -> Result<()> {
+    shard.validate_partition(partition)?;
+    let root = workspace_root()?;
+    integration_shards::validate_workspace(&root)?;
+    let batch_id = crate::nextest::IntegrationBatchId::new(shard, batch_number)?;
+    crate::nextest::NextestInvocation::for_integration_batch(batch_id, partition)?
+        .run(&root, INTEGRATION_ENV)
 }
 
 /// 纯函数：按 opts 产出有序门步计划。`--fast` 裁掉 `needs_compile` 步（fmt+meta+deny 保留）。
@@ -894,17 +894,19 @@ fn resolve_tool(available: bool, allow_missing: bool) -> ToolAction {
 fn run_step(
     lane: &str,
     label: &str,
+    subcommand: crate::cmd::CargoSubcommand,
     args: &[&str],
     env: &[(&str, &str)],
     cwd: &Path,
 ) -> Result<()> {
-    let status = crate::cmd::clean_cmd("cargo", args, env, Some(cwd))
+    let rendered = std::iter::once(subcommand.as_str())
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let status = crate::cmd::cargo_cmd(subcommand, args, env, Some(cwd))
         .status()
         .map_err(|e| {
-            anyhow::anyhow!(
-                "{lane}: 启动门步 `{label}`（cargo {}）失败: {e}",
-                args.join(" ")
-            )
+            anyhow::anyhow!("{lane}: 启动门步 `{label}`（cargo {}）失败: {e}", rendered)
         })?;
     if status.success() {
         return Ok(());
@@ -914,7 +916,7 @@ fn run_step(
         .map_or_else(|| "signal".to_owned(), |c| c.to_string());
     bail!(
         "{lane}: 门步 `{label}` 失败（cargo {} 退出码 {code}）",
-        args.join(" ")
+        rendered
     )
 }
 
@@ -924,27 +926,81 @@ fn run_one(
     step: &Step,
     opts: &VerifyOpts,
     root: &Path,
-    tool_available: impl Fn(&str) -> bool,
+    tool_available: impl Fn(crate::cmd::CargoSubcommand) -> bool,
 ) -> Result<()> {
     let execute = || match step.kind {
         StepKind::Internal(check) => run_internal(check),
-        StepKind::Cargo => run_step(lane, step.label(), step.args, step.env, root),
+        StepKind::Nextest(scope) => {
+            crate::nextest::NextestInvocation::for_core(scope, opts.nextest_lane, opts.partition)
+                .run(root, step.env)
+        }
+        StepKind::Cargo => {
+            let subcommand = match step.id.spec().tool() {
+                ToolRequirement::CargoTool { tool, .. } => tool,
+                ToolRequirement::CargoBuiltin(subcommand) => subcommand,
+                _ => bail!("{}: cargo step 缺 typed subcommand", step.label()),
+            };
+            let args = step
+                .args
+                .strip_prefix(&[subcommand.as_str()])
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{}: typed cargo subcommand 与 argv 漂移", step.label())
+                })?;
+            run_step(lane, step.label(), subcommand, args, step.env, root)
+        }
     };
     match step.id.spec().tool() {
-        ToolRequirement::InProcess | ToolRequirement::CargoBuiltin => execute(),
-        ToolRequirement::CargoTool {
-            probe,
-            install_hint,
-        } => run_tool_gated(
+        ToolRequirement::InProcess | ToolRequirement::CargoBuiltin(_) => execute(),
+        ToolRequirement::Nextest => {
+            crate::nextest::run_gated(lane, opts.allow_missing_tools, step.label(), execute)
+                .map(|_| ())
+        }
+        ToolRequirement::CoverageTools => run_coverage_tools_gated(
             lane,
-            tool_available(probe),
             opts.allow_missing_tools,
-            probe,
+            step.label(),
+            tool_available(crate::cmd::CargoSubcommand::LlvmCovReport),
+            crate::nextest::is_available,
+            execute,
+        ),
+        ToolRequirement::CargoTool { tool, install_hint } => run_tool_gated(
+            lane,
+            tool_available(tool),
+            opts.allow_missing_tools,
+            tool.as_str(),
             install_hint,
             step.label(),
             execute,
         ),
     }
+}
+
+fn run_coverage_tools_gated(
+    lane: &str,
+    allow_missing: bool,
+    label: &str,
+    llvm_cov_available: bool,
+    nextest_available: impl FnOnce() -> bool,
+    on_run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    run_tool_gated(
+        lane,
+        llvm_cov_available,
+        allow_missing,
+        crate::cmd::CargoSubcommand::LlvmCovReport.as_str(),
+        crate::ci_lanes::LLVM_COV_HINT,
+        label,
+        || {
+            crate::nextest::run_gated_with_probe(
+                lane,
+                allow_missing,
+                label,
+                nextest_available,
+                on_run,
+            )
+            .map(|_| ())
+        },
+    )
 }
 
 /// Registry 声明的工具门控分派：探测结果 + 宽限标志经
@@ -1024,6 +1080,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
 }
 
 fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -> Result<()> {
+    crate::nextest::validate_workspace(root)?;
     for (i, step) in plan.iter().enumerate() {
         eprintln!("{lane}: [{}/{}] {}", i + 1, plan.len(), step.label());
         run_one(lane, step, opts, root, crate::cmd::tool_available)?;
@@ -1036,6 +1093,8 @@ pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast,
         allow_missing_tools,
+        partition: None,
+        nextest_lane: crate::nextest::NextestLane::Verify,
     };
     let root = workspace_root()?;
     let plan = verify_plan(&opts);
@@ -1054,6 +1113,8 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
         allow_missing_tools,
+        partition: None,
+        nextest_lane: crate::nextest::NextestLane::CiCore,
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanTarget::CompatibilityCi);
@@ -1063,18 +1124,57 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_lane(lane: CiLane, allow_missing_tools: bool) -> Result<()> {
+pub(crate) fn run_lane(
+    lane: CiLane,
+    allow_missing_tools: bool,
+    partition: Option<crate::nextest::HashPartition>,
+) -> Result<()> {
+    if partition.is_some() {
+        bail!("ci-core 不接受 partition；PR tests 使用 ci-core-tests --partition M/N");
+    }
     let opts = VerifyOpts {
         fast: false,
         allow_missing_tools,
+        partition,
+        nextest_lane: crate::nextest::NextestLane::CiCore,
     };
     let root = workspace_root()?;
-    let plan = plan_for(PlanTarget::Lane(lane));
+    let plan = if lane == CiLane::Core {
+        plan_for(PlanTarget::Core(CoreExecution::Full))
+    } else {
+        plan_for(PlanTarget::Lane(lane))
+    };
     let name = lane.command_name();
     eprintln!("{name}：{} 步", plan.len());
     run_labeled_plan(name, &plan, &opts, &root)?;
     eprintln!("{name}：全部通过");
     Ok(())
+}
+
+pub(crate) fn run_core_execution(
+    execution: CoreExecution,
+    allow_missing_tools: bool,
+    partition: Option<crate::nextest::HashPartition>,
+) -> Result<()> {
+    match (execution, partition) {
+        (CoreExecution::Prerequisites, None) => {}
+        (CoreExecution::Tests, Some(value)) if value.is_two_way() => {}
+        _ => bail!("ci-core-prerequisites 禁止 partition；ci-core-tests 必须传 1/2 或 2/2"),
+    }
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools,
+        partition,
+        nextest_lane: crate::nextest::NextestLane::CiCore,
+    };
+    let root = workspace_root()?;
+    let plan = plan_for(PlanTarget::Core(execution));
+    let name = match execution {
+        CoreExecution::Prerequisites => "ci-core-prerequisites",
+        CoreExecution::Tests => "ci-core-tests",
+        CoreExecution::Full => "ci-core",
+    };
+    run_labeled_plan(name, &plan, &opts, &root)
 }
 
 /// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
@@ -1084,6 +1184,8 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
         fast: false,
         allow_missing_tools,
+        partition: None,
+        nextest_lane: crate::nextest::NextestLane::Verify,
     };
     let root = workspace_root()?;
     let plan = audit_plan();
@@ -1101,6 +1203,8 @@ mod tests {
         VerifyOpts {
             fast,
             allow_missing_tools,
+            partition: None,
+            nextest_lane: crate::nextest::NextestLane::Verify,
         }
     }
 
@@ -1121,7 +1225,7 @@ mod tests {
         );
         let core = labels(&plan_for(PlanTarget::Lane(CiLane::Core)));
         assert_eq!(core.first(), Some(&"build"));
-        assert!(core.contains(&"nextest"));
+        assert!(core.contains(&"default-test-runner"));
         assert!(!core.contains(&"coverage"));
         assert!(!core.contains(&"integration-compile"));
 
@@ -1157,10 +1261,44 @@ mod tests {
     }
 
     #[test]
+    fn core_execution_plans_are_disjoint_and_cover_full_core() {
+        let full = plan_for(PlanTarget::Core(CoreExecution::Full));
+        let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
+        let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
+        assert_eq!(prerequisites.len(), 3);
+        assert_eq!(tests.len(), 8);
+        let prereq_ids = prerequisites
+            .iter()
+            .map(|step| step.id as usize)
+            .collect::<std::collections::BTreeSet<_>>();
+        let test_ids = tests
+            .iter()
+            .map(|step| step.id as usize)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(prereq_ids.is_disjoint(&test_ids));
+        let union = prereq_ids
+            .union(&test_ids)
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(union, full.iter().map(|step| step.id as usize).collect());
+        let scopes = tests
+            .iter()
+            .filter_map(|step| match step.kind {
+                StepKind::Nextest(scope) => Some(scope),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            scopes,
+            crate::nextest::CoreTestScope::ALL.into_iter().collect()
+        );
+    }
+
+    #[test]
     fn ci_lane_compatibility_plan_keeps_43_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
         assert_eq!(plan.len(), 43);
-        assert!(!labels(&plan).contains(&"nextest"));
+        assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -1214,7 +1352,7 @@ mod tests {
                 "build",
                 "integration-compile",
                 "clippy",
-                "nextest",
+                "default-test-runner",
                 "s3-backend-tests",
                 "redis-backend-tests",
                 "oidc-backend-tests",
@@ -1280,7 +1418,7 @@ mod tests {
                 "deny"
             ]
         );
-        for dropped in ["build", "clippy", "nextest", "dylint"] {
+        for dropped in ["build", "clippy", "default-test-runner", "dylint"] {
             assert!(!labels(&plan).contains(&dropped), "fast 不应含 {dropped}");
         }
     }
@@ -1493,10 +1631,14 @@ mod tests {
     }
 
     #[test]
-    fn integration_batch_args_scope_targets_and_threads() {
+    fn integration_batch_args_scope_targets_and_threads() -> anyhow::Result<()> {
+        let partition = crate::nextest::HashPartition::new(1, 2)?;
         for shard in IntegrationShard::ALL {
-            for batch in integration_shards::batches(*shard) {
-                let args = integration_batch_args(&batch);
+            for (index, batch) in integration_shards::batches(*shard).iter().enumerate() {
+                let batch_id = crate::nextest::IntegrationBatchId::new(*shard, index + 1)?;
+                let invocation =
+                    crate::nextest::NextestInvocation::for_integration_batch(batch_id, None)?;
+                let args = invocation.execution_argv();
                 assert!(args.iter().any(|arg| arg == "--no-tests=fail"));
                 assert_eq!(
                     args.windows(2)
@@ -1530,8 +1672,75 @@ mod tests {
                         pair[0] == "-E" && pair[1].as_str() == batch.filter.as_str()
                     })
                 );
+                let partitioned = crate::nextest::NextestInvocation::for_integration_batch(
+                    batch_id,
+                    Some(partition),
+                )
+                .map(|invocation| invocation.execution_argv())
+                .unwrap_or_else(|_| args.clone());
+                if shard.validate_partition(Some(partition)).is_ok() {
+                    assert!(partitioned.iter().any(|arg| arg == "--no-tests=pass"));
+                }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn nextest_probe_registry_is_bidirectionally_bound_to_step_kind() {
+        fn binding_is_valid(requirement: ToolRequirement, is_nextest: bool) -> bool {
+            matches!(requirement, ToolRequirement::Nextest) == is_nextest
+        }
+        for spec in REGISTRY {
+            let step = step_for_id(spec.id());
+            assert!(
+                binding_is_valid(spec.tool(), matches!(step.kind, StepKind::Nextest(_))),
+                "gate {} nextest probe/StepKind 漂移",
+                step.label()
+            );
+        }
+        assert!(!binding_is_valid(ToolRequirement::Nextest, false));
+        assert!(!binding_is_valid(
+            ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
+            true
+        ));
+    }
+
+    #[test]
+    fn cargo_builtin_registry_has_exact_typed_prefixes() {
+        let mut observed = std::collections::BTreeSet::new();
+        for spec in REGISTRY {
+            if let ToolRequirement::CargoBuiltin(subcommand) = spec.tool() {
+                let step = step_for_id(spec.id());
+                assert_eq!(
+                    step.args.first().copied(),
+                    Some(subcommand.as_str()),
+                    "gate {} typed cargo builtin/argv 漂移",
+                    step.label()
+                );
+                observed.insert(subcommand.as_str());
+            }
+        }
+        assert_eq!(observed, ["build", "clippy", "fmt", "test"].into());
+    }
+
+    #[test]
+    fn integration_replay_route_is_closed_and_exact() -> anyhow::Result<()> {
+        let batch_id =
+            crate::nextest::IntegrationBatchId::new(IntegrationShard::EventTransport, 3)?;
+        let invocation = crate::nextest::NextestInvocation::for_integration_batch(
+            batch_id,
+            Some("2/2".parse()?),
+        )?;
+        assert_eq!(
+            invocation.replay_spec(),
+            &crate::nextest::ReplaySpec::Integration {
+                shard: IntegrationShard::EventTransport,
+                batch: 3,
+                partition: Some("2/2".parse()?),
+            }
+        );
+        Ok(())
     }
 
     /// anti-vacuity 红例（INVARIANT VERIFY-AGGREGATE-01）：门步非零退出 ⇒ `Err`，证明门真会 fail。
@@ -1542,7 +1751,8 @@ mod tests {
             run_step(
                 "verify",
                 "redcase",
-                &["zzz-not-a-cargo-subcommand"],
+                crate::cmd::CargoSubcommand::Fmt,
+                &["--zzz-not-a-cargo-flag"],
                 &[],
                 &root
             )
@@ -1555,7 +1765,17 @@ mod tests {
     #[test]
     fn run_step_success_is_ok() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        assert!(run_step("verify", "greencase", &["--version"], &[], &root).is_ok());
+        assert!(
+            run_step(
+                "verify",
+                "greencase",
+                crate::cmd::CargoSubcommand::Fmt,
+                &["--version"],
+                &[],
+                &root
+            )
+            .is_ok()
+        );
         Ok(())
     }
 
@@ -1564,7 +1784,7 @@ mod tests {
         let root = workspace_root()?;
         let plan = [Step {
             id: GateId::Fmt,
-            args: &["--version"],
+            args: &["fmt", "--version"],
             kind: StepKind::Cargo,
             env: &[],
         }];
@@ -1601,7 +1821,7 @@ mod tests {
         let probed = std::cell::Cell::new(false);
         assert!(
             run_one("verify", &step, &opts(false, false), &root, |probe| {
-                assert_eq!(probe, "llvm-cov");
+                assert_eq!(probe, crate::cmd::CargoSubcommand::LlvmCovReport);
                 probed.set(true);
                 false
             })
@@ -1618,6 +1838,31 @@ mod tests {
         let step = missing_coverage_tool_step();
         assert!(run_one("verify", &step, &opts(false, true), &root, |_| false).is_ok());
         Ok(())
+    }
+
+    #[test]
+    fn coverage_tools_require_both_typed_capabilities_before_execution() {
+        for (llvm_cov, nextest, should_run) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let executed = std::cell::Cell::new(false);
+            let result = run_coverage_tools_gated(
+                "ci-coverage",
+                false,
+                "coverage",
+                llvm_cov,
+                || nextest,
+                || {
+                    executed.set(true);
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_ok(), should_run);
+            assert_eq!(executed.get(), should_run);
+        }
     }
 
     fn missing_coverage_tool_step() -> Step {
@@ -1708,7 +1953,7 @@ mod tests {
     fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
         let plan = plan_for(PlanTarget::CompatibilityCi);
         assert!(
-            !labels(&plan).contains(&"nextest"),
+            !labels(&plan).contains(&"default-test-runner"),
             "ci 不应有独立 nextest 步（已并入 coverage）"
         );
         let cov = plan
@@ -1721,10 +1966,7 @@ mod tests {
         ));
         assert!(matches!(
             cov.id.spec().tool(),
-            ToolRequirement::CargoTool {
-                probe: "llvm-cov",
-                ..
-            }
+            ToolRequirement::CoverageTools
         ));
         let pa = plan
             .iter()
@@ -1737,7 +1979,7 @@ mod tests {
         assert!(matches!(
             pa.id.spec().tool(),
             ToolRequirement::CargoTool {
-                probe: "public-api",
+                tool: crate::cmd::CargoSubcommand::PublicApi,
                 ..
             }
         ));
@@ -1806,6 +2048,10 @@ mod tests {
     fn integration_compile_covers_adapters_and_journeys_no_run() {
         let step = step_integration_compile();
         assert_eq!(step.label(), "integration-compile");
+        assert_eq!(
+            step.id.spec().tool(),
+            ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test)
+        );
         assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
         for p in [
             "postgres",
@@ -1831,7 +2077,10 @@ mod tests {
         assert_eq!(deny.args, &["deny", "check", "advisories"]);
         assert!(matches!(
             deny.id.spec().tool(),
-            ToolRequirement::CargoTool { probe: "deny", .. }
+            ToolRequirement::CargoTool {
+                tool: crate::cmd::CargoSubcommand::Deny,
+                ..
+            }
         ));
         Ok(())
     }
@@ -1845,7 +2094,10 @@ mod tests {
         assert_eq!(step.args.first(), Some(&"audit"));
         assert!(matches!(
             step.id.spec().tool(),
-            ToolRequirement::CargoTool { probe: "audit", .. }
+            ToolRequirement::CargoTool {
+                tool: crate::cmd::CargoSubcommand::Audit,
+                ..
+            }
         ));
         assert!(
             !step.needs_compile(),
@@ -2347,6 +2599,7 @@ mod tests {
         uses: Option<String>,
         lane: Option<String>,
         with_fields: Vec<String>,
+        matrix_rows: Option<Vec<Option<(String, String)>>>,
     }
 
     fn reusable_caller_jobs(yaml: &str) -> Vec<ReusableCallerJob> {
@@ -2410,7 +2663,82 @@ mod tests {
                 }
             }
         }
+        job.matrix_rows = parse_core_matrix_rows(lines);
         job
+    }
+
+    fn parse_core_matrix_rows(lines: &[(usize, &str)]) -> Option<Vec<Option<(String, String)>>> {
+        let strategy_starts = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (indent, line))| {
+                (*indent == 4 && *line == "strategy:").then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [strategy_start] = strategy_starts.as_slice() else {
+            return None;
+        };
+        let strategy = lines[*strategy_start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 4)
+            .copied()
+            .collect::<Vec<_>>();
+        let strategy_fields = strategy
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 6).then_some(*line))
+            .collect::<Vec<_>>();
+        if strategy_fields != ["fail-fast: false", "matrix:"] {
+            return None;
+        }
+        let matrix_start = strategy
+            .iter()
+            .position(|(indent, line)| *indent == 6 && *line == "matrix:")?;
+        let matrix = strategy[matrix_start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 6)
+            .copied()
+            .collect::<Vec<_>>();
+        if matrix
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 8).then_some(*line))
+            .collect::<Vec<_>>()
+            != ["include:"]
+        {
+            return None;
+        }
+        let include_start = matrix
+            .iter()
+            .position(|(indent, line)| *indent == 8 && *line == "include:")?;
+        let include = matrix[include_start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 8)
+            .copied()
+            .collect::<Vec<_>>();
+        if include.is_empty() || include.iter().any(|(indent, _)| *indent != 10) {
+            return None;
+        }
+        Some(
+            include
+                .iter()
+                .map(|(_, line)| parse_core_partition_row(line))
+                .collect(),
+        )
+    }
+
+    fn parse_core_partition_row(line: &str) -> Option<(String, String)> {
+        let body = line.strip_prefix("- {")?.strip_suffix('}')?;
+        let mut fields = body.split(',').map(str::trim);
+        let partition = fields.next()?.strip_prefix("partition: ")?;
+        let label = fields.next()?.strip_prefix("partition-label: ")?;
+        if fields.next().is_some()
+            || partition.contains("${{")
+            || label.contains("${{")
+            || partition.is_empty()
+            || label.is_empty()
+        {
+            return None;
+        }
+        Some((partition.to_owned(), label.to_owned()))
     }
 
     fn workflow_has_exact_read_permissions(yaml: &str) -> bool {
@@ -2524,20 +2852,42 @@ mod tests {
             && workflow_dispatch_is_empty(&on_body)
     }
 
-    fn reusable_job_matches(job: &ReusableCallerJob, lane: &str, needs_meta: bool) -> bool {
+    fn reusable_job_matches(
+        job: &ReusableCallerJob,
+        lane: &str,
+        expected_needs: Option<&str>,
+    ) -> bool {
         let mut actual_fields = job.fields.iter().map(String::as_str).collect::<Vec<_>>();
         actual_fields.sort_unstable();
-        let expected_fields = if needs_meta {
+        let expected_fields = if lane == "ci-core-tests" {
+            &["name", "needs", "strategy", "uses", "with"][..]
+        } else if expected_needs.is_some() {
             &["needs", "uses", "with"][..]
         } else {
             &["uses", "with"][..]
         };
         job.id == lane
             && actual_fields == expected_fields
-            && job.needs.as_deref() == needs_meta.then_some("ci-meta")
+            && job.needs.as_deref() == expected_needs
             && job.uses.as_deref() == Some("./.github/workflows/rss-rust-lane.yml")
             && job.lane.as_deref() == Some(lane)
-            && job.with_fields == ["lane"]
+            && if lane == "ci-core-tests" {
+                job.with_fields
+                    == [
+                        "fail-fast",
+                        "matrix",
+                        "lane",
+                        "partition",
+                        "partition-label",
+                    ]
+                    && job.matrix_rows
+                        == Some(vec![
+                            Some(("1/2".to_owned(), "1-of-2".to_owned())),
+                            Some(("2/2".to_owned(), "2-of-2".to_owned())),
+                        ])
+            } else {
+                job.with_fields == ["lane"] && job.matrix_rows.is_none()
+            }
     }
 
     /// CI caller 的结构化闭集谓词：四个 literal job 直接调唯一 reusable workflow，
@@ -2546,18 +2896,21 @@ mod tests {
         let jobs = reusable_caller_jobs(yaml);
         workflow_has_only_safe_ci_events(yaml)
             && workflow_has_exact_read_permissions(yaml)
-            && jobs.len() == 4
+            && jobs.len() == 5
+            && yaml.contains("partition: ${{ matrix.partition }}")
+            && yaml.contains("partition-label: ${{ matrix.partition-label }}")
             && [
-                ("ci-meta", false),
-                ("ci-core", true),
-                ("ci-security", false),
-                ("ci-coverage", true),
+                ("ci-meta", None),
+                ("ci-core-prerequisites", Some("ci-meta")),
+                ("ci-core-tests", Some("ci-core-prerequisites")),
+                ("ci-security", None),
+                ("ci-coverage", Some("ci-meta")),
             ]
             .iter()
-            .all(|(lane, needs_meta)| {
+            .all(|(lane, expected_needs)| {
                 jobs.iter()
                     .find(|job| job.id == *lane)
-                    .is_some_and(|job| reusable_job_matches(job, lane, *needs_meta))
+                    .is_some_and(|job| reusable_job_matches(job, lane, *expected_needs))
             })
     }
 
@@ -2665,8 +3018,8 @@ mod tests {
     #[test]
     fn ci_evidence_shell_selftest_passes() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let status = crate::cmd::clean_cmd(
-            "bash",
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
             &[".github/scripts/ci-evidence.selftest.sh"],
             &[],
             Some(&root),
@@ -2680,8 +3033,8 @@ mod tests {
     #[test]
     fn ci_cache_maintenance_shell_selftest_passes() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let status = crate::cmd::clean_cmd(
-            "bash",
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
             &[".github/scripts/ci-cache-maintain.selftest.sh"],
             &[],
             Some(&root),
@@ -2698,8 +3051,8 @@ mod tests {
     #[test]
     fn ci_cache_result_shell_selftest_passes() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let status = crate::cmd::clean_cmd(
-            "bash",
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
             &[".github/scripts/ci-cache-result.selftest.sh"],
             &[],
             Some(&root),
@@ -2725,11 +3078,25 @@ jobs:
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
       lane: ci-meta
-  ci-core:
+  ci-core-prerequisites:
     needs: ci-meta
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
-      lane: ci-core
+      lane: ci-core-prerequisites
+  ci-core-tests:
+    name: ci-core-tests / ${{ matrix.partition }}
+    needs: ci-core-prerequisites
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { partition: 1/2, partition-label: 1-of-2 }
+          - { partition: 2/2, partition-label: 2-of-2 }
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-core-tests
+      partition: ${{ matrix.partition }}
+      partition-label: ${{ matrix.partition-label }}
   ci-security:
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
@@ -2750,7 +3117,13 @@ jobs:
             ("missing", green.replacen("  ci-security:\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: ci-security\n", "", 1)),
             ("extra", format!("{green}  ci-extra:\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: ci-meta\n")),
             ("rename", green.replacen("ci-security:", "security:", 1)),
-            ("lane-swap", green.replacen("lane: ci-core", "lane: ci-coverage", 1)),
+            ("lane-swap", green.replacen("lane: ci-core-tests", "lane: ci-coverage", 1)),
+            ("missing-partition", green.replacen("          - { partition: 2/2, partition-label: 2-of-2 }\n", "", 1)),
+            ("duplicate-partition", green.replacen("          - { partition: 2/2, partition-label: 2-of-2 }", "          - { partition: 1/2, partition-label: 1-of-2 }", 1)),
+            ("extra-partition", green.replacen("          - { partition: 2/2, partition-label: 2-of-2 }", "          - { partition: 2/2, partition-label: 2-of-2 }\n          - { partition: 3/3, partition-label: 3-of-3 }", 1)),
+            ("dynamic-partition", green.replacen("partition: 1/2, partition-label: 1-of-2", "partition: ${{ matrix.dynamic }}, partition-label: 1-of-2", 1)),
+            ("include-to-exclude", green.replacen("        include:", "        exclude:", 1)),
+            ("rows-under-other-key", green.replacen("        include:", "        other:", 1)),
             ("wrong-needs", green.replacen("needs: ci-meta", "needs: ci-security", 1)),
             ("dynamic-lane", green.replacen("lane: ci-meta", "lane: ${{ inputs.lane }}", 1)),
             ("inline-run", green.replacen("    uses: ./.github/workflows/rss-rust-lane.yml", "    run: cargo build --workspace\n    uses: ./.github/workflows/rss-rust-lane.yml", 1)),
@@ -3002,19 +3375,43 @@ jobs:
             .collect()
     }
 
-    fn integration_matrix_shards(yaml: &str) -> Option<Vec<&str>> {
+    fn integration_matrix_rows(yaml: &str) -> Option<Vec<String>> {
         let lines = yaml_indented_code_lines(yaml);
         let start = lines
             .iter()
-            .position(|(indent, line)| *indent == 8 && *line == "shard:")?;
+            .position(|(indent, line)| *indent == 8 && *line == "include:")?;
         lines[start + 1..]
             .iter()
             .take_while(|(indent, _)| *indent > 8)
             .map(|(indent, line)| {
-                (*indent == 10)
-                    .then(|| line.strip_prefix("- "))
-                    .flatten()
-                    .map(str::trim)
+                if *indent != 10 {
+                    return None;
+                }
+                line.strip_prefix("- { ")
+                    .and_then(|row| row.strip_suffix(" }"))
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    fn expected_integration_rows() -> Vec<String> {
+        IntegrationShard::ALL
+            .iter()
+            .flat_map(|shard| match shard.partition_policy() {
+                integration_shards::PartitionPolicy::Unpartitioned => vec![format!(
+                    "shard: {}, partition: \"\", partition-label: unpartitioned",
+                    shard.as_str()
+                )],
+                integration_shards::PartitionPolicy::TwoWayHash => {
+                    [("1/2", "1-of-2"), ("2/2", "2-of-2")]
+                        .map(|(partition, label)| {
+                            format!(
+                                "shard: {}, partition: {partition}, partition-label: {label}",
+                                shard.as_str()
+                            )
+                        })
+                        .to_vec()
+                }
             })
             .collect()
     }
@@ -3051,12 +3448,18 @@ jobs:
             && workflow_has_exact_read_permissions(yaml)
             && jobs == ["integration"]
             && top_fields == ["name", "strategy", "uses", "with"]
-            && lines.contains(&(4, "name: integration / ${{ matrix.shard }}"))
+            && lines.contains(&(
+                4,
+                "name: integration / ${{ matrix.shard }} / ${{ matrix.partition-label }}",
+            ))
             && lines.contains(&(6, "fail-fast: false"))
-            && integration_matrix_shards(yaml).as_deref() == Some(expected_shards)
+            && expected_shards == expected_integration_shards()
+            && integration_matrix_rows(yaml) == Some(expected_integration_rows())
             && lines.contains(&(4, "uses: ./.github/workflows/rss-rust-lane.yml"))
             && lines.contains(&(6, "lane: integration"))
             && lines.contains(&(6, "shard: ${{ matrix.shard }}"))
+            && lines.contains(&(6, "partition: ${{ matrix.partition }}"))
+            && lines.contains(&(6, "partition-label: ${{ matrix.partition-label }}"))
             && !yaml.contains("continue-on-error")
             && !yaml.contains("cargo nextest")
             && !yaml.contains("--allow-missing-tools")
@@ -3088,9 +3491,35 @@ jobs:
         integration_policy_shards(yaml).as_deref() == Some(expected_shards)
     }
 
+    fn expected_integration_partition_pairs() -> Vec<String> {
+        IntegrationShard::ALL
+            .iter()
+            .flat_map(|shard| match shard.partition_policy() {
+                integration_shards::PartitionPolicy::Unpartitioned => {
+                    vec![format!("{}:", shard.as_str())]
+                }
+                integration_shards::PartitionPolicy::TwoWayHash => {
+                    vec![
+                        format!("{}:1/2", shard.as_str()),
+                        format!("{}:2/2", shard.as_str()),
+                    ]
+                }
+            })
+            .collect()
+    }
+
+    fn integration_partition_pairs(yaml: &str) -> Option<Vec<String>> {
+        let lines = yaml.lines().map(str::trim).collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| *line == "case \"$RSS_SHARD:$RSS_PARTITION\" in")?;
+        let allowlist = lines.get(start + 1)?.strip_suffix(") ;;")?;
+        Some(allowlist.split('|').map(str::to_owned).collect())
+    }
+
     #[test]
     fn integration_matrix_predicate_green_and_red() {
-        let green = "name: Integration Tests\non:\n  pull_request:\n    branches: [develop]\n  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  integration:\n    name: integration / ${{ matrix.shard }}\n    strategy:\n      fail-fast: false\n      matrix:\n        shard:\n          - postgres-domain\n          - event-transport\n          - runtime-http-auth\n          - consistency-fault\n          - cdc-projection-saga\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: integration\n      shard: ${{ matrix.shard }}\n";
+        let green = include_str!("../../.github/workflows/integration.yml");
         assert!(github_integration_workflow_has_shard_matrix(green));
         let mut future_catalog = expected_integration_shards();
         future_catalog.push("future-shard");
@@ -3099,7 +3528,7 @@ jobs:
             "catalog 新增 shard 而 committed matrix 未同步时必须 red"
         );
         for red in [
-            green.replacen("          - postgres-domain\n", "", 1),
+            green.replacen("          - { shard: postgres-domain, partition: \"\", partition-label: unpartitioned }\n", "", 1),
             green.replace("fail-fast: false", "fail-fast: true"),
             green.replace("shard: ${{ matrix.shard }}", "shard: fromJSON(env.SHARDS)"),
             format!("{green}    continue-on-error: true\n"),
@@ -3278,10 +3707,10 @@ jobs:
                     )
                     && step.run_contains("tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH")
                     && step.run_has_line(
-                        "case \"$RSS_LANE\" in ci-meta|ci-core|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
+                        "case \"$RSS_LANE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
                     )
                     && step.run_has_line(
-                        "case \"$RSS_PROFILE\" in ci-meta|ci-core|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
+                        "case \"$RSS_PROFILE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
                     )
                     && step.run_contains("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]")
             })
@@ -3295,7 +3724,7 @@ jobs:
     }
 
     fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
-        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
+        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
         let lines = yaml_indented_code_lines(yaml);
         let steps = yaml_typed_steps(yaml);
         let index = |id: &str| {
@@ -3391,8 +3820,12 @@ jobs:
             let step = &steps[i];
             step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
                 && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
+                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
                 && step.run_contains("if [ \"$RSS_LANE\" = integration ]")
                 && integration_policy_matches_catalog(yaml, &expected_integration_shards())
+                && integration_partition_pairs(yaml) == Some(expected_integration_partition_pairs())
+                && step.run_contains("case \"$RSS_SHARD:$RSS_PARTITION\" in")
+                && step.run_contains("elif [ \"$RSS_LANE\" = ci-core-tests ]")
                 && step.run_contains("elif [ -n \"$RSS_SHARD\" ]")
                 && step.run_contains("case \"$RSS_LANE\" in")
                 && [
@@ -3406,11 +3839,20 @@ jobs:
                     ]
                     .as_slice(),
                     [
-                        "ci-core)",
-                        "echo 'profile=ci-core'",
+                        "ci-core-prerequisites)",
+                        "echo 'profile=ci-core-prerequisites'",
                         "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                        "echo 'prebuilt-tools=cargo-nextest@0.9.137'",
+                        "echo 'prebuilt-tools='",
                         "echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1'",
+                        ";;",
+                    ]
+                    .as_slice(),
+                    [
+                        "ci-core-tests)",
+                        "echo 'profile=ci-core-tests'",
+                        "echo 'nightly='",
+                        "echo 'prebuilt-tools=cargo-nextest@0.9.137'",
+                        "echo 'fallback-tools='",
                         ";;",
                     ]
                     .as_slice(),
@@ -3427,7 +3869,7 @@ jobs:
                         "ci-coverage)",
                         "echo 'profile=ci-coverage'",
                         "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                        "echo 'prebuilt-tools=cargo-llvm-cov@0.8.7'",
+                        "echo 'prebuilt-tools=cargo-llvm-cov@0.8.7,cargo-nextest@0.9.137'",
                         "echo 'fallback-tools=cargo-public-api@0.52.0'",
                         ";;",
                     ]
@@ -3435,7 +3877,7 @@ jobs:
                 ]
                 .iter()
                 .all(|branch| step.run_has_sequence(branch))
-                && step.run.iter().filter(|line| line.ends_with(')')).count() == 6
+                && step.run.iter().filter(|line| line.ends_with(')')).count() == 7
                 && step.run_has_line("integration)")
                 && step.run_has_line("audit)")
                 && step.run_has_line("*) exit 64 ;;")
@@ -3444,23 +3886,22 @@ jobs:
             let step = &steps[i];
             step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
                 && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
+                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
                 && step.run_contains("case \"$RSS_LANE\" in")
                 && [
                     "ci-meta) cargo run --locked -p xtask -- ci-meta ;;",
-                    "ci-core) cargo run --locked -p xtask -- ci-core ;;",
+                    "ci-core-prerequisites) cargo run --locked -p xtask -- ci-core-prerequisites ;;",
+                    "ci-core-tests) cargo run --locked -p xtask -- ci-core-tests --partition \"$RSS_PARTITION\" ;;",
                     "ci-security) cargo run --locked -p xtask -- ci-security ;;",
                     "ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;",
-                    "integration) cargo run --locked -p xtask -- ci-integration --shard \"$RSS_SHARD\" ;;",
                     "audit) cargo run --locked -p xtask -- audit ;;",
                 ]
                 .iter()
                 .all(|line| step.run_has_line(line))
-                && step
-                    .run
-                    .iter()
-                    .filter(|line| line.contains(") cargo run --locked -p xtask -- "))
-                    .count()
-                    == 6
+                && step.run_has_line("integration)")
+                && step.run_contains("args=(ci-integration --shard \"$RSS_SHARD\")")
+                && step.run_contains("args+=(--partition \"$RSS_PARTITION\")")
+                && step.run_contains("cargo run --locked -p xtask -- \"${args[@]}\"")
                 && step.run_has_line("*) exit 64 ;;")
         });
         let evidence_step = |name: &str, commands: &[&str]| {
@@ -3494,25 +3935,43 @@ jobs:
         ) && evidence_step(
             "Capture after-save evidence",
             &["ensure before-save", "snapshot after-save"],
-        ) && steps
-            .iter()
-            .filter(|step| {
+        );
+        let stage_evidence = steps.iter().position(|step| {
+            step.name.as_deref() == Some("Stage job evidence")
+                && step.if_expr.as_deref() == Some("${{ always() }}")
+                && step.run_has_line("set -euo pipefail")
+                && step.run_has_line("rm -rf target/job-evidence")
+                && step.run_has_line("mkdir -p target/job-evidence/ci")
+                && step.run_has_line(
+                    "cp \"$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE\" target/job-evidence/ci/ci-evidence.json",
+                )
+                && step.run_has_line("cargo run --locked -p xtask -- nextest-evidence stage")
+        });
+        let upload_evidence = steps.iter().position(|step| {
                 step.name.as_deref() == Some("Upload CI evidence")
                     && step.if_expr.as_deref() == Some("${{ always() }}")
                     && step.uses.as_deref() == Some("actions/upload-artifact@v4")
                     && step.with_exact(
                         "name",
-                        &["${{ inputs.lane == 'integration' && format('ci-evidence-{0}-{1}-{2}-{3}', inputs.lane, inputs.shard, github.run_id, github.run_attempt) || format('ci-evidence-{0}-{1}-{2}', inputs.lane, github.run_id, github.run_attempt) }}"],
+                        &["${{ format('ci-evidence-{0}-{1}-{2}-{3}-{4}', inputs.lane, inputs.shard || 'workspace', inputs.partition-label, github.run_id, github.run_attempt) }}"],
                     )
-                    && step.with_exact(
-                        "path",
-                        &["${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}"],
-                    )
+                    && step.with_exact("path", &["target/job-evidence"])
                     && step.with_exact("if-no-files-found", &["error"])
                     && step.with_exact("retention-days", &["7"])
-            })
-            .count()
-            == 1;
+            });
+        let evidence_ok = evidence_ok
+            && stage_evidence
+                .is_some_and(|stage| upload_evidence.is_some_and(|upload| stage < upload))
+            && steps
+                .iter()
+                .filter(|step| {
+                    matches!(
+                        step.name.as_deref(),
+                        Some("Stage job evidence" | "Upload CI evidence")
+                    )
+                })
+                .count()
+                == 2;
         let intermediate_conditions_ok = measure_tools.is_some_and(|i| {
             steps[i].if_expr.as_deref()
                 == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}")
@@ -3677,6 +4136,29 @@ jobs:
     }
 
     #[test]
+    fn reusable_rust_lane_evidence_staging_is_single_root_and_fail_closed() -> anyhow::Result<()> {
+        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
+        let green = std::fs::read_to_string(path)?;
+        for red in [
+            green.replacen("      - name: Stage job evidence", "      - name: Other", 1),
+            green.replacen("path: target/job-evidence", "path: target", 1),
+            green.replacen(
+                "cargo run --locked -p xtask -- nextest-evidence stage",
+                "cp -R target/nextest-evidence/. target/job-evidence/nextest/",
+                1,
+            ),
+            green.replacen(
+                "          path: target/job-evidence",
+                "          path: |\n            target/job-evidence\n            target/nextest-evidence",
+                1,
+            ),
+        ] {
+            assert!(!reusable_rust_lane_is_hardened(&red));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reusable_rust_lane_guard_rejects_semantic_weakening() -> anyhow::Result<()> {
         let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
         let green = std::fs::read_to_string(&path)?;
@@ -3697,10 +4179,14 @@ jobs:
             (" && github.ref_protected", ""),
             ("profile=ci", "profile=shared"),
             (
-                "ci-core)\n              echo 'profile=ci-core'\n              echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                "ci-core)\n              echo 'profile=ci-core'\n              echo 'nightly='",
+                "ci-core-tests)\n              echo 'profile=ci-core-tests'",
+                "ci-core-tests)\n              echo 'profile=ci-core'",
             ),
             ("tool-cache-epoch: v3", "tool-cache-epoch: v2"),
+            (
+                "prebuilt-tools=cargo-llvm-cov@0.8.7,cargo-nextest@0.9.137",
+                "prebuilt-tools=cargo-llvm-cov@0.8.7",
+            ),
             (
                 "steps.setup.outputs.tools-primary-key",
                 "steps.setup.outputs.target-primary-key",
@@ -3709,7 +4195,18 @@ jobs:
             ("~/.cargo/registry/cache", "~/.cargo/registry"),
             ("evidence-enabled: true", "evidence-enabled: false"),
             ("retention-days: 7", "retention-days: 8"),
-            ("inputs.shard, github.run_id", "github.run_id"),
+            ("inputs.partition-label, github.run_id", "github.run_id"),
+            ("event-transport:2/2|", ""),
+            ("event-transport:2/2", "event-transport:2/3"),
+            (
+                "(inputs.lane == 'ci-core-tests' && inputs.partition == '1/2')",
+                "inputs.lane == 'ci-core-tests'",
+            ),
+            ("inputs.partition == '1/2'", "inputs.partition == '2/2'"),
+            (
+                "|cdc-projection-saga:) ;;",
+                "|future-shard:|cdc-projection-saga:) ;;",
+            ),
         ] {
             let red = green.replacen(needle, replacement, 1);
             assert!(
@@ -3852,7 +4349,7 @@ jobs:
             ),
             ("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]", "true"),
             (
-                "ci-meta|ci-core|ci-security|ci-coverage|integration|audit",
+                "ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit",
                 "ci|integration|audit",
             ),
         ] {

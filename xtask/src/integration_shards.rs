@@ -4,11 +4,11 @@
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets" }.
 //! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets" }.
-//! INVARIANT: INTEGRATION-SHARD-NEXTEST-CONFIG-01 { level = "Medium", exec = "integration", source = "code", synthetic_red = "nextest_config_rejects_external_scheduling_red", anti_vacuity = "committed_nextest_config_has_no_external_shard_scheduling" }.
 
 #[cfg(test)]
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -104,7 +104,8 @@ macro_rules! integration_shard_catalog {
         },
     )+) => {
         #[repr(usize)]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(rename_all = "kebab-case")]
         pub(crate) enum IntegrationShard { $($variant),+ }
 
         const SHARD_SPECS: &[ShardSpec] = &[$(ShardSpec {
@@ -210,6 +211,40 @@ integration_shard_catalog! {
 impl fmt::Display for IntegrationShard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartitionPolicy {
+    Unpartitioned,
+    TwoWayHash,
+}
+
+impl IntegrationShard {
+    pub(crate) const fn partition_policy(self) -> PartitionPolicy {
+        match self {
+            Self::EventTransport | Self::RuntimeHttpAuth => PartitionPolicy::TwoWayHash,
+            Self::PostgresDomain | Self::ConsistencyFault | Self::CdcProjectionSaga => {
+                PartitionPolicy::Unpartitioned
+            }
+        }
+    }
+
+    pub(crate) fn validate_partition(
+        self,
+        partition: Option<crate::nextest::HashPartition>,
+    ) -> Result<()> {
+        match (self.partition_policy(), partition) {
+            (PartitionPolicy::Unpartitioned, None) => Ok(()),
+            (PartitionPolicy::TwoWayHash, Some(value)) if value.is_two_way() => Ok(()),
+            (PartitionPolicy::Unpartitioned, Some(_)) => {
+                bail!("integration shard `{self}` 禁止 partition")
+            }
+            (PartitionPolicy::TwoWayHash, None) => Ok(()),
+            (PartitionPolicy::TwoWayHash, Some(value)) => {
+                bail!("integration shard `{self}` 只接受 1/2 或 2/2，收到 {value}")
+            }
+        }
     }
 }
 
@@ -425,9 +460,9 @@ pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
 }
 
 pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
-    let output = crate::cmd::clean_cmd(
-        "cargo",
-        &["metadata", "--locked", "--no-deps", "--format-version", "1"],
+    let output = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::Metadata,
+        &["--locked", "--no-deps", "--format-version", "1"],
         &[],
         Some(root),
     )
@@ -444,44 +479,7 @@ pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
     validate_metadata(&metadata)?;
     let nextest_config = std::fs::read_to_string(root.join(".config/nextest.toml"))
         .context("read committed nextest configuration")?;
-    validate_nextest_config(&nextest_config)
-}
-
-fn validate_nextest_config(config: &str) -> Result<()> {
-    let parsed: toml::Value = toml::from_str(config).context("parse .config/nextest.toml")?;
-    let profile = parsed
-        .get("profile")
-        .and_then(toml::Value::as_table)
-        .context("nextest config missing profile table")?;
-    let integration = profile
-        .get("integration")
-        .and_then(toml::Value::as_table)
-        .context("nextest config missing profile.integration")?;
-    if integration.contains_key("overrides") {
-        bail!("profile.integration overrides are forbidden; shard scheduling belongs to Rust");
-    }
-    let default = profile
-        .get("default")
-        .and_then(toml::Value::as_table)
-        .context("nextest config missing profile.default")?;
-    let overrides = default
-        .get("overrides")
-        .and_then(toml::Value::as_array)
-        .context("profile.default must retain only the exact trybuild override")?;
-    let safe_trybuild = overrides.len() == 1
-        && overrides[0].get("filter").and_then(toml::Value::as_str) == Some("test(/^ui$/)")
-        && overrides[0].get("test-group").and_then(toml::Value::as_str) == Some("trybuild");
-    if !safe_trybuild {
-        bail!("profile.default overrides must be exactly the non-integration trybuild override");
-    }
-    let groups = parsed
-        .get("test-groups")
-        .and_then(toml::Value::as_table)
-        .context("nextest config missing test-groups")?;
-    if groups.contains_key("integration") {
-        bail!("integration test-group is forbidden; shard scheduling belongs to Rust");
-    }
-    Ok(())
+    crate::nextest::validate_config(&nextest_config)
 }
 
 #[cfg(test)]
@@ -619,35 +617,6 @@ mod tests {
             assert_eq!(shard.spec().resources, resources);
             assert!(!shard.spec().units.is_empty());
         }
-    }
-
-    #[test]
-    fn nextest_config_rejects_external_scheduling_red() -> Result<()> {
-        let green = include_str!("../../.config/nextest.toml");
-        validate_nextest_config(green)?;
-
-        let integration_override = format!(
-            "{green}\n[[profile.integration.overrides]]\nfilter = 'all()'\ntest-group = \"trybuild\"\n"
-        );
-        assert!(validate_nextest_config(&integration_override).is_err());
-
-        let inherited_override = format!(
-            "{green}\n[[profile.default.overrides]]\nfilter = 'test(/integration/)'\ntest-group = \"trybuild\"\n"
-        );
-        assert!(validate_nextest_config(&inherited_override).is_err());
-
-        let integration_group = green.replace(
-            "[test-groups]\ntrybuild =",
-            "[test-groups]\nintegration = { max-threads = 1 }\ntrybuild =",
-        );
-        assert!(validate_nextest_config(&integration_group).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn committed_nextest_config_has_no_external_shard_scheduling() -> Result<()> {
-        let config = std::fs::read_to_string(workspace_root()?.join(".config/nextest.toml"))?;
-        validate_nextest_config(&config)
     }
 
     fn metadata_from(targets: &[ExecutionUnit], include_standalone: bool) -> Value {

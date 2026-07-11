@@ -10,9 +10,9 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 构建与本地验证
 
-本地保留聚合验证入口；GitHub Actions 将合入门拆为 `ci-meta`、`ci-core`、`ci-security`、
-`ci-coverage` 四条 literal lane，并分别委托同名 `cargo xtask` 命令。`ci-meta` 与 `ci-security`
-并行启动，`ci-core`、`ci-coverage` 只依赖 `ci-meta`：
+本地保留聚合验证入口；GitHub Actions 将四类合入门映射为 `ci-meta`、`ci-security`、
+`ci-coverage`，以及拆成 `ci-core-prerequisites` 与 `ci-core-tests` 的 Core 拓扑。`ci-meta` 与
+`ci-security` 并行启动；Core prerequisite 只跑一次，两份 Core tests 在其后按 partition 并行：
 
 ```bash
 make verify              # == cargo xtask verify（薄 alias）
@@ -22,17 +22,20 @@ cargo xtask verify --allow-missing-tools   # 缺外部工具时显式宽限（�
 cargo xtask ci           # 本地去重兼容聚合：43 个唯一 gate；Coverage 取代 Core 的 default-nextest
 ```
 
-`cargo xtask ci` 覆盖四条 lane 的兼容 gate 联集，但不复现四个真实 check 的完整执行语义：
-它不重复运行 Core 的 default profile nextest，而 Coverage 使用 CI profile。需要本地复现真实 checks 时分别运行：
+`cargo xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现六个真实 check 的完整执行语义：
+它不重复运行 Core 的 `ci-core` profile nextest，而 Coverage 复用同一测试语义。需要本地复现真实 checks 时分别运行：
 
 ```bash
 cargo xtask ci-meta
-cargo xtask ci-core
+cargo xtask ci-core-prerequisites
+cargo xtask ci-core-tests --partition 1/2
+cargo xtask ci-core-tests --partition 2/2
 cargo xtask ci-security
 cargo xtask ci-coverage
 ```
 
-`verify` 串联的逐条命令（也可单独跑）：
+以下是常用开发检查，并非 `verify` 内部 typed step 的逐条公开命令；完整本地治理门运行
+`cargo xtask verify`，本地完整 Core 用 `cargo xtask ci-core`，PR 分区测试用 `ci-core-tests`：
 
 ```bash
 cargo fmt --all -- --check                             # 格式
@@ -43,7 +46,7 @@ cargo xtask layer-deps                                 # source-centric 分层�
 cargo xtask codegen --check                            # 契约 codegen 漂移门
 cargo build --workspace                                # 编译全 workspace（分层有环即失败）
 cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / panic 纪律）
-cargo nextest run --workspace --no-tests=pass          # 测试（或 cargo test --workspace）
+cargo xtask ci-core                                    # 不分区的完整 Core 测试与证据 typed 漏斗
 cargo deny check                                       # 分层禁依赖 + license + advisory
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```

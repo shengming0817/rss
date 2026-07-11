@@ -6,12 +6,16 @@ fail-fast = true
 slow-timeout = { period = "60s", terminate-after = 3 }
 leak-timeout = "200ms"
 
-[profile.ci]
+[profile.ci-core]
 fail-fast = false
-retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" }
+retries = 0
+flaky-result = "fail"
 slow-timeout = { period = "120s", terminate-after = 2 }
 leak-timeout = "200ms"
 final-status-level = "slow"
+
+[profile.ci-core.junit]
+path = "junit.xml"
 
 # 真集成 lane profile（#1137，`cargo xtask ci-integration --shard <name>`）：
 # testcontainers self-provision 容器冷启动（尤其 rabbitmq-management ~250MB 首拉）可超默认 60s slow-timeout，
@@ -22,23 +26,30 @@ final-status-level = "slow"
 slow-timeout = { period = "300s", terminate-after = 2 }
 leak-timeout = "200ms"
 fail-fast = false
-# self-provision 容器启动偶发 Docker/testcontainers 端口映射瞬断（如 `does not expose port .../tcp`）。
-# 仅重跑失败测试；确定性断言失败仍会稳定红。
-retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s" }
+retries = 0
+flaky-result = "fail"
 
-# trybuild：各 trybuild UI 测试（`#[test] fn ui()`，分布在 authn/diport/eventexec::trybuild、
-# httpserve::funnel_ui 等多个测试二进制）内部各自 spawn `cargo`（trybuild 调 cargo build/run 编译
-# compile-fail/pass 用例）。nextest 默认每测试独立进程并发跑 ⇒ 多个 trybuild 二进制同时调 cargo 会争用
-# 同一 target/package 文件锁（日志 "Blocking waiting for file lock"），`*_pass.rs`（需编译**并执行**）因
-# 锁等待被 slow-timeout 杀 ⇒ 偶发 "execution unsuccessful but no output"（与代码无关的调度竞态）。
-# max-threads=1 串行化全部 trybuild ui 测试，消除 cargo 锁竞争（azure 无 CI ⇒ make verify 是唯一 gate，须稳定绿）。
-[test-groups]
-trybuild = { max-threads = 1 }
+[profile.integration.junit]
+path = "junit.xml"
+
+# fault matrix 当前只有单个顶层测试；独立 profile 仅放宽故障注入 case 的上限，不伪装成可均衡拆分。
+[profile.fault-matrix]
+slow-timeout = { period = "600s", terminate-after = 1 }
+leak-timeout = "200ms"
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+
+[profile.fault-matrix.junit]
+path = "junit.xml"
+
+[test-groups.trybuild]
+max-threads = 1
 
 [[profile.default.overrides]]
 filter = 'test(/^ui$/)'
 test-group = "trybuild"
 
-[[profile.ci.overrides]]
+[[profile.ci-core.overrides]]
 filter = 'test(/^ui$/)'
 test-group = "trybuild"

@@ -125,7 +125,7 @@ fn baseline_dir() -> Result<PathBuf> {
 
 /// 检测外部 cargo-public-api；缺失即 fail-fast 给安装指引（INVARIANT PUBLICAPI-TOOL-GATE-01）。
 fn ensure_tool_available() -> Result<()> {
-    if crate::cmd::tool_available("public-api") {
+    if crate::cmd::tool_available(crate::cmd::CargoSubcommand::PublicApi) {
         return Ok(());
     }
     bail!(
@@ -136,14 +136,14 @@ fn ensure_tool_available() -> Result<()> {
     )
 }
 
-/// 构造 `cargo public-api -p <crate>` 子进程，经 [`crate::cmd::clean_cmd`] 漏斗把 `RUSTUP_TOOLCHAIN`
+/// 构造 `cargo public-api -p <crate>` 子进程，经 [`crate::cmd::cargo_cmd`] 漏斗把 `RUSTUP_TOOLCHAIN`
 /// 显式重设为 `toolchain`（剥离后成该变量唯一来源，CMD-ENV-CLEAN-01）——等价 `cargo +<toolchain> public-api`，
 /// 让 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json（`is_probably_stable()`==false ⇒ 透传当前
 /// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "ci-only", source = "public-api" }.
 fn public_api_cmd(krate: &str, toolchain: &str, target_dir: &std::path::Path) -> Command {
-    let mut cmd = crate::cmd::clean_cmd(
-        "cargo",
-        &["public-api", "-p", krate, "--omit", "blanket-impls"],
+    let mut cmd = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::PublicApi,
+        &["-p", krate, "--omit", "blanket-impls"],
         &[("RUSTUP_TOOLCHAIN", toolchain)],
         None,
     );

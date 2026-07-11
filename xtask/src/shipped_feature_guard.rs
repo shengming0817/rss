@@ -10,7 +10,6 @@
 
 use anyhow::{Context, Result, bail};
 
-use crate::cmd::clean_cmd;
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
 
@@ -50,10 +49,9 @@ impl GovernanceCheck for ShippedFeatureGuard {
 }
 
 fn shipped_feature_tree(root: &std::path::Path, package: &str) -> Result<String> {
-    let output = clean_cmd(
-        "cargo",
+    let output = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::Tree,
         &[
-            "tree",
             "--locked",
             "--color",
             "never",

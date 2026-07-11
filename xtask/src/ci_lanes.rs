@@ -44,9 +44,11 @@ pub(crate) enum CompileKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolRequirement {
     InProcess,
-    CargoBuiltin,
+    CargoBuiltin(crate::cmd::CargoSubcommand),
+    Nextest,
+    CoverageTools,
     CargoTool {
-        probe: &'static str,
+        tool: crate::cmd::CargoSubcommand,
         install_hint: &'static str,
     },
 }
@@ -109,7 +111,7 @@ macro_rules! gate_catalog {
                         "fmt",
                         META,
                         CompileKind::NoCompile,
-                        ToolRequirement::CargoBuiltin,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Fmt),
                         SOURCE,
                         BOTH_INCLUDED,
                     )
@@ -428,7 +430,7 @@ macro_rules! gate_catalog {
                         "build",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
                         SOURCE,
                         VERIFY_ONLY,
                     )
@@ -439,7 +441,7 @@ macro_rules! gate_catalog {
                         "integration-compile",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
                         EvidenceKind::Test,
                         VERIFY_ONLY,
                     )
@@ -450,7 +452,7 @@ macro_rules! gate_catalog {
                         "clippy",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Clippy),
                         SOURCE,
                         VERIFY_ONLY,
                     )
@@ -461,7 +463,7 @@ macro_rules! gate_catalog {
                         "build",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Build),
                         SOURCE,
                         CI_INCLUDED,
                     )
@@ -472,7 +474,7 @@ macro_rules! gate_catalog {
                         "clippy",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin,
+                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Clippy),
                         SOURCE,
                         CI_INCLUDED,
                     )
@@ -483,10 +485,7 @@ macro_rules! gate_catalog {
                         "coverage",
                         CiLane::Coverage,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "llvm-cov",
-                            install_hint: LLVM_COV_HINT,
-                        },
+                        ToolRequirement::CoverageTools,
                         EvidenceKind::Coverage,
                         CI_INCLUDED,
                     )
@@ -494,13 +493,10 @@ macro_rules! gate_catalog {
             DefaultNextest => (step_nextest, None,
                 gate(
                         GateId::DefaultNextest,
-                        "nextest",
+                        "default-test-runner",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         VERIFY_SUPERSEDED_BY_COVERAGE,
                     )
@@ -511,10 +507,7 @@ macro_rules! gate_catalog {
                         "s3-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -525,10 +518,7 @@ macro_rules! gate_catalog {
                         "redis-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -539,10 +529,7 @@ macro_rules! gate_catalog {
                         "oidc-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -553,10 +540,7 @@ macro_rules! gate_catalog {
                         "prometheus-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -567,10 +551,7 @@ macro_rules! gate_catalog {
                         "otel-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -581,10 +562,7 @@ macro_rules! gate_catalog {
                         "grpc-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -595,10 +573,7 @@ macro_rules! gate_catalog {
                         "vault-backend-tests",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            probe: "nextest",
-                            install_hint: NEXTEST_HINT,
-                        },
+                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -610,7 +585,7 @@ macro_rules! gate_catalog {
                         CiLane::Security,
                         CompileKind::NoCompile,
                         ToolRequirement::CargoTool {
-                            probe: "deny",
+                            tool: crate::cmd::CargoSubcommand::Deny,
                             install_hint: DENY_HINT,
                         },
                         EvidenceKind::SupplyChain,
@@ -629,7 +604,7 @@ macro_rules! gate_catalog {
                         cost: CostClass::Fast,
                         compile: CompileKind::NoCompile,
                         tool: ToolRequirement::CargoTool {
-                            probe: "audit",
+                            tool: crate::cmd::CargoSubcommand::Audit,
                             install_hint: AUDIT_HINT,
                         },
                         evidence: EvidenceKind::SupplyChain,
@@ -644,7 +619,7 @@ macro_rules! gate_catalog {
                         CORE,
                         CompileKind::Workspace,
                         ToolRequirement::CargoTool {
-                            probe: "dylint",
+                            tool: crate::cmd::CargoSubcommand::Dylint,
                             install_hint: DYLINT_HINT,
                         },
                         SOURCE,
@@ -658,7 +633,7 @@ macro_rules! gate_catalog {
                         CiLane::Coverage,
                         CompileKind::Workspace,
                         ToolRequirement::CargoTool {
-                            probe: "public-api",
+                            tool: crate::cmd::CargoSubcommand::PublicApi,
                             install_hint: PUBLIC_API_HINT,
                         },
                         EvidenceKind::PublicApi,
@@ -672,7 +647,7 @@ macro_rules! gate_catalog {
                         CiLane::Nightly,
                         CompileKind::NoCompile,
                         ToolRequirement::CargoTool {
-                            probe: "deny",
+                            tool: crate::cmd::CargoSubcommand::Deny,
                             install_hint: DENY_HINT,
                         },
                         EvidenceKind::SupplyChain,
@@ -769,8 +744,7 @@ impl GateSpec {
 const DENY_HINT: &str = "cargo install cargo-deny@0.19.9 --locked";
 const AUDIT_HINT: &str = "cargo install cargo-audit@0.22.2 --locked";
 const DYLINT_HINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
-const NEXTEST_HINT: &str = "cargo install cargo-nextest@0.9.137 --locked";
-const LLVM_COV_HINT: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
+pub(crate) const LLVM_COV_HINT: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
 const PUBLIC_API_HINT: &str =
     "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
 

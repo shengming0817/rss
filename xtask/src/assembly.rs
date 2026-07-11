@@ -734,7 +734,12 @@ fn load_workspace_metadata(root: &Path) -> Result<Option<CargoMetadata>> {
 
     let manifest_arg = manifest.display().to_string();
     let args = cargo_metadata_args(manifest_arg.as_str());
-    let mut cmd = crate::cmd::clean_cmd("cargo", &args, &[], Some(root));
+    let mut cmd = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::Metadata,
+        &args[1..],
+        &[],
+        Some(root),
+    );
     let output = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

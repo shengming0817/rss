@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "lane": "ci-core",
+  "profile": "ci-core",
+  "invocationId": "ci-core-workspace-ci-core-0123456789ab",
+  "gate": "core-workspace",
+  "outcome": "failed",
+  "junitPath": "nextest/ci-core.xml",
+  "nextestVersion": "0.9.137",
+  "sourceRevision": "0000000000000000000000000000000000000000",
+  "replay": {
+    "kind": "core",
+    "scope": "workspace",
+    "partition": "1/2"
+  }
+}

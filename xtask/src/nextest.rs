@@ -1,0 +1,1819 @@
+//! cargo-nextest 的唯一执行漏斗：typed profile/partition、JUnit 搬运与可重放 JSON sidecar。
+//!
+//! INVARIANT: NEXTEST-PROFILE-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "NextestProfile closed enum is exhaustive at every profile routing site" }——profile 只能由闭枚举产生。
+//! INVARIANT: NEXTEST-PARTITION-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "HashPartition private fields and validated constructor exclude illegal states" }——hash partition 的非法状态不可构造。
+//! INVARIANT: NEXTEST-EVIDENCE-DTO-01 { level = "Hard", exec = "native-compile", source = "code", native = "Evidence construction requires the closed typed DTO and Outcome enum" }——证据内部状态只能由闭合类型构造。
+//! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
+//! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
+//! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass", anti_vacuity = "real_nextest_call_sites_use_funnel" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造。
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub(crate) const NEXTEST_VERSION: &str = "0.9.137";
+const TOOL_NAME: &str = "nextest";
+const INSTALL_HINT: &str = "cargo install cargo-nextest@0.9.137 --locked";
+const EVIDENCE_SCHEMA_VERSION: u8 = 2;
+const EVIDENCE_DIR: &str = "target/nextest-evidence";
+
+/// nextest capability 的唯一 typed 门；调用方既不能取得 capability 名，也不能绕过安装提示策略。
+pub(crate) fn run_gated<T>(
+    lane: &str,
+    allow_missing: bool,
+    label: &str,
+    on_run: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    run_gated_with_probe(lane, allow_missing, label, is_available, on_run)
+}
+
+pub(crate) fn is_available() -> bool {
+    super::nextest_available(super::NextestCapability)
+}
+
+pub(crate) fn run_gated_with_probe<T>(
+    lane: &str,
+    allow_missing: bool,
+    label: &str,
+    probe: impl FnOnce() -> bool,
+    on_run: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    if probe() {
+        return on_run().map(Some);
+    }
+    if allow_missing {
+        eprintln!("{lane}: [跳过] 缺少 {TOOL_NAME}，未执行 {label}；安装：{INSTALL_HINT}");
+        return Ok(None);
+    }
+    bail!("{lane}: 缺少 {TOOL_NAME}，无法执行 {label}；安装：{INSTALL_HINT}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum NextestProfile {
+    CiCore,
+    Integration,
+    FaultMatrix,
+}
+
+impl NextestProfile {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CiCore => "ci-core",
+            Self::Integration => "integration",
+            Self::FaultMatrix => "fault-matrix",
+        }
+    }
+
+    const fn junit_path(self) -> &'static str {
+        match self {
+            Self::CiCore => "target/nextest/ci-core/junit.xml",
+            Self::Integration => "target/nextest/integration/junit.xml",
+            Self::FaultMatrix => "target/nextest/fault-matrix/junit.xml",
+        }
+    }
+
+    const fn junit_config_path(self) -> &'static str {
+        "junit.xml"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HashPartition {
+    index: u8,
+    total: u8,
+}
+
+impl HashPartition {
+    pub(crate) fn new(index: u8, total: u8) -> Result<Self> {
+        if index == 0 || total == 0 || index > total || total > 32 {
+            bail!("partition 必须满足 1 ≤ M ≤ N ≤ 32，收到 {index}/{total}");
+        }
+        Ok(Self { index, total })
+    }
+
+    pub(crate) fn nextest_arg(self) -> String {
+        format!("hash:{self}")
+    }
+
+    pub(crate) const fn is_two_way(self) -> bool {
+        self.total == 2 && (self.index == 1 || self.index == 2)
+    }
+}
+
+impl fmt::Display for HashPartition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.index, self.total)
+    }
+}
+
+impl FromStr for HashPartition {
+    type Err = anyhow::Error;
+
+    fn from_str(raw: &str) -> Result<Self> {
+        let (index, total) = raw
+            .split_once('/')
+            .filter(|_| raw.matches('/').count() == 1)
+            .ok_or_else(|| anyhow::anyhow!("partition 必须使用 M/N 格式，收到 {raw:?}"))?;
+        if index.is_empty()
+            || total.is_empty()
+            || !index.bytes().all(|byte| byte.is_ascii_digit())
+            || !total.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            bail!("partition 必须使用十进制 M/N 格式，收到 {raw:?}");
+        }
+        Self::new(
+            index.parse().context("partition M 超出范围")?,
+            total.parse().context("partition N 超出范围")?,
+        )
+    }
+}
+
+impl Serialize for HashPartition {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for HashPartition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum NextestLane {
+    Verify,
+    CiCore,
+    Coverage,
+    Integration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CoreTestScope {
+    Workspace,
+    S3Backend,
+    RedisBackend,
+    OidcBackend,
+    PrometheusBackend,
+    OtelBackend,
+    GrpcBackend,
+    VaultBackend,
+}
+
+impl CoreTestScope {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Workspace,
+        Self::S3Backend,
+        Self::RedisBackend,
+        Self::OidcBackend,
+        Self::PrometheusBackend,
+        Self::OtelBackend,
+        Self::GrpcBackend,
+        Self::VaultBackend,
+    ];
+
+    fn args(self, partitioned: bool) -> Vec<String> {
+        match self {
+            Self::Workspace => vec![
+                "--workspace".to_owned(),
+                if partitioned {
+                    "--no-tests=pass".to_owned()
+                } else {
+                    "--no-tests=fail".to_owned()
+                },
+            ],
+            Self::S3Backend => backend_args("s3"),
+            Self::RedisBackend => backend_args("redis-adapter"),
+            Self::OidcBackend => backend_args("oidc"),
+            Self::PrometheusBackend => backend_args("prometheus-adapter"),
+            Self::OtelBackend => backend_args("otel"),
+            Self::GrpcBackend => backend_args("grpc"),
+            Self::VaultBackend => backend_args("vault"),
+        }
+    }
+}
+
+fn backend_args(package: &str) -> Vec<String> {
+    ["-p", package, "--features", "backend"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+impl NextestLane {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verify => "verify",
+            Self::CiCore => "ci-core",
+            Self::Coverage => "coverage",
+            Self::Integration => "integration",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NextestRunner {
+    Cargo,
+    LlvmCov,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+struct Evidence {
+    schema_version: u8,
+    lane: NextestLane,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shard: Option<String>,
+    profile: NextestProfile,
+    invocation_id: String,
+    gate: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_label: Option<String>,
+    outcome: Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    junit_path: Option<String>,
+    nextest_version: String,
+    source_revision: String,
+    replay: ReplaySpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Outcome {
+    Passed,
+    Failed,
+    SetupFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum ReplaySpec {
+    Core {
+        scope: CoreTestScope,
+        partition: Option<HashPartition>,
+    },
+    Coverage,
+    Integration {
+        shard: crate::integration_shards::IntegrationShard,
+        batch: usize,
+        partition: Option<HashPartition>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IntegrationBatchId {
+    shard: crate::integration_shards::IntegrationShard,
+    number: usize,
+}
+
+impl IntegrationBatchId {
+    pub(crate) fn new(
+        shard: crate::integration_shards::IntegrationShard,
+        number: usize,
+    ) -> Result<Self> {
+        if number == 0 || number > crate::integration_shards::batches(shard).len() {
+            bail!("integration replay batch 超出 typed registry: {number}");
+        }
+        Ok(Self { shard, number })
+    }
+}
+
+pub(crate) struct NextestInvocation {
+    profile: NextestProfile,
+    lane: NextestLane,
+    shard: Option<&'static str>,
+    partition: Option<HashPartition>,
+    runner: NextestRunner,
+    args: Vec<String>,
+    replay_spec: ReplaySpec,
+}
+
+impl NextestInvocation {
+    fn new(
+        profile: NextestProfile,
+        lane: NextestLane,
+        shard: Option<&'static str>,
+        partition: Option<HashPartition>,
+        runner: NextestRunner,
+        args: Vec<String>,
+    ) -> Self {
+        Self {
+            profile,
+            lane,
+            shard,
+            partition,
+            runner,
+            args,
+            replay_spec: if runner == NextestRunner::LlvmCov {
+                ReplaySpec::Coverage
+            } else {
+                ReplaySpec::Core {
+                    scope: CoreTestScope::Workspace,
+                    partition,
+                }
+            },
+        }
+    }
+
+    pub(crate) fn for_core(
+        scope: CoreTestScope,
+        lane: NextestLane,
+        partition: Option<HashPartition>,
+    ) -> Self {
+        let mut invocation = Self::new(
+            NextestProfile::CiCore,
+            lane,
+            None,
+            partition,
+            NextestRunner::Cargo,
+            scope.args(partition.is_some()),
+        );
+        invocation.replay_spec = ReplaySpec::Core { scope, partition };
+        invocation
+    }
+
+    pub(crate) fn for_coverage(output_path: &str) -> Result<Self> {
+        if output_path.is_empty()
+            || Path::new(output_path).is_absolute()
+            || output_path.contains("..")
+        {
+            bail!("coverage output path 必须是 workspace 内安全相对路径");
+        }
+        Ok(Self::new(
+            NextestProfile::CiCore,
+            NextestLane::Coverage,
+            None,
+            None,
+            NextestRunner::LlvmCov,
+            [
+                "--workspace",
+                "--locked",
+                "--json",
+                "--output-path",
+                output_path,
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        ))
+    }
+
+    pub(crate) fn for_integration_batch(
+        batch_id: IntegrationBatchId,
+        partition: Option<HashPartition>,
+    ) -> Result<Self> {
+        let shard = batch_id.shard;
+        shard.validate_partition(partition)?;
+        let batches = crate::integration_shards::batches(shard);
+        let batch = &batches[batch_id.number - 1];
+        let profile = if batch.package == "journeys-fault-matrix" {
+            NextestProfile::FaultMatrix
+        } else {
+            NextestProfile::Integration
+        };
+        let mut invocation = Self::new(
+            profile,
+            NextestLane::Integration,
+            Some(shard.as_str()),
+            partition,
+            NextestRunner::Cargo,
+            integration_batch_args(batch, partition.is_some()),
+        );
+        invocation.replay_spec = ReplaySpec::Integration {
+            shard,
+            batch: batch_id.number,
+            partition,
+        };
+        Ok(invocation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replay_spec(&self) -> &ReplaySpec {
+        &self.replay_spec
+    }
+
+    pub(crate) fn execution_argv(&self) -> Vec<String> {
+        let mut argv = vec!["cargo".to_owned()];
+        match self.runner {
+            NextestRunner::Cargo => {
+                argv.extend(["nextest".to_owned(), "run".to_owned()]);
+                argv.extend(["--profile".to_owned(), self.profile.as_str().to_owned()]);
+            }
+            NextestRunner::LlvmCov => {
+                argv.extend(["llvm-cov".to_owned(), "nextest".to_owned()]);
+            }
+        }
+        argv.extend(self.args.iter().cloned());
+        if let Some(partition) = self.partition {
+            argv.extend(["--partition".to_owned(), partition.nextest_arg()]);
+        }
+        argv
+    }
+
+    pub(crate) fn run(&self, root: &Path, env: &[(&str, &str)]) -> Result<()> {
+        let canonical = root.join(self.profile.junit_path());
+        prepare_canonical_junit(&canonical)?;
+        let evidence_dir = root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&evidence_dir)?;
+        let execution = self.execution_argv();
+        let source_revision = super::source_revision(root)?;
+        let id = unique_invocation_id(&evidence_dir, &self.base_id(&execution));
+        let cargo_args = &execution[3..];
+        let borrowed = cargo_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut owned_env = env.to_vec();
+        if self.runner == NextestRunner::LlvmCov {
+            owned_env.push(("NEXTEST_PROFILE", self.profile.as_str()));
+        }
+        let mode = match self.runner {
+            NextestRunner::Cargo => super::NextestMode::Direct,
+            NextestRunner::LlvmCov => super::NextestMode::LlvmCov,
+        };
+        let spawn = super::nextest_cmd(
+            super::NextestCapability,
+            mode,
+            &borrowed,
+            &owned_env,
+            Some(root),
+        )
+        .status();
+        match spawn {
+            Ok(status) => self.finish(&evidence_dir, &canonical, &id, &source_revision, status),
+            Err(error) => {
+                self.write_sidecar(
+                    &evidence_dir,
+                    &id,
+                    &source_revision,
+                    Outcome::SetupFailed,
+                    None,
+                )?;
+                Err(error).context("启动 cargo-nextest 失败")
+            }
+        }
+    }
+
+    fn finish(
+        &self,
+        evidence_dir: &Path,
+        canonical: &Path,
+        id: &str,
+        source_revision: &str,
+        status: ExitStatus,
+    ) -> Result<()> {
+        let junit_path = if canonical.is_file() {
+            let destination = evidence_dir.join(format!("{id}.xml"));
+            fs::rename(canonical, &destination).or_else(|_| {
+                fs::copy(canonical, &destination)?;
+                fs::remove_file(canonical)
+            })?;
+            Some(format!("nextest/{id}.xml"))
+        } else {
+            None
+        };
+        let outcome = match (status.success(), junit_path.is_some()) {
+            (true, true) => Outcome::Passed,
+            (false, true) => Outcome::Failed,
+            (_, false) => Outcome::SetupFailed,
+        };
+        self.write_sidecar(evidence_dir, id, source_revision, outcome, junit_path)?;
+        if !canonical.exists() && matches!(outcome, Outcome::SetupFailed) {
+            bail!("nextest invocation {id} 未生成 JUnit，按 setup-failed 处理");
+        }
+        if status.success() {
+            Ok(())
+        } else {
+            let code = status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |value| value.to_string());
+            bail!("nextest invocation {id} 失败（退出码 {code}）")
+        }
+    }
+
+    fn write_sidecar(
+        &self,
+        evidence_dir: &Path,
+        id: &str,
+        source_revision: &str,
+        outcome: Outcome,
+        junit_path: Option<String>,
+    ) -> Result<()> {
+        let (gate, batch_label) = self.evidence_labels();
+        let evidence = Evidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            lane: self.lane,
+            shard: self.shard.map(str::to_owned),
+            profile: self.profile,
+            invocation_id: id.to_owned(),
+            gate,
+            batch_label,
+            outcome,
+            junit_path,
+            nextest_version: NEXTEST_VERSION.to_owned(),
+            source_revision: source_revision.to_owned(),
+            replay: self.replay_spec.clone(),
+        };
+        let destination = evidence_dir.join(format!("{id}.json"));
+        let temporary = evidence_dir.join(format!(".{id}.json.tmp"));
+        fs::write(&temporary, serde_json::to_vec_pretty(&evidence)?)?;
+        fs::rename(&temporary, &destination)?;
+        Ok(())
+    }
+
+    fn evidence_labels(&self) -> (String, Option<String>) {
+        match &self.replay_spec {
+            ReplaySpec::Core { scope, .. } => {
+                (format!("core-{scope:?}").to_ascii_lowercase(), None)
+            }
+            ReplaySpec::Coverage => ("coverage".to_owned(), None),
+            ReplaySpec::Integration { shard, batch, .. } => (
+                format!("integration-{shard}"),
+                Some(format!("batch-{batch}")),
+            ),
+        }
+    }
+
+    fn base_id(&self, replay: &[String]) -> String {
+        let mut digest = Sha256::new();
+        for arg in replay {
+            digest.update(arg.as_bytes());
+            digest.update([0]);
+        }
+        let hash = format!("{:x}", digest.finalize());
+        let shard = self.shard.unwrap_or("workspace");
+        format!(
+            "{}-{shard}-{}-{}",
+            self.lane.as_str(),
+            self.profile.as_str(),
+            &hash[..12]
+        )
+    }
+}
+
+const MAX_EVIDENCE_FILES: usize = 256;
+const MAX_EVIDENCE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_EVIDENCE_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct EvidenceManifest {
+    schema_version: u8,
+    entries: Vec<ManifestEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ManifestEntry {
+    invocation_id: String,
+    outcome: Outcome,
+    gate: String,
+    batch_label: Option<String>,
+    sidecar: String,
+}
+
+pub(crate) fn stage(root: &Path) -> Result<()> {
+    let source = root.join(EVIDENCE_DIR);
+    let parent = root.join("target/job-evidence");
+    fs::create_dir_all(&parent)?;
+    let parent_metadata = fs::symlink_metadata(&parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        bail!("job evidence parent 必须是普通目录");
+    }
+    let destination = parent.join("nextest");
+    remove_without_follow(&destination)?;
+    static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let temporary = parent.join(format!(
+        ".nextest-stage-v2-{}-{}",
+        std::process::id(),
+        STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&temporary)?;
+    let mut guard = StagingGuard::new(temporary.clone());
+    stage_into(&source, &temporary)?;
+    fs::rename(&temporary, &destination)?;
+    guard.published = true;
+    Ok(())
+}
+
+struct StagingGuard {
+    path: PathBuf,
+    published: bool,
+}
+
+impl StagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            published: false,
+        }
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = remove_without_follow(&self.path);
+        }
+    }
+}
+
+fn remove_without_follow(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path)?;
+        }
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("lstat {}", path.display())),
+    }
+    Ok(())
+}
+
+fn stage_into(source: &Path, destination: &Path) -> Result<()> {
+    let mut records = BTreeMap::new();
+    let mut xml_stems = BTreeSet::new();
+    let mut total = 0_u64;
+    match fs::symlink_metadata(source) {
+        Ok(source_meta) => {
+            if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
+                bail!("nextest evidence source 必须是普通目录");
+            }
+            let mut entries = fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort_by_key(fs::DirEntry::file_name);
+            if entries.len() > MAX_EVIDENCE_FILES {
+                bail!("nextest evidence 文件数超限");
+            }
+            for entry in entries {
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    bail!("nextest evidence 只允许顶层普通文件");
+                }
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("evidence 文件名非 UTF-8"))?;
+                let (stem, extension) = name
+                    .rsplit_once('.')
+                    .context("evidence 文件名必须有扩展名")?;
+                if !matches!(extension, "json" | "xml")
+                    || stem.is_empty()
+                    || !stem
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    bail!("nextest evidence 文件名不在闭合命名内: {name}");
+                }
+                if metadata.len() > MAX_EVIDENCE_FILE_BYTES {
+                    bail!("nextest evidence 单文件超限");
+                }
+                if extension == "xml" && metadata.len() == 0 {
+                    bail!("nextest JUnit 不得为空");
+                }
+                if extension == "xml" && !xml_stems.insert(stem.to_owned()) {
+                    bail!("nextest evidence XML stem 重复");
+                }
+                let copied_path = destination.join(&name);
+                let copied = copy_checked(&path, &copied_path, metadata.len())?;
+                total = total
+                    .checked_add(copied)
+                    .context("evidence size overflow")?;
+                if total > MAX_EVIDENCE_TOTAL_BYTES {
+                    bail!("nextest evidence 总大小超限");
+                }
+                if extension == "json" {
+                    let record: Evidence = serde_json::from_slice(&fs::read(&copied_path)?)?;
+                    validate_evidence_record(&record, stem)?;
+                    if records.insert(stem.to_owned(), record).is_some() {
+                        bail!("nextest evidence JSON stem 重复");
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("读取 nextest evidence source"),
+    }
+    for (stem, record) in &records {
+        let expects_xml = record.junit_path.is_some();
+        if xml_stems.contains(stem) != expects_xml {
+            bail!("sidecar 与 JUnit 必须按 stem 一一配对");
+        }
+    }
+    if xml_stems.iter().any(|stem| !records.contains_key(stem)) {
+        bail!("存在无 JSON sidecar 的孤儿 JUnit");
+    }
+    let mut records = records.into_values().collect::<Vec<_>>();
+    records.sort_by_key(|record| match record.outcome {
+        Outcome::Failed => 0,
+        Outcome::SetupFailed => 1,
+        Outcome::Passed => 2,
+    });
+    let manifest = EvidenceManifest {
+        schema_version: EVIDENCE_SCHEMA_VERSION,
+        entries: records
+            .into_iter()
+            .map(|record| ManifestEntry {
+                sidecar: format!("nextest/{}.json", record.invocation_id),
+                invocation_id: record.invocation_id,
+                outcome: record.outcome,
+                gate: record.gate,
+                batch_label: record.batch_label,
+            })
+            .collect(),
+    };
+    fs::write(
+        destination.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    Ok(())
+}
+
+fn copy_checked(source: &Path, destination: &Path, expected_bytes: u64) -> Result<u64> {
+    let copied = fs::copy(source, destination)?;
+    let source_after = fs::symlink_metadata(source)?;
+    let destination_after = fs::symlink_metadata(destination)?;
+    if source_after.file_type().is_symlink()
+        || !source_after.is_file()
+        || destination_after.file_type().is_symlink()
+        || !destination_after.is_file()
+        || copied != expected_bytes
+        || source_after.len() != copied
+        || destination_after.len() != copied
+        || copied > MAX_EVIDENCE_FILE_BYTES
+    {
+        bail!("nextest evidence copy 后身份或大小漂移");
+    }
+    Ok(copied)
+}
+
+fn validate_evidence_record(record: &Evidence, stem: &str) -> Result<()> {
+    if record.schema_version != EVIDENCE_SCHEMA_VERSION
+        || record.invocation_id != stem
+        || record.nextest_version != NEXTEST_VERSION
+        || record.source_revision.len() != 40
+        || !record
+            .source_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("nextest evidence DTO identity/schema/version 非法");
+    }
+    let expected = invocation_for_replay(&record.replay, record.lane)?;
+    let (expected_gate, expected_batch) = expected.evidence_labels();
+    if record.profile != expected.profile
+        || record.partition_for_validation() != expected.partition
+        || record.shard.as_deref() != expected.shard
+        || record.gate != expected_gate
+        || record.batch_label != expected_batch
+        || record.lane != expected.lane
+    {
+        bail!("nextest evidence replay 派生字段矛盾");
+    }
+    if !safe_display(&record.gate)
+        || record
+            .batch_label
+            .as_deref()
+            .is_some_and(|value| !safe_display(value))
+    {
+        bail!("nextest evidence label 含控制字符");
+    }
+    match (&record.outcome, &record.junit_path) {
+        (Outcome::Passed | Outcome::Failed, Some(junit))
+            if junit == &format!("nextest/{stem}.xml") => {}
+        (Outcome::SetupFailed, None) => {}
+        _ => bail!("outcome 与 JUnit 必须精确配对"),
+    }
+    Ok(())
+}
+
+impl Evidence {
+    fn partition_for_validation(&self) -> Option<HashPartition> {
+        match self.replay {
+            ReplaySpec::Core { partition, .. } | ReplaySpec::Integration { partition, .. } => {
+                partition
+            }
+            ReplaySpec::Coverage => None,
+        }
+    }
+}
+
+fn invocation_for_replay(replay: &ReplaySpec, lane: NextestLane) -> Result<NextestInvocation> {
+    match *replay {
+        ReplaySpec::Core { scope, partition }
+            if matches!(lane, NextestLane::Verify | NextestLane::CiCore) =>
+        {
+            Ok(NextestInvocation::for_core(scope, lane, partition))
+        }
+        ReplaySpec::Coverage if lane == NextestLane::Coverage => {
+            NextestInvocation::for_coverage("target/coverage/nextest.json")
+        }
+        ReplaySpec::Integration {
+            shard,
+            batch,
+            partition,
+        } if lane == NextestLane::Integration => NextestInvocation::for_integration_batch(
+            IntegrationBatchId::new(shard, batch)?,
+            partition,
+        ),
+        _ => bail!("replay kind 与 lane 矛盾"),
+    }
+}
+
+fn safe_display(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_control() && byte != 0x1b)
+}
+
+pub(crate) fn inspect(artifact_root: &Path) -> Result<()> {
+    let nextest_dir = artifact_root.join("nextest");
+    let directory_metadata = fs::symlink_metadata(&nextest_dir)?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        bail!("artifact nextest 必须是普通目录");
+    }
+    let mut actual_files = BTreeSet::new();
+    for entry in fs::read_dir(&nextest_dir)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("artifact evidence 文件名非 UTF-8"))?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_EVIDENCE_FILE_BYTES
+            || (name.ends_with(".xml") && metadata.len() == 0)
+            || !actual_files.insert(name)
+        {
+            bail!("artifact evidence 仅允许闭合顶层普通文件");
+        }
+    }
+    let manifest_path = nextest_dir.join("manifest.json");
+    let manifest_metadata = fs::symlink_metadata(&manifest_path)?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        bail!("manifest 必须是 artifact 内普通文件");
+    }
+    let manifest: EvidenceManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    if manifest.schema_version != EVIDENCE_SCHEMA_VERSION {
+        bail!("manifest schemaVersion 非 v2");
+    }
+    let mut seen = BTreeSet::new();
+    let mut expected_files = BTreeSet::from(["manifest.json".to_owned()]);
+    let mut reports = Vec::new();
+    for entry in manifest.entries {
+        if !safe_evidence_stem(&entry.invocation_id)
+            || !safe_display(&entry.gate)
+            || entry
+                .batch_label
+                .as_deref()
+                .is_some_and(|value| !safe_display(value))
+            || !seen.insert(entry.invocation_id.clone())
+        {
+            bail!("manifest entry identity/display 非法");
+        }
+        let expected_sidecar = format!("nextest/{}.json", entry.invocation_id);
+        if entry.sidecar != expected_sidecar {
+            bail!("manifest sidecar 必须是闭合 nextest/<id>.json");
+        }
+        expected_files.insert(format!("{}.json", entry.invocation_id));
+        if matches!(entry.outcome, Outcome::Passed | Outcome::Failed) {
+            expected_files.insert(format!("{}.xml", entry.invocation_id));
+        }
+        let sidecar = artifact_root.join(&entry.sidecar);
+        let metadata = fs::symlink_metadata(&sidecar)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("manifest sidecar 必须是 artifact 内普通文件");
+        }
+        let record: Evidence = serde_json::from_slice(&fs::read(&sidecar)?)?;
+        validate_evidence_record(&record, &entry.invocation_id)?;
+        let recomputed = ManifestEntry {
+            invocation_id: record.invocation_id,
+            outcome: record.outcome,
+            gate: record.gate,
+            batch_label: record.batch_label,
+            sidecar: expected_sidecar,
+        };
+        if entry != recomputed {
+            bail!("manifest entry 与 sidecar 内容矛盾");
+        }
+        if !matches!(entry.outcome, Outcome::Passed) {
+            reports.push(format!(
+                "{}\t{}\t{}\t{}",
+                entry.invocation_id,
+                entry.gate,
+                entry.batch_label.as_deref().unwrap_or("-"),
+                entry.sidecar
+            ));
+        }
+    }
+    if actual_files != expected_files {
+        bail!("artifact nextest 文件集与 manifest 非双向闭合");
+    }
+    for report in reports {
+        println!("{report}");
+    }
+    Ok(())
+}
+
+fn safe_evidence_stem(stem: &str) -> bool {
+    !stem.is_empty()
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(sidecar)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("replay sidecar 必须是普通 JSON 文件");
+    }
+    let record: Evidence = serde_json::from_slice(&fs::read(sidecar)?)?;
+    let stem = sidecar
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .context("replay sidecar 文件名非法")?;
+    validate_evidence_record(&record, stem)?;
+    if record.source_revision != super::source_revision(root)? {
+        bail!("sidecar sourceRevision 与当前 HEAD 不匹配");
+    }
+    match record.replay {
+        ReplaySpec::Core { scope, partition } => {
+            NextestInvocation::for_core(scope, NextestLane::CiCore, partition).run(root, &[])
+        }
+        ReplaySpec::Coverage => crate::coverage::run(),
+        ReplaySpec::Integration {
+            shard,
+            batch,
+            partition,
+        } => crate::verify::run_nextest_replay(shard, batch, partition),
+    }
+}
+
+fn integration_batch_args(
+    batch: &crate::integration_shards::ShardBatch,
+    allow_empty_partition: bool,
+) -> Vec<String> {
+    use crate::integration_shards::{Scheduling, TargetKind};
+
+    let mut args = vec![
+        "--features".to_owned(),
+        "integration".to_owned(),
+        if allow_empty_partition {
+            "--no-tests=pass".to_owned()
+        } else {
+            "--no-tests=fail".to_owned()
+        },
+    ];
+    if batch.scheduling == Scheduling::Serial {
+        args.extend(["--test-threads".to_owned(), "1".to_owned()]);
+    }
+    args.extend(["-p".to_owned(), batch.package.to_owned()]);
+    match batch.kind {
+        TargetKind::Lib => args.push("--lib".to_owned()),
+        TargetKind::Test => {
+            for target in &batch.targets {
+                args.extend(["--test".to_owned(), (*target).to_owned()]);
+            }
+        }
+    }
+    args.extend(["-E".to_owned(), batch.filter.clone()]);
+    args
+}
+
+fn prepare_canonical_junit(canonical: &Path) -> Result<()> {
+    if canonical.exists() {
+        fs::remove_file(canonical)
+            .with_context(|| format!("清理陈旧 JUnit 失败: {}", canonical.display()))?;
+    }
+    if let Some(parent) = canonical.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn unique_invocation_id(dir: &Path, base: &str) -> String {
+    for suffix in 1_u32.. {
+        let candidate = if suffix == 1 {
+            base.to_owned()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        if !dir.join(format!("{candidate}.json")).exists()
+            && !dir.join(format!("{candidate}.xml")).exists()
+        {
+            return candidate;
+        }
+    }
+    unreachable!("u32 invocation suffix space exhausted")
+}
+
+#[cfg(test)]
+fn validate_evidence_schema(actual: &str, golden: &str) -> Result<()> {
+    let _: serde_json::Value = serde_json::from_str(actual).context("evidence JSON 非法")?;
+    if actual.trim_end() != golden.trim_end() {
+        bail!("nextest evidence wire schema 与 committed golden 漂移");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_staged_evidence(artifact_root: &Path) -> Result<()> {
+    let nextest_dir = artifact_root.join("nextest");
+    for entry in fs::read_dir(&nextest_dir).context("读取 staged nextest evidence")? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        let Some(junit_path) = value.get("junitPath").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let relative = Path::new(junit_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || !relative.starts_with("nextest")
+        {
+            bail!("staged junitPath 必须是 artifact 根下 nextest/ 的安全相对路径");
+        }
+        if !artifact_root.join(relative).is_file() {
+            bail!("staged junitPath 未解析到同 artifact 内 XML");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_config(source: &str) -> Result<()> {
+    let value: toml::Value = toml::from_str(source).context("解析 nextest TOML 失败")?;
+    let profiles = value
+        .get("profile")
+        .and_then(toml::Value::as_table)
+        .context("缺少 [profile]")?;
+    let mut profile_names = profiles.keys().map(String::as_str).collect::<Vec<_>>();
+    profile_names.sort_unstable();
+    if profile_names != ["ci-core", "default", "fault-matrix", "integration"] {
+        bail!("nextest profiles 必须是 default/ci-core/integration/fault-matrix 精确闭集");
+    }
+    for profile in [
+        NextestProfile::CiCore,
+        NextestProfile::Integration,
+        NextestProfile::FaultMatrix,
+    ] {
+        let table = profiles
+            .get(profile.as_str())
+            .and_then(toml::Value::as_table)
+            .with_context(|| format!("缺少 profile.{}", profile.as_str()))?;
+        if table.contains_key("global-timeout") {
+            bail!("profile.{} 禁止 global-timeout", profile.as_str());
+        }
+        if table.get("retries").and_then(toml::Value::as_integer) != Some(0) {
+            bail!("profile.{} 必须 retries=0", profile.as_str());
+        }
+        if table.get("flaky-result").and_then(toml::Value::as_str) != Some("fail") {
+            bail!("profile.{} 必须 flaky-result=fail", profile.as_str());
+        }
+        let timeout = table.get("slow-timeout").and_then(toml::Value::as_table);
+        let period = timeout
+            .and_then(|timeout| timeout.get("period"))
+            .and_then(toml::Value::as_str);
+        let expected = if profile == NextestProfile::FaultMatrix {
+            "600s"
+        } else if profile == NextestProfile::Integration {
+            "300s"
+        } else {
+            "120s"
+        };
+        if period != Some(expected) {
+            bail!(
+                "profile.{} slow-timeout 必须为 {expected}",
+                profile.as_str()
+            );
+        }
+        let expected_terminate = if profile == NextestProfile::FaultMatrix {
+            1
+        } else {
+            2
+        };
+        if timeout
+            .and_then(|timeout| timeout.get("terminate-after"))
+            .and_then(toml::Value::as_integer)
+            != Some(expected_terminate)
+        {
+            bail!(
+                "profile.{} terminate-after 必须为 {expected_terminate}",
+                profile.as_str()
+            );
+        }
+        let junit = table
+            .get("junit")
+            .and_then(toml::Value::as_table)
+            .and_then(|report| report.get("path"))
+            .and_then(toml::Value::as_str);
+        if junit != Some(profile.junit_config_path()) {
+            bail!("profile.{} JUnit path 漂移", profile.as_str());
+        }
+        if profile != NextestProfile::CiCore && table.contains_key("overrides") {
+            bail!("profile.{} 禁止 overrides", profile.as_str());
+        }
+    }
+    validate_trybuild_scheduling(&value, profiles)?;
+    Ok(())
+}
+
+fn validate_trybuild_scheduling(
+    value: &toml::Value,
+    profiles: &toml::map::Map<String, toml::Value>,
+) -> Result<()> {
+    let groups = value
+        .get("test-groups")
+        .and_then(toml::Value::as_table)
+        .context("缺少 test-groups.trybuild")?;
+    if groups.len() != 1
+        || groups
+            .get("trybuild")
+            .and_then(toml::Value::as_table)
+            .and_then(|group| group.get("max-threads"))
+            .and_then(toml::Value::as_integer)
+            != Some(1)
+    {
+        bail!("test-groups 必须仅含 trybuild max-threads=1");
+    }
+    for profile in ["default", "ci-core"] {
+        let overrides = profiles
+            .get(profile)
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get("overrides"))
+            .and_then(toml::Value::as_array)
+            .with_context(|| format!("profile.{profile} 缺 trybuild override"))?;
+        if overrides.len() != 1 {
+            bail!("profile.{profile} 必须仅含一个 trybuild override");
+        }
+        let rule = overrides[0]
+            .as_table()
+            .context("trybuild override 非 table")?;
+        if rule.len() != 2
+            || rule.get("filter").and_then(toml::Value::as_str) != Some("test(/^ui$/)")
+            || rule.get("test-group").and_then(toml::Value::as_str) != Some("trybuild")
+        {
+            bail!("profile.{profile} trybuild override 漂移");
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_boundary_source(source: &str) -> Result<()> {
+    fn forbidden_identifier(ident: &syn::Ident) -> bool {
+        matches!(
+            ident.to_string().as_str(),
+            "clean_cmd" | "nextest_cmd" | "nextest_available"
+        )
+    }
+
+    fn macro_contains_forbidden_api(tokens: proc_macro2::TokenStream) -> bool {
+        tokens.into_iter().any(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) => forbidden_identifier(&ident),
+            proc_macro2::TokenTree::Group(group) => macro_contains_forbidden_api(group.stream()),
+            _ => false,
+        })
+    }
+
+    #[derive(Default)]
+    struct CapabilityVisitor {
+        findings: Vec<&'static str>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for CapabilityVisitor {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = node.func.as_ref()
+                && path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| forbidden_identifier(&segment.ident))
+            {
+                self.findings.push("private cargo capability API call");
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if macro_contains_forbidden_api(node.tokens.clone()) {
+                self.findings.push("private cargo capability API in macro");
+            }
+            syn::visit::visit_macro(self, node);
+        }
+    }
+    let syntax = syn::parse_file(source).context("解析 xtask production Rust AST 失败")?;
+    let mut visitor = CapabilityVisitor::default();
+    syn::visit::Visit::visit_file(&mut visitor, &syntax);
+    if !visitor.findings.is_empty() {
+        bail!("cargo/nextest private capability API 只能由 cmd::nextest carrier 构造")
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
+    validate_config(&fs::read_to_string(root.join(".config/nextest.toml"))?)?;
+    validate_trybuild_harnesses(root)?;
+    let source_root = root.join("xtask/src");
+    for path in rust_files_under(&source_root)? {
+        if path == source_root.join("nextest.rs") || path == source_root.join("cmd.rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path)?;
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .context("读取 production source")?;
+        validate_capability_boundary_source(production)
+            .with_context(|| format!("nextest execution funnel: {}", path.display()))?;
+    }
+    Ok(())
+}
+
+const TRYBUILD_UI_CARRIERS: [&str; 4] = [
+    "crates/authn/tests/trybuild.rs",
+    "crates/diport/tests/trybuild.rs",
+    "crates/httpserve/tests/funnel_ui.rs",
+    "crates/secure/tests/trybuild.rs",
+];
+
+fn validate_trybuild_harnesses(root: &Path) -> Result<()> {
+    let cargo: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.toml"))?)?;
+    let members = cargo
+        .get("workspace")
+        .and_then(|value| value.get("members"))
+        .and_then(toml::Value::as_array)
+        .context("workspace.members 缺失")?;
+    let mut actual = BTreeSet::new();
+    for member in members {
+        let member = member.as_str().context("workspace member 非字符串")?;
+        for path in rust_files_under(&root.join(member))? {
+            let syntax = syn::parse_file(&fs::read_to_string(&path)?)?;
+            let has_ui = syntax.items.iter().any(|item| {
+                let syn::Item::Fn(function) = item else {
+                    return false;
+                };
+                function.sig.ident == "ui"
+                    && function
+                        .attrs
+                        .iter()
+                        .any(|attr| attr.path().is_ident("test"))
+            });
+            if has_ui {
+                actual.insert(
+                    path.strip_prefix(root)
+                        .context("trybuild carrier 越出 workspace")?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    validate_trybuild_carrier_set(&actual)
+}
+
+fn validate_trybuild_carrier_set(actual: &BTreeSet<String>) -> Result<()> {
+    let expected = TRYBUILD_UI_CARRIERS
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if actual != &expected {
+        bail!("trybuild #[test] fn ui() carrier 闭集漂移: {actual:?}");
+    }
+    Ok(())
+}
+
+fn rust_files_under(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut entries = fs::read_dir(&directory)
+            .with_context(|| format!("读取 Rust source 目录失败: {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                bail!("Rust source 禁止符号链接: {}", path.display());
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace_root;
+
+    #[test]
+    fn hash_partition_accepts_only_closed_m_over_n() -> Result<()> {
+        for (raw, expected) in [
+            ("1/1", "hash:1/1"),
+            ("1/32", "hash:1/32"),
+            ("32/32", "hash:32/32"),
+        ] {
+            assert_eq!(raw.parse::<HashPartition>()?.nextest_arg(), expected);
+        }
+        for raw in [
+            "0/1",
+            "2/1",
+            "1/0",
+            "1/33",
+            "33/33",
+            "hash:1/2",
+            "count:1/2",
+            "slice:1/2",
+            "1",
+            "1/2/3",
+            "01/x",
+            "999999999999999999999/2",
+        ] {
+            assert!(raw.parse::<HashPartition>().is_err(), "{raw} must fail");
+        }
+        Ok(())
+    }
+
+    fn valid_config() -> String {
+        let profiles: String = [
+            ("ci-core", "120s", "junit.xml", 2),
+            ("integration", "300s", "junit.xml", 2),
+            ("fault-matrix", "600s", "junit.xml", 1),
+        ]
+        .into_iter()
+        .map(|(name, period, path, terminate)| format!("[profile.{name}]\nretries = 0\nflaky-result = \"fail\"\nslow-timeout = {{ period = \"{period}\", terminate-after = {terminate} }}\n[profile.{name}.junit]\npath = \"{path}\"\n"))
+        .collect();
+        format!(
+            "[profile.default]\nretries=0\n{profiles}\n[test-groups.trybuild]\nmax-threads=1\n[[profile.default.overrides]]\nfilter='test(/^ui$/)'\ntest-group='trybuild'\n[[profile.ci-core.overrides]]\nfilter='test(/^ui$/)'\ntest-group='trybuild'\n"
+        )
+    }
+
+    #[test]
+    fn config_policy_rejects_retry_override_and_missing_timeout() {
+        let green = valid_config();
+        assert!(validate_config(&green).is_ok());
+        for red in [
+            green.replacen("retries = 0", "retries = 2", 1),
+            green.replacen("[profile.ci-core]", "[profile.missing-ci-core]", 1),
+            green.replacen("slow-timeout", "missing-timeout", 1),
+            green.replacen("path = \"junit.xml\"", "path = \"wrong.xml\"", 1),
+            green.replacen("flaky-result = \"fail\"", "flaky-result = \"pass\"", 1),
+            format!("{green}\n[profile.ci]\nretries=0\n"),
+            format!("{green}\n[[profile.integration.overrides]]\nfilter='all()'\nretries=2\n"),
+            green.replacen("max-threads=1", "max-threads=2", 1),
+            green.replacen("test(/^ui$/)", "test(/ui/)", 1),
+            green.replacen("test-group='trybuild'", "test-group='other'", 1),
+            green.replacen("terminate-after = 2", "terminate-after = 1", 1),
+            green.replacen("retries = 0", "global-timeout = \"60s\"\nretries = 0", 1),
+        ] {
+            assert!(validate_config(&red).is_err());
+        }
+    }
+
+    #[test]
+    fn committed_nextest_config_obeys_policy() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(".config/nextest.toml"))?;
+        validate_config(&source)
+    }
+
+    #[test]
+    fn trybuild_ui_carrier_set_is_bidirectionally_closed() {
+        let green = TRYBUILD_UI_CARRIERS
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert!(validate_trybuild_carrier_set(&green).is_ok());
+        let mut missing = green.clone();
+        missing.remove(TRYBUILD_UI_CARRIERS[0]);
+        assert!(validate_trybuild_carrier_set(&missing).is_err());
+        let mut added = green.clone();
+        added.insert("crates/new/tests/trybuild.rs".to_owned());
+        assert!(validate_trybuild_carrier_set(&added).is_err());
+        let mut renamed = green;
+        renamed.remove(TRYBUILD_UI_CARRIERS[0]);
+        renamed.insert("crates/authn/tests/renamed.rs".to_owned());
+        assert!(validate_trybuild_carrier_set(&renamed).is_err());
+    }
+
+    #[test]
+    fn execution_funnel_rejects_private_capability_api_bypass() {
+        assert!(
+            validate_capability_boundary_source(
+                "fn f() { cargo_cmd(CargoSubcommand::Check, &[\"--locked\"]); }"
+            )
+            .is_ok()
+        );
+        for red in [
+            // 普通 macro_rules literal：不依赖展开或 nextest 字面量识别，只守 private API 边界。
+            "macro_rules! run { () => { clean_cmd(\"cargo\", &[\"nextest\", \"run\"]) } }",
+            // array concat：即使 capability 在运行期才拼出，旧 raw cargo API 仍不可调用。
+            "fn f() { let args = [[\"next\", \"est\"].concat(), \"run\".into()]; clean_cmd(\"cargo\", &args); }",
+            // 变量传播：validator 不追踪值，只拒绝越过 typed boundary。
+            "fn f(program: &str, args: &[&str]) { let forwarded = (program, args); clean_cmd(forwarded.0, forwarded.1); }",
+            "fn f() { nextest_cmd(token, mode, &[], &[], None); }",
+            "fn f() { nextest_available(token); }",
+        ] {
+            assert!(
+                validate_capability_boundary_source(red).is_err(),
+                "red must fail: {red}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_nextest_call_sites_use_funnel() -> Result<()> {
+        validate_workspace(&workspace_root()?)
+    }
+
+    #[test]
+    fn replay_spec_is_closed_and_partition_is_typed() -> Result<()> {
+        let partition = Some("2/2".parse()?);
+        let invocation =
+            NextestInvocation::for_core(CoreTestScope::Workspace, NextestLane::CiCore, partition);
+        assert_eq!(
+            invocation.replay_spec(),
+            &ReplaySpec::Core {
+                scope: CoreTestScope::Workspace,
+                partition
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn llvm_cov_replay_spec_closes_profile_without_raw_args() -> Result<()> {
+        let invocation = NextestInvocation::for_coverage("target/coverage.json")?;
+        assert_eq!(
+            invocation.execution_argv(),
+            [
+                "cargo",
+                "llvm-cov",
+                "nextest",
+                "--workspace",
+                "--locked",
+                "--json",
+                "--output-path",
+                "target/coverage.json"
+            ]
+            .map(str::to_owned)
+        );
+        assert_eq!(invocation.replay_spec(), &ReplaySpec::Coverage);
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_schema_matches_golden() -> Result<()> {
+        let evidence = Evidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            lane: NextestLane::CiCore,
+            shard: None,
+            profile: NextestProfile::CiCore,
+            invocation_id: "ci-core-workspace-ci-core-0123456789ab".to_owned(),
+            gate: "core-workspace".to_owned(),
+            batch_label: None,
+            outcome: Outcome::Failed,
+            junit_path: Some("nextest/ci-core.xml".to_owned()),
+            nextest_version: NEXTEST_VERSION.to_owned(),
+            source_revision: "0000000000000000000000000000000000000000".to_owned(),
+            replay: ReplaySpec::Core {
+                scope: CoreTestScope::Workspace,
+                partition: Some("1/2".parse()?),
+            },
+        };
+        validate_evidence_schema(
+            &serde_json::to_string_pretty(&evidence)?,
+            include_str!("../tests/golden/nextest-evidence.json"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_schema_rejects_wire_drift() -> Result<()> {
+        let golden = include_str!("../tests/golden/nextest-evidence.json");
+        let drift = golden.replacen("\"schemaVersion\"", "\"schema_version\"", 1);
+        assert!(validate_evidence_schema(&drift, golden).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_test_preserves_junit_and_sidecar_before_error() -> Result<()> {
+        use std::os::unix::process::ExitStatusExt;
+
+        let root = crate::testutil::unique_tmp("nextest-evidence-failure");
+        let canonical = root.join(NextestProfile::CiCore.junit_path());
+        let evidence_dir = root.join(EVIDENCE_DIR);
+        fs::create_dir_all(canonical.parent().context("canonical parent")?)?;
+        fs::create_dir_all(&evidence_dir)?;
+        fs::write(&canonical, "<testsuites/>")?;
+        let invocation = NextestInvocation::new(
+            NextestProfile::CiCore,
+            NextestLane::CiCore,
+            None,
+            Some("1/2".parse()?),
+            NextestRunner::Cargo,
+            vec!["--workspace".to_owned()],
+        );
+        let result = invocation.finish(
+            &evidence_dir,
+            &canonical,
+            "failure-case",
+            "0000000000000000000000000000000000000000",
+            ExitStatus::from_raw(1 << 8),
+        );
+        assert!(result.is_err());
+        assert!(!canonical.exists());
+        assert_eq!(
+            fs::read_to_string(evidence_dir.join("failure-case.xml"))?,
+            "<testsuites/>"
+        );
+        let json = fs::read_to_string(evidence_dir.join("failure-case.json"))?;
+        assert!(json.contains("\"outcome\": \"failed\""));
+        assert!(!json.contains(root.to_string_lossy().as_ref()));
+        assert!(json.contains("\"junitPath\": \"nextest/failure-case.xml\""));
+
+        stage(&root)?;
+        let artifact_root = root.join("target/job-evidence");
+        let staged_nextest = artifact_root.join("nextest");
+        validate_staged_evidence(&artifact_root)?;
+        assert!(staged_nextest.join("manifest.json").is_file());
+        fs::write(
+            staged_nextest.join("failure-case.json"),
+            json.replace(
+                "nextest/failure-case.xml",
+                "target/nextest-evidence/failure-case.xml",
+            ),
+        )?;
+        assert!(validate_staged_evidence(&artifact_root).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_junit_is_setup_failed_for_zero_and_nonzero_status() -> Result<()> {
+        use std::os::unix::process::ExitStatusExt;
+
+        for (name, raw_status) in [("success-missing", 0), ("failure-missing", 1 << 8)] {
+            let root = crate::testutil::unique_tmp(name);
+            let canonical = root.join(NextestProfile::CiCore.junit_path());
+            let evidence_dir = root.join(EVIDENCE_DIR);
+            fs::create_dir_all(&evidence_dir)?;
+            let invocation = NextestInvocation::new(
+                NextestProfile::CiCore,
+                NextestLane::CiCore,
+                None,
+                None,
+                NextestRunner::Cargo,
+                vec!["--workspace".to_owned()],
+            );
+            assert!(
+                invocation
+                    .finish(
+                        &evidence_dir,
+                        &canonical,
+                        name,
+                        "0000000000000000000000000000000000000000",
+                        ExitStatus::from_raw(raw_status),
+                    )
+                    .is_err()
+            );
+            let json = fs::read_to_string(evidence_dir.join(format!("{name}.json")))?;
+            assert!(json.contains("\"outcome\": \"setup-failed\""));
+            assert!(!evidence_dir.join(format!("{name}.xml")).exists());
+            fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_invocation_ids_never_overwrite() -> Result<()> {
+        let root = crate::testutil::unique_tmp("nextest-evidence-id");
+        fs::create_dir_all(&root)?;
+        assert_eq!(unique_invocation_id(&root, "stable"), "stable");
+        fs::write(root.join("stable.json"), "{}")?;
+        assert_eq!(unique_invocation_id(&root, "stable"), "stable-2");
+        fs::write(root.join("stable-2.xml"), "<testsuites/>")?;
+        assert_eq!(unique_invocation_id(&root, "stable"), "stable-3");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_canonical_junit_is_removed_before_every_run() -> Result<()> {
+        let root = crate::testutil::unique_tmp("nextest-stale-junit");
+        let canonical = root.join(NextestProfile::CiCore.junit_path());
+        fs::create_dir_all(canonical.parent().context("canonical parent")?)?;
+        fs::write(&canonical, "stale-secret-canary")?;
+        prepare_canonical_junit(&canonical)?;
+        assert!(!canonical.exists());
+        assert!(canonical.parent().is_some_and(Path::is_dir));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_rejects_symlink_unknown_dto_and_oversize() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let valid_sidecar = include_str!("../tests/golden/nextest-evidence.json")
+            .replace("ci-core-workspace-ci-core-0123456789ab", "case")
+            .replace("nextest/ci-core.xml", "nextest/case.xml");
+
+        let unknown_root = crate::testutil::unique_tmp("nextest-stage-unknown");
+        let unknown_source = unknown_root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&unknown_source)?;
+        fs::write(unknown_source.join("case.xml"), "<testsuites/>")?;
+        fs::write(
+            unknown_source.join("case.json"),
+            valid_sidecar.replacen("\"gate\":", "\"unknown\": true,\n  \"gate\":", 1),
+        )?;
+        assert!(stage(&unknown_root).is_err());
+        assert!(!unknown_root.join("target/job-evidence/nextest").exists());
+        fs::remove_dir_all(unknown_root)?;
+
+        let invalid_root = crate::testutil::unique_tmp("nextest-stage-invalid-json");
+        let invalid_source = invalid_root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&invalid_source)?;
+        fs::create_dir_all(invalid_root.join("target/job-evidence/nextest"))?;
+        fs::write(
+            invalid_root.join("target/job-evidence/nextest/old.json"),
+            "old",
+        )?;
+        fs::write(invalid_source.join("case.json"), "{")?;
+        assert!(stage(&invalid_root).is_err());
+        assert!(!invalid_root.join("target/job-evidence/nextest").exists());
+        fs::remove_dir_all(invalid_root)?;
+
+        let symlink_root = crate::testutil::unique_tmp("nextest-stage-symlink");
+        let symlink_source = symlink_root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&symlink_source)?;
+        fs::write(symlink_root.join("outside.xml"), "x")?;
+        symlink(
+            symlink_root.join("outside.xml"),
+            symlink_source.join("case.xml"),
+        )?;
+        assert!(stage(&symlink_root).is_err());
+        fs::remove_dir_all(symlink_root)?;
+
+        let dangling_root = crate::testutil::unique_tmp("nextest-stage-dangling-root");
+        fs::create_dir_all(dangling_root.join("target"))?;
+        symlink("missing", dangling_root.join(EVIDENCE_DIR))?;
+        assert!(stage(&dangling_root).is_err());
+        fs::remove_dir_all(dangling_root)?;
+
+        let orphan_root = crate::testutil::unique_tmp("nextest-stage-orphan-xml");
+        let orphan_source = orphan_root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&orphan_source)?;
+        fs::write(orphan_source.join("orphan.xml"), "<testsuites/>")?;
+        assert!(stage(&orphan_root).is_err());
+        assert!(!orphan_root.join("target/job-evidence/nextest").exists());
+        fs::remove_dir_all(orphan_root)?;
+
+        let oversize_root = crate::testutil::unique_tmp("nextest-stage-oversize");
+        let oversize_source = oversize_root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&oversize_source)?;
+        let file = fs::File::create(oversize_source.join("case.xml"))?;
+        file.set_len(MAX_EVIDENCE_FILE_BYTES + 1)?;
+        assert!(stage(&oversize_root).is_err());
+        assert!(!oversize_root.join("target/job-evidence/nextest").exists());
+        fs::remove_dir_all(oversize_root)?;
+
+        let total_root = crate::testutil::unique_tmp("nextest-stage-total-overflow");
+        let total_source = total_root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&total_source)?;
+        for index in 0..6 {
+            let id = format!("total-{index}");
+            let mut sidecar = valid_sidecar
+                .replace("case", &id)
+                .replace(
+                    "  \"outcome\": \"failed\",",
+                    "  \"outcome\": \"setup-failed\",",
+                )
+                .replace(&format!("  \"junitPath\": \"nextest/{id}.xml\",\n"), "");
+            sidecar.extend(std::iter::repeat_n(' ', (9 * 1024 * 1024) - sidecar.len()));
+            fs::write(total_source.join(format!("{id}.json")), sidecar)?;
+        }
+        assert!(stage(&total_root).is_err());
+        assert!(!total_root.join("target/job-evidence/nextest").exists());
+        fs::remove_dir_all(total_root)?;
+
+        let copy_root = crate::testutil::unique_tmp("nextest-copy-size");
+        fs::create_dir_all(&copy_root)?;
+        fs::write(copy_root.join("source"), "abc")?;
+        assert!(copy_checked(&copy_root.join("source"), &copy_root.join("dest"), 2).is_err());
+        fs::remove_dir_all(copy_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_validator_rejects_derived_contradictions_before_dispatch() -> Result<()> {
+        let mut record: Evidence = serde_json::from_str(
+            &include_str!("../tests/golden/nextest-evidence.json").replace(
+                "nextest/ci-core.xml",
+                "nextest/ci-core-workspace-ci-core-0123456789ab.xml",
+            ),
+        )?;
+        assert!(validate_evidence_record(&record, &record.invocation_id).is_ok());
+        record.gate = "core-vaultbackend".to_owned();
+        assert!(validate_evidence_record(&record, &record.invocation_id).is_err());
+
+        record.replay = ReplaySpec::Integration {
+            shard: crate::integration_shards::IntegrationShard::PostgresDomain,
+            batch: 999,
+            partition: None,
+        };
+        assert!(validate_evidence_record(&record, &record.invocation_id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_revalidates_manifest_sidecars_and_display_fields() -> Result<()> {
+        let root = crate::testutil::unique_tmp("nextest-inspect-trust");
+        let source = root.join(EVIDENCE_DIR);
+        fs::create_dir_all(&source)?;
+        let sidecar = include_str!("../tests/golden/nextest-evidence.json")
+            .replace("ci-core-workspace-ci-core-0123456789ab", "case")
+            .replace("nextest/ci-core.xml", "nextest/case.xml");
+        fs::write(source.join("case.json"), sidecar)?;
+        fs::write(source.join("case.xml"), "<testsuites/>")?;
+        stage(&root)?;
+        let artifact = root.join("target/job-evidence");
+        let manifest_path = artifact.join("nextest/manifest.json");
+        let green: EvidenceManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+        assert!(inspect(&artifact).is_ok());
+
+        let mut reds = Vec::new();
+        let mut path_escape = green.clone();
+        path_escape.entries[0].sidecar = "../case.json".to_owned();
+        reds.push(path_escape);
+        let mut control = green.clone();
+        control.entries[0].gate = "bad\tgate\u{1b}".to_owned();
+        reds.push(control);
+        let mut mismatch = green.clone();
+        mismatch.entries[0].outcome = Outcome::Passed;
+        reds.push(mismatch);
+        let mut missing = green.clone();
+        missing.entries[0].invocation_id = "missing".to_owned();
+        missing.entries[0].sidecar = "nextest/missing.json".to_owned();
+        reds.push(missing);
+        for red in reds {
+            fs::write(&manifest_path, serde_json::to_vec_pretty(&red)?)?;
+            assert!(inspect(&artifact).is_err());
+        }
+        let empty = EvidenceManifest {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        };
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&empty)?)?;
+        assert!(
+            inspect(&artifact).is_err(),
+            "empty manifest cannot hide sidecars"
+        );
+
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&green)?)?;
+        fs::remove_file(artifact.join("nextest/case.xml"))?;
+        assert!(inspect(&artifact).is_err(), "required XML must exist");
+        fs::write(artifact.join("nextest/case.xml"), "<testsuites/>")?;
+
+        fs::write(artifact.join("nextest/extra.xml"), "<testsuites/>")?;
+        assert!(inspect(&artifact).is_err(), "extra XML must fail closed");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rejects_source_revision_mismatch_before_execution() -> Result<()> {
+        let root = crate::testutil::unique_tmp("nextest-replay-revision");
+        fs::create_dir_all(&root)?;
+        let sidecar = root.join("case.json");
+        fs::write(
+            &sidecar,
+            include_str!("../tests/golden/nextest-evidence.json"),
+        )?;
+        assert!(replay(&sidecar, &crate::workspace_root()?).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

@@ -714,6 +714,28 @@ fn scan_xtask(root: &Path, index: &mut Index) -> Result<()> {
             }
             continue;
         }
+        if path.ends_with("xtask/src/nextest.rs") {
+            let found_invariants = extract_invariants(root, &path)?;
+            record_invalid_invariants(index, &found_invariants);
+            validate_closed_invariant_bindings(
+                index,
+                &path,
+                &found_invariants,
+                NEXTEST_INVARIANT_BINDINGS,
+            );
+            for binding in NEXTEST_INVARIANT_BINDINGS {
+                scan_extracted_invariant_rules_filtered(
+                    root,
+                    index,
+                    &found_invariants,
+                    binding.carrier,
+                    binding.evidence,
+                    Some(binding.gates),
+                    |rule| binding.matches(rule) && binding.accepts(rule),
+                )?;
+            }
+            continue;
+        }
         let gate = xtask_gate(root, &path);
         scan_invariant_file(root, index, &path, "xtask", xtask_evidence(&path), gate)?;
     }
@@ -802,13 +824,56 @@ const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "exact resource and target scheduling plan with rendered argv proof",
         gates: "integration",
     },
+];
+
+const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
-        path: "xtask/src/integration_shards.rs",
-        id: "INTEGRATION-SHARD-NEXTEST-CONFIG-01",
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-PROFILE-REGISTRY-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed profile enum",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-PARTITION-TYPE-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "validated partition newtype",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-EVIDENCE-DTO-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "typed serde DTO and committed golden",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-EVIDENCE-SCHEMA-01",
         facet: None,
         carrier: "xtask",
-        evidence: "parsed committed nextest config with synthetic selector-reflow red",
-        gates: "integration",
+        evidence: "serde wire synthetic red and committed golden anti-vacuity",
+        gates: "verify,ci-core,integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-CONFIG-POLICY-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "parsed config synthetic red and committed anti-vacuity",
+        gates: "verify,ci-core,integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/nextest.rs",
+        id: "NEXTEST-EXECUTION-FUNNEL-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "direct-call synthetic red and production source anti-vacuity",
+        gates: "verify,ci-core,integration",
     },
 ];
 
@@ -2048,6 +2113,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         path: "xtask/src/integration_shards.rs",
         tokens: "native-compile,integration",
         role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
+    },
+    GateDeclaration {
+        path: "xtask/src/nextest.rs",
+        tokens: "native-compile,verify,ci-core,integration",
+        role: GateDeclarationRole::Orchestrator(OrchestratorReason::PlanExecution),
     },
     GateDeclaration {
         path: "xtask/src/verify.rs",

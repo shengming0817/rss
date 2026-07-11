@@ -16,11 +16,26 @@ jobs:
     with:
       lane: ci-meta
 
-  ci-core:
+  ci-core-prerequisites:
     needs: ci-meta
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
-      lane: ci-core
+      lane: ci-core-prerequisites
+
+  ci-core-tests:
+    name: ci-core-tests / ${{ matrix.partition }}
+    needs: ci-core-prerequisites
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { partition: 1/2, partition-label: 1-of-2 }
+          - { partition: 2/2, partition-label: 2-of-2 }
+    uses: ./.github/workflows/rss-rust-lane.yml
+    with:
+      lane: ci-core-tests
+      partition: ${{ matrix.partition }}
+      partition-label: ${{ matrix.partition-label }}
 
   ci-security:
     uses: ./.github/workflows/rss-rust-lane.yml

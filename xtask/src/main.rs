@@ -52,7 +52,7 @@
 //!                                      供应链漏洞**定时刷新** lane（issue #1133，GitHub Actions `schedule:`
 //!                                      cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit`
 //!                                      两门（皆 no-compile、快），捕获「未变依赖」新披露 CVE。详见 `verify.rs`。
-//!   `cargo xtask ci-integration --shard <name> [--allow-missing-tools]`
+//!   `cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]`
 //!                                      按 capability shard 运行真集成 target；typed registry 单源派生
 //!                                      target filter、资源门与串/并行批次。
 mod archrules;
@@ -61,6 +61,7 @@ mod assembly_codegen;
 mod cdc_config;
 mod ci_lanes;
 mod cmd;
+pub(crate) use cmd::nextest;
 mod codegen;
 mod command_symmetry;
 mod consistency_effects;
@@ -151,12 +152,25 @@ enum Command {
         lane: ci_lanes::CiLane,
         allow_missing_tools: bool,
     },
+    CoreExecution {
+        execution: verify::CoreExecution,
+        allow_missing_tools: bool,
+        partition: Option<nextest::HashPartition>,
+    },
     Audit {
         allow_missing_tools: bool,
     },
     CiIntegration {
         shard: integration_shards::IntegrationShard,
         allow_missing_tools: bool,
+        partition: Option<nextest::HashPartition>,
+    },
+    NextestEvidenceStage,
+    NextestEvidenceInspect {
+        artifact_root: PathBuf,
+    },
+    NextestEvidenceReplay {
+        sidecar: PathBuf,
     },
     SchemaRls,
     /// inbox receipt runtime cutover old-token guard（INBOX-RECEIPTS-CUTOVER-01）。
@@ -201,10 +215,21 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["ci", rest @ ..] => parse_ci(rest),
         ["ci-meta", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Meta, rest),
         ["ci-core", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Core, rest),
+        ["ci-core-prerequisites", rest @ ..] => {
+            parse_core_execution(verify::CoreExecution::Prerequisites, rest)
+        }
+        ["ci-core-tests", rest @ ..] => parse_core_execution(verify::CoreExecution::Tests, rest),
         ["ci-security", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Security, rest),
         ["ci-coverage", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Coverage, rest),
         ["audit", rest @ ..] => parse_audit(rest),
         ["ci-integration", rest @ ..] => parse_ci_integration(rest),
+        ["nextest-evidence", "stage"] => Ok(Command::NextestEvidenceStage),
+        ["nextest-evidence", "inspect", artifact_root] => Ok(Command::NextestEvidenceInspect {
+            artifact_root: PathBuf::from(artifact_root),
+        }),
+        ["nextest-evidence", "replay", sidecar] => Ok(Command::NextestEvidenceReplay {
+            sidecar: PathBuf::from(sidecar),
+        }),
         ["schema-rls"] => Ok(Command::SchemaRls),
         ["inbox-cutover-guard"] => Ok(Command::InboxCutoverGuard),
         ["setlocal-funnel"] => Ok(Command::SetLocalFunnel),
@@ -216,7 +241,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly <validate | generate-modules [--check]> | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | localtx-coverage | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | ci-integration --shard <name> [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法含 localtx-coverage | ci-core | ci-core-prerequisites | ci-core-tests --partition M/N | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
             )
         }
     }
@@ -358,22 +383,49 @@ fn parse_ci(args: &[&str]) -> Result<Command> {
 }
 
 fn parse_ci_lane(lane: ci_lanes::CiLane, args: &[&str]) -> Result<Command> {
-    match args {
-        [] => Ok(Command::CiLane {
-            lane,
-            allow_missing_tools: false,
-        }),
-        ["--allow-missing-tools"] => Ok(Command::CiLane {
-            lane,
-            allow_missing_tools: true,
-        }),
-        other => {
-            let command = lane.command_name();
-            bail!(
-                "{command} 未知参数: {other:?}；用法: cargo xtask {command} [--allow-missing-tools]"
-            )
+    let mut allow_missing_tools = false;
+    for &token in args {
+        match token {
+            "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
+            other => {
+                let command = lane.command_name();
+                bail!(
+                    "{command} 未知或重复参数: {other}；用法: cargo xtask {command} [--allow-missing-tools]"
+                )
+            }
         }
     }
+    Ok(Command::CiLane {
+        lane,
+        allow_missing_tools,
+    })
+}
+
+fn parse_core_execution(execution: verify::CoreExecution, args: &[&str]) -> Result<Command> {
+    let mut allow_missing_tools = false;
+    let mut partition = None;
+    let mut iter = args.iter().copied();
+    while let Some(token) = iter.next() {
+        match token {
+            "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
+            "--partition" if execution == verify::CoreExecution::Tests && partition.is_none() => {
+                partition = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow::anyhow!("--partition 缺 M/N"))?
+                        .parse()?,
+                );
+            }
+            other => bail!("core execution 未知或重复参数: {other}"),
+        }
+    }
+    if execution == verify::CoreExecution::Tests && partition.is_none() {
+        bail!("ci-core-tests 必须传 --partition M/N");
+    }
+    Ok(Command::CoreExecution {
+        execution,
+        allow_missing_tools,
+        partition,
+    })
 }
 
 /// 解析 `audit` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`audit` 无 `--fast`——供应链 lane 恒全量跑。
@@ -394,7 +446,8 @@ fn parse_audit(args: &[&str]) -> Result<Command> {
 
 /// 解析闭合 `ci-integration --shard <name>`；未知、缺失、重复或尾参均 fail-closed。
 fn parse_ci_integration(args: &[&str]) -> Result<Command> {
-    let mut shard = None;
+    let mut shard: Option<integration_shards::IntegrationShard> = None;
+    let mut partition = None;
     let mut allow_missing_tools = false;
     let mut iter = args.iter().copied();
     while let Some(tok) = iter.next() {
@@ -402,23 +455,31 @@ fn parse_ci_integration(args: &[&str]) -> Result<Command> {
             "--allow-missing-tools" if !allow_missing_tools => allow_missing_tools = true,
             "--shard" if shard.is_none() => {
                 let raw = iter.next().ok_or_else(|| {
-                    anyhow::anyhow!("--shard 缺少值；用法: cargo xtask ci-integration --shard <name> [--allow-missing-tools]")
+                    anyhow::anyhow!("--shard 缺少值；用法: cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]")
                 })?;
                 shard = Some(raw.parse()?);
             }
+            "--partition" if partition.is_none() => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--partition 缺少 M/N"))?;
+                partition = Some(raw.parse()?);
+            }
             other => {
                 bail!(
-                    "ci-integration 未知或重复参数: {other}；用法: cargo xtask ci-integration --shard <name> [--allow-missing-tools]"
+                    "ci-integration 未知或重复参数: {other}；用法: cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]"
                 )
             }
         }
     }
     let shard = shard.ok_or_else(|| {
-        anyhow::anyhow!("ci-integration 缺少 --shard；用法: cargo xtask ci-integration --shard <name> [--allow-missing-tools]")
+        anyhow::anyhow!("ci-integration 缺少 --shard；用法: cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]")
     })?;
+    shard.validate_partition(partition)?;
     Ok(Command::CiIntegration {
         shard,
         allow_missing_tools,
+        partition,
     })
 }
 
@@ -503,14 +564,23 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::CiLane {
             lane,
             allow_missing_tools,
-        } => verify::run_lane(lane, allow_missing_tools),
+        } => verify::run_lane(lane, allow_missing_tools, None),
+        Command::CoreExecution {
+            execution,
+            allow_missing_tools,
+            partition,
+        } => verify::run_core_execution(execution, allow_missing_tools, partition),
         Command::Audit {
             allow_missing_tools,
         } => verify::run_audit(allow_missing_tools),
         Command::CiIntegration {
             shard,
             allow_missing_tools,
-        } => verify::run_ci_integration(shard, allow_missing_tools),
+            partition,
+        } => verify::run_ci_integration(shard, allow_missing_tools, partition),
+        Command::NextestEvidenceStage => nextest::stage(&workspace_root()?),
+        Command::NextestEvidenceInspect { artifact_root } => nextest::inspect(&artifact_root),
+        Command::NextestEvidenceReplay { sidecar } => nextest::replay(&sidecar, &workspace_root()?),
         Command::SchemaRls => diagnostic::run_check(&schema_rls::SchemaRlsGuard),
         Command::InboxCutoverGuard => {
             diagnostic::run_check(&inbox_cutover_guard::InboxCutoverGuard)
@@ -1017,6 +1087,19 @@ mod tests {
         }
         assert!(parse_command(&s(&["ci-nightly"])).is_err());
         assert!(parse_command(&s(&["ci-integration"])).is_err());
+        assert!(parse_command(&s(&["ci-core-tests", "--partition", "1/2"])).is_ok());
+        assert!(parse_command(&s(&["ci-core-prerequisites"])).is_ok());
+        for args in [
+            vec!["ci-core", "--partition", "1/2"],
+            vec!["ci-core-tests"],
+            vec!["ci-core-tests", "--partition"],
+            vec!["ci-core-tests", "--partition", "hash:1/2"],
+            vec!["ci-core-tests", "--partition", "1/2", "--partition", "2/2"],
+            vec!["ci-core-prerequisites", "--partition", "1/2"],
+            vec!["ci-meta", "--partition", "1/2"],
+        ] {
+            assert!(parse_command(&s(&args)).is_err());
+        }
         Ok(())
     }
 
@@ -1073,11 +1156,32 @@ mod tests {
                 .is_ok(),
                 "local missing-tool allowance must compose with {shard}"
             );
+            let partitioned = parse_command(&s(&[
+                "ci-integration",
+                "--shard",
+                shard,
+                "--partition",
+                "1/2",
+            ]));
+            assert_eq!(
+                partitioned.is_ok(),
+                matches!(shard, "event-transport" | "runtime-http-auth")
+            );
         }
 
         assert!(parse_command(&s(&["ci-integration"])).is_err());
         assert!(parse_command(&s(&["ci-integration", "--shard"])).is_err());
         assert!(parse_command(&s(&["ci-integration", "--all"])).is_err());
+        assert!(
+            parse_command(&s(&[
+                "ci-integration",
+                "--shard",
+                "event-transport",
+                "--partition",
+                "hash:1/2"
+            ]))
+            .is_err()
+        );
         assert!(parse_command(&s(&["ci-integration", "--shard", "POSTGRES-DOMAIN"])).is_err());
         assert!(
             parse_command(&s(&[
@@ -1098,6 +1202,31 @@ mod tests {
         assert!(parse_command(&s(&["consistency-fault-matrix"])).is_err());
         assert!(parse_command(&s(&["consistency-fault-matrix", "--bogus"])).is_err());
         assert!(parse_command(&s(&["integration"])).is_err());
+    }
+
+    #[test]
+    fn nextest_evidence_commands_are_exact_and_fail_closed() {
+        assert_eq!(
+            parse_command(&s(&["nextest-evidence", "stage"])).ok(),
+            Some(Command::NextestEvidenceStage)
+        );
+        assert!(matches!(
+            parse_command(&s(&["nextest-evidence", "inspect", "artifact"])),
+            Ok(Command::NextestEvidenceInspect { .. })
+        ));
+        assert!(matches!(
+            parse_command(&s(&["nextest-evidence", "replay", "sidecar.json"])),
+            Ok(Command::NextestEvidenceReplay { .. })
+        ));
+        for args in [
+            vec!["nextest-evidence"],
+            vec!["nextest-evidence", "stage", "extra"],
+            vec!["nextest-evidence", "inspect"],
+            vec!["nextest-evidence", "replay", "a", "b"],
+            vec!["nextest-replay", "--coverage"],
+        ] {
+            assert!(parse_command(&s(&args)).is_err());
+        }
     }
 
     #[test]

@@ -12,6 +12,16 @@ on:
         required: false
         default: ""
         type: string
+      partition:
+        description: Closed hash partition M/N; empty for unpartitioned jobs.
+        required: false
+        default: ""
+        type: string
+      partition-label:
+        description: Filesystem-safe partition label paired with partition.
+        required: false
+        default: unpartitioned
+        type: string
 
 permissions:
   contents: read
@@ -21,7 +31,7 @@ env:
   CARGO_INCREMENTAL: 0
   RSS_NIGHTLY_PINNED: nightly-2026-04-16
   RSS_CI_EVIDENCE_FILE: ci-evidence.json
-  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
+  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
   lane:
@@ -48,6 +58,8 @@ jobs:
         env:
           RSS_LANE: ${{ inputs.lane }}
           RSS_SHARD: ${{ inputs.shard }}
+          RSS_PARTITION: ${{ inputs.partition }}
+          RSS_PARTITION_LABEL: ${{ inputs.partition-label }}
         run: |
           set -euo pipefail
           if [ "$RSS_LANE" = integration ]; then
@@ -55,9 +67,21 @@ jobs:
               postgres-domain|event-transport|runtime-http-auth|consistency-fault|cdc-projection-saga) ;;
               *) exit 64 ;;
             esac
+            case "$RSS_SHARD:$RSS_PARTITION" in
+              postgres-domain:|event-transport:1/2|event-transport:2/2|runtime-http-auth:1/2|runtime-http-auth:2/2|consistency-fault:|cdc-projection-saga:) ;;
+              *) exit 64 ;;
+            esac
+          elif [ "$RSS_LANE" = ci-core-tests ]; then
+            case "$RSS_PARTITION" in 1/2|2/2) ;; *) exit 64 ;; esac
           elif [ -n "$RSS_SHARD" ]; then
             exit 64
+          elif [ -n "$RSS_PARTITION" ]; then
+            exit 64
           fi
+          case "$RSS_PARTITION:$RSS_PARTITION_LABEL" in
+            1/2:1-of-2|2/2:2-of-2|:unpartitioned) ;;
+            *) exit 64 ;;
+          esac
           case "$RSS_LANE" in
             ci-meta)
               echo 'profile=ci-meta'
@@ -65,11 +89,17 @@ jobs:
               echo 'prebuilt-tools='
               echo 'fallback-tools='
               ;;
-            ci-core)
-              echo 'profile=ci-core'
+            ci-core-prerequisites)
+              echo 'profile=ci-core-prerequisites'
               echo "nightly=$RSS_NIGHTLY_PINNED"
-              echo 'prebuilt-tools=cargo-nextest@0.9.137'
+              echo 'prebuilt-tools='
               echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1'
+              ;;
+            ci-core-tests)
+              echo 'profile=ci-core-tests'
+              echo 'nightly='
+              echo 'prebuilt-tools=cargo-nextest@0.9.137'
+              echo 'fallback-tools='
               ;;
             ci-security)
               echo 'profile=ci-security'
@@ -80,7 +110,7 @@ jobs:
             ci-coverage)
               echo 'profile=ci-coverage'
               echo "nightly=$RSS_NIGHTLY_PINNED"
-              echo 'prebuilt-tools=cargo-llvm-cov@0.8.7'
+              echo 'prebuilt-tools=cargo-llvm-cov@0.8.7,cargo-nextest@0.9.137'
               echo 'fallback-tools=cargo-public-api@0.52.0'
               ;;
             integration)
@@ -136,14 +166,20 @@ jobs:
         env:
           RSS_LANE: ${{ inputs.lane }}
           RSS_SHARD: ${{ inputs.shard }}
+          RSS_PARTITION: ${{ inputs.partition }}
         run: |
           set -euo pipefail
           case "$RSS_LANE" in
             ci-meta) cargo run --locked -p xtask -- ci-meta ;;
-            ci-core) cargo run --locked -p xtask -- ci-core ;;
+            ci-core-prerequisites) cargo run --locked -p xtask -- ci-core-prerequisites ;;
+            ci-core-tests) cargo run --locked -p xtask -- ci-core-tests --partition "$RSS_PARTITION" ;;
             ci-security) cargo run --locked -p xtask -- ci-security ;;
             ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;
-            integration) cargo run --locked -p xtask -- ci-integration --shard "$RSS_SHARD" ;;
+            integration)
+              args=(ci-integration --shard "$RSS_SHARD")
+              if [ -n "$RSS_PARTITION" ]; then args+=(--partition "$RSS_PARTITION"); fi
+              cargo run --locked -p xtask -- "${args[@]}"
+              ;;
             audit) cargo run --locked -p xtask -- audit ;;
             *) exit 64 ;;
           esac
@@ -227,11 +263,20 @@ jobs:
           if [ "${{ steps.save-download.outcome }}" = failure ] || [ "${{ steps.save-target.outcome }}" = failure ]; then build_outcome=attempted-failure; elif [ "${{ steps.save-download.outcome }}" = success ] || [ "${{ steps.save-target.outcome }}" = success ]; then build_outcome=attempted-success; fi
           .github/scripts/ci-evidence.sh snapshot after-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome "$build_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
 
+      - name: Stage job evidence
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          rm -rf target/job-evidence
+          mkdir -p target/job-evidence/ci
+          cp "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" target/job-evidence/ci/ci-evidence.json
+          cargo run --locked -p xtask -- nextest-evidence stage
+
       - name: Upload CI evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.lane == 'integration' && format('ci-evidence-{0}-{1}-{2}-{3}', inputs.lane, inputs.shard, github.run_id, github.run_attempt) || format('ci-evidence-{0}-{1}-{2}', inputs.lane, github.run_id, github.run_attempt) }}
-          path: ${{ runner.temp }}/${{ env.RSS_CI_EVIDENCE_FILE }}
+          name: ${{ format('ci-evidence-{0}-{1}-{2}-{3}-{4}', inputs.lane, inputs.shard || 'workspace', inputs.partition-label, github.run_id, github.run_attempt) }}
+          path: target/job-evidence
           if-no-files-found: error
           retention-days: 7

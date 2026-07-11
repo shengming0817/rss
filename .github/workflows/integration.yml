@@ -12,17 +12,21 @@ permissions:
 
 jobs:
   integration:
-    name: integration / ${{ matrix.shard }}
+    name: integration / ${{ matrix.shard }} / ${{ matrix.partition-label }}
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - postgres-domain
-          - event-transport
-          - runtime-http-auth
-          - consistency-fault
-          - cdc-projection-saga
+        include:
+          - { shard: postgres-domain, partition: "", partition-label: unpartitioned }
+          - { shard: event-transport, partition: 1/2, partition-label: 1-of-2 }
+          - { shard: event-transport, partition: 2/2, partition-label: 2-of-2 }
+          - { shard: runtime-http-auth, partition: 1/2, partition-label: 1-of-2 }
+          - { shard: runtime-http-auth, partition: 2/2, partition-label: 2-of-2 }
+          - { shard: consistency-fault, partition: "", partition-label: unpartitioned }
+          - { shard: cdc-projection-saga, partition: "", partition-label: unpartitioned }
     uses: ./.github/workflows/rss-rust-lane.yml
     with:
       lane: integration
       shard: ${{ matrix.shard }}
+      partition: ${{ matrix.partition }}
+      partition-label: ${{ matrix.partition-label }}

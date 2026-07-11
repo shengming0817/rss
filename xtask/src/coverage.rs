@@ -21,7 +21,6 @@
 //!   **或未被测量**（JSON 无其数据 / 0 行）⇒ ci 非零退出。缺测量也 fail：杜绝「没跑到 = 静默绿」的 vacuity。
 //!   per-diff 增量门的不变式（COVERAGE-DIFF-FLOOR-01）见 [`crate::diffcov`]。
 
-use crate::cmd::clean_cmd;
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -187,36 +186,19 @@ pub(crate) fn run() -> Result<()> {
 
 /// 跑 `cargo llvm-cov nextest --workspace --json --output-path <file>`（默认 feature——集成测试不编入
 /// ⇒ 无需 DB/broker）。stdio 继承（实时看测试输出）。非零退出 = 测试失败（nextest 门）⇒ `Err`。
-/// `NEXTEST_PROFILE=ci`（fail-fast=false + retries，见 `.config/nextest.toml`；用 env 而非 `--profile`
-/// 避免与 llvm-cov 自身 `--profile`（cargo build profile）的 flag 撞名）。本步留下的 profdata 由
+/// profile 由 [`crate::nextest::NextestInvocation`] 闭合选择为 `ci-core`，避免与 llvm-cov 自身
+/// `--profile`（cargo build profile）的 flag 撞名。本步留下的 profdata 由
 /// [`lcov_report`] 复用出 lcov（per-diff 增量门），不重跑测试。
 fn run_llvm_cov(root: &Path) -> Result<String> {
     // 跟随 CARGO_TARGET_DIR（clean_cmd 不清它——见 cmd.rs STRIPPED_ENV charter），否则默认 root/target；
     // 与 llvm-cov 实际写 JSON 的 target 目录一致（review #206 C6）。
-    let out = coverage_output_path(&coverage_target_dir(root), "xtask-ci-coverage.json")?;
-    let out_str = out.to_str().context("覆盖率 JSON 输出路径非法 UTF-8")?;
-    let status = clean_cmd(
-        "cargo",
-        &[
-            "llvm-cov",
-            "nextest",
-            "--workspace",
-            "--locked", // CI 确定性：Cargo.lock 漂移即 fail（review #206 codex F2）
-            "--json",
-            "--output-path",
-            out_str,
-        ],
-        &[("NEXTEST_PROFILE", "ci")],
-        Some(root),
-    )
-    .status()
-    .context("启动 cargo llvm-cov nextest 失败")?;
-    if !status.success() {
-        let code = status
-            .code()
-            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
-        bail!("coverage: nextest 门失败（cargo llvm-cov nextest 退出码 {code}）");
-    }
+    let out = coverage_output_path(&coverage_report_dir(root), "xtask-ci-coverage.json")?;
+    let out_str = out
+        .strip_prefix(root)
+        .context("coverage output 必须位于 workspace 内，避免证据泄露绝对路径")?
+        .to_str()
+        .context("覆盖率 JSON 输出路径非法 UTF-8")?;
+    crate::nextest::NextestInvocation::for_coverage(out_str)?.run(root, &[])?;
     std::fs::read_to_string(&out).with_context(|| format!("读覆盖率 JSON 失败: {}", out.display()))
 }
 
@@ -227,11 +209,11 @@ fn run_llvm_cov(root: &Path) -> Result<String> {
 /// instrumented 编译的 profdata 决定，已含全 workspace（实测 `report` 输出全 workspace crate 的 lcov）；
 /// 且 `cargo llvm-cov report` **不接受** `--workspace`（传入即报错）——勿误加。
 fn lcov_report(root: &Path) -> Result<String> {
-    let out = coverage_output_path(&coverage_target_dir(root), "xtask-ci-coverage.lcov")?;
+    let out = coverage_output_path(&coverage_report_dir(root), "xtask-ci-coverage.lcov")?;
     let out_str = out.to_str().context("覆盖率 lcov 输出路径非法 UTF-8")?;
-    let status = clean_cmd(
-        "cargo",
-        &["llvm-cov", "report", "--lcov", "--output-path", out_str],
+    let status = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::LlvmCovReport,
+        &["--lcov", "--output-path", out_str],
         &[],
         Some(root),
     )
@@ -248,9 +230,28 @@ fn lcov_report(root: &Path) -> Result<String> {
 
 /// 覆盖率产物落盘目录：跟随 `CARGO_TARGET_DIR`（clean_cmd 不清它），否则默认 `root/target`。JSON / lcov 共用。
 fn coverage_target_dir(root: &Path) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("target"))
+    normalize_target_dir(root, std::env::var_os("CARGO_TARGET_DIR").as_deref())
+}
+
+fn normalize_target_dir(root: &Path, configured: Option<&std::ffi::OsStr>) -> PathBuf {
+    match configured.map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => root.join(path),
+        None => root.join("target"),
+    }
+}
+
+fn coverage_report_dir(root: &Path) -> PathBuf {
+    let target = coverage_target_dir(root);
+    report_dir_for_target(root, &target)
+}
+
+fn report_dir_for_target(root: &Path, target: &Path) -> PathBuf {
+    if target.starts_with(root) {
+        target.to_path_buf()
+    } else {
+        root.join("target/coverage-reports")
+    }
 }
 
 /// cargo 配置可把实际编译产物重定向到别处，但 `--output-path` 的父目录仍须由调用方创建。
@@ -292,6 +293,23 @@ mod tests {
         assert_eq!(out, target.join("report.json"));
         std::fs::remove_dir_all(target)?;
         Ok(())
+    }
+
+    #[test]
+    fn target_dir_normalizes_relative_and_external_paths() {
+        let root = Path::new("/workspace");
+        assert_eq!(
+            normalize_target_dir(root, Some(std::ffi::OsStr::new(".cache/target"))),
+            root.join(".cache/target")
+        );
+        assert_eq!(
+            report_dir_for_target(root, Path::new("/tmp/external-target")),
+            root.join("target/coverage-reports")
+        );
+        assert_eq!(
+            normalize_target_dir(root, Some(std::ffi::OsStr::new("/tmp/external-target"))),
+            PathBuf::from("/tmp/external-target")
+        );
     }
 
     /// STRICT 集 = CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集（anti-drift）。

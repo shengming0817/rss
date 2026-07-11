@@ -14,12 +14,11 @@
 //! （feature-gated/未编译）记 [`Score::missing`]，**单独** 0/0 时 fail-closed（F1）；inline `#[cfg(test)]` 行从
 //! 分母剔除（[`test_line_ranges`]，F2，防测试码稀释）。真无可度量生产新代码（无 missing）⇒ pass。
 //!
-//! 唯一子进程 = `git`，经 [`crate::cmd::clean_cmd`] 构造（CMD-FUNNEL-01：`xtask/src` 禁裸 `Command::new`）。
+//! 唯一子进程 = `git`，经 [`crate::cmd::external_cmd`] 构造（CMD-FUNNEL-01：`xtask/src` 禁裸 `Command::new`）。
 //!
 //! INVARIANT: COVERAGE-DIFF-FLOOR-01 { level = "Medium", exec = "ci-only", source = "code" }—— diff 可执行新增行聚合覆盖率 < [`DIFF_MIN_PERCENT`] ⇒ ci 非零退出；
 //!   base 不可解析/自引用 ⇒ fail-closed；生产文件缺 lcov 数据且无可度量行 ⇒ fail-closed（非静默 0/0 绿）。
 
-use crate::cmd::clean_cmd;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -305,8 +304,8 @@ fn git_diff(root: &Path, base: &str) -> Result<String> {
     // base 不可解析 ⇒ fail-closed（非静默当空 diff）。`^{{commit}}` = git peeling：强制确认 base 能解析为
     // commit 对象（非裸 tag/tree），比裸 rev-parse 更严格，防误传非 commit ref 致 diff 错误。
     let commitish = format!("{base}^{{commit}}");
-    let resolved = clean_cmd(
-        "git",
+    let resolved = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Git,
         &["rev-parse", "--verify", "--quiet", commitish.as_str()],
         &[],
         Some(root),
@@ -323,8 +322,8 @@ fn git_diff(root: &Path, base: &str) -> Result<String> {
         );
     }
     let range = format!("{base}...HEAD");
-    let out = clean_cmd(
-        "git",
+    let out = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Git,
         &[
             "diff",
             "--unified=0",
@@ -834,8 +833,8 @@ mod tests {
 
     /// 跑 git 子进程（经 clean_cmd——CMD-FUNNEL-01；身份经 env，静默 stdio）。
     fn git(dir: &Path, args: &[&str]) -> Result<()> {
-        let st = clean_cmd(
-            "git",
+        let st = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Git,
             args,
             &[
                 ("GIT_AUTHOR_NAME", "t"),

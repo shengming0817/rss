@@ -330,11 +330,16 @@ fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
         "--manifest-path",
         manifest,
     ];
-    let output = crate::cmd::clean_cmd("cargo", &args, &[], Some(root))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("execute cargo metadata for LocalTx coverage")?;
+    let output = crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::Metadata,
+        &args[1..],
+        &[],
+        Some(root),
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .context("execute cargo metadata for LocalTx coverage")?;
     if !output.status.success() {
         let stderr = bounded_stderr(&output.stderr);
         bail!(
@@ -2897,21 +2902,7 @@ mod tests {
     #[test]
     fn green_fixture_is_a_compiling_workspace() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-green-compile")?;
-        let root = &temp.path;
-        let output = crate::cmd::clean_cmd(
-            "cargo",
-            &[
-                "check",
-                "--offline",
-                "--manifest-path",
-                root.join("Cargo.toml")
-                    .to_str()
-                    .ok_or_else(|| anyhow!("fixture manifest path is not UTF-8"))?,
-            ],
-            &[],
-            Some(root),
-        )
-        .output()?;
+        let output = temp.cargo_check()?;
         assert!(
             output.status.success(),
             "green fixture must compile: {}",
@@ -5012,6 +5003,30 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
             let path = crate::testutil::unique_tmp(prefix);
             copy_tree(&fixture("green"), &path)?;
             Ok(Self { path })
+        }
+
+        fn cargo_check(&self) -> anyhow::Result<std::process::Output> {
+            let manifest = self.path.join("Cargo.toml");
+            let target = self.path.join("target");
+            crate::cmd::cargo_cmd(
+                crate::cmd::CargoSubcommand::Check,
+                &[
+                    "--offline",
+                    "--manifest-path",
+                    manifest
+                        .to_str()
+                        .ok_or_else(|| anyhow!("fixture manifest path is not UTF-8"))?,
+                ],
+                &[(
+                    "CARGO_TARGET_DIR",
+                    target
+                        .to_str()
+                        .ok_or_else(|| anyhow!("fixture target path is not UTF-8"))?,
+                )],
+                Some(&self.path),
+            )
+            .output()
+            .map_err(Into::into)
         }
     }
     impl Drop for FixtureCopy {

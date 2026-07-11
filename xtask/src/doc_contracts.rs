@@ -2637,9 +2637,14 @@ fn read_commit_blob(root: &Path, commit: &str, relative: &Path) -> Option<String
     }
     let relative = relative.to_str()?;
     let object = format!("{commit}:{relative}");
-    let output = crate::cmd::clean_cmd("/usr/bin/git", &["show", object.as_str()], &[], Some(root))
-        .output()
-        .ok()?;
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["show", object.as_str()],
+        &[],
+        Some(root),
+    )
+    .output()
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -3244,7 +3249,13 @@ fn never_ignored_test() {}
         ));
         std::fs::create_dir_all(&root)?;
         let git = |args: &[&str]| -> Result<std::process::Output> {
-            let output = crate::cmd::clean_cmd("/usr/bin/git", args, &[], Some(&root)).output()?;
+            let output = crate::cmd::external_cmd(
+                crate::cmd::ExternalProgram::SystemGit,
+                args,
+                &[],
+                Some(&root),
+            )
+            .output()?;
             if !output.status.success() {
                 bail!(
                     "git {:?} failed: {}",
@@ -3350,7 +3361,13 @@ fn never_ignored_test() {}
         std::fs::write(root.join("gate.rs"), "INVARIANT: GATE-01")?;
         std::fs::write(root.join("runbook.md"), "## Recovery")?;
         let git = |args: &[&str]| -> Result<std::process::Output> {
-            let output = crate::cmd::clean_cmd("/usr/bin/git", args, &[], Some(&root)).output()?;
+            let output = crate::cmd::external_cmd(
+                crate::cmd::ExternalProgram::SystemGit,
+                args,
+                &[],
+                Some(&root),
+            )
+            .output()?;
             if !output.status.success() {
                 bail!(
                     "git {:?} failed: {}",

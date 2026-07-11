@@ -11,6 +11,10 @@
 cargo xtask ci-integration --shard <name>
 ```
 
+`event-transport` 与 `runtime-http-auth` 在 CI 中分别追加 `--partition 1/2`、`--partition 2/2`；其余
+shard 不传 partition。每次 invocation 的 JUnit/JSON、空 bucket 与重放语义见
+[`202607111501-1731-nextest-test-evidence.md`](./202607111501-1731-nextest-test-evidence.md)。
+
 `<name>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
 `consistency-fault`、`cdc-projection-saga`。缺失、重复、未知 shard、额外尾参、自由 filter 和 `--all`
 均 fail-closed。旧 `cargo xtask integration` 已删除，不提供 alias 或兼容 shim。
@@ -20,7 +24,7 @@ cargo xtask ci-integration --shard <name>
 ## Target 归属、资源与调度
 
 `serial` 批次由 xtask 传 `--test-threads 1`；`parallel` 批次使用 nextest 默认并发。每个 shard 先跑
-serial，再跑 parallel。`.config/nextest.toml` 不再以 `all()` 把 integration profile 全量串行化。
+serial，再跑 parallel。`.config/nextest.toml` 不承载 selector/test-group；所有调度只由 typed registry 派生。
 
 | Shard | 所需资源 | Serial targets | Parallel targets |
 |-------|----------|----------------|------------------|
@@ -59,14 +63,16 @@ integration lane，因此不伪装成任一 shard 的覆盖。需要验证 S3/Mi
 
 ## 本地运行与故障定位
 
-完整复现 GitHub matrix：
+精确复现 GitHub 七行 matrix：
 
 ```bash
-status=0
-for shard in postgres-domain event-transport runtime-http-auth consistency-fault cdc-projection-saga; do
-  cargo xtask ci-integration --shard "$shard" || status=1
-done
-exit "$status"
+cargo xtask ci-integration --shard postgres-domain
+cargo xtask ci-integration --shard event-transport --partition 1/2
+cargo xtask ci-integration --shard event-transport --partition 2/2
+cargo xtask ci-integration --shard runtime-http-auth --partition 1/2
+cargo xtask ci-integration --shard runtime-http-auth --partition 2/2
+cargo xtask ci-integration --shard consistency-fault
+cargo xtask ci-integration --shard cdc-projection-saga
 ```
 
 定位顺序：
@@ -77,8 +83,10 @@ exit "$status"
 3. `docker daemon 不可达，且缺少 ...`：只补齐消息列出的 shard 资源，或启动 Docker；不要为无关资源设占位值。
 4. nextest 的 `[n/m] serial|parallel` 失败：用输出中的精确 package/binary filter 定位 target；共享状态类失败先看
    serial 批次，hermetic 失败看 parallel 批次。
-5. CI 单 shard 失败：下载名称含 shard 的 evidence，并查看同名 `integration / <shard>` check；其它 shard
-   因 matrix `fail-fast: false` 会继续运行。
+5. CI 单 shard 失败：下载名称含 shard 的 evidence，并按 [#1731 测试证据主文档](./202607111501-1731-nextest-test-evidence.md)
+   的完整 context 模板查看 `Integration Tests / integration / <shard> / <partition-label> / cargo xtask integration`；
+   未分区行的 `<partition-label>` 明确为 `unpartitioned`，最终以对应 run 的实际 check-run context 为准。其它
+   shard 因 matrix `fail-fast: false` 会继续运行。
 
 Integration matrix 只读恢复共享 Rust cache，不写 target cache；因此 cache miss 影响耗时，不应通过给五个
 并发 shard 恢复 writer 权限来修复。

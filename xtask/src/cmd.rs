@@ -1,4 +1,5 @@
-//! xtask 子进程构造**单一漏斗** —— 所有 cargo / rustfmt 等外部子进程经 [`clean_cmd`] 构造，
+//! xtask 子进程构造**单一漏斗** —— cargo 子进程经闭合 [`CargoSubcommand`] + [`cargo_cmd`]，
+//! 非 cargo 程序经闭合 [`ExternalProgram`] + [`external_cmd`]；二者最终汇入私有 `clean_cmd`，
 //! 先 `env_remove` ambient toolchain/flag 变量（[`STRIPPED_ENV`]）再叠加显式 env，使治理门与
 //! codegen 派生**对环境无关**。
 //!
@@ -25,11 +26,11 @@
 //! ref: Enselic/cargo-public-api rustdoc-json/src/builder.rs cargo_rustdoc_command()@main
 //! ref: rust-lang/rustup doc/user-guide/src/overrides.md@main（toolchain 优先级表）
 //!
-//! INVARIANT: CMD-ENV-CLEAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— [`clean_cmd`] 构造的子进程恒先 `env_remove`([`STRIPPED_ENV`]) 再
+//! INVARIANT: CMD-ENV-CLEAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— typed command API 构造的子进程恒先 `env_remove`([`STRIPPED_ENV`]) 再
 //!   set 显式 env（显式 env 是该步该变量的唯一来源）。
 //! INVARIANT: CMD-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `xtask/src` 内 `Command::new(...)` 的**唯一合法构造点** = 本 `cmd.rs`
-//!   的 [`clean_cmd`]；其余子进程一律须经 [`clean_cmd`]。**上游**：[`clean_cmd`] 是唯一 sanctioned 构造
-//!   点（`pub(crate)`，外部 crate 无法 `use` 绕过）；**下游**：governance 测试用 `syn` AST 扫描
+//!   的私有 `clean_cmd`；其余子进程一律须经 typed API。**上游**：cargo 首段只能由闭枚举产生，
+//!   nextest capability 与 spawn API 仅对 `cmd::nextest` 子模块可见；**下游**：governance 测试用 `syn` AST 扫描
 //!   `xtask/src` 每个 `.rs`（**含 cmd.rs 本体**，不豁免整文件），统计 `Command::new` 调用表达式——
 //!   cmd.rs 恰 1（clean_cmd）、其它文件 0，越界即 fail（Medium，载体 4 governance test；AST 词法天然
 //!   忽略字符串 / 注释内同名文本，无 text-scan 的盲区，故 fail-closed 而非「带已知绕过」）。上下游同守
@@ -39,6 +40,9 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+#[path = "nextest.rs"]
+pub(crate) mod nextest;
 
 /// 子进程须清洗的 ambient 环境变量——凡能改变门 **verdict** 者（toolchain 选择 / 编译器行为 / 编译
 /// flag）皆清，语义见模块文档。charter：只清「改 verdict」的变量；`CARGO_TARGET_DIR` 等只改产物**落盘
@@ -67,15 +71,10 @@ pub(crate) const STRIPPED_ENV: &[&str] = &[
 /// set `env`——故某步显式传的 env（如 dylint 的 `DYLINT_RUSTFLAGS=-D warnings`）是该步该变量的唯一
 /// 来源。stdio 不在此设置（调用方按需 inherit / `null` / pipe）。
 ///
-/// 新增工具步：构造 cargo / rustfmt 等子进程**仅用本函数**，勿裸 `Command::new`（CMD-FUNNEL-01 守）。
+/// 私有最终构造器；调用方必须使用闭合 typed API，勿裸 `Command::new`（CMD-FUNNEL-01 守）。
 ///
 /// INVARIANT: CMD-ENV-CLEAN-01 { level = "Medium", exec = "manual/opt-in", source = "code" }.
-pub(crate) fn clean_cmd(
-    program: &str,
-    args: &[&str],
-    env: &[(&str, &str)],
-    cwd: Option<&Path>,
-) -> Command {
+fn clean_cmd(program: &str, args: &[&str], env: &[(&str, &str)], cwd: Option<&Path>) -> Command {
     let mut cmd = Command::new(program);
     cmd.args(args);
     if let Some(dir) = cwd {
@@ -90,14 +89,150 @@ pub(crate) fn clean_cmd(
     cmd
 }
 
-/// 探测第三方 cargo 子命令是否可用：`cargo <sub> --version`（静默，经 [`clean_cmd`] 清洗环境）。
-/// cargo 对「无此子命令」和「检查失败」都返回 101，故用 `--version` 探测做判别。
-pub(crate) fn tool_available(probe_sub: &str) -> bool {
-    clean_cmd("cargo", &[probe_sub, "--version"], &[], None)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalProgram {
+    Rustfmt,
+    Docker,
+    #[cfg(test)]
+    Bash,
+    Git,
+    SystemGit,
+}
+
+impl ExternalProgram {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rustfmt => "rustfmt",
+            Self::Docker => "docker",
+            #[cfg(test)]
+            Self::Bash => "bash",
+            Self::Git => "git",
+            Self::SystemGit => "/usr/bin/git",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CargoSubcommand {
+    Metadata,
+    Tree,
+    #[cfg(test)]
+    Check,
+    Fmt,
+    Build,
+    Test,
+    Clippy,
+    Deny,
+    Audit,
+    Dylint,
+    PublicApi,
+    LlvmCovReport,
+}
+
+impl CargoSubcommand {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::Tree => "tree",
+            #[cfg(test)]
+            Self::Check => "check",
+            Self::Fmt => "fmt",
+            Self::Build => "build",
+            Self::Test => "test",
+            Self::Clippy => "clippy",
+            Self::Deny => "deny",
+            Self::Audit => "audit",
+            Self::Dylint => "dylint",
+            Self::PublicApi => "public-api",
+            Self::LlvmCovReport => "llvm-cov",
+        }
+    }
+}
+
+pub(crate) fn external_cmd(
+    program: ExternalProgram,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> Command {
+    clean_cmd(program.as_str(), args, env, cwd)
+}
+
+pub(crate) fn source_revision(root: &Path) -> anyhow::Result<String> {
+    let output = external_cmd(
+        ExternalProgram::SystemGit,
+        &["rev-parse", "--verify", "HEAD"],
+        &[],
+        Some(root),
+    )
+    .output()?;
+    let revision = String::from_utf8(output.stdout)?.trim().to_owned();
+    if !output.status.success()
+        || revision.len() != 40
+        || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("无法取得严格 40-hex sourceRevision");
+    }
+    Ok(revision)
+}
+
+pub(crate) fn cargo_cmd(
+    subcommand: CargoSubcommand,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> Command {
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    argv.push(subcommand.as_str());
+    if subcommand == CargoSubcommand::LlvmCovReport {
+        argv.push("report");
+    }
+    argv.extend_from_slice(args);
+    clean_cmd("cargo", &argv, env, cwd)
+}
+
+/// 该 capability 与 spawn API 均为 cmd carrier 私有；仅子模块 `nextest` 可使用。
+struct NextestCapability;
+
+#[derive(Clone, Copy)]
+enum NextestMode {
+    Direct,
+    LlvmCov,
+}
+
+fn nextest_cmd(
+    _capability: NextestCapability,
+    mode: NextestMode,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> Command {
+    let prefix: &[&str] = match mode {
+        NextestMode::Direct => &["nextest", "run"],
+        NextestMode::LlvmCov => &["llvm-cov", "nextest"],
+    };
+    let mut argv = Vec::with_capacity(prefix.len() + args.len());
+    argv.extend_from_slice(prefix);
+    argv.extend_from_slice(args);
+    clean_cmd("cargo", &argv, env, cwd)
+}
+
+/// 探测闭合的第三方 cargo 子命令（静默，经 [`clean_cmd`] 清洗环境）。
+pub(crate) fn tool_available(tool: CargoSubcommand) -> bool {
+    clean_cmd("cargo", &[tool.as_str(), "--version"], &[], None)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn nextest_available(_capability: NextestCapability) -> bool {
+    clean_cmd("cargo", &["nextest", "--version"], &[], None)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
@@ -160,10 +295,68 @@ mod tests {
         assert_eq!(bare.get_current_dir(), None);
     }
 
-    /// 不存在的 cargo 子命令探测必为 false（确定性，不依赖宿主装了什么）。anti-vacuity 红例。
     #[test]
-    fn tool_available_missing_probe_is_false() {
-        assert!(!tool_available("zzz-not-a-cargo-subcommand"));
+    fn typed_programs_preserve_exact_argv_and_close_llvm_cov_operation() {
+        let metadata = cargo_cmd(
+            CargoSubcommand::Metadata,
+            &["--locked", "--no-deps"],
+            &[],
+            None,
+        );
+        assert_eq!(metadata.get_program(), OsStr::new("cargo"));
+        assert_eq!(
+            metadata.get_args().collect::<Vec<_>>(),
+            ["metadata", "--locked", "--no-deps"].map(OsStr::new)
+        );
+
+        let test_no_run = cargo_cmd(
+            CargoSubcommand::Test,
+            &["-p", "postgres", "--features", "integration", "--no-run"],
+            &[],
+            None,
+        );
+        assert_eq!(
+            test_no_run.get_args().collect::<Vec<_>>(),
+            [
+                "test",
+                "-p",
+                "postgres",
+                "--features",
+                "integration",
+                "--no-run",
+            ]
+            .map(OsStr::new)
+        );
+
+        let report = cargo_cmd(
+            CargoSubcommand::LlvmCovReport,
+            &["--lcov", "--output-path", "target/report.lcov"],
+            &[],
+            None,
+        );
+        assert_eq!(
+            report.get_args().collect::<Vec<_>>(),
+            [
+                "llvm-cov",
+                "report",
+                "--lcov",
+                "--output-path",
+                "target/report.lcov",
+            ]
+            .map(OsStr::new)
+        );
+
+        let git = external_cmd(
+            ExternalProgram::SystemGit,
+            &["status", "--short"],
+            &[],
+            None,
+        );
+        assert_eq!(git.get_program(), OsStr::new("/usr/bin/git"));
+        assert_eq!(
+            git.get_args().collect::<Vec<_>>(),
+            ["status", "--short"].map(OsStr::new)
+        );
     }
 
     // ---- CMD-FUNNEL-01：子进程构造唯一漏斗 governance AST 扫描（syn，含 cmd.rs 本体）----

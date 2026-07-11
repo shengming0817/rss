@@ -636,10 +636,10 @@ fn print_result(against: &str, mode: EnforcementMode, result: &EvalResult) {
     eprintln!("{THIRD_PHASE_NOTE}");
 }
 
-/// `git rev-parse --verify --quiet {ref}` 退出 0 ⇒ ref 可解析。经 [`clean_cmd`](crate::cmd::clean_cmd)（CMD-FUNNEL-01）。
+/// `git rev-parse --verify --quiet {ref}` 退出 0 ⇒ ref 可解析。经 [`external_cmd`](crate::cmd::external_cmd)（CMD-FUNNEL-01）。
 fn ref_exists(root: &Path, git_ref: &str) -> bool {
-    crate::cmd::clean_cmd(
-        "git",
+    crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Git,
         &["rev-parse", "--verify", "--quiet", git_ref],
         &[],
         Some(root),
@@ -793,10 +793,10 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
 }
 
 /// `git ls-tree -r --name-only {ref} -- contracts/` 列 base 侧所有 `contract.toml` 路径。
-/// 经 [`clean_cmd`](crate::cmd::clean_cmd)（CMD-FUNNEL-01）。ref 无 contracts/ → 空（非错）。
+/// 经 [`external_cmd`](crate::cmd::external_cmd)（CMD-FUNNEL-01）。ref 无 contracts/ → 空（非错）。
 fn base_contract_manifests(root: &Path, against: &str) -> Result<Vec<String>> {
-    let out = crate::cmd::clean_cmd(
-        "git",
+    let out = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Git,
         &["ls-tree", "-r", "--name-only", against, "--", "contracts/"],
         &[],
         Some(root),
@@ -814,13 +814,18 @@ fn base_contract_manifests(root: &Path, against: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-/// `git show {ref}:{rel}` 读文本；rel 不在该 ref → `Ok(None)`。经 [`clean_cmd`](crate::cmd::clean_cmd)（CMD-FUNNEL-01）。
+/// `git show {ref}:{rel}` 读文本；rel 不在该 ref → `Ok(None)`。经 [`external_cmd`](crate::cmd::external_cmd)（CMD-FUNNEL-01）。
 fn read_text_at_ref(root: &Path, git_ref: &str, rel: &str) -> Result<Option<String>> {
     let spec = format!("{git_ref}:{rel}");
-    let out = crate::cmd::clean_cmd("git", &["show", &spec], &[], Some(root))
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("git show {spec} 失败: {e}"))?;
+    let out = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Git,
+        &["show", &spec],
+        &[],
+        Some(root),
+    )
+    .stderr(Stdio::null())
+    .output()
+    .map_err(|e| anyhow::anyhow!("git show {spec} 失败: {e}"))?;
     if !out.status.success() {
         return Ok(None);
     }
