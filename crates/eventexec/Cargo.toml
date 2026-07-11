@@ -49,6 +49,7 @@ metrics = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+testkit = { path = "../testkit" }
 # test-util feature 提供 tokio::time::advance/pause（start_paused=true 控 interval tick）。
 tokio = { workspace = true, features = ["test-util"] }
 # #1224 consume trace 还原单测：复用 tracewire `test-util` 脚手架装 otel subscriber，验证 handler span

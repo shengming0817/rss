@@ -9,10 +9,12 @@
 //! 路径也必须先显式打开事务并由 postgres adapter 铸造令牌——类型系统天然阻止无事务直接调用。
 //!
 //! **CAS fencing**：`relay` 以 `event_id`（= `IdemKey::as_str()`）为键 `UPDATE ... RETURNING retry_count`，
-//! 0 行 → 已被他人发或已 published → `Ok(Disposition::Ack)`，防二次 publish（at-least-once 幂等收口）。
+//! 0 行 → lease 未取得、已被他人接管或已 published → `Ok(Disposition::Ack)`；CAS 只围栏 lease 获取与
+//! 状态写回，不提供 broker exactly-once。
 //!
 //! **崩溃重投**：`poll_pending` 捞回 `status='publishing' AND updated_at <= now() - LEASE_TTL` 的 stale 行；
-//! relay 幂等 CAS 保证即使重投也至多 publish 一次。
+//! publish 成功而 settle 前崩溃会以同一 event/message id 重投，broker 可能收到重复 delivery；消费端 inbox
+//! 幂等才把重复业务副作用收口为一次。
 //!
 //! ref: serverlesstechnology/cqrs `persistence/postgres-es/src/event_repository.rs@main`
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
@@ -966,6 +968,15 @@ impl PgOutbox {
     }
 }
 
+fn publish_request(entry: &StoredOutboxEntry, metadata: EnvelopeMetadata) -> PublishRequest {
+    PublishRequest::new(
+        diport::Topic::new(entry.topic().as_str()),
+        diport::MessageId::new(entry.idem_key().as_str()),
+        entry.payload().to_vec(),
+    )
+    .with_metadata(metadata)
+}
+
 #[cfg(feature = "fault-matrix-test-support")]
 pub(crate) async fn fault_matrix_publish_before_settle(
     pool: &sqlx::PgPool,
@@ -1010,12 +1021,7 @@ pub(crate) async fn fault_matrix_publish_before_settle(
             now_epoch,
         },
     )?;
-    let request = PublishRequest::new(
-        diport::Topic::new(entry.topic().as_str()),
-        diport::MessageId::new(event_id),
-        entry.payload().to_vec(),
-    )
-    .with_metadata(metadata);
+    let request = publish_request(entry, metadata);
     validate_publish_request_envelope(&request)
         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
     relay
@@ -1065,7 +1071,8 @@ impl OutboxSource for PgOutbox {
     /// - **backlog 注意**：head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog
     ///   depth（见 `sample_backlog` 注释），否则 stalled partition 对 SLO 失明。
     ///
-    /// `FOR UPDATE OF o SKIP LOCKED` 尽力去重并发扫描；at-most-once 正确性由 `acquire_lease` CAS 保证。
+    /// `FOR UPDATE OF o SKIP LOCKED` 尽力减少并发重复扫描；`acquire_lease` CAS 围栏同一有效 lease 与 stale
+    /// writer 的状态写回。publish 成功、settle 前崩溃仍允许 broker duplicate，须由 consumer inbox 幂等收口。
     /// parse 失败（topic / idem_key 无效）→ `EngineErrorKind::Invariant`（我们写入的数据不该无效）。
     ///
     /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -1158,12 +1165,7 @@ impl OutboxRelay for PgOutbox {
         // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
         //    （至少一次 + 幂等去重端到端，eventbus.md §DLX 与幂等）。
         //    metadata_json 从 outbox.metadata 列 hydrate → EnvelopeMetadata（#1160 A4）。
-        let request = PublishRequest::new(
-            diport::Topic::new(entry.topic().as_str()),
-            diport::MessageId::new(event_id),
-            entry.payload().to_vec(),
-        )
-        .with_metadata(metadata);
+        let request = publish_request(entry, metadata);
         let publish_result = match validate_publish_request_envelope(&request) {
             Ok(()) => self
                 .publisher
@@ -1927,7 +1929,7 @@ mod tests {
         RelayEnvelopeValidationReason, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED,
         STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
         classify_append_fingerprint, dlx_decision, hydrate_envelope_metadata,
-        max_redelivery_window_secs, metadata_with_ambient,
+        max_redelivery_window_secs, metadata_with_ambient, publish_request,
         record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
     };
     use diport::{
@@ -2119,6 +2121,25 @@ mod tests {
         .with_metadata(valid_publish_metadata());
 
         assert!(validate_publish_request_envelope(&request).is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn relay_publish_request_reuses_durable_identity_on_every_attempt() {
+        let entry = consistency::StoredOutboxEntry::hydrate(
+            "identity.session-created",
+            consistency::IdemKey::parse("session-created-01").expect("valid event id"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
+        )
+        .expect("valid stored outbox entry");
+
+        let first = publish_request(&entry, valid_publish_metadata());
+        let retried = publish_request(&entry, valid_publish_metadata());
+
+        assert_eq!(first.event_id().as_str(), entry.idem_key().as_str());
+        assert_eq!(retried.event_id().as_str(), first.event_id().as_str());
+        assert_eq!(retried.topic().as_str(), first.topic().as_str());
+        assert_eq!(retried.payload(), first.payload());
     }
 
     #[test]
