@@ -1,9 +1,9 @@
 #![feature(rustc_private)]
-//! `rss_dlq_operator_callsite` — RSS eventbus 治理 dylint lint：限定 DLQ mutation capability 签发入口。
+//! `rss_dlq_operator_callsite` — RSS operator capability 签发入口治理 dylint。
 //!
 //! INVARIANT: EVENTBUS-DLQ-OPERATOR-CAP-01 { level = "Medium", exec = "verify", source = "dylint" }
 //!
-//! `OperatorDlqCapability` 的私有字段让构造只能经 `issue_for_authorized_operator()` funnel（上游 Hard），
+//! Operator capability 的私有字段让构造只能经 `issue_for_authorized_operator()` funnel（上游 Hard），
 //! 但“谁可以调用该 funnel”是跨 crate callsite 约束，类型系统不能表达；本 lint 复用
 //! `rss_crosstenant_callsite` 的下游治理模式，只允许 admin/PDP 边界 crate 或最小 runtime CLI wrapper
 //! 调用该签发函数。
@@ -21,7 +21,10 @@ use rustc_span::Span;
 
 /// 仅 admin/PDP 边界可签发 DLQ mutation capability；runtime 只允许精确 wrapper。
 const ALLOWED_CALLER_CRATES: &[&str] = &["httpserve"];
-const ALLOWED_RUNTIME_FUNCTION: &str = "issue_authorized_dlq_capability";
+const ALLOWED_RUNTIME_FUNCTIONS: &[&str] = &[
+    "issue_authorized_dlq_capability",
+    "issue_authorized_reconcile_capability",
+];
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -71,11 +74,12 @@ fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
     }
     let parent = cx.tcx.hir_get_parent_item(hir_id);
     let parent_def_id = parent.to_def_id();
-    if cx.tcx.item_name(parent_def_id).as_str() != ALLOWED_RUNTIME_FUNCTION {
+    let item_name = cx.tcx.item_name(parent_def_id);
+    if !ALLOWED_RUNTIME_FUNCTIONS.contains(&item_name.as_str()) {
         return false;
     }
     let def_path = cx.tcx.def_path_str(parent_def_id);
-    def_path == ALLOWED_RUNTIME_FUNCTION
+    ALLOWED_RUNTIME_FUNCTIONS.contains(&def_path.as_str())
 }
 
 fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
@@ -84,10 +88,10 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         RSS_DLQ_OPERATOR_CALLSITE,
         hir_id,
         span,
-        "DLQ mutation capability 仅 admin/PDP 边界可签发：`OperatorDlqCapability::issue_for_authorized_operator` 不得在此 crate 调用",
+        "operator capability 仅 admin/PDP 边界可签发：`issue_for_authorized_operator` 不得在此 crate 调用",
         |diag| {
             diag.help(
-                "在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许 `issue_authorized_dlq_capability` wrapper，其它 crate 经请求 DTO 接收",
+                "在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许精确的 authenticated+authorized wrapper，其它 crate 经请求 DTO 接收",
             );
         },
     );

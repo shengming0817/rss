@@ -613,6 +613,8 @@ pub enum DlqError {
     PayloadKeyUnavailable,
     #[error("dlq payload key provider rejected configuration or authorization")]
     PayloadKeyForbidden,
+    #[error("dlq replay outbox fact conflict")]
+    FactConflict(#[source] consistency::OutboxFactConflict),
     #[error("dlq store failed")]
     Store,
 }
@@ -628,6 +630,7 @@ impl DlqError {
             Self::InvalidSchemaHeaders => "invalid_schema_headers",
             Self::PayloadKeyUnavailable => "payload_key_unavailable",
             Self::PayloadKeyForbidden => "payload_key_forbidden",
+            Self::FactConflict(_) => "fact_conflict",
             Self::Store => "store",
         }
     }
@@ -700,6 +703,14 @@ fn compare_summary_to_cursor(a: &DlqEntrySummary, b: &DlqCursor) -> std::cmp::Or
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fact_conflict_has_closed_safe_label() {
+        let error = DlqError::FactConflict(consistency::OutboxFactConflict);
+        assert_eq!(error.as_label(), "fact_conflict");
+        assert_eq!(error.to_string(), "dlq replay outbox fact conflict");
+        assert!(!format!("{error:?}").contains("fingerprint"));
+    }
 
     #[test]
     #[allow(clippy::expect_used)]

@@ -14,6 +14,10 @@ pub enum CoreErrorKind {
     NotFound,
     Unauthenticated,
     Forbidden,
+    /// 同一 outbox event id 已绑定到不同稳定事实；重试不会改变既有事实。
+    OutboxFactConflict,
+    /// 乐观并发版本已变化；重新读取后可安全重试。
+    VersionConflict,
     Conflict,
     Validation,
     PayloadTooLarge,
@@ -29,6 +33,8 @@ impl CoreErrorKind {
             CoreErrorKind::NotFound => "not found",
             CoreErrorKind::Unauthenticated => "unauthenticated",
             CoreErrorKind::Forbidden => "forbidden",
+            CoreErrorKind::OutboxFactConflict => "outbox fact conflict",
+            CoreErrorKind::VersionConflict => "version conflict",
             CoreErrorKind::Conflict => "conflict",
             CoreErrorKind::Validation => "validation error",
             CoreErrorKind::PayloadTooLarge => "payload too large",
@@ -48,6 +54,8 @@ impl CoreErrorKind {
             CoreErrorKind::NotFound => "ERR_CORE_NOT_FOUND",
             CoreErrorKind::Unauthenticated => "ERR_CORE_UNAUTHENTICATED",
             CoreErrorKind::Forbidden => "ERR_CORE_FORBIDDEN",
+            CoreErrorKind::OutboxFactConflict => "ERR_CORE_OUTBOX_FACT_CONFLICT",
+            CoreErrorKind::VersionConflict => "ERR_CORE_VERSION_CONFLICT",
             CoreErrorKind::Conflict => "ERR_CORE_CONFLICT",
             CoreErrorKind::Validation => "ERR_CORE_VALIDATION",
             CoreErrorKind::PayloadTooLarge => "ERR_CORE_PAYLOAD_TOO_LARGE",
@@ -55,6 +63,16 @@ impl CoreErrorKind {
             CoreErrorKind::NotImplemented => "ERR_CORE_NOT_IMPLEMENTED",
             CoreErrorKind::Internal => "ERR_CORE_INTERNAL",
         }
+    }
+
+    /// 客户端可否在请求事实不变时安全重试。
+    ///
+    /// 默认 fail-closed：仅明确的乐观并发与节流可重试；事实冲突始终不可重试。
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            CoreErrorKind::VersionConflict | CoreErrorKind::TooManyRequests
+        )
     }
 }
 
@@ -152,6 +170,8 @@ mod tests {
             (CoreErrorKind::NotFound, "not found"),
             (CoreErrorKind::Unauthenticated, "unauthenticated"),
             (CoreErrorKind::Forbidden, "forbidden"),
+            (CoreErrorKind::OutboxFactConflict, "outbox fact conflict"),
+            (CoreErrorKind::VersionConflict, "version conflict"),
             (CoreErrorKind::Conflict, "conflict"),
             (CoreErrorKind::Validation, "validation error"),
             (CoreErrorKind::PayloadTooLarge, "payload too large"),
@@ -172,6 +192,11 @@ mod tests {
             (CoreErrorKind::Unauthenticated, "ERR_CORE_UNAUTHENTICATED"),
             (CoreErrorKind::Forbidden, "ERR_CORE_FORBIDDEN"),
             (CoreErrorKind::Conflict, "ERR_CORE_CONFLICT"),
+            (
+                CoreErrorKind::OutboxFactConflict,
+                "ERR_CORE_OUTBOX_FACT_CONFLICT",
+            ),
+            (CoreErrorKind::VersionConflict, "ERR_CORE_VERSION_CONFLICT"),
             (CoreErrorKind::Validation, "ERR_CORE_VALIDATION"),
             (CoreErrorKind::PayloadTooLarge, "ERR_CORE_PAYLOAD_TOO_LARGE"),
             (CoreErrorKind::TooManyRequests, "ERR_CORE_TOO_MANY_REQUESTS"),
@@ -183,6 +208,19 @@ mod tests {
             // 错误码命名空间前缀不变式：全集均 `ERR_CORE_` 前缀。
             assert!(kind.code().starts_with("ERR_CORE_"), "kind={kind:?}");
         }
+    }
+
+    #[test]
+    fn retryability_is_explicit_and_fact_conflict_is_terminal() {
+        assert!(
+            CoreErrorKind::VersionConflict.retryable(),
+            "CAS conflict is retryable"
+        );
+        assert!(!CoreErrorKind::Conflict.retryable());
+        assert!(
+            !CoreErrorKind::OutboxFactConflict.retryable(),
+            "an event id bound to another fact is terminal"
+        );
     }
 
     #[test]

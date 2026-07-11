@@ -164,6 +164,7 @@ mod smoke {
             IdentityError::InvalidPolicy => {}
             IdentityError::CredentialNotFound => {}
             IdentityError::VersionConflict => {}
+            IdentityError::OutboxFactConflict(_) => {}
             IdentityError::Storage(_) => {}
         }
     }

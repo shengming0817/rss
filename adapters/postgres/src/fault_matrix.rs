@@ -31,7 +31,7 @@ use diport::{
     SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
 use eventexec::reconcile::{
-    ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
+    ReconcileScheduleStore, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 use eventexec::{
     ProjectionHarness, ProjectionStop, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
@@ -678,7 +678,7 @@ impl PgFaultMatrixHarness {
             let outcome = store
                 .record_action_and_enqueue_command(&attempt, ConvergeAction::Update, command)
                 .await?;
-            if outcome != ScheduleLeaseOutcome::Held {
+            if outcome != ScheduleActionOutcome::Enqueued {
                 bail!("reconcile action lost lease before enqueue");
             }
         }

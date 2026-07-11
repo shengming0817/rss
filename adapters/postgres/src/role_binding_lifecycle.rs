@@ -10,7 +10,8 @@ use identity::ports::{RoleBinding, RoleBindingLifecycle, RoleId, TenantId, Tenan
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{
-    OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient, unix_secs,
+    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
+    unix_secs,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -141,9 +142,10 @@ impl RoleBindingLifecycle for PgRoleBindingLifecycle {
                         if deleted == 0 {
                             return Ok(false);
                         }
-                        append_outbox_with_projection(conn, &entry, &env, &projection_registry)
-                            .await
-                            .map_err(OutboxEmitError::new)?;
+                        let _outcome =
+                            append_outbox_with_projection(conn, &entry, &env, &projection_registry)
+                                .await
+                                .map_err(OutboxAppendError::into_observed_emit_error)?;
                         Ok(true)
                     })
                 },

@@ -21,7 +21,9 @@ use eventexec::command::{
     JournaledCommandDispatcher, ReviewedCommandJournal,
 };
 use eventexec::{
-    AttemptResult, AttemptTrigger, ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome,
+    AttemptResult, AttemptTrigger, OperatorReconcileCapability, ReconcileOperatorStore,
+    ReconcileQuarantineReason, ReconcileScheduleErrorKind, ReconcileScheduleStore,
+    ReconcileTargetStatus, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 use futures::future::BoxFuture;
 
@@ -1417,7 +1419,7 @@ async fn command_outbox_semantic_match_ignores_only_volatile_metadata() -> TestR
     let tenant = test_tenant();
     let event_id = unique_event_id("direct-command-stable-replay");
     let payload = br#"{"amount":7,"targetId":"target-1"}"#;
-    let persisted_metadata = serde_json::json!({
+    let first = serde_json::json!({
         "tenantId": tenant.to_string(),
         "schemaVersion": generated::command::_seed_v1::CONTRACT.version(),
         "schemaHash": generated::command::_seed_v1::CONTRACT.schema_hash(),
@@ -1432,72 +1434,38 @@ async fn command_outbox_semantic_match_ignores_only_volatile_metadata() -> TestR
         "trace": "00-old",
         "correlation": "corr-old"
     });
-    sqlx::query(
-        "INSERT INTO outbox (
-             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
-             payload, metadata, status, partition_key, causation_id
-         ) VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, 'pending', $10, $11)",
-    )
-    .bind(&event_id)
-    .bind(tenant.to_string())
-    .bind(generated::command::_seed_v1::CONTRACT.domain())
-    .bind(generated::command::_seed_v1::TOPIC)
-    .bind(generated::command::_seed_v1::CONTRACT_ID)
-    .bind(generated::command::_seed_v1::CONTRACT.version())
-    .bind(generated::command::_seed_v1::CONTRACT.schema_hash())
-    .bind(payload.as_slice())
-    .bind(persisted_metadata.to_string())
-    .bind("partition-a")
-    .bind("cause-a")
-    .execute(&store.pool)
-    .await?;
+    let mut retried = first.clone();
+    retried["occurredAt"] = serde_json::json!(2);
+    retried["trace"] = serde_json::json!("00-new");
+    retried["correlation"] = serde_json::json!("corr-new");
 
-    let mut replay_metadata = persisted_metadata.clone();
-    replay_metadata["occurredAt"] = serde_json::json!(2);
-    replay_metadata["trace"] = serde_json::json!("00-new");
-    replay_metadata["correlation"] = serde_json::json!("corr-new");
-    let matches: (bool,) =
-        sqlx::query_as(crate::command_journal::ENSURE_EXISTING_OUTBOX_MATCHES_SQL)
-            .bind(&event_id)
+    let fingerprint = |metadata: serde_json::Value| {
+        let pool = store.pool.clone();
+        let event_id = event_id.clone();
+        async move {
+            sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT rss_outbox_fact_fingerprint($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)",
+            )
+            .bind(event_id)
             .bind(tenant.to_string())
-            .bind(generated::command::_seed_v1::TOPIC)
             .bind(generated::command::_seed_v1::CONTRACT.domain())
+            .bind(generated::command::_seed_v1::TOPIC)
             .bind(generated::command::_seed_v1::CONTRACT_ID)
             .bind(generated::command::_seed_v1::CONTRACT.version())
             .bind(generated::command::_seed_v1::CONTRACT.schema_hash())
             .bind(payload.as_slice())
-            .bind(replay_metadata.to_string())
             .bind("partition-a")
             .bind("cause-a")
-            .bind(crate::command_journal::VOLATILE_METADATA_KEYS.as_slice())
-            .fetch_one(&store.pool)
-            .await?;
-    assert!(
-        matches.0,
-        "volatile metadata must not turn a retry into conflict"
-    );
+            .bind(metadata.to_string())
+            .fetch_one(&pool)
+            .await
+        }
+    };
 
-    replay_metadata["actor"]["id"] = serde_json::json!("different-actor");
-    let changed_actor: (bool,) =
-        sqlx::query_as(crate::command_journal::ENSURE_EXISTING_OUTBOX_MATCHES_SQL)
-            .bind(&event_id)
-            .bind(tenant.to_string())
-            .bind(generated::command::_seed_v1::TOPIC)
-            .bind(generated::command::_seed_v1::CONTRACT.domain())
-            .bind(generated::command::_seed_v1::CONTRACT_ID)
-            .bind(generated::command::_seed_v1::CONTRACT.version())
-            .bind(generated::command::_seed_v1::CONTRACT.schema_hash())
-            .bind(payload.as_slice())
-            .bind(replay_metadata.to_string())
-            .bind("partition-a")
-            .bind("cause-a")
-            .bind(crate::command_journal::VOLATILE_METADATA_KEYS.as_slice())
-            .fetch_one(&store.pool)
-            .await?;
-    assert!(
-        !changed_actor.0,
-        "stable actor identity changes must conflict"
-    );
+    let first_fingerprint = fingerprint(first).await?;
+    assert_eq!(first_fingerprint, fingerprint(retried.clone()).await?);
+    retried["actor"]["id"] = serde_json::json!("different-actor");
+    assert_ne!(first_fingerprint, fingerprint(retried).await?);
 
     store.shutdown().await?;
     Ok(())
@@ -2404,6 +2372,16 @@ async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
                 "text".to_string(),
                 "YES".to_string()
             ),
+            (
+                "partition_key".to_string(),
+                "text".to_string(),
+                "YES".to_string()
+            ),
+            (
+                "fact_fingerprint".to_string(),
+                "bytea".to_string(),
+                "NO".to_string()
+            ),
         ],
         "outbox_log columns must match the CDC append-only contract"
     );
@@ -2412,7 +2390,7 @@ async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
         "SELECT attname, attgenerated::text \
          FROM pg_attribute \
          WHERE attrelid = 'outbox_log'::regclass \
-           AND attname IN ('occurred_at', 'trace', 'correlation_id') \
+           AND attname IN ('occurred_at', 'trace', 'correlation_id', 'fact_fingerprint') \
          ORDER BY attname",
     )
     .fetch_all(&store.pool)
@@ -2421,11 +2399,45 @@ async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
         generated_columns,
         vec![
             ("correlation_id".to_string(), "s".to_string()),
+            ("fact_fingerprint".to_string(), "s".to_string()),
             ("occurred_at".to_string(), "s".to_string()),
             ("trace".to_string(), "s".to_string()),
         ],
         "CDC header projection columns must be stored generated columns"
     );
+
+    let fingerprint_functions: Vec<(String, String, bool, bool)> = sqlx::query_as(
+        "SELECT p.proname, pg_get_userbyid(p.proowner), \
+                has_function_privilege('rss_app', p.oid, 'EXECUTE'), \
+                has_function_privilege('rss_outbox_maintenance', p.oid, 'EXECUTE') \
+         FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'public' \
+           AND p.proname IN ( \
+               'rss_outbox_fact_frame', \
+               'rss_outbox_canonical_number', \
+               'rss_outbox_canonical_json', \
+               'rss_outbox_fact_fingerprint' \
+           ) \
+         ORDER BY p.proname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(fingerprint_functions.len(), 4);
+    for (function, owner, rss_app_can_execute, maintenance_can_execute) in fingerprint_functions {
+        assert_ne!(
+            owner, "rss_app",
+            "serving role must not own generated-column helper `{function}`"
+        );
+        assert!(
+            rss_app_can_execute,
+            "serving role must retain EXECUTE on `{function}`"
+        );
+        assert!(
+            maintenance_can_execute,
+            "relay maintenance role needs only EXECUTE on generated-column helper `{function}`"
+        );
+    }
 
     let constraint_text: Vec<(String, String)> = sqlx::query_as(
         "SELECT conname, pg_get_constraintdef(oid) \
@@ -2856,6 +2868,14 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
         target_unique.0, "tenant_id,reconciler_id,resource_kind,resource_id",
         "target uniqueness must include tenant and full resource identity"
     );
+    let disabled_reason: (String, String) = sqlx::query_as(
+        "SELECT data_type, is_nullable FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'reconcile_targets' \
+           AND column_name = 'disabled_reason'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(disabled_reason, ("text".to_string(), "YES".to_string()));
 
     let fk_text: Vec<(String, String)> = sqlx::query_as(
         "SELECT conname, pg_get_constraintdef(oid) \
@@ -2907,6 +2927,7 @@ async fn reconcile_schema_catalog_after_migrations() -> TestResult {
         .join("\n");
     for name in [
         "reconcile_targets_status_valid",
+        "reconcile_targets_disabled_reason_valid",
         "reconcile_leases_state_valid",
         "reconcile_leases_epoch_non_negative",
         "reconcile_attempts_trigger_kind_valid",
@@ -3423,7 +3444,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
             command,
         )
         .await?,
-        eventexec::ScheduleLeaseOutcome::Held,
+        eventexec::ScheduleActionOutcome::Enqueued,
         "current lease should atomically record action and outbox row"
     );
     assert_eq!(
@@ -3545,7 +3566,7 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
                 command,
             )
             .await?,
-            eventexec::ScheduleLeaseOutcome::Held
+            eventexec::ScheduleActionOutcome::Enqueued
         );
         dispatched.push((tenant, target.target_id().to_string()));
     }
@@ -3605,21 +3626,41 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         };
     let raw_key = format!("conflicting-command-{}", uuid::Uuid::new_v4());
 
-    for (target_id, expected_ok) in [("first", true), ("second", false)] {
-        let command = reviewed_reconcile_command(tenant, &raw_key, &raw_key, target_id, 1)?;
-        let result = ReconcileScheduleStore::record_action_and_enqueue_command(
+    let first = reviewed_reconcile_command(tenant, &raw_key, &raw_key, "first", 1)?;
+    assert_eq!(
+        ReconcileScheduleStore::record_action_and_enqueue_command(
             &reconcile,
             &attempt,
             ConvergeAction::Create,
-            command,
+            first,
         )
-        .await;
-        assert_eq!(
-            result.is_ok(),
-            expected_ok,
-            "same scoped dispatch key with different payload must fail closed"
-        );
-    }
+        .await?,
+        ScheduleActionOutcome::Enqueued
+    );
+    let first_fact: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT payload, fact_fingerprint FROM outbox \
+         WHERE tenant_id = $1::uuid AND topic = $2 AND metadata->>'subjectId' = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(generated::command::_seed_v1::TOPIC)
+    .bind(&raw_key)
+    .fetch_one(&store.pool)
+    .await?;
+    let second = reviewed_reconcile_command(tenant, &raw_key, &raw_key, "second", 1)?;
+    let conflict = ReconcileScheduleStore::record_action_and_enqueue_command(
+        &reconcile,
+        &attempt,
+        ConvergeAction::Create,
+        second,
+    )
+    .await;
+    assert!(
+        matches!(
+            conflict,
+            Err(ref error) if error.kind() == ReconcileScheduleErrorKind::FactConflict
+        ),
+        "same scoped dispatch key must remain typed Err after quarantine: {conflict:?}"
+    );
 
     let action_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM reconcile_actions \
@@ -3634,8 +3675,8 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         "failed command conflict must roll back the action insert"
     );
 
-    let outbox: (Vec<u8>,) = sqlx::query_as(
-        "SELECT payload FROM outbox \
+    let outbox: (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT payload, fact_fingerprint FROM outbox \
              WHERE tenant_id = $1::uuid AND topic = $2 AND metadata->>'subjectId' = $3",
     )
     .bind(tenant.to_string())
@@ -3644,6 +3685,82 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(outbox.0, br#"{"amount":1,"targetId":"first"}"#);
+    assert_eq!(
+        outbox, first_fact,
+        "quarantine must preserve the first fact"
+    );
+
+    let target_status: (String,) = sqlx::query_as(
+        "SELECT status FROM reconcile_targets WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        target_status.0, "disabled",
+        "fact conflict quarantine must persistently disable automatic reclaim"
+    );
+
+    let capability = OperatorReconcileCapability::issue_for_authorized_operator();
+    let inspected = ReconcileOperatorStore::inspect_target(
+        &reconcile,
+        tenant,
+        attempt.target().target_id(),
+        capability,
+    )
+    .await?;
+    assert_eq!(inspected.status(), ReconcileTargetStatus::Disabled);
+    assert_eq!(
+        inspected.disabled_reason(),
+        Some(ReconcileQuarantineReason::FactConflict)
+    );
+
+    let wrong_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    for result in [
+        ReconcileOperatorStore::inspect_target(
+            &reconcile,
+            wrong_tenant,
+            attempt.target().target_id(),
+            capability,
+        )
+        .await,
+        ReconcileOperatorStore::resume_target(
+            &reconcile,
+            wrong_tenant,
+            attempt.target().target_id(),
+            capability,
+        )
+        .await,
+    ] {
+        let Err(error) = result else {
+            return Err("cross-tenant reconcile operator access must fail closed".into());
+        };
+        assert_eq!(error.kind(), ReconcileScheduleErrorKind::Infrastructure);
+        assert_eq!(
+            error.to_string(),
+            "reconcile schedule store operation failed"
+        );
+    }
+
+    let resumed = ReconcileOperatorStore::resume_target(
+        &reconcile,
+        tenant,
+        attempt.target().target_id(),
+        capability,
+    )
+    .await?;
+    assert_eq!(resumed.status(), ReconcileTargetStatus::Active);
+    assert_eq!(resumed.disabled_reason(), None);
+    let resumed_db: (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT status, disabled_reason, next_run_at <= now() \
+         FROM reconcile_targets WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(resumed_db, ("active".to_string(), None, true));
 
     store.shutdown().await?;
     Ok(())
@@ -3717,7 +3834,7 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
             stale_command,
         )
         .await?,
-        eventexec::ScheduleLeaseOutcome::Lost,
+        eventexec::ScheduleActionOutcome::Lost,
         "stale token+epoch must not record action or outbox"
     );
     assert_eq!(
@@ -3899,15 +4016,15 @@ use std::sync::{Arc, Mutex};
 
 use consistency::{
     BacklogMetricSample, BacklogSample, Disposition, EngineErrorKind, EventEntry, EventTopic,
-    HandleResult, OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay, OutboxSource,
-    PendingEntry, RetentionSweeper,
+    HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactIdentity,
+    OutboxMetricSubject, OutboxRelay, OutboxSource, PendingEntry, RetentionSweeper,
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
     DeliveryStream, DynAcker, DynDeadLetterStore, DynPublisher, EnvelopeMetadata, KEY_ACTOR,
     KEY_CORRELATION, KEY_OCCURRED_AT, KEY_PRINCIPAL, KEY_SCHEMA_HASH, KEY_SCHEMA_VERSION,
-    KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, Message, PublishRequest,
-    Publisher, PublisherError,
+    KEY_SUBJECT_ID, KEY_TENANT_AUTHORITY, KEY_TENANT_ID, KEY_TRACE, Message, OutboxEmitErrorKind,
+    PublishRequest, Publisher, PublisherError,
 };
 use eventexec::{
     ConsumerMeta, LeaseConfig, MAX_REDELIVERY, TenantAuthority, TenantAuthorityBinding,
@@ -3918,12 +4035,16 @@ use testkit::eventing_conformance as eventconf;
 
 use crate::dead_letter_payload::tests::test_protector;
 use crate::outbox::{
-    MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, PgOutbox, SettleOutcome, append_outbox,
-    append_outbox_with_projection,
+    MAX_PUBLISH_ATTEMPTS, OutboxAppendError, OutboxEnvelope, OutboxMetadata, PgOutbox,
+    SettleOutcome, append_outbox, append_outbox_with_projection,
 };
 use crate::outbox_cdc::append_outbox_log;
 
 static OUTBOX_SWEEP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn test_append_error(_: OutboxAppendError) -> sqlx::Error {
+    sqlx::Error::Protocol("outbox append test failed".to_string())
+}
 
 /// setup 阶段：应用 migration（含 outbox 表）。**不**全表 DELETE——每个 outbox 用例按唯一 `event_id`
 /// （[`unique_event_id`]）+ 唯一 domain 命名空间自隔离断言（`WHERE event_id = $1` / domain-scoped 查询用各自
@@ -4081,6 +4202,451 @@ fn make_test_env_for_tenant(
     )
 }
 
+struct SeedFactSnapshot {
+    payload: Vec<u8>,
+    fingerprint: Vec<u8>,
+}
+
+async fn seed_conflicting_outbox_fact(
+    store: &PgStore,
+    tenant: vocab::TenantId,
+    event_id: &str,
+) -> Result<SeedFactSnapshot, TestError> {
+    let entry = EventEntry::new(
+        EventTopic::parse("test.event")?,
+        IdemKey::parse(event_id)?,
+        reviewed_payload(b"preexisting-conflicting-fact"),
+    );
+    let env = OutboxEnvelope::new(
+        "test".to_string(),
+        "test.contract".to_string(),
+        OutboxMetadata::new(0, tenant, test_contract())
+            .with_subject_id(subject_id("conflict-seed")),
+    );
+    let outcome = store
+        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+            Box::pin(async move { append_outbox(cap, &entry, &env).await })
+        })
+        .await?;
+    assert_eq!(outcome, OutboxAppendOutcome::Inserted);
+    let (payload, fingerprint): (Vec<u8>, Vec<u8>) =
+        sqlx::query_as("SELECT payload, fact_fingerprint FROM outbox WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    Ok(SeedFactSnapshot {
+        payload,
+        fingerprint,
+    })
+}
+
+async fn assert_seed_fact_unchanged(
+    store: &PgStore,
+    event_id: &str,
+    expected: &SeedFactSnapshot,
+) -> Result<(), TestError> {
+    let rows: Vec<(Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT payload, fact_fingerprint FROM outbox WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_all(&store.pool)
+            .await?;
+    assert_eq!(rows.len(), 1, "seed fact must remain the sole event row");
+    assert_eq!(rows[0].0, expected.payload);
+    assert_eq!(rows[0].1, expected.fingerprint);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_append_distinguishes_same_fact_from_conflict() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let event_id = unique_event_id("outbox-fact-conflict");
+    let entry = make_entry(&event_id);
+    let first_env = OutboxEnvelope::new(
+        "identity".to_string(),
+        "identity.session-created".to_string(),
+        OutboxMetadata::new(1, test_tenant(), test_contract())
+            .with_subject_id(subject_id("stable-subject"))
+            .with_trace("trace-a")
+            .with_correlation("correlation-a"),
+    );
+    let retried_env = OutboxEnvelope::new(
+        "identity".to_string(),
+        "identity.session-created".to_string(),
+        OutboxMetadata::new(2, test_tenant(), test_contract())
+            .with_subject_id(subject_id("stable-subject"))
+            .with_trace("trace-b")
+            .with_correlation("correlation-b"),
+    );
+
+    let first = store
+        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+            Box::pin(async move { append_outbox(cap, &entry, &first_env).await })
+        })
+        .await?;
+    assert_eq!(first, OutboxAppendOutcome::Inserted);
+
+    let retry_entry = make_entry(&event_id);
+    let retry = store
+        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+            Box::pin(async move { append_outbox(cap, &retry_entry, &retried_env).await })
+        })
+        .await?;
+    assert_eq!(retry, OutboxAppendOutcome::SameFact);
+
+    let conflicting_entry = EventEntry::new(
+        EventTopic::parse("test.event")?,
+        IdemKey::parse(&event_id)?,
+        OutboxPayload::from_reviewed_event_bytes(b"SECRET_CONFLICT_PAYLOAD".to_vec()),
+    );
+    let conflict_env = OutboxEnvelope::new(
+        "identity".to_string(),
+        "identity.session-created".to_string(),
+        OutboxMetadata::new(3, test_tenant(), test_contract())
+            .with_subject_id(subject_id("stable-subject")),
+    );
+    let conflict = store
+        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+            Box::pin(async move { append_outbox(cap, &conflicting_entry, &conflict_env).await })
+        })
+        .await;
+    assert!(matches!(conflict, Err(OutboxAppendError::Conflict(_))));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?,
+        1
+    );
+    let tamper = sqlx::query("UPDATE outbox SET fact_fingerprint = $2 WHERE event_id = $1")
+        .bind(&event_id)
+        .bind(vec![0_u8; 32])
+        .execute(&store.pool)
+        .await;
+    assert!(
+        tamper.is_err(),
+        "stored generated fingerprint must reject explicit writes"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_outbox_append_serializes_same_fact_and_conflict() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let same_id = unique_event_id("outbox-concurrent-same");
+    let same_entry_a = make_entry(&same_id);
+    let same_entry_b = same_entry_a.clone();
+    let same_env_a = make_test_env("test", "projection.bound");
+    let same_env_b = same_env_a.clone();
+    let projection_registry_a =
+        crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS);
+    let projection_registry_b = projection_registry_a;
+    let same_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move {
+            append_outbox_with_projection(cap, &same_entry_a, &same_env_a, &projection_registry_a)
+                .await
+        })
+    });
+    let same_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move {
+            append_outbox_with_projection(cap, &same_entry_b, &same_env_b, &projection_registry_b)
+                .await
+        })
+    });
+    let (same_a, same_b) = tokio::join!(same_a, same_b);
+    let same_outcomes = [same_a?, same_b?];
+    assert_eq!(
+        same_outcomes
+            .iter()
+            .filter(|outcome| **outcome == OutboxAppendOutcome::Inserted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM projection_events WHERE event_id = $1",)
+            .bind(&same_id)
+            .fetch_one(&store.pool)
+            .await?,
+        1,
+        "concurrent same-fact retries must mirror exactly one projection row"
+    );
+    assert_eq!(
+        same_outcomes
+            .iter()
+            .filter(|outcome| **outcome == OutboxAppendOutcome::SameFact)
+            .count(),
+        1
+    );
+
+    let conflict_id = unique_event_id("outbox-concurrent-conflict");
+    let conflict_entry_a = make_entry(&conflict_id);
+    let conflict_entry_b = EventEntry::new(
+        EventTopic::parse("test.event")?,
+        IdemKey::parse(&conflict_id)?,
+        OutboxPayload::from_reviewed_event_bytes(b"different-payload".to_vec()),
+    );
+    let conflict_env_a = make_test_env("identity", "identity.session-created");
+    let conflict_env_b = conflict_env_a.clone();
+    let conflict_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move { append_outbox(cap, &conflict_entry_a, &conflict_env_a).await })
+    });
+    let conflict_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move { append_outbox(cap, &conflict_entry_b, &conflict_env_b).await })
+    });
+    let (conflict_a, conflict_b) = tokio::join!(conflict_a, conflict_b);
+    let inserted = usize::from(matches!(
+        conflict_a.as_ref(),
+        Ok(OutboxAppendOutcome::Inserted)
+    )) + usize::from(matches!(
+        conflict_b.as_ref(),
+        Ok(OutboxAppendOutcome::Inserted)
+    ));
+    let conflicts = usize::from(matches!(
+        conflict_a.as_ref(),
+        Err(OutboxAppendError::Conflict(_))
+    )) + usize::from(matches!(
+        conflict_b.as_ref(),
+        Err(OutboxAppendError::Conflict(_))
+    ));
+    assert_eq!(inserted, 1);
+    assert_eq!(conflicts, 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_cdc_append_serializes_same_fact_and_typed_conflict() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let same_id = unique_event_id("cdc-concurrent-same");
+    let same_entry_a = make_entry(&same_id);
+    let same_entry_b = same_entry_a.clone();
+    let same_env_a = make_test_env("identity", "identity.session-created");
+    let same_env_b = same_env_a.clone();
+    let same_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move {
+            append_outbox_log(cap, &same_entry_a, &same_env_a, "aggregate-same").await
+        })
+    });
+    let same_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move {
+            append_outbox_log(cap, &same_entry_b, &same_env_b, "aggregate-same").await
+        })
+    });
+    let (same_a, same_b) = tokio::join!(same_a, same_b);
+    let same_outcomes = [same_a?, same_b?];
+    assert_eq!(
+        same_outcomes
+            .iter()
+            .filter(|outcome| **outcome == OutboxAppendOutcome::Inserted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        same_outcomes
+            .iter()
+            .filter(|outcome| **outcome == OutboxAppendOutcome::SameFact)
+            .count(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox_log WHERE event_id = $1")
+            .bind(&same_id)
+            .fetch_one(&store.pool)
+            .await?,
+        1
+    );
+
+    let conflict_id = unique_event_id("cdc-concurrent-conflict");
+    let first_payload = b"cdc-first".to_vec();
+    let second_payload = b"cdc-second".to_vec();
+    let conflict_entry_a = EventEntry::new(
+        EventTopic::parse("test.event")?,
+        IdemKey::parse(&conflict_id)?,
+        OutboxPayload::from_reviewed_event_bytes(first_payload.clone()),
+    );
+    let conflict_entry_b = EventEntry::new(
+        EventTopic::parse("test.event")?,
+        IdemKey::parse(&conflict_id)?,
+        OutboxPayload::from_reviewed_event_bytes(second_payload.clone()),
+    );
+    let conflict_env_a = make_test_env("identity", "identity.session-created");
+    let conflict_env_b = conflict_env_a.clone();
+    let conflict_a = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move {
+            append_outbox_log(
+                cap,
+                &conflict_entry_a,
+                &conflict_env_a,
+                "aggregate-conflict",
+            )
+            .await
+        })
+    });
+    let conflict_b = store.run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+        Box::pin(async move {
+            append_outbox_log(
+                cap,
+                &conflict_entry_b,
+                &conflict_env_b,
+                "aggregate-conflict",
+            )
+            .await
+        })
+    });
+    let (conflict_a, conflict_b) = tokio::join!(conflict_a, conflict_b);
+    assert_eq!(
+        usize::from(matches!(
+            conflict_a.as_ref(),
+            Ok(OutboxAppendOutcome::Inserted)
+        )) + usize::from(matches!(
+            conflict_b.as_ref(),
+            Ok(OutboxAppendOutcome::Inserted)
+        )),
+        1
+    );
+    assert_eq!(
+        usize::from(matches!(
+            conflict_a.as_ref(),
+            Err(OutboxAppendError::Conflict(_))
+        )) + usize::from(matches!(
+            conflict_b.as_ref(),
+            Err(OutboxAppendError::Conflict(_))
+        )),
+        1
+    );
+
+    let original: (i64, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT count(*) OVER (), payload, fact_fingerprint FROM outbox_log WHERE event_id = $1",
+    )
+    .bind(&conflict_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(original.0, 1);
+    assert!(original.1 == first_payload || original.1 == second_payload);
+    let retry_payload = if original.1 == first_payload {
+        second_payload
+    } else {
+        first_payload
+    };
+    let retry_entry = EventEntry::new(
+        EventTopic::parse("test.event")?,
+        IdemKey::parse(&conflict_id)?,
+        OutboxPayload::from_reviewed_event_bytes(retry_payload),
+    );
+    let retry_env = make_test_env("identity", "identity.session-created");
+    let retry = store
+        .run_global_transaction::<_, _, OutboxAppendError>(|cap| {
+            Box::pin(async move {
+                append_outbox_log(cap, &retry_entry, &retry_env, "aggregate-conflict").await
+            })
+        })
+        .await;
+    assert!(matches!(retry, Err(OutboxAppendError::Conflict(_))));
+    let after: (i64, Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT count(*) OVER (), payload, fact_fingerprint FROM outbox_log WHERE event_id = $1",
+    )
+    .bind(&conflict_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        after, original,
+        "typed conflicts must preserve the original CDC fact"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutboxFactGoldenFixture {
+    schema_version: u32,
+    cases: Vec<OutboxFactGoldenCase>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutboxFactGoldenCase {
+    label: String,
+    event_id: String,
+    tenant_id: String,
+    domain: String,
+    topic: String,
+    contract_id: String,
+    contract_version: String,
+    schema_hash: String,
+    payload: Vec<u8>,
+    partition_key: Option<String>,
+    causation_id: Option<String>,
+    metadata: serde_json::Value,
+    expected_digest: [u8; 32],
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_fact_sql_matches_rust_known_vectors() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let fixture: OutboxFactGoldenFixture = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/consistency/outbox-fact-v1-vectors.json"
+    )))?;
+    assert_eq!(fixture.schema_version, 1);
+    assert!(!fixture.cases.is_empty());
+    for case in fixture.cases {
+        let actual = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT rss_outbox_fact_fingerprint($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)",
+        )
+        .bind(&case.event_id)
+        .bind(&case.tenant_id)
+        .bind(&case.domain)
+        .bind(&case.topic)
+        .bind(&case.contract_id)
+        .bind(&case.contract_version)
+        .bind(&case.schema_hash)
+        .bind(case.payload.as_slice())
+        .bind(case.partition_key.as_deref())
+        .bind(case.causation_id.as_deref())
+        .bind(case.metadata.to_string())
+        .fetch_one(&store.pool)
+        .await?;
+        let rust = OutboxFactIdentity::new(
+            &case.event_id,
+            &case.tenant_id,
+            &case.domain,
+            &case.topic,
+            &case.contract_id,
+            &case.contract_version,
+            &case.schema_hash,
+            &case.payload,
+            case.partition_key.as_deref(),
+            case.causation_id.as_deref(),
+            &case.metadata,
+        )
+        .fingerprint();
+        assert_eq!(
+            actual.as_slice(),
+            rust.as_bytes(),
+            "Rust/SQL parity: {}",
+            case.label
+        );
+        assert_eq!(
+            actual.as_slice(),
+            case.expected_digest,
+            "fixed digest: {}",
+            case.label
+        );
+    }
+    store.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> TestResult {
     use crate::projection_events::ProjectionWriteRegistry;
@@ -4111,16 +4677,26 @@ async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> 
             let bound_env = bound_env.clone();
             let unbound_env = unbound_env.clone();
             Box::pin(async move {
-                append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry).await?;
-                append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry).await?;
-                append_outbox_with_projection(cap, &unbound_entry, &unbound_env, &registry).await?;
-                append_outbox_with_projection(
+                let _outcome =
+                    append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry)
+                        .await
+                        .map_err(test_append_error)?;
+                let _outcome =
+                    append_outbox_with_projection(cap, &bound_entry, &bound_env, &registry)
+                        .await
+                        .map_err(test_append_error)?;
+                let _outcome =
+                    append_outbox_with_projection(cap, &unbound_entry, &unbound_env, &registry)
+                        .await
+                        .map_err(test_append_error)?;
+                let _outcome = append_outbox_with_projection(
                     cap,
                     &schema_mismatch_entry,
                     &schema_mismatch_env,
                     &registry,
                 )
-                .await?;
+                .await
+                .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -4267,7 +4843,9 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     let first = tokio::spawn(async move {
         let mut tx = pool_a.begin().await?;
         let mut cap = TxCapability::from_transaction(&mut tx);
-        append_outbox_with_projection(&mut cap, &first_entry, &first_env, &registry).await?;
+        let _outcome = append_outbox_with_projection(&mut cap, &first_entry, &first_env, &registry)
+            .await
+            .map_err(test_append_error)?;
         let _ = first_appended_tx.send(());
         release_first_rx.await.map_err(|err| {
             Box::new(std::io::Error::other(format!(
@@ -4284,7 +4862,10 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
         let mut tx = pool_b.begin().await?;
         let mut cap = TxCapability::from_transaction(&mut tx);
         let _ = second_started_tx.send(());
-        append_outbox_with_projection(&mut cap, &second_entry, &second_env, &registry).await?;
+        let _outcome =
+            append_outbox_with_projection(&mut cap, &second_entry, &second_env, &registry)
+                .await
+                .map_err(test_append_error)?;
         tx.commit().await?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
@@ -4383,8 +4964,12 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
             let unbound_entry = unbound_entry.clone();
             let unbound_env = unbound_env.clone();
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
-                append_outbox(cap, &unbound_entry, &unbound_env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                let _outcome = append_outbox(cap, &unbound_entry, &unbound_env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -4936,7 +5521,9 @@ async fn conf_seed_pending(
             let entry = make_entry(&event_id);
             let env = make_test_env(&domain, "eventing-conf");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -5173,7 +5760,9 @@ async fn outbox_relay_and_cdc_envelope_parity_conformance() -> TestResult {
             let entry = entry.clone();
             let env = env.clone();
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -5183,9 +5772,21 @@ async fn outbox_relay_and_cdc_envelope_parity_conformance() -> TestResult {
     crate::cotx::set_local_tenant(&mut tx, tenant).await?;
     {
         let mut cap = crate::cotx::TxCapability::from_transaction(&mut tx);
-        append_outbox_log(&mut cap, &entry, &env, subject).await?;
+        let _outcome = append_outbox_log(&mut cap, &entry, &env, subject).await?;
     }
     tx.commit().await?;
+
+    let (relay_fingerprint, cdc_fingerprint): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT o.fact_fingerprint, l.fact_fingerprint \
+         FROM outbox o JOIN outbox_log l USING (event_id) WHERE o.event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        relay_fingerprint, cdc_fingerprint,
+        "mutable and CDC modes must share one canonical fingerprint"
+    );
 
     let (publisher, captured_requests) = CapturedPublishRequestPublisher::new();
     let outbox = make_pg_outbox_with_publisher(&store, publisher);
@@ -5882,7 +6483,9 @@ async fn t1_rollback_leaves_no_outbox_entry() -> TestResult {
                     .with_subject_id(subject_id(event_id.as_str())),
             );
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 // 强制回滚。
                 Err(sqlx::Error::RowNotFound)
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
@@ -5926,7 +6529,9 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
                     .with_subject_id(subject_id(event_id.as_str())),
             );
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -5972,7 +6577,9 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6021,7 +6628,9 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6093,7 +6702,9 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6153,7 +6764,9 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6208,7 +6821,9 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
             let entry = entry.clone();
             let env = make_test_env("crash-domain", "c");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6232,7 +6847,9 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = other_entry.clone();
             Box::pin(async move {
-                append_outbox(cap, &entry, &make_test_env("other-domain", "c")).await?;
+                let _outcome = append_outbox(cap, &entry, &make_test_env("other-domain", "c"))
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6303,7 +6920,9 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
             let entry = entry.clone();
             let env = make_test_env("t7-domain", "c");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -6378,7 +6997,9 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 Box::pin(async move {
                     let env = make_test_env("sweep-domain", "c");
-                    append_outbox(cap, &entry_c, &env).await?;
+                    let _outcome = append_outbox(cap, &entry_c, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -6407,7 +7028,10 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         store
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 Box::pin(async move {
-                    append_outbox(cap, &entry_c, &make_test_env("sweep-domain", "c")).await?;
+                    let _outcome =
+                        append_outbox(cap, &entry_c, &make_test_env("sweep-domain", "c"))
+                            .await
+                            .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -7495,6 +8119,31 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
         "duplicate DLQ replay must not insert a second projection event"
     );
 
+    let conflict_replay_id = IdemKey::parse(&unique_event_id("dlq-replay-fact-conflict")).unwrap();
+    let seed = seed_conflicting_outbox_fact(&store, tenant, conflict_replay_id.as_str()).await?;
+    let conflict = dlq
+        .replay_dead_letter(DlqReplayRequest::new(
+            tenant,
+            DeadLetterId::parse(&dead_letter_id)?,
+            conflict_replay_id.clone(),
+            cap,
+        ))
+        .await;
+    assert!(
+        matches!(conflict, Err(DlqError::FactConflict(_))),
+        "DLQ replay must preserve typed outbox fact conflict: {conflict:?}"
+    );
+    assert_seed_fact_unchanged(&store, conflict_replay_id.as_str(), &seed).await?;
+    let conflict_projection_count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM projection_events WHERE event_id = $1")
+            .bind(conflict_replay_id.as_str())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        conflict_projection_count.0, 0,
+        "conflicting DLQ replay must not mirror a projection row"
+    );
+
     let missing_id = uuid::Uuid::new_v4().to_string();
     let missing_replay_id = IdemKey::parse(&unique_event_id("missing-replay")).unwrap();
     let missing = dlq
@@ -7735,7 +8384,9 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
             let env = make_test_env(&domain, "contract-dlq")
                 .with_partition_key_opt(Some(partition_key.clone()));
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -7950,7 +8601,9 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
             Box::pin(async move {
-                append_outbox(cap, &entry, &make_test_env("t9-domain", "c")).await?;
+                let _outcome = append_outbox(cap, &entry, &make_test_env("t9-domain", "c"))
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -8013,6 +8666,77 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
     assert_eq!(
         status2.0, "published",
         "valid lease token must settle the row"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_fingerprint_allows_real_relay_acquire_settle_and_redrive() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let settled_id = unique_event_id("generated-permission-settle");
+    let dlx_id = unique_event_id("generated-permission-redrive");
+    for event_id in [&settled_id, &dlx_id] {
+        let entry = make_entry(event_id);
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome =
+                        append_outbox(cap, &entry, &make_test_env("generated-permission", "event"))
+                            .await
+                            .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    let settled_lease = crate::outbox::acquire_lease(&store.pool, &settled_id)
+        .await?
+        .ok_or("relay acquire must update a generated-fingerprint row")?;
+    assert_eq!(
+        crate::outbox::settle_published(&store.pool, &settled_id, &settled_lease.1).await?,
+        SettleOutcome::Settled
+    );
+
+    let dlx_lease = crate::outbox::acquire_lease(&store.pool, &dlx_id)
+        .await?
+        .ok_or("relay acquire before redrive must succeed")?;
+    let marked: Option<(String,)> =
+        sqlx::query_as("SELECT tenant_id FROM rss_outbox_mark_dlx($1, 1, $2::uuid)")
+            .bind(&dlx_id)
+            .bind(&dlx_lease.1)
+            .fetch_optional(&store.pool)
+            .await?;
+    assert!(
+        marked.is_some(),
+        "mark DLX must update the generated column row"
+    );
+    let redriven: i64 = sqlx::query_scalar("SELECT rss_outbox_redrive($1, $2::uuid)")
+        .bind(&dlx_id)
+        .bind(test_tenant().to_string())
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        redriven, 1,
+        "redrive must update exactly one generated column row"
+    );
+
+    let states: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT event_id, status, retry_count FROM outbox WHERE event_id = ANY($1) ORDER BY event_id",
+    )
+    .bind(vec![settled_id, dlx_id])
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(states.len(), 2);
+    assert!(states.iter().any(|(_, status, _)| status == "published"));
+    assert!(
+        states
+            .iter()
+            .any(|(_, status, retry_count)| status == "pending" && *retry_count == 0)
     );
 
     store.shutdown().await?;
@@ -8304,10 +9028,17 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
     let conflict = emitter
         .emit(make_entry(br#"{"sessionId":"second"}"#), make_envelope())
         .await;
-    assert!(
-        conflict.is_err(),
-        "same event_id with different immutable CDC payload must fail"
-    );
+    let Err(conflict) = conflict else {
+        return Err("same event_id with different immutable CDC payload must fail".into());
+    };
+    assert_eq!(conflict.kind(), OutboxEmitErrorKind::FactConflict);
+    let rendered = format!("{conflict:?} {conflict}");
+    for secret in ["first", "second", "cdc-conflict-subject", "fingerprint"] {
+        assert!(
+            !rendered.contains(secret),
+            "typed CDC fact conflict must redact `{secret}`: {rendered}"
+        );
+    }
 
     let row: (i64, Vec<u8>) =
         sqlx::query_as("SELECT count(*) OVER (), payload FROM outbox_log WHERE event_id = $1")
@@ -8635,7 +9366,9 @@ async fn t12_cotx_rollback_leaves_neither() -> TestResult {
                 .bind(1_700_000_000_i64)
                 .execute(cap.conn())
                 .await?;
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 // 模拟 commit 前任一步失败 → 整体回滚（both-or-neither）。
                 Err(sqlx::Error::RowNotFound)
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
@@ -8772,7 +9505,9 @@ async fn t15b_sample_backlog_observed_scope_without_backlog_returns_zero() -> Te
             let entry = make_entry(&event_id);
             let env = make_test_env(&domain, "metrics.zero");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -8813,7 +9548,9 @@ async fn t15c_poll_pending_rejects_invalid_persisted_contract_id() -> TestResult
             let entry = make_entry(&event_id);
             let env = make_test_env(&domain, "metrics.valid");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -8862,7 +9599,9 @@ async fn t16_sample_backlog_counts_only_pending_rows() -> TestResult {
                 let entry = entry.clone();
                 let env = make_test_env(domain, "c");
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -8905,7 +9644,9 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
             let entry = make_entry(&new_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -8918,7 +9659,9 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
             let entry = make_entry(&old_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -8969,7 +9712,9 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
             let entry = make_entry(&due_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -8981,7 +9726,9 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
             let entry = make_entry(&future_id);
             let env = make_test_env(domain, "c");
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -9030,7 +9777,9 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
                 let entry = entry.clone();
                 let env = make_test_env(domain, "c");
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9109,7 +9858,9 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9194,7 +9945,9 @@ async fn t25_partition_serial_in_order() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9290,7 +10043,9 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9304,7 +10059,9 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9318,7 +10075,9 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9381,7 +10140,9 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9413,7 +10174,9 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9497,7 +10260,9 @@ async fn t27b_outbox_cross_tenant_partition_dlx_does_not_block() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -9606,6 +10371,114 @@ async fn migration_0040_rejects_non_empty_legacy_projection_events() -> TestResu
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0055_backfills_legacy_mutable_outbox_with_rust_parity() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    create_rss_app_role_for_migration_test(&store).await?;
+    sqlx::raw_sql(
+        "CREATE TABLE outbox ( \
+             event_id text NOT NULL, tenant_id uuid NOT NULL, domain text NOT NULL, \
+             topic text NOT NULL, contract_id text NOT NULL, contract_version text NOT NULL, \
+             schema_hash text NOT NULL, payload bytea NOT NULL, metadata jsonb NOT NULL, \
+             partition_key text NULL, causation_id text NULL \
+         ); \
+         CREATE TABLE outbox_log ( \
+             event_id text NOT NULL, tenant_id uuid NOT NULL, aggregate_type text NOT NULL, \
+             topic text NOT NULL, contract_id text NOT NULL, contract_version text NOT NULL, \
+             schema_hash text NOT NULL, payload bytea NOT NULL, metadata jsonb NOT NULL, \
+             causation_id text NULL \
+         ); \
+         CREATE TABLE reconcile_targets (target_id uuid PRIMARY KEY DEFAULT gen_random_uuid())",
+    )
+    .execute(&store.pool)
+    .await?;
+    let tenant = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let schema_hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let metadata = serde_json::json!({
+        "actor": {"kind": "user", "id": "legacy-actor"},
+        "occurredAt": 17,
+        "subjectId": "legacy-subject"
+    });
+    sqlx::query(
+        "INSERT INTO outbox ( \
+             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash, \
+             payload, metadata, partition_key, causation_id \
+         ) VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)",
+    )
+    .bind("legacy-mutable-event")
+    .bind(tenant)
+    .bind("identity")
+    .bind("identity.session-created")
+    .bind("identity.session-created")
+    .bind("v1")
+    .bind(schema_hash)
+    .bind(b"legacy-payload".as_slice())
+    .bind(metadata.to_string())
+    .bind("legacy-partition")
+    .bind("legacy-cause")
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0055_outbox_fact_fingerprint.sql"
+    ))
+    .execute(&store.pool)
+    .await?;
+
+    let stored = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT fact_fingerprint FROM outbox WHERE event_id = 'legacy-mutable-event'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    let rust = OutboxFactIdentity::new(
+        "legacy-mutable-event",
+        tenant,
+        "identity",
+        "identity.session-created",
+        "identity.session-created",
+        "v1",
+        schema_hash,
+        b"legacy-payload",
+        Some("legacy-partition"),
+        Some("legacy-cause"),
+        &metadata,
+    )
+    .fingerprint();
+    assert_eq!(stored.len(), 32);
+    assert_eq!(stored.as_slice(), rust.as_bytes());
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0055_rejects_non_empty_legacy_outbox_log() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    sqlx::raw_sql(
+        "CREATE TABLE outbox_log (event_id text NOT NULL); \
+         INSERT INTO outbox_log (event_id) VALUES ('legacy-cdc-event')",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let result = sqlx::raw_sql(include_str!(
+        "../migrations/0055_outbox_fact_fingerprint.sql"
+    ))
+    .execute(&store.pool)
+    .await;
+    let Err(error) = result else {
+        return Err("0055 must reject non-empty legacy outbox_log".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("outbox_log must be empty before canonical fact fingerprint migration")
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 0045：legacy reconcile_actions 的 terminal result 必须先 backfill 到 reconcile_attempt_results。
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_0045_backfills_legacy_reconcile_action_results() -> TestResult {
@@ -9695,6 +10568,9 @@ async fn create_rss_app_role_for_migration_test(store: &PgStore) -> TestResult {
         BEGIN
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_app') THEN
                 CREATE ROLE rss_app NOLOGIN NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rss_outbox_maintenance') THEN
+                CREATE ROLE rss_outbox_maintenance NOLOGIN BYPASSRLS;
             END IF;
         END
         $$;
@@ -9998,7 +10874,9 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
             Box::pin(async move {
-                append_outbox(cap, &entry, &env).await?;
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
                 Ok(())
             }) as BoxFuture<'_, Result<(), sqlx::Error>>
         })
@@ -10108,7 +10986,9 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -10183,7 +11063,9 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -10243,7 +11125,9 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 let entry = entry.clone();
                 Box::pin(async move {
-                    append_outbox(cap, &entry, &env).await?;
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
                     Ok(())
                 }) as BoxFuture<'_, Result<(), sqlx::Error>>
             })
@@ -10393,6 +11277,45 @@ async fn t14_cotx_real_method_rollback_on_session_insert_failure() -> TestResult
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ob_cnt.0, 0, "真实 method 回滚后 outbox 行不应存在");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_fact_conflict_rolls_back_session_insert() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = TenantId::parse(COTX_TENANT_A)?;
+    let event_id = unique_event_id("session-fact-conflict");
+    let session_id = unique_event_id("session-fact-conflict-row");
+    let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session =
+        identity::test_support::session(&session_id, "subj-opaque-cotx", tenant, expires, created);
+
+    let conflict = crate::PgSessionLifecycle::new(&store, fixed_clock())
+        .persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
+        .await;
+    let Err(conflict) = conflict else {
+        return Err("session write must fail on a conflicting outbox fact".into());
+    };
+    assert_eq!(conflict.kind(), OutboxEmitErrorKind::FactConflict);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions WHERE session_id = $1")
+            .bind(&session_id)
+            .fetch_one(&store.pool)
+            .await?,
+        0,
+        "outbox conflict must roll back the session insert"
+    );
+    assert_seed_fact_unchanged(&store, &event_id, &seed).await?;
 
     store.shutdown().await?;
     Ok(())
@@ -12604,6 +13527,42 @@ async fn tc6_config_cotx_business_failure_rolls_back_both() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn config_fact_conflict_rolls_back_mutation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let tenant = config_tenant();
+    let event_id = unique_event_id("config-fact-conflict");
+    let key = "app.fact-conflict";
+    let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+
+    let conflict = repo
+        .commit(
+            settings_scope(tenant),
+            ConfigMutation::Put(config_entry(key, "must-rollback", 1)),
+            config_outbox_entry(&event_id),
+            config_envelope(key),
+        )
+        .await;
+    assert!(
+        matches!(conflict, Err(ConfigRepoError::OutboxFactConflict(_))),
+        "config adapter must preserve typed fact conflict: {conflict:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM config_entries WHERE config_key = $1")
+            .bind(key)
+            .fetch_one(&store.pool)
+            .await?,
+        0,
+        "outbox conflict must roll back the config mutation"
+    );
+    assert_seed_fact_unchanged(&store, &event_id, &seed).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// tc7：**真实 method** `commit` 的 CAS 冲突分支 → VersionConflict 且**无 outbox 行**
 /// （write-without-event 不发生）；原版本不被覆盖。
 ///
@@ -14537,6 +15496,52 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_fact_conflict_rolls_back_policy_create() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let policy_name = format!("policy-fact-conflict-{}", uuid_like());
+    let policy = policy_fixture(
+        &policy_name,
+        tenant,
+        1,
+        10,
+        None,
+        PolicyEffect::Allow,
+        PolicyObligations::empty(),
+    )?;
+    let event_id = unique_event_id("policy-fact-conflict");
+    let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
+    let (entry, envelope) = policy_lifecycle_event_with_id(
+        tenant,
+        policy.id().as_str(),
+        "created",
+        policy.version(),
+        &event_id,
+    )?;
+
+    let conflict = PgPolicyLifecycle::new(&store, fixed_clock())
+        .create_and_emit(identity_scope(tenant), policy, entry, envelope)
+        .await;
+    assert!(
+        matches!(conflict, Err(IdentityError::OutboxFactConflict(_))),
+        "policy adapter must preserve typed fact conflict: {conflict:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM abac_policies WHERE id = $1")
+            .bind(&policy_name)
+            .fetch_one(&store.pool)
+            .await?,
+        0,
+        "outbox conflict must roll back policy creation"
+    );
+    assert_seed_fact_unchanged(&store, &event_id, &seed).await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// policy manage read side：list_active 按 policy id 稳定分页，deactivate 后 get/list 均不可见。
 #[tokio::test(flavor = "multi_thread")]
 async fn policy_repo_list_active_paginates_and_hides_deactivated() -> TestResult {
@@ -15618,6 +16623,75 @@ async fn role_binding_lifecycle_persists_nonempty_causation_id() -> TestResult {
         "role binding causation_id persisted-only，不得进入 metadata: {}",
         outbox.1
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let role_name = format!("role-fact-conflict-{}", uuid_like());
+    let subject = format!("subject-fact-conflict-{}", uuid_like());
+    PgRoleRepo::new(&store)
+        .save(
+            identity_scope(tenant),
+            Role::hydrate(
+                &role_name,
+                "Fact conflict",
+                &["identity:role:assign".to_string()],
+            )?,
+        )
+        .await?;
+    let event_id = unique_event_id("role-binding-fact-conflict");
+    let seed = seed_conflicting_outbox_fact(&store, tenant, &event_id).await?;
+    let entry = EventEntry::new(
+        EventTopic::parse("identity.role-assigned")?,
+        IdemKey::parse(&event_id)?,
+        reviewed_payload(
+            serde_json::to_vec(&serde_json::json!({
+                "subject": subject,
+                "roleId": role_name
+            }))?
+            .as_slice(),
+        ),
+    );
+    let envelope = OutboxEnvelopeParts::new(
+        vocab::ContractBinding::from_static(
+            "identity",
+            "identity.role-assigned",
+            "v1",
+            "sha256:7c7a931a40c99329cfd172d834191fdbc47c5d7f3307a4f09f4320693d7722e9",
+        ),
+        tenant,
+        subject_id(&subject),
+        actor_for(tenant),
+    );
+    let binding = RoleBinding::hydrate(&subject, &role_name, tenant)?;
+
+    let conflict = PgRoleBindingLifecycle::new(&store, fixed_clock())
+        .assign_and_emit(identity_scope(tenant), binding, entry, envelope)
+        .await;
+    let Err(conflict) = conflict else {
+        return Err("role binding write must fail on a conflicting outbox fact".into());
+    };
+    assert_eq!(conflict.kind(), OutboxEmitErrorKind::FactConflict);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM role_bindings \
+             WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
+        )
+        .bind(tenant.to_string())
+        .bind(&role_name)
+        .bind(&subject)
+        .fetch_one(&store.pool)
+        .await?,
+        0,
+        "outbox conflict must roll back role assignment"
+    );
+    assert_seed_fact_unchanged(&store, &event_id, &seed).await?;
 
     store.shutdown().await?;
     Ok(())

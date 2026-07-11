@@ -5,8 +5,9 @@ use consistency::outbox::{OutboxPayload, StoredOutboxEntry};
 use consistency::{
     CommandErrorSummary, CommandJournalOutcome, CommandJournalStatus,
     CommandJournalTerminalSummary, CommandRequestFingerprint, CommandResultSummary,
+    OutboxAppendOutcome,
 };
-use diport::{Clock, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_TRACE};
+use diport::Clock;
 use eventexec::command::{
     CommandAliasProbeSet, CommandDispatchStore, CommandJournalStore, CommandStoreError,
     ReviewedCommandDispatch, ReviewedCommandIntent, ReviewedCommandJournal,
@@ -16,25 +17,8 @@ use futures::future::BoxFuture;
 use crate::PgStore;
 use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 use crate::outbox::{
-    OutboxAppendOutcome, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
+    OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
 };
-
-pub(crate) const VOLATILE_METADATA_KEYS: [&str; 3] = [KEY_OCCURRED_AT, KEY_TRACE, KEY_CORRELATION];
-
-pub(crate) const ENSURE_EXISTING_OUTBOX_MATCHES_SQL: &str = r#"
-        SELECT tenant_id = $2::uuid
-           AND topic = $3
-           AND domain = $4
-           AND contract_id = $5
-           AND contract_version = $6
-           AND schema_hash = $7
-           AND payload = $8
-           AND (metadata - $12::text[]) = ($9::jsonb - $12::text[])
-           AND partition_key IS NOT DISTINCT FROM $10
-           AND causation_id IS NOT DISTINCT FROM $11 AS matches
-        FROM outbox
-        WHERE event_id = $1
-        "#;
 
 impl PgStore {
     pub(crate) fn command_journal(&self, clock: Box<dyn Clock>) -> PgCommandJournal {
@@ -363,10 +347,9 @@ async fn append_or_match(
 ) -> Result<(), CommandStoreError> {
     match append_outbox(tx, entry, env)
         .await
-        .map_err(map_sqlx_error)?
+        .map_err(map_append_error)?
     {
-        OutboxAppendOutcome::Inserted => Ok(()),
-        OutboxAppendOutcome::AlreadyExists => ensure_existing_outbox_matches(tx, entry, env).await,
+        OutboxAppendOutcome::Inserted | OutboxAppendOutcome::SameFact => Ok(()),
     }
 }
 
@@ -408,30 +391,11 @@ async fn mark_failed(
     }
 }
 
-async fn ensure_existing_outbox_matches(
-    tx: &mut TxCapability<'_>,
-    entry: &StoredOutboxEntry,
-    env: &OutboxEnvelope,
-) -> Result<(), CommandStoreError> {
-    let row: Option<(bool,)> = sqlx::query_as(ENSURE_EXISTING_OUTBOX_MATCHES_SQL)
-        .bind(entry.idem_key().as_str())
-        .bind(env.tenant().to_string())
-        .bind(entry.topic().as_str())
-        .bind(env.domain())
-        .bind(env.contract_id())
-        .bind(env.contract_version())
-        .bind(env.schema_hash())
-        .bind(entry.payload())
-        .bind(env.metadata_json())
-        .bind(env.partition_key())
-        .bind(env.causation_id())
-        .bind(VOLATILE_METADATA_KEYS.as_slice())
-        .fetch_optional(tx.conn())
-        .await
-        .map_err(map_sqlx_error)?;
-    match row {
-        Some((true,)) => Ok(()),
-        Some((false,)) | None => Err(CommandStoreError::conflict(CommandJournalOutboxConflict)),
+fn map_append_error(error: OutboxAppendError) -> CommandStoreError {
+    match error {
+        OutboxAppendError::Conflict(conflict) => CommandStoreError::conflict(conflict),
+        OutboxAppendError::Storage(error) => map_sqlx_error(error),
+        other => CommandStoreError::internal(other),
     }
 }
 
@@ -483,23 +447,8 @@ struct CommandJournalUnknownStatus;
 #[derive(Debug, thiserror::Error)]
 #[error("command journal status changed before completion")]
 struct CommandJournalStatusRace;
-#[derive(Debug, thiserror::Error)]
-#[error("command journal outbox conflict")]
-struct CommandJournalOutboxConflict;
-
 #[cfg(test)]
 mod tests {
-    use super::{ENSURE_EXISTING_OUTBOX_MATCHES_SQL, VOLATILE_METADATA_KEYS};
-
-    #[test]
-    fn replay_match_normalizes_only_volatile_metadata_keys() {
-        assert_eq!(
-            VOLATILE_METADATA_KEYS,
-            ["occurredAt", "trace", "correlation"]
-        );
-        assert!(ENSURE_EXISTING_OUTBOX_MATCHES_SQL.contains("metadata - $12::text[]"));
-    }
-
     #[test]
     fn command_alias_migration_is_v2_and_rejects_legacy_rows() {
         const MIGRATION: &str = include_str!("../migrations/0053_command_alias_v2.sql");

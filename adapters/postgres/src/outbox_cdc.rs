@@ -4,13 +4,16 @@
 //! logical-decoding/CDC pipelines. It writes immutable rows to `outbox_log` and intentionally does
 //! not participate in the relay `outbox` mutable status machine.
 
-use consistency::EventEntry;
+use consistency::{EventEntry, OutboxAppendOutcome, OutboxFactFingerprint};
 use diport::{Clock, EnvelopeSubjectId, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use futures::future::BoxFuture;
 
 use crate::PgStore;
 use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
-use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
+use crate::outbox::{
+    AppendFingerprintObservation, CanonicalOutboxFact, OutboxAppendError, OutboxEnvelope,
+    classify_append_fingerprint, metadata_with_ambient, unix_secs,
+};
 
 /// PostgreSQL CDC outbox emitter.
 ///
@@ -61,7 +64,7 @@ impl OutboxEmitter for PgOutboxCdcEmitter {
                         append_outbox_log(tx, &entry, &env, &aggregate_id)
                             .await
                             .map(|_| ())
-                            .map_err(OutboxEmitError::new)
+                            .map_err(OutboxAppendError::into_observed_emit_error)
                     }) as BoxFuture<'_, Result<(), OutboxEmitError>>
                 },
                 OutboxEmitError::new,
@@ -70,21 +73,8 @@ impl OutboxEmitter for PgOutboxCdcEmitter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutboxLogAppendOutcome {
-    Inserted,
-    AlreadyExists,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum OutboxLogAppendError {
-    #[error("outbox_log insert failed")]
-    Sql(#[from] sqlx::Error),
-    #[error("outbox_log event_id conflict")]
-    EventIdConflict,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct OutboxLogRecord {
     pub(crate) event_id: String,
     pub(crate) tenant_id: vocab::TenantId,
@@ -97,8 +87,10 @@ pub(crate) struct OutboxLogRecord {
     pub(crate) payload: Vec<u8>,
     pub(crate) metadata_json: String,
     pub(crate) causation_id: Option<String>,
+    pub(crate) partition_key: Option<String>,
 }
 
+#[cfg(test)]
 impl OutboxLogRecord {
     pub(crate) fn from_entry_env(
         entry: &EventEntry,
@@ -117,6 +109,7 @@ impl OutboxLogRecord {
             payload: entry.payload().to_vec(),
             metadata_json: env.metadata_json(),
             causation_id: env.causation_id().map(str::to_string),
+            partition_key: env.partition_key().map(str::to_string),
         }
     }
 }
@@ -126,75 +119,58 @@ pub(crate) async fn append_outbox_log(
     entry: &EventEntry,
     env: &OutboxEnvelope,
     aggregate_id: &str,
-) -> Result<OutboxLogAppendOutcome, OutboxLogAppendError> {
-    let record = OutboxLogRecord::from_entry_env(entry, env, aggregate_id);
-    let result = sqlx::query(
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    let fact = CanonicalOutboxFact::from_entry_env(entry, env);
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>(
         r#"
         INSERT INTO outbox_log (
             event_id, tenant_id, aggregate_type, aggregate_id, topic, contract_id,
-            contract_version, schema_hash, payload, metadata, causation_id
+            contract_version, schema_hash, payload, metadata, causation_id, partition_key
         )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
         ON CONFLICT (event_id) DO NOTHING
+        RETURNING fact_fingerprint
         "#,
     )
-    .bind(&record.event_id)
-    .bind(record.tenant_id.to_string())
-    .bind(&record.aggregate_type)
-    .bind(&record.aggregate_id)
-    .bind(&record.topic)
-    .bind(&record.contract_id)
-    .bind(&record.contract_version)
-    .bind(&record.schema_hash)
-    .bind(&record.payload)
-    .bind(&record.metadata_json)
-    .bind(record.causation_id.as_deref())
-    .execute(tx.conn())
-    .await?;
-    if result.rows_affected() == 1 {
-        return Ok(OutboxLogAppendOutcome::Inserted);
-    }
-    if existing_outbox_log_row_matches(tx, &record).await? {
-        Ok(OutboxLogAppendOutcome::AlreadyExists)
-    } else {
-        Err(OutboxLogAppendError::EventIdConflict)
-    }
-}
-
-async fn existing_outbox_log_row_matches(
-    tx: &mut TxCapability<'_>,
-    record: &OutboxLogRecord,
-) -> Result<bool, sqlx::Error> {
-    let same = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT tenant_id = $2::uuid
-           AND aggregate_type = $3
-           AND aggregate_id = $4
-           AND topic = $5
-           AND contract_id = $6
-           AND contract_version = $7
-           AND schema_hash = $8
-           AND payload = $9
-           AND metadata = $10::jsonb
-           AND causation_id IS NOT DISTINCT FROM $11
-        FROM outbox_log
-        WHERE event_id = $1
-        "#,
-    )
-    .bind(&record.event_id)
-    .bind(record.tenant_id.to_string())
-    .bind(&record.aggregate_type)
-    .bind(&record.aggregate_id)
-    .bind(&record.topic)
-    .bind(&record.contract_id)
-    .bind(&record.contract_version)
-    .bind(&record.schema_hash)
-    .bind(&record.payload)
-    .bind(&record.metadata_json)
-    .bind(record.causation_id.as_deref())
+    .bind(fact.event_id())
+    .bind(fact.tenant_id())
+    .bind(fact.domain())
+    .bind(aggregate_id)
+    .bind(fact.topic())
+    .bind(fact.contract_id())
+    .bind(fact.contract_version())
+    .bind(fact.schema_hash())
+    .bind(fact.payload())
+    .bind(fact.metadata_json())
+    .bind(fact.causation_id())
+    .bind(fact.partition_key())
     .fetch_optional(tx.conn())
     .await?;
-    Ok(same.unwrap_or(false))
+    classify_log_append(tx, fact.event_id(), fact.fingerprint(), inserted).await
+}
+
+async fn classify_log_append(
+    tx: &mut TxCapability<'_>,
+    event_id: &str,
+    expected: OutboxFactFingerprint,
+    inserted: Option<Vec<u8>>,
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    if let Some(stored) = inserted.as_deref() {
+        return classify_append_fingerprint(
+            expected,
+            AppendFingerprintObservation::Inserted(stored),
+        );
+    }
+    let stored = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT fact_fingerprint FROM outbox_log WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    classify_append_fingerprint(
+        expected,
+        AppendFingerprintObservation::Existing(stored.as_deref()),
+    )
 }
 
 fn aggregate_id_for_log(subject_id: &EnvelopeSubjectId) -> String {
@@ -265,6 +241,7 @@ mod tests {
         assert_eq!(record.schema_hash, HASH);
         assert_eq!(record.payload, b"payload");
         assert_eq!(record.causation_id.as_deref(), Some("cause-1"));
+        assert_eq!(record.partition_key.as_deref(), Some("tenant-7:session-9"));
         assert!(
             record.metadata_json.contains(r#""tenantId":"#),
             "metadata should carry sealed tenant header: {}",
@@ -328,6 +305,50 @@ mod tests {
     }
 
     #[test]
+    fn outbox_fact_fingerprint_migration_is_generated_and_fail_closed() {
+        let sql = include_str!("../migrations/0055_outbox_fact_fingerprint.sql");
+        for needle in [
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '5min'",
+            "pg_total_relation_size('outbox'::regclass) > 10737418240",
+            "LOCK TABLE outbox_log IN ACCESS EXCLUSIVE MODE",
+            "LOCK TABLE outbox IN ACCESS EXCLUSIVE MODE",
+            "outbox_log must be empty before canonical fact fingerprint migration",
+            "rss_outbox_canonical_number",
+            "rss_outbox_fact_fingerprint",
+            "ADD COLUMN partition_key text NULL",
+            "fact_fingerprint bytea GENERATED ALWAYS AS",
+            "octet_length(fact_fingerprint) = 32",
+            "OUTBOX-FACT-FUNNEL-01",
+        ] {
+            assert!(sql.contains(needle), "0055 migration missing `{needle}`");
+        }
+        assert!(
+            !sql.contains("OWNER TO rss_app"),
+            "0055 must keep canonical function ownership on the migrator role"
+        );
+        for signature in [
+            "rss_outbox_fact_frame(integer, integer, bytea)",
+            "rss_outbox_canonical_number(jsonb)",
+            "rss_outbox_canonical_json(jsonb, boolean)",
+            "rss_outbox_fact_fingerprint(text, text, text, text, text, text, text, bytea, text, text, jsonb)",
+        ] {
+            assert!(
+                sql.contains(&format!("GRANT EXECUTE ON FUNCTION {signature}")),
+                "0055 must grant rss_app only the execution capability for `{signature}`"
+            );
+            assert!(
+                sql.contains(&format!(
+                    "GRANT EXECUTE ON FUNCTION {signature} TO rss_outbox_maintenance"
+                )) || sql.contains(&format!(
+                    "GRANT EXECUTE ON FUNCTION {signature}\n    TO rss_outbox_maintenance"
+                )),
+                "0055 must grant relay maintenance EXECUTE on `{signature}`"
+            );
+        }
+    }
+
+    #[test]
     fn migration_readme_documents_cdc_generated_header_columns() {
         let readme = include_str!("../migrations/README.md");
         for needle in [
@@ -341,6 +362,26 @@ mod tests {
             assert!(
                 readme.contains(needle),
                 "migration README must document CDC generated-column boundary `{needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_readme_has_complete_0055_cdc_cutover_runbook() {
+        let readme = include_str!("../migrations/README.md");
+        for needle in [
+            "0055 CDC cutover runbook",
+            "GET /connectors/<name>/config",
+            "GET /connectors/<name>/offsets",
+            "COPY (SELECT * FROM outbox_log ORDER BY event_id) TO STDOUT (FORMAT binary)",
+            "publish_generated_columns = stored",
+            "PATCH /connectors/<name>/offsets",
+            "禁止 `snapshot.mode=initial`",
+            "archive checksum",
+        ] {
+            assert!(
+                readme.contains(needle),
+                "CDC cutover runbook missing `{needle}`"
             );
         }
     }

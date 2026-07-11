@@ -44,4 +44,4 @@ schema（`*.schema.json`）→ contract.toml（id/kind/consistencyLevel/owner/en
 
 - wire 字段 camelCase（serde rename）；DB snake_case。
 - payload 类型经 generated，**不**手写共享 crate（domain-patterns.md §DTO 作用域）。
-- 错误响应 shared error schema（`{error:{code,message,details,requestId}}`）；handler 用 typed response envelope。
+- 错误响应 shared error schema（`{error:{code,message,retryable,details,requestId}}`）；handler 用 typed response envelope。

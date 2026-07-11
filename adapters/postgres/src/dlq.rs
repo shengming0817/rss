@@ -1,5 +1,6 @@
 //! PostgreSQL DLQ inspection/replay adapter (#1214).
 
+use consistency::OutboxAppendOutcome;
 use diport::key_provider::{KeyProviderError, KeyProviderErrorKind};
 use diport::{
     DeadLetterSource, EnvelopeSchemaHash, EnvelopeSchemaVersion, KEY_SCHEMA_HASH,
@@ -16,7 +17,7 @@ use crate::PgStore;
 use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 use crate::outbox::{
-    OutboxAppendOutcome, ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox_with_projection,
+    OutboxAppendError, ReplayedOutboxAppend, STATUS_DLX, append_replayed_outbox_with_projection,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -232,12 +233,11 @@ impl DlqStore for PgDlqStore {
                             &projection_registry,
                         )
                         .await
-                        .map_err(db_error("replay.insert_outbox"))?;
+                        .map_err(append_error("replay.insert_outbox"))?;
 
-                        if outcome == OutboxAppendOutcome::Inserted {
-                            Ok(DlqReplayOutcome::Inserted)
-                        } else {
-                            Ok(DlqReplayOutcome::AlreadyExists)
+                        match outcome {
+                            OutboxAppendOutcome::Inserted => Ok(DlqReplayOutcome::Inserted),
+                            OutboxAppendOutcome::SameFact => Ok(DlqReplayOutcome::AlreadyExists),
                         }
                     })
                 },
@@ -710,6 +710,21 @@ fn db_error(operation: &'static str) -> impl Fn(sqlx::Error) -> DlqError {
             "dlq: db error"
         );
         DlqError::Store
+    }
+}
+
+fn append_error(operation: &'static str) -> impl Fn(OutboxAppendError) -> DlqError {
+    move |error| match error {
+        OutboxAppendError::Conflict(conflict) => DlqError::FactConflict(conflict),
+        other => {
+            tracing::warn!(
+                target: "postgres",
+                operation,
+                error = %secure::redact_error(&other),
+                "dlq: outbox append error"
+            );
+            DlqError::Store
+        }
     }
 }
 

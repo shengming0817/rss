@@ -514,6 +514,30 @@ impl PgMaintenanceDeps {
         .await
     }
 
+    /// Durable audit record for reconcile target inspection / recovery.
+    pub async fn record_reconcile_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        self.record_maintenance_audit(
+            "reconcile.target.maintenance",
+            operator_subject,
+            action,
+            outcome,
+            resource_id,
+        )
+        .await
+    }
+
+    /// Tenant-scoped reconcile target operator store.
+    #[must_use]
+    pub fn reconcile_store(&self) -> PgReconcileStore {
+        self.store.reconcile()
+    }
+
     /// Durable audit record for per-tenant audit ledger verification jobs.
     pub async fn record_audit_ledger_verify_audit(
         &self,

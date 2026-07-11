@@ -623,6 +623,25 @@ impl core::marker::Unpin for consistency::outbox::EventTopicError
 impl core::marker::UnsafeUnpin for consistency::outbox::EventTopicError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::EventTopicError
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::EventTopicError
+pub enum consistency::outbox::OutboxAppendOutcome
+pub consistency::outbox::OutboxAppendOutcome::Inserted
+pub consistency::outbox::OutboxAppendOutcome::SameFact
+impl core::clone::Clone for consistency::outbox::OutboxAppendOutcome
+pub fn consistency::outbox::OutboxAppendOutcome::clone(&self) -> consistency::outbox::OutboxAppendOutcome
+impl core::cmp::Eq for consistency::outbox::OutboxAppendOutcome
+impl core::cmp::PartialEq for consistency::outbox::OutboxAppendOutcome
+pub fn consistency::outbox::OutboxAppendOutcome::eq(&self, &consistency::outbox::OutboxAppendOutcome) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxAppendOutcome
+pub fn consistency::outbox::OutboxAppendOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::OutboxAppendOutcome
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Freeze for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Send for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Sync for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Unpin for consistency::outbox::OutboxAppendOutcome
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxAppendOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxAppendOutcome
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxAppendOutcome
 #[non_exhaustive] pub enum consistency::outbox::OutboxContractIdError
 pub consistency::outbox::OutboxContractIdError::Empty
 pub consistency::outbox::OutboxContractIdError::Format
@@ -814,6 +833,60 @@ impl core::marker::Unpin for consistency::outbox::OutboxContractId
 impl core::marker::UnsafeUnpin for consistency::outbox::OutboxContractId
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxContractId
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxContractId
+pub struct consistency::outbox::OutboxFactConflict
+impl core::clone::Clone for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::clone(&self) -> consistency::outbox::OutboxFactConflict
+impl core::cmp::Eq for consistency::outbox::OutboxFactConflict
+impl core::cmp::PartialEq for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::eq(&self, &consistency::outbox::OutboxFactConflict) -> bool
+impl core::error::Error for consistency::outbox::OutboxFactConflict
+impl core::fmt::Debug for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::OutboxFactConflict
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxFactConflict
+impl core::marker::Freeze for consistency::outbox::OutboxFactConflict
+impl core::marker::Send for consistency::outbox::OutboxFactConflict
+impl core::marker::Sync for consistency::outbox::OutboxFactConflict
+impl core::marker::Unpin for consistency::outbox::OutboxFactConflict
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxFactConflict
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxFactConflict
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFactConflict
+pub struct consistency::outbox::OutboxFactFingerprint(_)
+impl consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::as_bytes(&self) -> &[u8; 32]
+impl core::clone::Clone for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::clone(&self) -> consistency::outbox::OutboxFactFingerprint
+impl core::cmp::Eq for consistency::outbox::OutboxFactFingerprint
+impl core::cmp::PartialEq for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::eq(&self, &consistency::outbox::OutboxFactFingerprint) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for consistency::outbox::OutboxFactFingerprint
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Freeze for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Send for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Sync for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Unpin for consistency::outbox::OutboxFactFingerprint
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxFactFingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxFactFingerprint
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFactFingerprint
+pub struct consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> consistency::outbox::OutboxFactIdentity<'a>
+pub fn consistency::outbox::OutboxFactIdentity<'a>::fingerprint(&self) -> consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactIdentity<'a>::new(&'a str, &'a str, &'a str, &'a str, &'a str, &'a str, &'a str, &'a [u8], core::option::Option<&'a str>, core::option::Option<&'a str>, &'a serde_json::value::Value) -> Self
+impl core::fmt::Debug for consistency::outbox::OutboxFactIdentity<'_>
+pub fn consistency::outbox::OutboxFactIdentity<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Freeze for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::Send for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::Sync for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::Unpin for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::UnsafeUnpin for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFactIdentity<'a>
 pub struct consistency::outbox::OutboxMetricSubject
 impl consistency::outbox::OutboxMetricSubject
 pub fn consistency::outbox::OutboxMetricSubject::contract_id(&self) -> &consistency::outbox::OutboxContractId
@@ -2521,6 +2594,25 @@ impl core::marker::Unpin for consistency::idempotency::LeaseOutcome
 impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseOutcome
+pub enum consistency::OutboxAppendOutcome
+pub consistency::OutboxAppendOutcome::Inserted
+pub consistency::OutboxAppendOutcome::SameFact
+impl core::clone::Clone for consistency::outbox::OutboxAppendOutcome
+pub fn consistency::outbox::OutboxAppendOutcome::clone(&self) -> consistency::outbox::OutboxAppendOutcome
+impl core::cmp::Eq for consistency::outbox::OutboxAppendOutcome
+impl core::cmp::PartialEq for consistency::outbox::OutboxAppendOutcome
+pub fn consistency::outbox::OutboxAppendOutcome::eq(&self, &consistency::outbox::OutboxAppendOutcome) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxAppendOutcome
+pub fn consistency::outbox::OutboxAppendOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::OutboxAppendOutcome
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Freeze for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Send for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Sync for consistency::outbox::OutboxAppendOutcome
+impl core::marker::Unpin for consistency::outbox::OutboxAppendOutcome
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxAppendOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxAppendOutcome
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxAppendOutcome
 #[non_exhaustive] pub enum consistency::OutboxContractIdError
 pub consistency::OutboxContractIdError::Empty
 pub consistency::OutboxContractIdError::Format
@@ -3553,6 +3645,60 @@ impl core::marker::Unpin for consistency::outbox::OutboxContractId
 impl core::marker::UnsafeUnpin for consistency::outbox::OutboxContractId
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxContractId
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxContractId
+pub struct consistency::OutboxFactConflict
+impl core::clone::Clone for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::clone(&self) -> consistency::outbox::OutboxFactConflict
+impl core::cmp::Eq for consistency::outbox::OutboxFactConflict
+impl core::cmp::PartialEq for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::eq(&self, &consistency::outbox::OutboxFactConflict) -> bool
+impl core::error::Error for consistency::outbox::OutboxFactConflict
+impl core::fmt::Debug for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for consistency::outbox::OutboxFactConflict
+pub fn consistency::outbox::OutboxFactConflict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::OutboxFactConflict
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxFactConflict
+impl core::marker::Freeze for consistency::outbox::OutboxFactConflict
+impl core::marker::Send for consistency::outbox::OutboxFactConflict
+impl core::marker::Sync for consistency::outbox::OutboxFactConflict
+impl core::marker::Unpin for consistency::outbox::OutboxFactConflict
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxFactConflict
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxFactConflict
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFactConflict
+pub struct consistency::OutboxFactFingerprint(_)
+impl consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::as_bytes(&self) -> &[u8; 32]
+impl core::clone::Clone for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::clone(&self) -> consistency::outbox::OutboxFactFingerprint
+impl core::cmp::Eq for consistency::outbox::OutboxFactFingerprint
+impl core::cmp::PartialEq for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::eq(&self, &consistency::outbox::OutboxFactFingerprint) -> bool
+impl core::fmt::Debug for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactFingerprint::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for consistency::outbox::OutboxFactFingerprint
+impl core::marker::StructuralPartialEq for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Freeze for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Send for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Sync for consistency::outbox::OutboxFactFingerprint
+impl core::marker::Unpin for consistency::outbox::OutboxFactFingerprint
+impl core::marker::UnsafeUnpin for consistency::outbox::OutboxFactFingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxFactFingerprint
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFactFingerprint
+pub struct consistency::OutboxFactIdentity<'a>
+impl<'a> consistency::outbox::OutboxFactIdentity<'a>
+pub fn consistency::outbox::OutboxFactIdentity<'a>::fingerprint(&self) -> consistency::outbox::OutboxFactFingerprint
+pub fn consistency::outbox::OutboxFactIdentity<'a>::new(&'a str, &'a str, &'a str, &'a str, &'a str, &'a str, &'a str, &'a [u8], core::option::Option<&'a str>, core::option::Option<&'a str>, &'a serde_json::value::Value) -> Self
+impl core::fmt::Debug for consistency::outbox::OutboxFactIdentity<'_>
+pub fn consistency::outbox::OutboxFactIdentity<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Freeze for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::Send for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::Sync for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::Unpin for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::marker::UnsafeUnpin for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::OutboxFactIdentity<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFactIdentity<'a>
 pub struct consistency::OutboxMetricSubject
 impl consistency::outbox::OutboxMetricSubject
 pub fn consistency::outbox::OutboxMetricSubject::contract_id(&self) -> &consistency::outbox::OutboxContractId

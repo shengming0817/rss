@@ -20,7 +20,8 @@ use diport::{Clock, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts};
 use crate::PgStore;
 use crate::cotx::{PgTenantPool, infra_tenant_scope};
 use crate::outbox::{
-    OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient, unix_secs,
+    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, metadata_with_ambient,
+    unix_secs,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -93,7 +94,7 @@ impl OutboxEmitter for PgEmitter {
                         append_outbox_with_projection(tx, &entry, &env, &projection_registry)
                             .await
                             .map(|_| ())
-                            .map_err(OutboxEmitError::new)
+                            .map_err(OutboxAppendError::into_observed_emit_error)
                     })
                 },
                 OutboxEmitError::new,

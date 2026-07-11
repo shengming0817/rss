@@ -410,6 +410,9 @@ pub enum IdentityError {
     CredentialNotFound,
     #[error("credential version conflict")]
     VersionConflict,
+    /// 同一 event id 已持久化为不同稳定事实；与仓储 CAS 冲突分轨。
+    #[error("identity outbox fact conflict")]
+    OutboxFactConflict(#[source] consistency::OutboxFactConflict),
     /// 底层存储错误（持久化失败；原始错误进 `#[source]`，不进 Display / wire）。
     #[error("identity storage error")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),

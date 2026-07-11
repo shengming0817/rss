@@ -15,8 +15,8 @@ use sqlx::Row;
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{
-    OutboxEnvelope, append_outbox_with_projection, epoch_secs_to_time, metadata_with_ambient,
-    unix_secs,
+    OutboxAppendError, OutboxEnvelope, append_outbox_with_projection, epoch_secs_to_time,
+    metadata_with_ambient, unix_secs,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 
@@ -79,6 +79,13 @@ fn storage(e: sqlx::Error) -> IdentityError {
 
 fn storage_boxed(e: impl std::error::Error + Send + Sync + 'static) -> IdentityError {
     IdentityError::Storage(Box::new(e))
+}
+
+fn append_storage(error: OutboxAppendError) -> IdentityError {
+    match error {
+        OutboxAppendError::Conflict(conflict) => IdentityError::OutboxFactConflict(conflict),
+        other => storage_boxed(other),
+    }
 }
 
 fn tenant_param(tenant: TenantId) -> String {
@@ -521,9 +528,10 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                                 Err(IdentityError::PolicyAlreadyExists)
                             }
                         })?;
-                        append_outbox_with_projection(conn, &entry, &env, &projection_registry)
-                            .await
-                            .map_err(storage)?;
+                        let _outcome =
+                            append_outbox_with_projection(conn, &entry, &env, &projection_registry)
+                                .await
+                                .map_err(append_storage)?;
                         Ok(1)
                     })
                 },
@@ -593,14 +601,14 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .await
                         .map_err(storage)?;
                         if row.is_some() {
-                            append_outbox_with_projection(
+                            let _outcome = append_outbox_with_projection(
                                 conn,
                                 &entry,
                                 &env,
                                 &projection_registry,
                             )
                             .await
-                            .map_err(storage)?;
+                            .map_err(append_storage)?;
                         }
                         row.map(row_to_raw).transpose().map_err(storage)
                     })
@@ -670,9 +678,14 @@ impl PolicyLifecycle for PgPolicyLifecycle {
                         .map_err(storage)
                         .map(|r| r.rows_affected())?;
                         if rows > 0 {
-                            append_outbox_with_projection(conn, &entry, &env, &projection_registry)
-                                .await
-                                .map_err(storage)?;
+                            let _outcome = append_outbox_with_projection(
+                                conn,
+                                &entry,
+                                &env,
+                                &projection_registry,
+                            )
+                            .await
+                            .map_err(append_storage)?;
                         }
                         Ok(rows)
                     })

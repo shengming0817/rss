@@ -3,7 +3,7 @@
 //! DTO 为 wire 类型（非 domain entity），derive Serialize 合规。
 //! **detail 透传 + 5xx strip 已落地（#1361）**：[`core_error_response`] 对 4xx 下发 `public_details`、
 //! 对 5xx 强制 strip；`internal_attrs` 永不进 wire（typed 通道分流即脱敏，`PublicDetail` 已是 vetted 公开值，
-//! 不再对其二次 `redact`）。kind→status 单源 [`status_for`]——code 与 status 同出 `kind`，类型层杜绝错配。
+//! 不再对其二次 `redact`）。kind→status 单源 [`status_for`]；code/status/retryability 同出 `kind`，类型层杜绝错配。
 //!
 //! ref: tokio-rs/axum axum/src/response/mod.rs@main（IntoResponse 组合）
 
@@ -19,12 +19,13 @@ struct ErrorEnvelope {
     error: ErrorBody,
 }
 
-/// Wire 错误 body（camelCase；`requestId` 由框架中间件注入）。
+/// Wire 错误 body（camelCase；`requestId` 由框架中间件注入，`retryable` 由错误 kind 单源派生）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ErrorBody {
     code: &'static str,
     message: &'static str,
+    retryable: bool,
     details: Vec<WireDetail>,
     request_id: String,
 }
@@ -61,14 +62,16 @@ impl Serialize for WireDetail {
     }
 }
 
-/// kind → HTTP status 的**单一来源**（全 6 kind）。code 取 `kind.code()`、status 取此——二者同出 `kind`，
+/// kind → HTTP status 的**单一来源**。code 取 `kind.code()`、status 取此——二者同出 `kind`，
 /// 类型层杜绝 code/status 错配（取代旧 raw `error_response(kind, status)` 的手配对）。
 fn status_for(kind: CoreErrorKind) -> StatusCode {
     match kind {
         CoreErrorKind::NotFound => StatusCode::NOT_FOUND,
         CoreErrorKind::Unauthenticated => StatusCode::UNAUTHORIZED,
         CoreErrorKind::Forbidden => StatusCode::FORBIDDEN,
-        CoreErrorKind::Conflict => StatusCode::CONFLICT,
+        CoreErrorKind::OutboxFactConflict
+        | CoreErrorKind::VersionConflict
+        | CoreErrorKind::Conflict => StatusCode::CONFLICT,
         CoreErrorKind::Validation => StatusCode::BAD_REQUEST,
         CoreErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         CoreErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -109,7 +112,7 @@ fn render_public_detail(detail: &PublicDetail) -> Option<WireDetail> {
 
 /// 构造 axum 错误响应：`CoreError` → JSON envelope。**4xx 下发 `public_details`、5xx 强制 strip**
 /// （error-handling.md §Message 与 PII）；`internal_attrs` 永不进 wire。status 经 [`status_for`] 由 `kind`
-/// 派生（与 `code` 同源），杜绝 code/status 错配。
+/// 派生（与 `code`、`retryable` 同源），杜绝 wire 分类错配。
 pub fn core_error_response(err: &CoreError, request_id: &str) -> axum::response::Response {
     let kind = err.kind();
     let status = status_for(kind);
@@ -127,6 +130,7 @@ pub fn core_error_response(err: &CoreError, request_id: &str) -> axum::response:
         error: ErrorBody {
             code: kind.code(),
             message: kind.message(),
+            retryable: kind.retryable(),
             details,
             request_id: request_id.to_owned(),
         },
@@ -350,6 +354,8 @@ mod tests {
             (CoreErrorKind::NotFound, StatusCode::NOT_FOUND),
             (CoreErrorKind::Unauthenticated, StatusCode::UNAUTHORIZED),
             (CoreErrorKind::Forbidden, StatusCode::FORBIDDEN),
+            (CoreErrorKind::OutboxFactConflict, StatusCode::CONFLICT),
+            (CoreErrorKind::VersionConflict, StatusCode::CONFLICT),
             (CoreErrorKind::Conflict, StatusCode::CONFLICT),
             (CoreErrorKind::Validation, StatusCode::BAD_REQUEST),
             (CoreErrorKind::Internal, StatusCode::INTERNAL_SERVER_ERROR),
@@ -402,5 +408,27 @@ mod tests {
             .to_str()
             .expect("str");
         assert_eq!(v1, "1", "1000ms → 1s");
+    }
+
+    #[tokio::test]
+    async fn fact_conflict_has_dedicated_terminal_wire_contract() {
+        let json = body_json(core_error_response(
+            &CoreError::new(CoreErrorKind::OutboxFactConflict),
+            "rid",
+        ))
+        .await;
+        assert_eq!(json["error"]["code"], "ERR_CORE_OUTBOX_FACT_CONFLICT");
+        assert_eq!(json["error"]["retryable"], false);
+    }
+
+    #[tokio::test]
+    async fn cas_conflict_remains_retryable() {
+        let json = body_json(core_error_response(
+            &CoreError::new(CoreErrorKind::VersionConflict),
+            "rid",
+        ))
+        .await;
+        assert_eq!(json["error"]["code"], "ERR_CORE_VERSION_CONFLICT");
+        assert_eq!(json["error"]["retryable"], true);
     }
 }

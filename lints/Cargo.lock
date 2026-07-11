@@ -380,6 +380,7 @@ dependencies = [
  "runctx",
  "secure",
  "serde_json",
+ "sha2",
  "support",
  "thiserror 2.0.18",
  "uuid",

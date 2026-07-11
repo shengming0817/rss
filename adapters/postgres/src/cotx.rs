@@ -18,12 +18,13 @@
 //! ref: debezium outbox SMT / MassTransit Bus Outbox（业务写 + outbox 行同一本地事务，producer 侧 durable）
 
 use consistency::EventEntry;
+use diport::OutboxEmitError;
 use futures::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use vocab::TenantId;
 
 use crate::PgStore;
-use crate::outbox::{OutboxEnvelope, append_outbox_with_projection};
+use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
 use crate::projection_events::ProjectionWriteRegistry;
 
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
@@ -254,7 +255,7 @@ impl PgTenantPool {
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-        E: Send,
+        E: MapOutboxAppendError + Send,
     {
         let tenant = scope.tenant();
         co_tx_with_outbox(
@@ -281,7 +282,7 @@ impl PgTenantPool {
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-        E: Send,
+        E: MapOutboxAppendError + Send,
     {
         let tenant = scope.tenant();
         co_tx_with_outbox_inner(
@@ -514,7 +515,7 @@ async fn co_tx_with_outbox<F, E>(
 ) -> Result<(), E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-    E: Send,
+    E: MapOutboxAppendError + Send,
 {
     co_tx_with_outbox_inner(
         pool,
@@ -537,7 +538,7 @@ async fn co_tx_with_outbox_inner<F, E>(
 ) -> Result<(), E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-    E: Send,
+    E: MapOutboxAppendError + Send,
 {
     let mut tx = pool.begin().await.map_err(&map_storage)?;
     match write_in_tx(
@@ -564,14 +565,10 @@ where
         }),
         Err(e) => {
             log_cotx_write_error(write.entry, write.env, &e);
-            // rollback 失败是运维高价值事件（连接泄漏 / PG 断线）——补齐 event_id/domain/topic 定位字段
-            // （与 commit 分支对齐），便于按域 / 事件排障。
+            // rollback 失败是运维高价值事件；不输出 fact identity 原材料。
             if let Err(rb) = tx.rollback().await {
                 tracing::warn!(
                     target: "postgres",
-                    event_id = write.entry.idem_key().as_str(),
-                    domain = write.env.domain(),
-                    topic = write.entry.topic().as_str(),
                     error = %secure::redact_error(&rb),
                     "co-tx: rollback failed after write error"
                 );
@@ -626,10 +623,38 @@ enum CoTxWriteError<E> {
     TenantMismatch(sqlx::Error),
     RetryLockTimeout(sqlx::Error),
     BusinessWrite(E),
-    AppendOutbox(sqlx::Error),
+    AppendOutbox(OutboxAppendError),
 }
 
-impl<E> CoTxWriteError<E> {
+pub(crate) trait MapOutboxAppendError {
+    fn from_outbox_append(error: OutboxAppendError) -> Self;
+}
+
+impl MapOutboxAppendError for OutboxEmitError {
+    fn from_outbox_append(error: OutboxAppendError) -> Self {
+        error.into_emit_error()
+    }
+}
+
+impl MapOutboxAppendError for settings::ports::ConfigRepoError {
+    fn from_outbox_append(error: OutboxAppendError) -> Self {
+        match error {
+            OutboxAppendError::Conflict(conflict) => Self::OutboxFactConflict(conflict),
+            other => Self::Storage(Box::new(other)),
+        }
+    }
+}
+
+impl MapOutboxAppendError for identity::ports::IdentityError {
+    fn from_outbox_append(error: OutboxAppendError) -> Self {
+        match error {
+            OutboxAppendError::Conflict(conflict) => Self::OutboxFactConflict(conflict),
+            other => Self::Storage(Box::new(other)),
+        }
+    }
+}
+
+impl<E: MapOutboxAppendError> CoTxWriteError<E> {
     fn stage(&self) -> &'static str {
         match self {
             Self::TenantScope(_) => "set-local-tenant",
@@ -642,31 +667,56 @@ impl<E> CoTxWriteError<E> {
 
     fn sqlx_source(&self) -> Option<&sqlx::Error> {
         match self {
-            Self::TenantScope(e)
-            | Self::TenantMismatch(e)
-            | Self::RetryLockTimeout(e)
-            | Self::AppendOutbox(e) => Some(e),
-            Self::BusinessWrite(_) => None,
+            Self::TenantScope(e) | Self::TenantMismatch(e) | Self::RetryLockTimeout(e) => Some(e),
+            Self::AppendOutbox(OutboxAppendError::Storage(e)) => Some(e),
+            Self::AppendOutbox(
+                OutboxAppendError::Conflict(_)
+                | OutboxAppendError::CanonicalDrift
+                | OutboxAppendError::InvalidIdentity,
+            )
+            | Self::BusinessWrite(_) => None,
         }
     }
 
     fn into_domain(self, map_storage: &(impl Fn(sqlx::Error) -> E + Send)) -> E {
         match self {
-            Self::TenantScope(e)
-            | Self::TenantMismatch(e)
-            | Self::RetryLockTimeout(e)
-            | Self::AppendOutbox(e) => map_storage(e),
+            Self::TenantScope(e) | Self::TenantMismatch(e) | Self::RetryLockTimeout(e) => {
+                map_storage(e)
+            }
+            Self::AppendOutbox(e) => E::from_outbox_append(e),
             Self::BusinessWrite(e) => e,
         }
     }
 }
 
-fn log_cotx_write_error<E>(entry: &EventEntry, env: &OutboxEnvelope, error: &CoTxWriteError<E>) {
+fn log_cotx_write_error<E: MapOutboxAppendError>(
+    entry: &EventEntry,
+    env: &OutboxEnvelope,
+    error: &CoTxWriteError<E>,
+) {
+    if let CoTxWriteError::AppendOutbox(append_error) = error
+        && log_cotx_identity_error(append_error)
+    {
+        return;
+    }
     if let Some(source) = error.sqlx_source() {
         log_cotx_sqlx_error(entry, env, error.stage(), source);
     } else {
         log_cotx_domain_error(entry, env, error.stage());
     }
+}
+
+fn log_cotx_identity_error(error: &OutboxAppendError) -> bool {
+    let Some(reason) = error.identity_failure_reason() else {
+        return false;
+    };
+    tracing::warn!(
+        target: "postgres",
+        stage = "append-outbox",
+        reason,
+        "co-tx: write failed; rolling back"
+    );
+    true
 }
 
 fn log_cotx_sqlx_error(

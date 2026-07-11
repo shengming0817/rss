@@ -54,10 +54,13 @@ pub use dlq::{
 pub mod reconcile;
 pub use reconcile::{
     AttemptErrorKind, AttemptResult, AttemptScope, AttemptTrigger, BackoffError, BackoffPolicy,
-    Builder as ReconcileBuilder, ClaimedTarget, DurableReconciler, RECONCILE_PROBE,
-    ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileScheduleError,
-    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWorker, ReconcileWorkerControl,
-    ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger, TriggerError,
+    Builder as ReconcileBuilder, ClaimedTarget, DurableReconciler, OperatorReconcileCapability,
+    RECONCILE_PROBE, ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileOperatorStore,
+    ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
+    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
+    ReconcileTargetSummary, ReconcileWorker, ReconcileWorkerControl, ReviewedCommand,
+    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
+    TriggerError,
 };
 
 pub mod projection;

@@ -11,7 +11,7 @@
 //! 应用服务，`init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint`（#1690
 //! atomic evidence/handler funnel）从 generated SPEC 挂 config publish/get/delete/rollback 与 secret-publish
 //! 五条认证路由（鉴权 = permission，租户来自 route gate 注入的 [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
-//! 域错误经 generic `vocab::CoreErrorKind` 映射状态码（4xx 客户端 / 5xx 内部，不铸 `ERR_SETTINGS_` 命名空间）。
+//! 域错误经 `vocab::CoreErrorKind` 映射状态码；CAS 与 outbox 事实冲突分别具有可重试/终止 wire 分类。
 //!
 //! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
@@ -115,6 +115,9 @@ pub enum SettingsServiceError {
     /// 乐观并发写冲突（读后被并发版本超前）。
     #[error("version conflict")]
     VersionConflict,
+    /// 同一 event id 已绑定到不同稳定事实；与配置 CAS 冲突分轨。
+    #[error("outbox fact conflict")]
+    OutboxFactConflict(#[source] consistency::OutboxFactConflict),
     /// 目标配置 / 版本不存在（回滚源缺失）。
     #[error("config entry not found")]
     NotFound,
@@ -156,6 +159,7 @@ impl From<ConfigRepoError> for SettingsServiceError {
         match error {
             // 业务：乐观并发 CAS 冲突（读后重写重试可恢复）。
             ConfigRepoError::VersionConflict => Self::VersionConflict,
+            ConfigRepoError::OutboxFactConflict(source) => Self::OutboxFactConflict(source),
             ConfigRepoError::ProtectionUnavailable(source) => Self::ProtectionUnavailable(source),
             ConfigRepoError::ProtectionAuthFailure(source) => Self::ProtectionAuthFailure(source),
             // 基础设施：保留 source 链（adapter 已 redact 日志；5xx 时 wire strip）。
@@ -880,7 +884,7 @@ async fn config_rollback_handler(
 }
 
 /// `SettingsServiceError` → wire 响应：generic [`CoreErrorKind`] 派生状态码（4xx 客户端 / 5xx 内部），
-/// **不**铸 `ERR_SETTINGS_` 命名空间（复用 vocab 通用 kind）。5xx 记结构化 error（const message，无 PII；
+/// outbox 事实冲突使用专用、不可重试 kind，其余复用 vocab 通用 kind。5xx 记结构化 error（const message，无 PII；
 /// `tenant_id` 是合法低基数可观测字段、非凭据，透传供跨租定位——对标 identity handler 错误日志）。
 fn config_error_response(
     err: &SettingsServiceError,
@@ -893,7 +897,8 @@ fn config_error_response(
         SettingsServiceError::InvalidKey | SettingsServiceError::PercentageOutOfRange => {
             CoreErrorKind::Validation
         }
-        SettingsServiceError::VersionConflict => CoreErrorKind::Conflict,
+        SettingsServiceError::VersionConflict => CoreErrorKind::VersionConflict,
+        SettingsServiceError::OutboxFactConflict(_) => CoreErrorKind::OutboxFactConflict,
         SettingsServiceError::NotFound => CoreErrorKind::NotFound,
         SettingsServiceError::PayloadEncode(_)
         | SettingsServiceError::EntryBuild
@@ -2185,8 +2190,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_error_response_maps_status_codes() {
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_error_response_maps_status_codes() {
         let cases = [
             (SettingsServiceError::InvalidKey, StatusCode::BAD_REQUEST),
             (
@@ -2194,6 +2200,10 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (SettingsServiceError::VersionConflict, StatusCode::CONFLICT),
+            (
+                SettingsServiceError::OutboxFactConflict(consistency::OutboxFactConflict),
+                StatusCode::CONFLICT,
+            ),
             (SettingsServiceError::NotFound, StatusCode::NOT_FOUND),
             (
                 SettingsServiceError::EntryBuild,
@@ -2207,6 +2217,32 @@ mod tests {
                 want,
                 "{err:?} → {want}"
             );
+        }
+
+        for (err, want_code, want_retryable) in [
+            (
+                SettingsServiceError::VersionConflict,
+                "ERR_CORE_VERSION_CONFLICT",
+                true,
+            ),
+            (
+                SettingsServiceError::OutboxFactConflict(consistency::OutboxFactConflict),
+                "ERR_CORE_OUTBOX_FACT_CONFLICT",
+                false,
+            ),
+        ] {
+            let response =
+                config_error_response(&err, tenant(), "rid", &CONFIG_HTTP_SPEC, "config_publish");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("collect error body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("parse error body");
+            assert_eq!(json["error"]["code"], want_code);
+            assert_eq!(json["error"]["retryable"], want_retryable);
+            let rendered = String::from_utf8_lossy(&body);
+            assert!(!rendered.contains("payload"));
+            assert!(!rendered.contains("fingerprint"));
         }
     }
 

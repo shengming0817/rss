@@ -94,7 +94,8 @@ use bootstrap::Domain as _;
 use bootstrap::KernelError;
 use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{
-    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
+    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEmitErrorKind,
+    OutboxEnvelopeParts,
 };
 use generated::event::identity_v1::session_created::{
     IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
@@ -1009,6 +1010,9 @@ async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
     match service.login(tenant, request).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(LoginError::InvalidCredentials) => httpserve::error::unauthenticated(request_id),
+        Err(LoginError::SessionWrite(err)) if err.kind() == OutboxEmitErrorKind::FactConflict => {
+            fact_conflict_response(request_id)
+        }
         Err(err) => {
             if matches!(&err, LoginError::SessionWrite(_)) {
                 // F4 reorder 残留窗口：mint 成功后 co-tx 失败 ⇒ refresh token 已落库但无 session/outbox；
@@ -1886,6 +1890,10 @@ fn core_response(kind: CoreErrorKind, request_id: &str) -> Response {
     httpserve::error::core_error_response(&CoreError::new(kind), request_id)
 }
 
+fn fact_conflict_response(request_id: &str) -> Response {
+    core_response(CoreErrorKind::OutboxFactConflict, request_id)
+}
+
 fn role_id_from_wire(raw: &str) -> Result<RoleId, ()> {
     RoleId::parse(raw).map_err(|_| ())
 }
@@ -2478,6 +2486,7 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
         Err(IdentityError::PermissionDenied) => {
             core_response(CoreErrorKind::Forbidden, &request_id)
         }
+        Err(IdentityError::OutboxFactConflict(_)) => fact_conflict_response(&request_id),
         Err(err) => {
             tracing::error!(
                 error = %err,
@@ -2499,6 +2508,13 @@ fn rbac_error_response(
     request_id: &str,
     spec: &HttpSpec,
 ) -> Response {
+    if matches!(
+        err,
+        RbacAdminError::BindingWrite(error)
+            if error.kind() == OutboxEmitErrorKind::FactConflict
+    ) {
+        return fact_conflict_response(request_id);
+    }
     let kind = match err {
         RbacAdminError::RoleNotFound => CoreErrorKind::NotFound,
         RbacAdminError::RoleLookup(_)
@@ -2525,15 +2541,18 @@ fn policy_error_response(
     request_id: &str,
     spec: &HttpSpec,
 ) -> Response {
+    if matches!(err, PolicyManageError::OutboxFactConflict(_)) {
+        return fact_conflict_response(request_id);
+    }
     let kind = match err {
         PolicyManageError::InvalidPolicy => CoreErrorKind::Validation,
         PolicyManageError::PolicyNotFound => CoreErrorKind::NotFound,
-        PolicyManageError::PolicyAlreadyExists | PolicyManageError::VersionConflict => {
-            CoreErrorKind::Conflict
-        }
+        PolicyManageError::PolicyAlreadyExists => CoreErrorKind::Conflict,
+        PolicyManageError::VersionConflict => CoreErrorKind::VersionConflict,
         PolicyManageError::PayloadEncode(_)
         | PolicyManageError::EntryBuild
-        | PolicyManageError::Store(_) => CoreErrorKind::Internal,
+        | PolicyManageError::Store(_)
+        | PolicyManageError::OutboxFactConflict(_) => CoreErrorKind::Internal,
     };
     if matches!(kind, CoreErrorKind::Internal) {
         tracing::error!(
@@ -2556,7 +2575,7 @@ fn password_error_response(
     let kind = match err {
         ChangePasswordError::InvalidCredentials => CoreErrorKind::Forbidden,
         ChangePasswordError::NotFound => CoreErrorKind::NotFound,
-        ChangePasswordError::VersionConflict => CoreErrorKind::Conflict,
+        ChangePasswordError::VersionConflict => CoreErrorKind::VersionConflict,
         ChangePasswordError::Hash | ChangePasswordError::Store(_) => CoreErrorKind::Internal,
     };
     if matches!(kind, CoreErrorKind::Internal) {
@@ -2737,6 +2756,52 @@ mod tests {
     // 未种子化的 canonical user id（change_password 未知主体 → NotFound，#1277 F2）。
     const GHOST_USER: &str = "99999999-8888-4777-8666-555544443333";
     const RESOURCE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn fact_conflict_mappers_use_one_terminal_wire_contract() {
+        let conflict = consistency::OutboxFactConflict;
+        let responses = [
+            fact_conflict_response("rid"),
+            rbac_error_response(
+                &RbacAdminError::BindingWrite(OutboxEmitError::fact_conflict(conflict)),
+                tid(CANON_TENANT),
+                "rid",
+                &ROLES_ASSIGN_HTTP_SPEC,
+            ),
+            policy_error_response(
+                &PolicyManageError::OutboxFactConflict(conflict),
+                tid(CANON_TENANT),
+                "rid",
+                &POLICIES_CREATE_HTTP_SPEC,
+            ),
+        ];
+        for response in responses {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("collect error body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("parse error body");
+            assert_eq!(json["error"]["code"], "ERR_CORE_OUTBOX_FACT_CONFLICT");
+            assert_eq!(json["error"]["retryable"], false);
+            let rendered = String::from_utf8_lossy(&body);
+            assert!(!rendered.contains("payload"));
+            assert!(!rendered.contains("fingerprint"));
+        }
+
+        let cas = policy_error_response(
+            &PolicyManageError::VersionConflict,
+            tid(CANON_TENANT),
+            "rid",
+            &POLICIES_UPDATE_HTTP_SPEC,
+        );
+        let body = axum::body::to_bytes(cas.into_body(), usize::MAX)
+            .await
+            .expect("collect CAS error body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("parse CAS error body");
+        assert_eq!(json["error"]["code"], "ERR_CORE_VERSION_CONFLICT");
+        assert_eq!(json["error"]["retryable"], true);
+    }
 
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：SessionLifecycle / Clock 替身在此手写。
     // CapturingSessionLifecycle 双职能：① 捕获 co-tx 写入（Session + Entry + envelope）供 outbox 断言（test 1-5）；

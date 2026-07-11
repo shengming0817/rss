@@ -102,7 +102,21 @@ durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope`
 `StableDispatchKey` 公共模型。最终 durable dispatch id 由 `tenant + topic + raw key` 的长度分隔 SHA-256
 派生为 opaque key，同 raw key 跨 tenant/topic 不共享 outbox `event_id`，且 raw key 不落库。Postgres
 实现必须在同一 tenant transaction 内先以 `lease_token + epoch` CAS 确认 lease，再 append
-`reconcile_actions`，再 append outbox entry；若 outbox 行已存在，必须校验同 tenant/topic/contract/payload 后才视为幂等。
+`reconcile_actions`，再 append outbox entry；若 outbox fact fingerprint 冲突，事务内 savepoint 必须先回滚
+action/command alias 写入，再把 target 原子切为 `disabled`。该终态只暴露闭分类 `fact_conflict`，worker 记录
+invariant attempt result 并释放 lease，但 due claim 不会自动 reclaim；仅显式 resume 可恢复。
+
+生产恢复面固定为一次性 operator CLI，不允许直接 SQL：
+
+1. 配置 `RSS_RECONCILE_OPERATOR_GRANTS=subject|inspect|tenant,subject|resume|tenant`，授权精确到
+   service principal、动作与 tenant。
+2. 先运行 `rss reconcile-target inspect --operator-service-token <token> --operator-tenant <tenant>
+   --tenant <tenant> --target-id <uuid>`，确认 `status=disabled` 且 `disabledReason=fact_conflict`。
+3. 修正导致稳定 event id 冲突的配置/事实来源后，运行同参数的 `resume`。恢复操作清除 reason、切回
+   `active` 并使 target 立即到期；不得在冲突根因未消除时反复 resume。
+
+inspect/resume 均要求 durable replay guard 验证 service token、精确 grant 授权，并在
+`auth_audit_events` 写 start/finish 记录；输出不包含 payload、metadata、fingerprint 或 resource id。
 `reconcile_actions` 不保存 terminal attempt result；不得 direct publisher/broker，也不得在 `eventexec` 内裸 `append_outbox`。
 
 该 seam 只提供 durable scheduler 的事务边界；首个真实 active command contract 与生产 `CommandEmit` bridge

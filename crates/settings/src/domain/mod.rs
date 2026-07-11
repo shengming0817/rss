@@ -1051,6 +1051,9 @@ pub enum ConfigRepoError {
     /// 版本冲突（乐观并发写：`entry.version()` ≠ 当前最高版本 + 1）。
     #[error("config version conflict")]
     VersionConflict,
+    /// 同一 event id 已持久化为不同稳定事实；不得按 CAS 版本冲突重试。
+    #[error("config outbox fact conflict")]
+    OutboxFactConflict(#[source] consistency::OutboxFactConflict),
     /// 字段保护 provider 不可用（KMS/KeyProvider 超时、不可达或配置拒绝），调用方可按基础设施错误处理。
     #[error("config value protection unavailable")]
     ProtectionUnavailable(#[source] Box<dyn std::error::Error + Send + Sync>),

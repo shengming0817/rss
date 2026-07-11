@@ -17,6 +17,307 @@
 //!
 //! ref: ThreeDotsLabs/watermill message/router.go@master（Ack/Requeue/Reject disposition 概念对标）。
 
+use sha2::{Digest, Sha256};
+
+const OUTBOX_FACT_CANONICAL_VERSION: &str = "rss-outbox-fact-v1";
+const FACT_TYPE_UTF8: u8 = 1;
+const FACT_TYPE_BYTES: u8 = 2;
+const FACT_TYPE_JSON: u8 = 3;
+const FACT_OPTION_NONE: u8 = 0;
+const FACT_OPTION_SOME: u8 = 1;
+
+/// 一条 outbox durable fact 的完整、provider-neutral 身份。
+///
+/// 所有字段均为私有，唯一构造器要求调用方同时提供完整事实，避免新写路径遗漏某个身份维度。
+/// metadata 顶层仅忽略可重试变化的 `occurredAt` / `trace` / `correlation`；嵌套同名键及
+/// 其余内容都受 fingerprint 保护。
+pub struct OutboxFactIdentity<'a> {
+    event_id: &'a str,
+    tenant_id: &'a str,
+    domain: &'a str,
+    topic: &'a str,
+    contract_id: &'a str,
+    contract_version: &'a str,
+    schema_hash: &'a str,
+    payload: &'a [u8],
+    partition_key: Option<&'a str>,
+    causation_id: Option<&'a str>,
+    metadata: &'a serde_json::Value,
+}
+
+impl std::fmt::Debug for OutboxFactIdentity<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutboxFactIdentity(<redacted>)")
+    }
+}
+
+impl<'a> OutboxFactIdentity<'a> {
+    /// 收口构造完整 outbox fact identity。
+    #[allow(clippy::too_many_arguments)]
+    // reason: 这是 AI-HARD 完整性门；将字段分散到可选 builder 会让漏算变成可表达状态。
+    pub fn new(
+        event_id: &'a str,
+        tenant_id: &'a str,
+        domain: &'a str,
+        topic: &'a str,
+        contract_id: &'a str,
+        contract_version: &'a str,
+        schema_hash: &'a str,
+        payload: &'a [u8],
+        partition_key: Option<&'a str>,
+        causation_id: Option<&'a str>,
+        metadata: &'a serde_json::Value,
+    ) -> Self {
+        Self {
+            event_id,
+            tenant_id,
+            domain,
+            topic,
+            contract_id,
+            contract_version,
+            schema_hash,
+            payload,
+            partition_key,
+            causation_id,
+            metadata,
+        }
+    }
+
+    /// 计算版本化 canonical SHA-256 fingerprint。
+    pub fn fingerprint(&self) -> OutboxFactFingerprint {
+        let mut canonical = Vec::new();
+        append_required(
+            &mut canonical,
+            FACT_TYPE_UTF8,
+            OUTBOX_FACT_CANONICAL_VERSION.as_bytes(),
+        );
+        append_required(&mut canonical, FACT_TYPE_UTF8, self.event_id.as_bytes());
+        append_required(&mut canonical, FACT_TYPE_UTF8, self.tenant_id.as_bytes());
+        append_required(&mut canonical, FACT_TYPE_UTF8, self.domain.as_bytes());
+        append_required(&mut canonical, FACT_TYPE_UTF8, self.topic.as_bytes());
+        append_required(&mut canonical, FACT_TYPE_UTF8, self.contract_id.as_bytes());
+        append_required(
+            &mut canonical,
+            FACT_TYPE_UTF8,
+            self.contract_version.as_bytes(),
+        );
+        append_required(&mut canonical, FACT_TYPE_UTF8, self.schema_hash.as_bytes());
+        append_required(&mut canonical, FACT_TYPE_BYTES, self.payload);
+        append_optional(
+            &mut canonical,
+            FACT_TYPE_UTF8,
+            self.partition_key.map(str::as_bytes),
+        );
+        append_optional(
+            &mut canonical,
+            FACT_TYPE_UTF8,
+            self.causation_id.map(str::as_bytes),
+        );
+        let metadata = canonical_metadata(self.metadata);
+        append_required(&mut canonical, FACT_TYPE_JSON, &metadata);
+
+        OutboxFactFingerprint(Sha256::digest(canonical).into())
+    }
+}
+
+fn append_required(target: &mut Vec<u8>, type_tag: u8, value: &[u8]) {
+    append_frame(target, type_tag, FACT_OPTION_SOME, value);
+}
+
+fn append_optional(target: &mut Vec<u8>, type_tag: u8, value: Option<&[u8]>) {
+    match value {
+        Some(value) => append_frame(target, type_tag, FACT_OPTION_SOME, value),
+        None => append_frame(target, type_tag, FACT_OPTION_NONE, &[]),
+    }
+}
+
+fn append_frame(target: &mut Vec<u8>, type_tag: u8, option_tag: u8, value: &[u8]) {
+    target.push(type_tag);
+    target.push(option_tag);
+    let length = value.len() as u64;
+    target.extend_from_slice(&length.to_be_bytes());
+    target.extend_from_slice(value);
+}
+
+fn canonical_metadata(value: &serde_json::Value) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    match value {
+        serde_json::Value::Object(values) => {
+            append_canonical_object(&mut encoded, values, true);
+        }
+        value => append_canonical_json(&mut encoded, value),
+    }
+    encoded
+}
+
+fn append_canonical_json(target: &mut Vec<u8>, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => target.extend_from_slice(b"null"),
+        serde_json::Value::Bool(value) => {
+            target.extend_from_slice(if *value { b"true" } else { b"false" });
+        }
+        serde_json::Value::Number(value) => append_canonical_number(target, value),
+        serde_json::Value::String(value) => append_json_string(target, value),
+        serde_json::Value::Array(values) => {
+            target.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    target.push(b',');
+                }
+                append_canonical_json(target, value);
+            }
+            target.push(b']');
+        }
+        serde_json::Value::Object(values) => append_canonical_object(target, values, false),
+    }
+}
+
+/// Freeze JSON numbers as an exact base-10 value, independent of parser or database rendering.
+///
+/// The canonical spelling is a non-zero integer coefficient with no leading/trailing zeroes,
+/// followed by a signed base-10 exponent (`<coefficient>e<exponent>`). Zero, including negative
+/// zero, is always `0e0`. `serde_json`'s `arbitrary_precision` feature preserves the input decimal
+/// before this normalization; PostgreSQL applies the same transform to its exact `numeric` value.
+fn append_canonical_number(target: &mut Vec<u8>, value: &serde_json::Number) {
+    let rendered = value.to_string();
+    let (negative, unsigned) = rendered
+        .strip_prefix('-')
+        .map_or((false, rendered.as_str()), |value| (true, value));
+    let (significand, explicit_exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((significand, exponent)) => match exponent.parse::<i64>() {
+            Ok(exponent) => (significand, exponent),
+            Err(_) => {
+                // Outside PostgreSQL numeric's bounded exponent domain. Keep a collision-free,
+                // deterministic spelling; persistence fails closed before this can be stored.
+                target.extend_from_slice(b"non-pg-number:");
+                target.extend_from_slice(rendered.as_bytes());
+                return;
+            }
+        },
+        None => (unsigned, 0_i64),
+    };
+    let (integer, fraction) = significand
+        .split_once('.')
+        .map_or((significand, ""), |parts| parts);
+    let mut digits = String::with_capacity(integer.len() + fraction.len());
+    digits.push_str(integer);
+    digits.push_str(fraction);
+    let first_nonzero = digits.find(|character| character != '0');
+    let Some(first_nonzero) = first_nonzero else {
+        target.extend_from_slice(b"0e0");
+        return;
+    };
+    let mut coefficient = &digits[first_nonzero..];
+    let trailing_zeroes = coefficient.len() - coefficient.trim_end_matches('0').len();
+    coefficient = coefficient.trim_end_matches('0');
+    let exponent = i64::try_from(fraction.len()).ok().and_then(|fractional| {
+        i64::try_from(trailing_zeroes).ok().and_then(|trailing| {
+            explicit_exponent
+                .checked_sub(fractional)
+                .and_then(|exponent| exponent.checked_add(trailing))
+        })
+    });
+    let Some(exponent) = exponent else {
+        target.extend_from_slice(b"non-pg-number:");
+        target.extend_from_slice(rendered.as_bytes());
+        return;
+    };
+    if negative {
+        target.push(b'-');
+    }
+    target.extend_from_slice(coefficient.as_bytes());
+    target.push(b'e');
+    target.extend_from_slice(exponent.to_string().as_bytes());
+}
+
+fn append_canonical_object(
+    target: &mut Vec<u8>,
+    values: &serde_json::Map<String, serde_json::Value>,
+    filter_root_volatile: bool,
+) {
+    target.push(b'{');
+    let mut keys: Vec<_> = values
+        .keys()
+        .filter(|key| !filter_root_volatile || !is_volatile_metadata_key(key))
+        .collect();
+    keys.sort_unstable();
+    for (index, key) in keys.into_iter().enumerate() {
+        if index != 0 {
+            target.push(b',');
+        }
+        append_json_string(target, key);
+        target.push(b':');
+        append_canonical_json(target, &values[key]);
+    }
+    target.push(b'}');
+}
+
+fn append_json_string(target: &mut Vec<u8>, value: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    target.push(b'"');
+    for character in value.chars() {
+        match character {
+            '"' => target.extend_from_slice(br#"\""#),
+            '\\' => target.extend_from_slice(br"\\"),
+            '\u{08}' => target.extend_from_slice(br"\b"),
+            '\u{0c}' => target.extend_from_slice(br"\f"),
+            '\n' => target.extend_from_slice(br"\n"),
+            '\r' => target.extend_from_slice(br"\r"),
+            '\t' => target.extend_from_slice(br"\t"),
+            '\u{00}'..='\u{1f}' => {
+                let code = character as u8;
+                target.extend_from_slice(br"\u00");
+                target.push(HEX[usize::from(code >> 4)]);
+                target.push(HEX[usize::from(code & 0x0f)]);
+            }
+            character => {
+                let mut buffer = [0_u8; 4];
+                target.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+            }
+        }
+    }
+    target.push(b'"');
+}
+
+fn is_volatile_metadata_key(key: &str) -> bool {
+    matches!(key, "occurredAt" | "trace" | "correlation")
+}
+
+/// Outbox fact 的不可伪造 SHA-256 fingerprint。
+///
+/// 无公开原始构造器；只能由 [`OutboxFactIdentity::fingerprint`] 产生。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OutboxFactFingerprint([u8; 32]);
+
+impl OutboxFactFingerprint {
+    /// 借出持久化/比较所需的 32-byte digest。
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for OutboxFactFingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutboxFactFingerprint(<redacted>)")
+    }
+}
+
+/// 幂等 outbox append 的成功结果；事实冲突不属于成功结果。
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxAppendOutcome {
+    /// 首次插入 durable fact。
+    Inserted,
+    /// 相同 event id 已持久化为相同 durable fact。
+    SameFact,
+}
+
+/// 相同 event id 已绑定到不同 durable fact。
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("outbox fact conflict")]
+pub struct OutboxFactConflict;
+
 /// 消费处置（穷尽闭值集，Hard 冻结；漏 case 编不过）。eventbus.md §Disposition 表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -682,9 +983,10 @@ pub trait OutboxBacklog {
 mod tests {
     use super::{
         BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
-        HandleResult, OutboxContractId, OutboxContractIdError, OutboxMetricSubject, OutboxPayload,
-        PartitionKey, PartitionKeyError, PendingEntry, PermanentError, PermanentErrorKind,
-        StoredOutboxEntry,
+        HandleResult, OUTBOX_FACT_CANONICAL_VERSION, OutboxAppendOutcome, OutboxContractId,
+        OutboxContractIdError, OutboxFactConflict, OutboxFactIdentity, OutboxMetricSubject,
+        OutboxPayload, PartitionKey, PartitionKeyError, PendingEntry, PermanentError,
+        PermanentErrorKind, StoredOutboxEntry, append_canonical_json,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -1090,5 +1392,353 @@ mod tests {
         assert_eq!(dbg, "PartitionKey(<redacted>)");
         // anti-vacuity：明文值不出现在 Debug 输出。
         assert!(!dbg.contains("session-secret"), "凭据级值不得泄漏: {dbg}");
+    }
+
+    fn fact<'a>(
+        payload: &'a [u8],
+        partition_key: Option<&'a str>,
+        causation_id: Option<&'a str>,
+        metadata: &'a serde_json::Value,
+    ) -> OutboxFactIdentity<'a> {
+        OutboxFactIdentity::new(
+            "evt-1739",
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "identity",
+            "identity.session-created",
+            "identity.session-created",
+            "v1",
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            payload,
+            partition_key,
+            causation_id,
+            metadata,
+        )
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OutboxFactGoldenFixture {
+        schema_version: u32,
+        canonical_version: String,
+        cases: Vec<OutboxFactGoldenCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OutboxFactGoldenCase {
+        label: String,
+        event_id: String,
+        tenant_id: String,
+        domain: String,
+        topic: String,
+        contract_id: String,
+        contract_version: String,
+        schema_hash: String,
+        payload: Vec<u8>,
+        partition_key: Option<String>,
+        causation_id: Option<String>,
+        metadata: serde_json::Value,
+        expected_digest: [u8; 32],
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: committed test fixture parse failure is itself the focused test failure.
+    fn outbox_fact_golden_fixture() -> OutboxFactGoldenFixture {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/consistency/outbox-fact-v1-vectors.json"
+        )))
+        .expect("outbox fact v1 golden fixture must be valid")
+    }
+
+    #[test]
+    fn outbox_fact_fingerprint_is_canonical_and_unambiguous() {
+        let metadata = serde_json::json!({
+            "actor": {"kind": "user", "id": "subject-1", "scope": "tenant"},
+            "subjectId": "subject-1",
+            "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        });
+        let base = fact(b"payload", Some("partition-a"), Some("cause-a"), &metadata).fingerprint();
+        assert_eq!(base.as_bytes().len(), 32);
+
+        let split_a = fact(b"ab\0c", Some("partition-a"), None, &metadata).fingerprint();
+        let split_b = fact(b"a\0bc", Some("partition-a"), None, &metadata).fingerprint();
+        assert_ne!(
+            split_a, split_b,
+            "length framing must prevent concatenation collisions"
+        );
+        assert_ne!(
+            fact(b"payload", None, None, &metadata).fingerprint(),
+            fact(b"payload", Some(""), None, &metadata).fingerprint(),
+            "None and Some(empty) must have distinct option tags"
+        );
+    }
+
+    #[test]
+    fn outbox_fact_fingerprint_matches_v1_known_vectors() {
+        let fixture = outbox_fact_golden_fixture();
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.canonical_version, OUTBOX_FACT_CANONICAL_VERSION);
+        assert!(!fixture.cases.is_empty());
+        for case in fixture.cases {
+            let actual = OutboxFactIdentity::new(
+                &case.event_id,
+                &case.tenant_id,
+                &case.domain,
+                &case.topic,
+                &case.contract_id,
+                &case.contract_version,
+                &case.schema_hash,
+                &case.payload,
+                case.partition_key.as_deref(),
+                case.causation_id.as_deref(),
+                &case.metadata,
+            )
+            .fingerprint();
+            assert_eq!(
+                actual.as_bytes(),
+                &case.expected_digest,
+                "fixed digest: {}",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: committed literal JSON numbers are known-valid test inputs.
+    fn outbox_fact_numbers_have_frozen_exact_decimal_spelling() {
+        let cases = [
+            ("1e2", "1e2"),
+            ("100.0", "1e2"),
+            ("1.2300", "123e-2"),
+            ("1.23", "123e-2"),
+            ("1e-7", "1e-7"),
+            ("-0", "0e0"),
+            ("9007199254740993", "9007199254740993e0"),
+        ];
+        for (raw, expected) in cases {
+            let value: serde_json::Value = serde_json::from_str(raw).expect("valid JSON number");
+            let mut encoded = Vec::new();
+            append_canonical_json(&mut encoded, &value);
+            assert_eq!(encoded, expected.as_bytes(), "exact decimal: {raw}");
+        }
+    }
+
+    #[test]
+    fn outbox_fact_fingerprint_ignores_only_volatile_metadata() {
+        let first = serde_json::json!({
+            "occurredAt": 1,
+            "trace": "trace-a",
+            "correlation": "corr-a",
+            "subjectId": "subject-1",
+            "actor": {"kind": "user", "id": "actor-1"}
+        });
+        let retried = serde_json::json!({
+            "actor": {"id": "actor-1", "kind": "user"},
+            "subjectId": "subject-1",
+            "correlation": "corr-b",
+            "trace": "trace-b",
+            "occurredAt": 999
+        });
+        assert_eq!(
+            fact(b"payload", Some("partition-a"), None, &first).fingerprint(),
+            fact(b"payload", Some("partition-a"), None, &retried).fingerprint()
+        );
+
+        let changed_actor = serde_json::json!({
+            "subjectId": "subject-1",
+            "actor": {"kind": "user", "id": "actor-2"}
+        });
+        assert_ne!(
+            fact(b"payload", Some("partition-a"), None, &first).fingerprint(),
+            fact(b"payload", Some("partition-a"), None, &changed_actor).fingerprint()
+        );
+
+        let nested_trace_a = serde_json::json!({"actor": {"trace": "stable-a"}});
+        let nested_trace_b = serde_json::json!({"actor": {"trace": "stable-b"}});
+        assert_ne!(
+            fact(b"payload", None, None, &nested_trace_a).fingerprint(),
+            fact(b"payload", None, None, &nested_trace_b).fingerprint(),
+            "volatile exclusions apply only to metadata root"
+        );
+
+        let differently_cased_key = serde_json::json!({"Trace": "stable-a"});
+        let differently_cased_key_changed = serde_json::json!({"Trace": "stable-b"});
+        assert_ne!(
+            fact(b"payload", None, None, &differently_cased_key).fingerprint(),
+            fact(b"payload", None, None, &differently_cased_key_changed).fingerprint(),
+            "only the three exact root keys are volatile"
+        );
+    }
+
+    #[test]
+    fn outbox_fact_metadata_canonicalizes_nested_objects_but_preserves_array_order_and_types() {
+        let sorted_differently = serde_json::json!({
+            "nested": {"z": "line\n\"quoted\"", "a": "你好"},
+            "items": [1, "1", null, true]
+        });
+        let same_fact = serde_json::json!({
+            "items": [1, "1", null, true],
+            "nested": {"a": "你好", "z": "line\n\"quoted\""}
+        });
+        assert_eq!(
+            fact(b"payload", None, None, &sorted_differently).fingerprint(),
+            fact(b"payload", None, None, &same_fact).fingerprint()
+        );
+
+        let reordered_array = serde_json::json!({
+            "nested": {"a": "你好", "z": "line\n\"quoted\""},
+            "items": ["1", 1, null, true]
+        });
+        assert_ne!(
+            fact(b"payload", None, None, &same_fact).fingerprint(),
+            fact(b"payload", None, None, &reordered_array).fingerprint()
+        );
+    }
+
+    #[test]
+    fn outbox_fact_fingerprint_protects_every_fact_component() {
+        let metadata = serde_json::json!({"subjectId": "subject-1"});
+        let baseline =
+            fact(b"payload", Some("partition-a"), Some("cause-a"), &metadata).fingerprint();
+        let changed_metadata = serde_json::json!({"subjectId": "subject-2"});
+        let changed = [
+            OutboxFactIdentity::new(
+                "evt-other",
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            OutboxFactIdentity::new(
+                "evt-1739",
+                "00000000-0000-4000-8000-000000000abc",
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            OutboxFactIdentity::new(
+                "evt-1739",
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "settings",
+                "identity.session-created",
+                "identity.session-created",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            OutboxFactIdentity::new(
+                "evt-1739",
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "identity",
+                "identity.other",
+                "identity.session-created",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            OutboxFactIdentity::new(
+                "evt-1739",
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "identity",
+                "identity.session-created",
+                "identity.other",
+                "v1",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            OutboxFactIdentity::new(
+                "evt-1739",
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                "v2",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            OutboxFactIdentity::new(
+                "evt-1739",
+                "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                "identity",
+                "identity.session-created",
+                "identity.session-created",
+                "v1",
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            fact(
+                b"payload-other",
+                Some("partition-a"),
+                Some("cause-a"),
+                &metadata,
+            )
+            .fingerprint(),
+            fact(b"payload", Some("partition-b"), Some("cause-a"), &metadata).fingerprint(),
+            fact(b"payload", Some("partition-a"), Some("cause-b"), &metadata).fingerprint(),
+            fact(
+                b"payload",
+                Some("partition-a"),
+                Some("cause-a"),
+                &changed_metadata,
+            )
+            .fingerprint(),
+        ];
+        assert!(changed.iter().all(|candidate| candidate != &baseline));
+    }
+
+    #[test]
+    fn outbox_fact_types_redact_and_outcomes_are_closed() {
+        let metadata = serde_json::json!({"subjectId": "SECRET_SUBJECT_MARKER"});
+        let identity = fact(
+            b"SECRET_PAYLOAD_MARKER",
+            Some("SECRET_PARTITION_MARKER"),
+            Some("SECRET_CAUSATION_MARKER"),
+            &metadata,
+        );
+        let fingerprint = identity.fingerprint();
+        for rendered in [format!("{identity:?}"), format!("{fingerprint:?}")] {
+            assert!(rendered.contains("<redacted>"));
+            assert!(!rendered.contains("SECRET_"));
+        }
+        let conflict = OutboxFactConflict;
+        assert_eq!(conflict.to_string(), "outbox fact conflict");
+        assert!(!format!("{conflict:?}").contains("SECRET_"));
+        assert_ne!(OutboxAppendOutcome::Inserted, OutboxAppendOutcome::SameFact);
     }
 }

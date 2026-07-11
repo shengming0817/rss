@@ -101,7 +101,7 @@ pub async fn call(
 /// 返回 [`TestkitError::Body`] 而非 `usize::MAX` 下的 OOM——与 harness「不 panic、全走 Result」一致。
 const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 
-/// 构造统一 wire error envelope 响应（`{"error":{"code","message","details","requestId"}}`，
+/// 构造统一 wire error envelope 响应（`{"error":{"code","message","retryable","details","requestId"}}`，
 /// `error-handling.md §Wire 格式`）——**test fixture**：供契约测试的样板 handler 产出错误响应，单源化
 /// envelope 形状（与 [`WireError`] 解析侧对称，防 drift）。生产 handler 用 generated typed response
 /// envelope（`domain-patterns.md §Typed response envelope`），非本 helper。`requestId` 用固定哨兵
@@ -113,7 +113,13 @@ pub fn wire_error_response(
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
     let body = serde_json::json!({
-        "error": { "code": code, "message": message, "details": [], "requestId": "test-rid" }
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": false,
+            "details": [],
+            "requestId": "test-rid"
+        }
     });
     (status, axum::Json(body)).into_response()
 }

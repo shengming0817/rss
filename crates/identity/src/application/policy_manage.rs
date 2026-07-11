@@ -49,6 +49,8 @@ pub enum PolicyManageError {
     PolicyAlreadyExists,
     #[error("policy version conflict")]
     VersionConflict,
+    #[error("policy outbox fact conflict")]
+    OutboxFactConflict(#[source] consistency::OutboxFactConflict),
     #[error("policy-event payload encode failed")]
     PayloadEncode(#[source] serde_json::Error),
     #[error("policy-event outbox entry build failed")]
@@ -453,6 +455,7 @@ fn map_identity_error(err: IdentityError) -> PolicyManageError {
         IdentityError::PolicyNotFound => PolicyManageError::PolicyNotFound,
         IdentityError::PolicyAlreadyExists => PolicyManageError::PolicyAlreadyExists,
         IdentityError::VersionConflict => PolicyManageError::VersionConflict,
+        IdentityError::OutboxFactConflict(source) => PolicyManageError::OutboxFactConflict(source),
         other => PolicyManageError::Store(other),
     }
 }

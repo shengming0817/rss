@@ -24,7 +24,7 @@
 
 use dynosaur::dynosaur;
 
-use consistency::EventEntry;
+use consistency::{EventEntry, OutboxFactConflict};
 
 use crate::redacted::RedactedSource;
 
@@ -38,8 +38,18 @@ const OPAQUE_ID_MAX_LEN: usize = 256;
 #[derive(Debug, thiserror::Error)]
 #[error("outbox emit failed")]
 pub struct OutboxEmitError {
+    kind: OutboxEmitErrorKind,
     #[source]
     source: RedactedSource,
+}
+
+/// Closed, payload-free classification for outbox emit failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxEmitErrorKind {
+    /// Provider, transaction, or canonicalization infrastructure failed.
+    Infrastructure,
+    /// The event id already names a different durable fact.
+    FactConflict,
 }
 
 impl OutboxEmitError {
@@ -49,8 +59,22 @@ impl OutboxEmitError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
+            kind: OutboxEmitErrorKind::Infrastructure,
             source: RedactedSource::new(source),
         }
+    }
+
+    /// Preserve a typed fact conflict without exposing fact material.
+    pub fn fact_conflict(source: OutboxFactConflict) -> Self {
+        Self {
+            kind: OutboxEmitErrorKind::FactConflict,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    /// Return the closed failure classification.
+    pub const fn kind(&self) -> OutboxEmitErrorKind {
+        self.kind
     }
 }
 
@@ -634,6 +658,7 @@ mod smoke {
     #[test]
     fn outbox_emit_error_wraps_source() {
         let err = OutboxEmitError::new(std::io::Error::other("leak-marker-emit"));
+        assert_eq!(err.kind(), super::OutboxEmitErrorKind::Infrastructure);
         assert_eq!(err.to_string(), "outbox emit failed");
         assert!(std::error::Error::source(&err).is_some());
         // anti-vacuity：内层 Debug 确携 marker（前提），wrapper Debug 不得泄漏。
@@ -645,6 +670,11 @@ mod smoke {
             !format!("{err:?}").contains("leak-marker-emit"),
             "wrapper Debug 泄漏 source: {err:?}"
         );
+
+        let conflict = OutboxEmitError::fact_conflict(consistency::OutboxFactConflict);
+        assert_eq!(conflict.kind(), super::OutboxEmitErrorKind::FactConflict);
+        assert_eq!(conflict.to_string(), "outbox emit failed");
+        assert!(!format!("{conflict:?}").contains("fingerprint"));
     }
 
     #[allow(clippy::expect_used)]

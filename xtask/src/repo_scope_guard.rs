@@ -234,6 +234,7 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ),
     ("adapters/postgres/src/reconcile.rs", "cas_lease"),
     ("adapters/postgres/src/reconcile.rs", "claim_due_targets"),
+    ("adapters/postgres/src/reconcile.rs", "inspect_target"),
     (
         "adapters/postgres/src/reconcile.rs",
         "record_action_and_enqueue_command",
@@ -714,6 +715,10 @@ mod tests {
             (
                 "adapters/postgres/src/saga.rs".to_string(),
                 "async fn list_runnable() { infra_tenant_scope(tenant); }".to_string(),
+            ),
+            (
+                "adapters/postgres/src/reconcile.rs".to_string(),
+                "async fn inspect_target() { infra_tenant_scope(tenant); }".to_string(),
             ),
         ];
         let (_, findings) = scan_infra_tenant_scope(&files);

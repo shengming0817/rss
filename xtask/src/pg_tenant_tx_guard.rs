@@ -6,7 +6,11 @@
 //! `sqlx::PgPool` / direct connection / global transaction paths are allowed only for explicitly
 //! named global infrastructure or maintenance exceptions.
 //!
-//! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx.rs`.
+//! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx.rs`
+//! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
+//!
+//! INVARIANT: OUTBOX-FACT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_outbox_log_insert_outside_cdc_funnel", anti_vacuity = "tests::green_outbox_log_insert_is_owned_by_cdc_funnel" } —
+//! production `outbox` / `outbox_log` INSERTs are confined to their canonical fingerprint funnels.
 //! It intentionally does not replace `setlocal-funnel`: that guard owns "GUC write literal is
 //! unique"; this guard owns "tenant table SQL cannot be reached through raw pool/TxManager".
 //!
@@ -31,6 +35,7 @@ pub(crate) enum Rule {
     TenantTablesAbsent,
     ProdFilesAbsent,
     SqlSitesAbsent,
+    OutboxInsertSitesAbsent,
     StaleException,
     /// transaction retry primitive or postgres wrapper used outside the sanctioned UoW boundary.
     RetryPlacement,
@@ -230,6 +235,24 @@ pub(crate) fn scan_guard(
             "未扫描到任何 tenant-table SQL site，guard 真空化",
         ));
     }
+    if files
+        .iter()
+        .any(|(rel, _)| matches!(rel.as_str(), "outbox.rs" | "outbox_cdc.rs"))
+    {
+        for required in [
+            "outbox.rs::append_outbox",
+            "outbox.rs::append_replayed_outbox",
+            "outbox_cdc.rs::append_outbox_log",
+        ] {
+            if state.outbox_insert_sites.get(required).copied() != Some(1) {
+                findings.push(finding(
+                    Rule::OutboxInsertSitesAbsent,
+                    required,
+                    "canonical outbox INSERT must occur exactly once in its exact owner symbol",
+                ));
+            }
+        }
+    }
     if files.iter().any(|(rel, _)| rel == "tx_retry.rs") {
         for required in ["settings-config-commit", "identity-credential-bump-version"] {
             if !state.retry_sites.contains(required) {
@@ -258,6 +281,7 @@ struct ScanState {
     raw_sites: usize,
     allowed_exceptions: BTreeSet<&'static str>,
     retry_sites: BTreeSet<&'static str>,
+    outbox_insert_sites: BTreeMap<&'static str, usize>,
 }
 
 fn scan_source_file(
@@ -279,11 +303,15 @@ fn scan_source_file(
     let helper_tables = tenant_pgconnection_helpers(&expanded, tenant_tables);
     let (raw_hits, site_exceptions) =
         raw_tenant_accesses(rel, &expanded, tenant_tables, &helper_tables);
-    let (outbox_insert_hits, outbox_exceptions) = raw_outbox_insert_sites(rel, &expanded);
+    let (outbox_insert_hits, outbox_exceptions, outbox_insert_sites) =
+        raw_outbox_insert_sites(rel, &expanded);
     let append_bypass_hits = outbox_append_bypass_sites(rel, &expanded);
     let capability_mint_hits = tx_capability_mint_sites(rel, &expanded);
     state.allowed_exceptions.extend(site_exceptions);
     state.allowed_exceptions.extend(outbox_exceptions);
+    for site in outbox_insert_sites {
+        *state.outbox_insert_sites.entry(site).or_default() += 1;
+    }
     let raw_pool_field_hits = raw_tenant_pool_fields(&expanded);
     let raw_pool_field_exception = raw_pool_field_exception(rel, &expanded);
     note_raw_pool_field_exception(
@@ -666,34 +694,84 @@ struct RawOutboxAccess {
 fn raw_outbox_insert_sites(
     rel: &str,
     content: &str,
-) -> (Vec<RawOutboxAccess>, BTreeSet<&'static str>) {
-    if rel == "outbox.rs" {
-        return (Vec::new(), BTreeSet::new());
-    }
-    const NEEDLE: &str = "insert into outbox";
+) -> (
+    Vec<RawOutboxAccess>,
+    BTreeSet<&'static str>,
+    Vec<&'static str>,
+) {
     let mut exceptions = BTreeSet::new();
-    let findings = content
-        .match_indices(NEEDLE)
-        .filter(|(idx, _)| {
-            content[*idx + NEEDLE.len()..]
-                .chars()
-                .next()
-                .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        })
-        .filter_map(|(idx, _)| {
+    let mut owned_sites = Vec::new();
+    let mut findings = Vec::new();
+    for (needle, owner, symbols, pattern) in [
+        (
+            "insert into outbox",
+            "outbox.rs",
+            &["append_outbox", "append_replayed_outbox"][..],
+            "INSERT INTO outbox",
+        ),
+        (
+            "insert into outbox_log",
+            "outbox_cdc.rs",
+            &["append_outbox_log"][..],
+            "INSERT INTO outbox_log",
+        ),
+    ] {
+        for (idx, _) in content.match_indices(needle) {
+            let suffix = &content[idx + needle.len()..];
+            if needle == "insert into outbox"
+                && suffix
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            {
+                continue;
+            }
+            if rel == owner
+                && let Some(symbol) = enclosing_function_name(content, idx)
+                && symbols.contains(&symbol)
+            {
+                let site = match (rel, symbol) {
+                    ("outbox.rs", "append_outbox") => "outbox.rs::append_outbox",
+                    ("outbox.rs", "append_replayed_outbox") => "outbox.rs::append_replayed_outbox",
+                    ("outbox_cdc.rs", "append_outbox_log") => "outbox_cdc.rs::append_outbox_log",
+                    _ => unreachable!("symbol checked against exact owner allowlist"),
+                };
+                owned_sites.push(site);
+                continue;
+            }
             let (_, end) = raw_access_window(content, idx, ".execute(pool");
             let window = &content[idx.saturating_sub(400)..end];
-            if let Some(exception) = allowed_fault_matrix_outbox_insert(rel, window) {
+            if needle == "insert into outbox"
+                && let Some(exception) = allowed_fault_matrix_outbox_insert(rel, window)
+            {
                 exceptions.insert(exception);
-                return None;
+                continue;
             }
-            Some(RawOutboxAccess {
-                pattern: "INSERT INTO outbox",
+            findings.push(RawOutboxAccess {
+                pattern,
                 line: line_number(content, idx),
-            })
-        })
-        .collect();
-    (findings, exceptions)
+            });
+        }
+    }
+    (findings, exceptions, owned_sites)
+}
+
+fn enclosing_function_name(content: &str, target: usize) -> Option<&str> {
+    for (fn_idx, _) in content.match_indices("fn ") {
+        let name_start = fn_idx + "fn ".len();
+        let (name, after_name) = split_token(&content[name_start..]);
+        if name.is_empty() {
+            continue;
+        }
+        let open_rel = after_name.find('{')?;
+        let body_start = name_start + name.len() + open_rel + 1;
+        let (_, consumed) = braced_body(&content[body_start..])?;
+        let body_end = body_start + consumed;
+        if (body_start..body_end).contains(&target) {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn outbox_append_bypass_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
@@ -1514,7 +1592,7 @@ pub mod fault_matrix;
     }
 
     #[test]
-    fn green_outbox_log_insert_is_not_relay_outbox_bypass() {
+    fn green_outbox_log_insert_is_owned_by_cdc_funnel() {
         let (_, findings) = scan_guard(
             &migrations(),
             &files(&[
@@ -1523,13 +1601,128 @@ pub mod fault_matrix;
                     "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
                 ),
                 (
+                    "outbox.rs",
+                    "async fn append_outbox(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }\n\
+                     async fn append_replayed_outbox(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+                (
                     "outbox_cdc.rs",
-                    "async fn append(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                    "async fn append_outbox_log(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
                 ),
             ]),
         );
         assert!(
             !findings.iter().any(|f| f.rule == Rule::RawOutboxInsert),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_outbox_insert_in_owner_file_but_wrong_symbol() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "outbox.rs",
+                    "async fn append_outbox(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }\n\
+                     async fn append_replayed_outbox(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }\n\
+                     async fn accidental_bypass(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+                (
+                    "outbox_cdc.rs",
+                    "async fn append_outbox_log(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::RawOutboxInsert && finding.subject.starts_with("outbox.rs:")
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_duplicate_outbox_insert_inside_allowed_owner_symbol() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "outbox.rs",
+                    "async fn append_outbox(){ \
+                         sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; \
+                         sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; \
+                     }\n\
+                     async fn append_replayed_outbox(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+                (
+                    "outbox_cdc.rs",
+                    "async fn append_outbox_log(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::OutboxInsertSitesAbsent
+                    && finding.subject == "outbox.rs::append_outbox"
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn anti_vacuity_missing_exact_outbox_owner_symbol_is_reported() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "outbox.rs",
+                    "async fn append_outbox(){ sqlx::query(\"INSERT INTO outbox (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+                (
+                    "outbox_cdc.rs",
+                    "async fn append_outbox_log(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::OutboxInsertSitesAbsent
+                    && finding.subject == "outbox.rs::append_replayed_outbox"
+            }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_outbox_log_insert_outside_cdc_funnel() {
+        let (_, findings) = scan_guard(
+            &migrations(),
+            &files(&[
+                (
+                    "dead_letter.rs",
+                    "fn sweep(){ sqlx::query(\"DELETE FROM dead_letter WHERE last_attempt_at <= now() - make_interval(secs => $1)\").execute(&self.maintenance_pool); }",
+                ),
+                (
+                    "emitter.rs",
+                    "async fn append(){ sqlx::query(\"INSERT INTO outbox_log (event_id) VALUES ($1)\").execute(conn.conn()).await; }",
+                ),
+            ]),
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == Rule::RawOutboxInsert),
             "{findings:?}"
         );
     }

@@ -8,7 +8,8 @@ use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::reconcile::{
     AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, DurableReconciler,
     ReconcileAttempt, ReconcileScheduleError, ReconcileScheduleStore, ReconcileSchedulerBuilder,
-    ReviewedCommand, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
+    ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy,
+    Trigger,
 };
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 
@@ -60,8 +61,8 @@ impl ReconcileScheduleStore for NoopStore {
         _attempt: &ReconcileAttempt,
         _action: ConvergeAction,
         _command: ReviewedCommand,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
-        Ok(ScheduleLeaseOutcome::Held)
+    ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
+        Ok(ScheduleActionOutcome::Enqueued)
     }
 
     async fn extend_lease(
@@ -120,8 +121,8 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
             .await
             .expect("record action and command")
         {
-            ScheduleLeaseOutcome::Held => {}
-            ScheduleLeaseOutcome::Lost => {
+            ScheduleActionOutcome::Enqueued => {}
+            ScheduleActionOutcome::Lost => {
                 return Err(ReconcileError::new(EngineErrorKind::Transient));
             }
         }

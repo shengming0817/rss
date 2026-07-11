@@ -52,7 +52,8 @@ pub use inbox::{
 };
 pub use outbox::{
     BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
-    HandleResult, OutboxBacklog, OutboxContractId, OutboxContractIdError, OutboxMetricSubject,
+    HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxContractIdError,
+    OutboxFactConflict, OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject,
     OutboxPayload, OutboxRelay, OutboxSource, PartitionKey, PartitionKeyError, PendingEntry,
     PermanentError, PermanentErrorKind, RetentionSweeper, StoredOutboxEntry,
     StoredOutboxEntryError, StoredOutboxTopic, is_canonical_topic_name,

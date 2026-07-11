@@ -1788,6 +1788,25 @@ impl core::marker::Unpin for diport::outbox_emitter::EnvelopeIdentityError
 impl core::marker::UnsafeUnpin for diport::outbox_emitter::EnvelopeIdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeIdentityError
+pub enum diport::outbox_emitter::OutboxEmitErrorKind
+pub diport::outbox_emitter::OutboxEmitErrorKind::FactConflict
+pub diport::outbox_emitter::OutboxEmitErrorKind::Infrastructure
+impl core::clone::Clone for diport::outbox_emitter::OutboxEmitErrorKind
+pub fn diport::outbox_emitter::OutboxEmitErrorKind::clone(&self) -> diport::outbox_emitter::OutboxEmitErrorKind
+impl core::cmp::Eq for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::cmp::PartialEq for diport::outbox_emitter::OutboxEmitErrorKind
+pub fn diport::outbox_emitter::OutboxEmitErrorKind::eq(&self, &diport::outbox_emitter::OutboxEmitErrorKind) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::OutboxEmitErrorKind
+pub fn diport::outbox_emitter::OutboxEmitErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Freeze for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Send for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Sync for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Unpin for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxEmitErrorKind
 #[repr(transparent)] pub struct diport::outbox_emitter::DynOutboxEmitter<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynOutboxEmitter<'dynosaur_struct>
 pub const fn diport::DynOutboxEmitter<'dynosaur_struct>::from_box(alloc::boxed::Box<impl diport::outbox_emitter::OutboxEmitter + 'dynosaur_struct>) -> alloc::boxed::Box<diport::DynOutboxEmitter<'dynosaur_struct>>
@@ -1903,6 +1922,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OutboxA
 impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxActor
 pub struct diport::outbox_emitter::OutboxEmitError
 impl diport::outbox_emitter::OutboxEmitError
+pub fn diport::outbox_emitter::OutboxEmitError::fact_conflict(consistency::outbox::OutboxFactConflict) -> Self
+pub const fn diport::outbox_emitter::OutboxEmitError::kind(&self) -> diport::outbox_emitter::OutboxEmitErrorKind
 pub fn diport::outbox_emitter::OutboxEmitError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 impl core::error::Error for diport::outbox_emitter::OutboxEmitError
 pub fn diport::outbox_emitter::OutboxEmitError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
@@ -3599,6 +3620,25 @@ impl core::marker::Unpin for diport::object_store::ObjectStoreError
 impl core::marker::UnsafeUnpin for diport::object_store::ObjectStoreError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::object_store::ObjectStoreError
 impl !core::panic::unwind_safe::UnwindSafe for diport::object_store::ObjectStoreError
+pub enum diport::OutboxEmitErrorKind
+pub diport::OutboxEmitErrorKind::FactConflict
+pub diport::OutboxEmitErrorKind::Infrastructure
+impl core::clone::Clone for diport::outbox_emitter::OutboxEmitErrorKind
+pub fn diport::outbox_emitter::OutboxEmitErrorKind::clone(&self) -> diport::outbox_emitter::OutboxEmitErrorKind
+impl core::cmp::Eq for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::cmp::PartialEq for diport::outbox_emitter::OutboxEmitErrorKind
+pub fn diport::outbox_emitter::OutboxEmitErrorKind::eq(&self, &diport::outbox_emitter::OutboxEmitErrorKind) -> bool
+impl core::fmt::Debug for diport::outbox_emitter::OutboxEmitErrorKind
+pub fn diport::outbox_emitter::OutboxEmitErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::StructuralPartialEq for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Freeze for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Send for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Sync for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::Unpin for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::marker::UnsafeUnpin for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::outbox_emitter::OutboxEmitErrorKind
+impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OutboxEmitErrorKind
 #[non_exhaustive] pub enum diport::PdpError
 pub diport::PdpError::Expired
 pub diport::PdpError::InvalidSignature
@@ -5463,6 +5503,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::OutboxEffect
 impl core::panic::unwind_safe::UnwindSafe for diport::OutboxEffect
 pub struct diport::OutboxEmitError
 impl diport::outbox_emitter::OutboxEmitError
+pub fn diport::outbox_emitter::OutboxEmitError::fact_conflict(consistency::outbox::OutboxFactConflict) -> Self
+pub const fn diport::outbox_emitter::OutboxEmitError::kind(&self) -> diport::outbox_emitter::OutboxEmitErrorKind
 pub fn diport::outbox_emitter::OutboxEmitError::new<E>(E) -> Self where E: core::error::Error + core::marker::Send + core::marker::Sync + 'static
 impl core::error::Error for diport::outbox_emitter::OutboxEmitError
 pub fn diport::outbox_emitter::OutboxEmitError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>

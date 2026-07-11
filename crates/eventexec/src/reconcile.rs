@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use consistency::{
@@ -54,8 +55,18 @@ const RENEW_INTERVAL: Duration = Duration::from_secs(5);
 #[derive(Debug, thiserror::Error)]
 #[error("reconcile schedule store operation failed")]
 pub struct ReconcileScheduleError {
+    kind: ReconcileScheduleErrorKind,
     #[source]
     source: RedactedSource,
+}
+
+/// Closed, payload-free scheduler failure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileScheduleErrorKind {
+    /// Durable scheduler provider failed.
+    Infrastructure,
+    /// An action event id already names a different durable fact.
+    FactConflict,
 }
 
 impl ReconcileScheduleError {
@@ -65,8 +76,22 @@ impl ReconcileScheduleError {
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
+            kind: ReconcileScheduleErrorKind::Infrastructure,
             source: RedactedSource::new(source),
         }
+    }
+
+    /// Preserve a typed outbox fact conflict without exposing fact material.
+    pub fn fact_conflict(source: consistency::OutboxFactConflict) -> Self {
+        Self {
+            kind: ReconcileScheduleErrorKind::FactConflict,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    /// Return the closed failure classification.
+    pub const fn kind(&self) -> ReconcileScheduleErrorKind {
+        self.kind
     }
 }
 
@@ -95,6 +120,150 @@ pub enum ScheduleLeaseOutcome {
     /// The target lease token + epoch still matched.
     Held,
     /// The target lease was reclaimed or expired before the write.
+    Lost,
+}
+
+/// Closed, payload-free reason for persistently disabling a reconcile target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileQuarantineReason {
+    /// The stable event id is already bound to a different outbox fact.
+    FactConflict,
+}
+
+/// Reviewed capability for tenant-scoped reconcile target inspection and recovery.
+///
+/// Only an authenticated operator boundary may issue this zero-sized token. Keeping it mandatory
+/// on the mutation/read port makes omission fail to compile; `rss_dlq_operator_callsite` limits
+/// the public issuing funnel to reviewed admin/PDP wrappers.
+#[derive(Debug, Clone, Copy)]
+pub struct OperatorReconcileCapability {
+    _private: (),
+}
+
+impl OperatorReconcileCapability {
+    /// Issue the capability after service-principal authentication, tenant authorization and
+    /// start-audit recording have all succeeded.
+    pub fn issue_for_authorized_operator() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Durable reconcile target state exposed to the operator control boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileTargetStatus {
+    /// The scheduler may claim the target.
+    Active,
+    /// The scheduler must skip the target until an authorized resume.
+    Disabled,
+}
+
+impl ReconcileTargetStatus {
+    /// Stable wire/log label.
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// Payload-free reconcile target inspection result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileTargetSummary {
+    tenant: vocab::TenantId,
+    target_id: String,
+    reconciler_id: String,
+    resource_kind: String,
+    status: ReconcileTargetStatus,
+    disabled_reason: Option<ReconcileQuarantineReason>,
+}
+
+impl ReconcileTargetSummary {
+    /// Construct a validated provider result.
+    pub fn new(
+        tenant: vocab::TenantId,
+        target_id: String,
+        reconciler_id: String,
+        resource_kind: String,
+        status: ReconcileTargetStatus,
+        disabled_reason: Option<ReconcileQuarantineReason>,
+    ) -> Result<Self, ReconcileScheduleError> {
+        if status == ReconcileTargetStatus::Active && disabled_reason.is_some() {
+            return Err(ReconcileScheduleError::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "active reconcile target has a disabled reason",
+            )));
+        }
+        Ok(Self {
+            tenant,
+            target_id,
+            reconciler_id,
+            resource_kind,
+            status,
+            disabled_reason,
+        })
+    }
+
+    /// Owning tenant.
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// Opaque target UUID.
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    /// Reconciler namespace.
+    pub fn reconciler_id(&self) -> &str {
+        &self.reconciler_id
+    }
+
+    /// Resource kind; the resource identifier is intentionally not exposed.
+    pub fn resource_kind(&self) -> &str {
+        &self.resource_kind
+    }
+
+    /// Current scheduler state.
+    pub fn status(&self) -> ReconcileTargetStatus {
+        self.status
+    }
+
+    /// Closed quarantine reason, when the target was disabled by the scheduler.
+    pub fn disabled_reason(&self) -> Option<ReconcileQuarantineReason> {
+        self.disabled_reason
+    }
+}
+
+impl ReconcileQuarantineReason {
+    /// Stable low-cardinality log/UI label.
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::FactConflict => "fact_conflict",
+        }
+    }
+
+    const fn code(self) -> u8 {
+        match self {
+            Self::FactConflict => 1,
+        }
+    }
+
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::FactConflict),
+            _ => None,
+        }
+    }
+}
+
+/// Atomic action/outbox write result under the target lease.
+#[must_use = "action outcomes must be matched so Lost is handled explicitly"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleActionOutcome {
+    /// Action and command outbox fact were committed.
+    Enqueued,
+    /// The target lease was no longer held.
     Lost,
 }
 
@@ -312,6 +481,15 @@ impl AttemptResult {
         }
     }
 
+    fn from_quarantine(next_run_after: Duration) -> Self {
+        Self {
+            result: ReconcileResultLabel::Invariant,
+            error_kind: Some(AttemptErrorKind::Invariant),
+            requeue_after: None,
+            next_run_after,
+        }
+    }
+
     /// Stable result label.
     pub fn result(&self) -> ReconcileResultLabel {
         self.result
@@ -419,7 +597,7 @@ pub trait ReconcileScheduleStore {
         attempt: &ReconcileAttempt,
         action: ConvergeAction,
         command: ReviewedCommand,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>;
+    ) -> Result<ScheduleActionOutcome, ReconcileScheduleError>;
 
     /// Extend a held target lease.
     async fn extend_lease(
@@ -449,11 +627,32 @@ pub trait ReconcileScheduleStore {
     ) -> Result<(), ReconcileScheduleError>;
 }
 
+/// Authorized operator port for inspecting and resuming quarantined reconcile targets.
+#[allow(async_fn_in_trait)]
+pub trait ReconcileOperatorStore {
+    /// Read one exact tenant/target without exposing command payloads or fact material.
+    async fn inspect_target(
+        &self,
+        tenant: vocab::TenantId,
+        target_id: &str,
+        capability: OperatorReconcileCapability,
+    ) -> Result<ReconcileTargetSummary, ReconcileScheduleError>;
+
+    /// Clear a reviewed quarantine and make the exact tenant/target immediately due.
+    async fn resume_target(
+        &self,
+        tenant: vocab::TenantId,
+        target_id: &str,
+        capability: OperatorReconcileCapability,
+    ) -> Result<ReconcileTargetSummary, ReconcileScheduleError>;
+}
+
 /// Attempt-scoped recorder handed to durable reconcilers.
 pub struct AttemptScope<'a, S: ReconcileScheduleStore> {
     store: &'a S,
     keyring: &'a CommandIdempotencyKeyring,
     attempt: ReconcileAttempt,
+    quarantine_reason: AtomicU8,
 }
 
 impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
@@ -466,6 +665,7 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
             store,
             keyring,
             attempt,
+            quarantine_reason: AtomicU8::new(0),
         }
     }
 
@@ -479,15 +679,29 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
         &self,
         action: ConvergeAction,
         command: C,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>
+    ) -> Result<ScheduleActionOutcome, ReconcileScheduleError>
     where
         C: generated::command::TypedCommandSpec<SubjectId = EnvelopeSubjectId, Actor = OutboxActor>,
     {
         let command = ReviewedCommand::from_spec(command, self.keyring)
             .map_err(ReconcileScheduleError::new)?;
-        self.store
+        let outcome = self
+            .store
             .record_action_and_enqueue_command(&self.attempt, action, command)
-            .await
+            .await;
+        if let Err(error) = &outcome
+            && error.kind() == ReconcileScheduleErrorKind::FactConflict
+        {
+            self.quarantine_reason.store(
+                ReconcileQuarantineReason::FactConflict.code(),
+                Ordering::Release,
+            );
+        }
+        outcome
+    }
+
+    fn quarantine_reason(&self) -> Option<ReconcileQuarantineReason> {
+        ReconcileQuarantineReason::from_code(self.quarantine_reason.load(Ordering::Acquire))
     }
 }
 
@@ -651,7 +865,7 @@ type DurableReconcileOutcome =
     Result<Result<Outcome, ReconcileError>, Box<dyn std::any::Any + Send>>;
 
 enum TargetRun {
-    Finished(DurableReconcileOutcome),
+    Finished(DurableReconcileOutcome, Option<ReconcileQuarantineReason>),
     Cancelled,
     LeaseLost,
 }
@@ -795,7 +1009,13 @@ where
             .run_reconciler_with_lease(&target, &attempt, token)
             .await
         {
-            TargetRun::Finished(result) => self.finish_attempt(attempt, result, attempts).await,
+            TargetRun::Finished(result, None) => {
+                self.finish_attempt(attempt, result, attempts).await
+            }
+            TargetRun::Finished(_, Some(reason)) => {
+                self.finish_quarantined_attempt(attempt, reason, attempts)
+                    .await;
+            }
             TargetRun::Cancelled => {
                 self.release_lease_best_effort(&target, "attempt_cancelled")
                     .await;
@@ -877,7 +1097,7 @@ where
                 TargetRun::LeaseLost
             }
             result = AssertUnwindSafe(self.reconciler.reconcile(&ctx, target, &scope)).catch_unwind() => {
-                TargetRun::Finished(result)
+                TargetRun::Finished(result, scope.quarantine_reason())
             }
         }
     }
@@ -893,6 +1113,34 @@ where
         emit_reconcile_result(attempt_result.result());
         self.persist_attempt_result(&attempt, attempt_result).await;
         self.release_lease_best_effort(attempt.target(), "attempt_finished")
+            .await;
+    }
+
+    async fn finish_quarantined_attempt(
+        &self,
+        attempt: ReconcileAttempt,
+        reason: ReconcileQuarantineReason,
+        attempts: &mut HashMap<String, u32>,
+    ) {
+        attempts.remove(attempt.target().target_id());
+        self.health.mark_degraded();
+        emit_reconcile_result(ReconcileResultLabel::Invariant);
+        tracing::error!(
+            tenant_id = %attempt.target().tenant(),
+            reconciler_id = attempt.target().reconciler_id(),
+            resource_kind = attempt.target().resource_kind(),
+            resource_id = attempt.target().resource_id(),
+            target_id = attempt.target().target_id(),
+            attempt_id = attempt.attempt_id(),
+            quarantine_reason = reason.as_label(),
+            "reconcile: target quarantined; automatic reclaim disabled"
+        );
+        self.persist_attempt_result(
+            &attempt,
+            AttemptResult::from_quarantine(self.trigger.period()),
+        )
+        .await;
+        self.release_lease_best_effort(attempt.target(), "attempt_quarantined")
             .await;
     }
 
@@ -1636,10 +1884,48 @@ mod tests {
     use super::{
         AttemptErrorKind, AttemptResult, AttemptScope, BackoffError, BackoffPolicy, Builder,
         ClaimedTarget, DurableReconciler, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
-        ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileScheduleError,
-        ReconcileScheduleStore, ReconcileSchedulerBuilder, ReviewedCommand, ScheduleAttemptOutcome,
-        ScheduleLeaseOutcome, Tenancy, Trigger, TriggerError, bump_attempts,
+        ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileQuarantineReason,
+        ReconcileScheduleError, ReconcileScheduleErrorKind, ReconcileScheduleStore,
+        ReconcileSchedulerBuilder, ReconcileTargetStatus, ReconcileTargetSummary, ReviewedCommand,
+        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
+        TriggerError, bump_attempts,
     };
+
+    #[test]
+    fn schedule_error_classification_is_closed_and_redacted() {
+        let infrastructure =
+            ReconcileScheduleError::new(std::io::Error::other("SECRET_SCHEDULE_MARKER"));
+        assert_eq!(
+            infrastructure.kind(),
+            ReconcileScheduleErrorKind::Infrastructure
+        );
+        assert!(!format!("{infrastructure:?}").contains("SECRET_SCHEDULE_MARKER"));
+
+        let conflict = ReconcileScheduleError::fact_conflict(consistency::OutboxFactConflict);
+        assert_eq!(conflict.kind(), ReconcileScheduleErrorKind::FactConflict);
+        assert_eq!(
+            conflict.to_string(),
+            "reconcile schedule store operation failed"
+        );
+        assert!(!format!("{conflict:?}").contains("fingerprint"));
+    }
+
+    #[test]
+    fn operator_summary_rejects_active_target_with_quarantine_reason() -> TestResult {
+        let tenant = vocab::TenantId::parse("018f5d8a-7b6c-7d2e-8a1b-1234567890ab")?;
+        assert!(
+            ReconcileTargetSummary::new(
+                tenant,
+                "018f5d8a-7b6c-7d2e-8a1b-1234567890ac".to_owned(),
+                "device".to_owned(),
+                "device".to_owned(),
+                ReconcileTargetStatus::Active,
+                Some(ReconcileQuarantineReason::FactConflict),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1964,6 +2250,8 @@ mod tests {
         extend_outcome: Option<ScheduleLeaseOutcome>,
         release_outcome: Option<ScheduleLeaseOutcome>,
         release_error: bool,
+        fact_conflict_on_action: bool,
+        quarantines: u32,
     }
 
     impl FakeScheduleStore {
@@ -2011,6 +2299,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .release_error = true;
+        }
+
+        fn quarantine_action(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .fact_conflict_on_action = true;
         }
     }
 
@@ -2073,15 +2368,21 @@ mod tests {
             _attempt: &ReconcileAttempt,
             action: ConvergeAction,
             command: ReviewedCommand,
-        ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+        ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
             let (intent, _envelope) = command.into_parts();
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.fact_conflict_on_action {
+                state.quarantines = state.quarantines.saturating_add(1);
+                return Err(ReconcileScheduleError::fact_conflict(
+                    consistency::OutboxFactConflict,
+                ));
+            }
             state.actions.push(action);
             let current = intent.aliases().current().expect("keyed reconcile command");
             state
                 .command_keys
                 .push(format!("{}:{}", current.key_id(), current.digest().len()));
-            Ok(ScheduleLeaseOutcome::Held)
+            Ok(ScheduleActionOutcome::Enqueued)
         }
 
         async fn extend_lease(
@@ -2170,6 +2471,40 @@ mod tests {
         }
     }
 
+    struct QuarantiningScript;
+
+    impl DurableReconciler<FakeScheduleStore> for QuarantiningScript {
+        #[allow(clippy::expect_used)]
+        // reason: fixed unit-test command fixtures and injected fake outcomes are infallible.
+        async fn reconcile(
+            &self,
+            _ctx: &Context,
+            target: &ClaimedTarget,
+            attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<Outcome, ReconcileError> {
+            let error = attempt
+                .record_action_and_enqueue_command(
+                    ConvergeAction::Create,
+                    generated::command::_seed_v1::reconcile_command(
+                        generated::command::_seed_v1::SeedDoThingRequest {
+                            amount: 1,
+                            target_id: target.resource_id().to_string(),
+                        },
+                        target.tenant(),
+                        EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
+                        OutboxActor::service(
+                            OpaqueActorId::from_opaque("reconcile-test").expect("actor"),
+                        ),
+                        "quarantined-command".to_string(),
+                    ),
+                )
+                .await
+                .expect_err("fake fact conflict");
+            assert_eq!(error.kind(), ReconcileScheduleErrorKind::FactConflict);
+            Err(ReconcileError::new(EngineErrorKind::Invariant))
+        }
+    }
+
     #[allow(clippy::expect_used)]
     fn reviewed_command(key: &str) -> ReviewedCommand {
         ReviewedCommand::from_spec(
@@ -2255,12 +2590,53 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(outcome, ScheduleLeaseOutcome::Held);
+        assert_eq!(outcome, ScheduleActionOutcome::Enqueued);
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.actions, vec![ConvergeAction::Create]);
         assert_eq!(state.command_keys.len(), 1);
         assert_eq!(state.command_keys[0], "current:32");
         Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed positive builder fixture is part of the quarantine worker proof.
+    async fn reconcile_worker_terminally_records_fact_conflict_quarantine() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.quarantine_action();
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            QuarantiningScript,
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_batch_size(1)
+        .expect("positive batch")
+        .build();
+        let health = Arc::clone(&worker.health);
+
+        worker.run(token).await;
+
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.quarantines, 1);
+        assert!(
+            state.actions.is_empty(),
+            "quarantined action must roll back"
+        );
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.results[0].result(), ReconcileResultLabel::Invariant);
+        assert_eq!(
+            state.results[0].error_kind(),
+            Some(AttemptErrorKind::Invariant)
+        );
+        assert_eq!(state.releases, 1);
+        assert_ne!(health.status(), HealthStatus::Healthy);
     }
 
     #[tokio::test(start_paused = true)]

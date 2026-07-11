@@ -10,17 +10,20 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use consistency::OutboxAppendOutcome;
 use diport::{Clock, RedactedSource};
 use eventexec::reconcile::{
-    AttemptErrorKind, AttemptResult, AttemptTrigger, ClaimedTarget, ReconcileAttempt,
-    ReconcileScheduleError, ReconcileScheduleStore, ReviewedCommand, ScheduleAttemptOutcome,
+    AttemptErrorKind, AttemptResult, AttemptTrigger, ClaimedTarget, OperatorReconcileCapability,
+    ReconcileAttempt, ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleError,
+    ReconcileScheduleErrorKind, ReconcileScheduleStore, ReconcileTargetStatus,
+    ReconcileTargetSummary, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
     ScheduleLeaseOutcome,
 };
 
 use crate::PgStore;
 use crate::cotx::{PgTenantPool, TxCapability, infra_tenant_scope};
 use crate::outbox::{
-    OutboxAppendOutcome, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
+    OutboxAppendError, OutboxEnvelope, append_outbox, metadata_with_ambient, unix_secs,
 };
 
 /// Reconcile target identity under one tenant.
@@ -620,7 +623,7 @@ impl PgReconcileStore {
         tenant: vocab::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
-        update_target_status(&self.pool, tenant, target_id, "disabled", false).await
+        update_target_status(&self.pool, tenant, target_id, "disabled", None, false).await
     }
 
     /// Resume a target and make it immediately due.
@@ -629,7 +632,34 @@ impl PgReconcileStore {
         tenant: vocab::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
-        update_target_status(&self.pool, tenant, target_id, "active", true).await
+        update_target_status(&self.pool, tenant, target_id, "active", None, true).await
+    }
+}
+
+impl ReconcileOperatorStore for PgReconcileStore {
+    async fn inspect_target(
+        &self,
+        tenant: vocab::TenantId,
+        target_id: &str,
+        _capability: OperatorReconcileCapability,
+    ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
+        inspect_target(&self.pool, tenant, target_id)
+            .await
+            .map_err(ReconcileScheduleError::new)
+    }
+
+    async fn resume_target(
+        &self,
+        tenant: vocab::TenantId,
+        target_id: &str,
+        _capability: OperatorReconcileCapability,
+    ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
+        update_target_status(&self.pool, tenant, target_id, "active", None, true)
+            .await
+            .map_err(ReconcileScheduleError::new)?;
+        inspect_target(&self.pool, tenant, target_id)
+            .await
+            .map_err(ReconcileScheduleError::new)
     }
 }
 
@@ -810,7 +840,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         attempt: &ReconcileAttempt,
         action: consistency::ConvergeAction,
         command: ReviewedCommand,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+    ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
         let (intent, envelope_parts) = command.into_parts();
         let (contract, command_tenant, subject_id, actor, partition_key, causation_id) =
             envelope_parts.into_parts();
@@ -833,7 +863,8 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let lease_token = attempt.target().lease_token().to_string();
         let epoch = epoch_to_db(attempt.target().epoch()).map_err(ReconcileScheduleError::new)?;
         let action_kind = action.as_label();
-        self.pool
+        let committed = self
+            .pool
             .write(
                 infra_tenant_scope(tenant),
                 move |tx| {
@@ -842,43 +873,85 @@ impl ReconcileScheduleStore for PgReconcileStore {
                             .await
                             .map_err(ReconcileScheduleError::new)?;
                         if !held {
-                            return Ok(ScheduleLeaseOutcome::Lost);
+                            return Ok(CommittedActionOutcome::Lost);
                         }
-                        let prepared = crate::command_journal::prepare_command(tx, tenant, intent)
-                            .await
-                            .map_err(ReconcileScheduleError::new)?;
-                        sqlx::query(
-                            r#"
-                            INSERT INTO reconcile_actions
-                                (tenant_id, attempt_id, target_id, action_kind, result_label,
-                                 requeue_after_ms, error_kind)
-                            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'recorded', NULL, NULL)
-                            "#,
-                        )
-                        .bind(&tenant_id)
-                        .bind(&attempt_id)
-                        .bind(&target_id)
-                        .bind(action_kind)
-                        .execute(tx.conn())
-                        .await
-                        .map_err(ReconcileScheduleError::new)?;
-                        match append_outbox(tx, &prepared.entry, &env)
-                            .await
-                            .map_err(ReconcileScheduleError::new)?
-                        {
-                            OutboxAppendOutcome::Inserted => {}
-                            OutboxAppendOutcome::AlreadyExists => {
-                                ensure_existing_outbox_matches(tx, &prepared.entry, &env)
+                        begin_reconcile_command_savepoint(tx).await?;
+                        let write = async {
+                            let prepared =
+                                crate::command_journal::prepare_command(tx, tenant, intent)
                                     .await
                                     .map_err(ReconcileScheduleError::new)?;
+                            sqlx::query(
+                                r#"
+                                INSERT INTO reconcile_actions
+                                    (tenant_id, attempt_id, target_id, action_kind, result_label,
+                                     requeue_after_ms, error_kind)
+                                VALUES ($1::uuid, $2::uuid, $3::uuid, $4, 'recorded', NULL, NULL)
+                                "#,
+                            )
+                            .bind(&tenant_id)
+                            .bind(&attempt_id)
+                            .bind(&target_id)
+                            .bind(action_kind)
+                            .execute(tx.conn())
+                            .await
+                            .map_err(ReconcileScheduleError::new)?;
+                            match append_outbox(tx, &prepared.entry, &env)
+                                .await
+                                .map_err(map_schedule_append_error)?
+                            {
+                                OutboxAppendOutcome::Inserted | OutboxAppendOutcome::SameFact => {}
+                            }
+                            Ok::<(), ReconcileScheduleError>(())
+                        }
+                        .await;
+                        match write {
+                            Ok(()) => {
+                                release_reconcile_command_savepoint(tx).await?;
+                                Ok(CommittedActionOutcome::Enqueued)
+                            }
+                            Err(error)
+                                if error.kind() == ReconcileScheduleErrorKind::FactConflict =>
+                            {
+                                rollback_reconcile_command_savepoint(tx).await?;
+                                release_reconcile_command_savepoint(tx).await?;
+                                let quarantined = sqlx::query(
+                                    r#"
+                                    UPDATE reconcile_targets
+                                    SET status = 'disabled',
+                                        disabled_reason = 'fact_conflict',
+                                        updated_at = now()
+                                    WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                                    "#,
+                                )
+                                .bind(&tenant_id)
+                                .bind(&target_id)
+                                .execute(tx.conn())
+                                .await
+                                .map_err(ReconcileScheduleError::new)?;
+                                if quarantined.rows_affected() != 1 {
+                                    return Ok(CommittedActionOutcome::Lost);
+                                }
+                                Ok(CommittedActionOutcome::FactConflictQuarantined)
+                            }
+                            Err(error) => {
+                                rollback_reconcile_command_savepoint(tx).await?;
+                                release_reconcile_command_savepoint(tx).await?;
+                                Err(error)
                             }
                         }
-                        Ok(ScheduleLeaseOutcome::Held)
                     })
                 },
                 ReconcileScheduleError::new,
             )
-            .await
+            .await?;
+        match committed {
+            CommittedActionOutcome::Enqueued => Ok(ScheduleActionOutcome::Enqueued),
+            CommittedActionOutcome::Lost => Ok(ScheduleActionOutcome::Lost),
+            CommittedActionOutcome::FactConflictQuarantined => Err(
+                ReconcileScheduleError::fact_conflict(consistency::OutboxFactConflict),
+            ),
+        }
     }
 
     async fn extend_lease(
@@ -936,13 +1009,52 @@ impl ReconcileScheduleStore for PgReconcileStore {
     }
 }
 
+enum CommittedActionOutcome {
+    Enqueued,
+    Lost,
+    FactConflictQuarantined,
+}
+
+async fn begin_reconcile_command_savepoint(
+    tx: &mut TxCapability<'_>,
+) -> Result<(), ReconcileScheduleError> {
+    sqlx::query("SAVEPOINT reconcile_command_write")
+        .execute(tx.conn())
+        .await
+        .map(|_| ())
+        .map_err(ReconcileScheduleError::new)
+}
+
+async fn rollback_reconcile_command_savepoint(
+    tx: &mut TxCapability<'_>,
+) -> Result<(), ReconcileScheduleError> {
+    sqlx::query("ROLLBACK TO SAVEPOINT reconcile_command_write")
+        .execute(tx.conn())
+        .await
+        .map(|_| ())
+        .map_err(ReconcileScheduleError::new)
+}
+
+async fn release_reconcile_command_savepoint(
+    tx: &mut TxCapability<'_>,
+) -> Result<(), ReconcileScheduleError> {
+    sqlx::query("RELEASE SAVEPOINT reconcile_command_write")
+        .execute(tx.conn())
+        .await
+        .map(|_| ())
+        .map_err(ReconcileScheduleError::new)
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("reconcile command tenant does not match attempt tenant")]
 struct ReconcileTenantMismatch;
 
-#[derive(Debug, thiserror::Error)]
-#[error("reconcile command outbox conflict")]
-struct ReconcileOutboxConflict;
+fn map_schedule_append_error(error: OutboxAppendError) -> ReconcileScheduleError {
+    match error {
+        OutboxAppendError::Conflict(conflict) => ReconcileScheduleError::fact_conflict(conflict),
+        other => ReconcileScheduleError::new(other),
+    }
+}
 
 /// Reconcile store error.
 #[derive(Debug, thiserror::Error)]
@@ -1091,47 +1203,12 @@ async fn lock_held_lease(
     Ok(row.is_some())
 }
 
-async fn ensure_existing_outbox_matches(
-    tx: &mut TxCapability<'_>,
-    entry: &consistency::StoredOutboxEntry,
-    env: &OutboxEnvelope,
-) -> Result<(), ReconcileOutboxConflict> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        r#"
-        SELECT tenant_id = $2::uuid
-           AND topic = $3
-           AND domain = $4
-           AND contract_id = $5
-           AND contract_version = $6
-           AND schema_hash = $7
-           AND payload = $8 AS matches
-        FROM outbox
-        WHERE event_id = $1
-        "#,
-    )
-    .bind(entry.idem_key().as_str())
-    .bind(env.tenant().to_string())
-    .bind(entry.topic().as_str())
-    .bind(env.domain())
-    .bind(env.contract_id())
-    .bind(env.contract_version())
-    .bind(env.schema_hash())
-    .bind(entry.payload())
-    .fetch_optional(tx.conn())
-    .await
-    .map_err(|_| ReconcileOutboxConflict)?;
-
-    match row {
-        Some((true,)) => Ok(()),
-        Some((false,)) | None => Err(ReconcileOutboxConflict),
-    }
-}
-
 async fn update_target_status(
     pool: &PgTenantPool,
     tenant: vocab::TenantId,
     target_id: &str,
     status: &'static str,
+    disabled_reason: Option<&'static str>,
     due_now: bool,
 ) -> Result<(), ReconcileStoreError> {
     validate_runtime_component("target_id", target_id, UUID_TEXT_MAX_BYTES)?;
@@ -1145,7 +1222,8 @@ async fn update_target_status(
                     r#"
                     UPDATE reconcile_targets
                     SET status = $3,
-                        next_run_at = CASE WHEN $4 THEN now() ELSE next_run_at END,
+                        disabled_reason = $4,
+                        next_run_at = CASE WHEN $5 THEN now() ELSE next_run_at END,
                         updated_at = now()
                     WHERE tenant_id = $1::uuid
                       AND target_id = $2::uuid
@@ -1154,6 +1232,7 @@ async fn update_target_status(
                 .bind(&tenant_id)
                 .bind(&target_id)
                 .bind(status)
+                .bind(disabled_reason)
                 .bind(due_now)
                 .execute(tx.conn())
                 .await
@@ -1173,9 +1252,61 @@ async fn update_target_status(
     .await
 }
 
+async fn inspect_target(
+    pool: &PgTenantPool,
+    tenant: vocab::TenantId,
+    target_id: &str,
+) -> Result<ReconcileTargetSummary, ReconcileStoreError> {
+    validate_runtime_component("target_id", target_id, UUID_TEXT_MAX_BYTES)?;
+    let target_id = target_id.to_string();
+    let row: Option<(String, String, String, String, Option<String>)> = pool
+        .read(infra_tenant_scope(tenant), move |conn| {
+            Box::pin(async move {
+                sqlx::query_as(
+                    r#"
+                    SELECT target_id::text, reconciler_id, resource_kind, status, disabled_reason
+                    FROM reconcile_targets
+                    WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                    "#,
+                )
+                .bind(tenant.to_string())
+                .bind(target_id)
+                .fetch_optional(&mut *conn)
+                .await
+            })
+        })
+        .await
+        .map_err(ReconcileStoreError::new)?;
+    let (target_id, reconciler_id, resource_kind, status, disabled_reason) =
+        row.ok_or_else(|| ReconcileStoreError::new(ReconcileTargetNotFound))?;
+    let status = match status.as_str() {
+        "active" => ReconcileTargetStatus::Active,
+        "disabled" => ReconcileTargetStatus::Disabled,
+        _ => return Err(ReconcileStoreError::new(InvalidReconcileTargetState)),
+    };
+    let disabled_reason = match disabled_reason.as_deref() {
+        None => None,
+        Some("fact_conflict") => Some(ReconcileQuarantineReason::FactConflict),
+        Some(_) => return Err(ReconcileStoreError::new(InvalidReconcileTargetState)),
+    };
+    ReconcileTargetSummary::new(
+        tenant,
+        target_id,
+        reconciler_id,
+        resource_kind,
+        status,
+        disabled_reason,
+    )
+    .map_err(ReconcileStoreError::new)
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("reconcile target not found")]
 struct ReconcileTargetNotFound;
+
+#[derive(Debug, thiserror::Error)]
+#[error("reconcile target state is invalid")]
+struct InvalidReconcileTargetState;
 
 fn trigger_from_label(label: &str) -> Result<AttemptTrigger, ReconcileStoreError> {
     match label {

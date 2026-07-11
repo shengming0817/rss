@@ -38,7 +38,7 @@ impl ContractResponse {
         serde_json::from_slice(&self.body).map_err(TestkitError::Decode)
     }
 
-    /// 解析统一 wire error envelope（`{"error":{"code","message","details","requestId"}}`，
+    /// 解析统一 wire error envelope（`{"error":{"code","message","retryable","details","requestId"}}`，
     /// `error-handling.md §Wire 格式`，camelCase）。
     pub fn wire_error(&self) -> Result<WireError, TestkitError> {
         let env: ErrorEnvelope =
@@ -151,7 +151,7 @@ fn is_sensitive_key(key: &str) -> bool {
 /// 这是 testkit **测试侧 deserialize 镜像**——httpserve 的 serialize 侧 envelope 类型是私有的，
 /// 测试断言只需 decode 形状（与 `httpserve/tests/runtime.rs` 直接索引 `json["error"]["code"]` 同精神）。
 ///
-/// **严格镜像（契约对齐，不放宽）**：4 个字段 `code/message/details/requestId` 全 **required**（无
+/// **严格镜像（契约对齐，不放宽）**：5 个字段 `code/message/retryable/details/requestId` 全 **required**（无
 /// `serde(default)`）+ `deny_unknown_fields`——与 `error-handling.md` envelope 形状逐字段对齐。镜像比契约
 /// 宽松（默认空值吞掉缺字段 / 容忍多余字段）会让域契约测试经 [`ContractResponse::ensure_error`] 漏测
 /// envelope 形状回归：handler 漏 `message`/`details`/`requestId` 或多写字段时，反序列化即失败、`ensure_error`
@@ -163,6 +163,8 @@ pub struct WireError {
     pub code: String,
     /// 人读 message（const literal，无 PII）。
     pub message: String,
+    /// 请求事实不变时客户端可否安全重试。
+    pub retryable: bool,
     /// typed detail 列表（4xx 可下发；可空数组，但字段须在）。
     pub details: Vec<serde_json::Value>,
     /// 关联请求 id（框架注入）。

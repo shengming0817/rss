@@ -97,7 +97,14 @@ async fn extra_field_error() -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({
-            "error": { "code": "ERR_X", "message": "m", "details": [], "requestId": "r", "extra": 1 }
+            "error": {
+                "code": "ERR_X",
+                "message": "m",
+                "retryable": false,
+                "details": [],
+                "requestId": "r",
+                "extra": 1
+            }
         })),
     )
         .into_response()
@@ -149,6 +156,7 @@ async fn malformed_body_is_validation_error() -> TestResult {
     // envelope 形状字段可访问（camelCase requestId 解析）。此处 "test-rid" 是合成 router 的固定哨兵
     // （由 testkit::wire_error_response 写入）——真实 requestId 由框架注入，见 httpserve/tests/runtime.rs。
     assert_eq!(resp.wire_error()?.request_id, "test-rid");
+    assert!(!resp.wire_error()?.retryable);
     Ok(())
 }
 

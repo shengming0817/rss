@@ -319,6 +319,13 @@ outbox、projection 等跨域 key 混入 `_runtime` 前缀而丢失所有权。
 
 ## Outbox Envelope
 
+Outbox same-fact/conflict 判定的 canonical fingerprint 仅用于存储边界比较，不属于诊断
+标识。fingerprint、payload、partition key、causation id 与 stable metadata 的 current/candidate
+值均不得进入 Debug/Display/error/log/trace/metrics；冲突只暴露低基数静态分类
+`fact_conflict`；Rust/SQL parity 漂移只记录静态分类 `canonical_drift`，不记录 identity
+原材料。`occurredAt` / `trace` / `correlation` 是可重试漂移的观测字段，不参与事实
+fingerprint。
+
 trace、correlation、principal、occurred_at、schemaVersion、schemaHash 等 reserved envelope 字段由 **adapter 在受控构造点经
 sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 端事件发生时刻；schema 字段来自 generated
 `vocab::ContractBinding`，并同源落 outbox `contract_version` / `schema_hash` 物理列；同 crate 时间编码

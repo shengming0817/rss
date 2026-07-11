@@ -134,6 +134,7 @@ mod smoke {
         let e = ConfigRepoError::VersionConflict;
         match e {
             ConfigRepoError::VersionConflict => {}
+            ConfigRepoError::OutboxFactConflict(_) => {}
             ConfigRepoError::ProtectionUnavailable(_) => {}
             ConfigRepoError::ProtectionAuthFailure(_) => {}
             ConfigRepoError::Storage(_) => {}

@@ -142,6 +142,43 @@ SELECT/INSERT/UPDATE 且不授 DELETE，并在建表迁移内落 `FORCE RLS` 与
 command journal claim 和 relay outbox append 必须在同一个 tenant-scoped transaction 内提交，不提供
 dual-write、旧字段 fallback 或 raw pool path。
 
+`0055` 为 mutable `outbox` 与 CDC `outbox_log` 安装同一 `rss-outbox-fact-v1` canonical
+fingerprint；`fact_fingerprint` 是 32-byte stored generated column，应用不可显式写入。同
+`event_id` 只有 fingerprint 相等时才是 `SameFact`，不等则是 typed conflict 并回滚业务
+事务。旧 mutable 行由 generated expression 确定性回填；旧 CDC 行缺失
+`partition_key` 无法无损恢复，故 migration 在 `outbox_log` 非空时用静态错误 fail-closed，
+不猜测、不留兼容路径。metadata number 冻结为 exact decimal canonical spelling：去符号零、前导零和
+coefficient 尾零后编码成 `<integer-coefficient>e<base10-exponent>`（例如 `1e2`/`100.0` → `1e2`、
+`1.2300` → `123e-2`、`1e-7` → `1e-7`、`-0` → `0e0`）；Rust 启用 arbitrary-precision JSON
+保留输入精度，PostgreSQL 从 exact `jsonb numeric` 做同算法转换，不依赖两端默认格式化。
+
+### 0055 CDC cutover runbook（一次性、无兼容路径）
+
+1. **冻结并存档。** 停止所有 CDC outbox producer；暂停 Kafka Connect connector，确认 task 为
+   `PAUSED`。分别保存 `GET /connectors/<name>/config`、`GET /connectors/<name>/status`、
+   `GET /connectors/<name>/offsets` 响应并做 SHA-256；用
+   `SELECT * FROM pg_publication_tables WHERE pubname='<publication>' ORDER BY 1,2,3` 保存 publication
+   membership。执行 `SELECT count(*) FROM outbox_log`，结果必须为 `0`；非零即终止，不 delete、不猜测
+   partition、不继续迁移。用 `COPY (SELECT * FROM outbox_log ORDER BY event_id) TO STDOUT (FORMAT binary)`
+   生成空表基线 archive 并保存 checksum，作为 cutover 审计证据。
+2. **容量/锁预检。** 确认 `pg_total_relation_size('outbox') <= 10 GiB`，maintenance window 至少覆盖
+   heap rewrite；确认无长事务持有 `outbox`/`outbox_log` 锁。0055 自身以 `lock_timeout=5s`、
+   `statement_timeout=5min` fail-closed，超限或超时只允许扩大已评审的维护窗口后重跑，不启用旧写路径。
+3. **迁移。** 保持 connector paused，运行唯一正式 migration runner。验证 `outbox_log.partition_key`、
+   两表 stored `fact_fingerprint`、32-byte CHECK 和 canonical helper privilege；运行共享 Rust/SQL golden
+   vectors。migration 事务失败时 schema 原子回滚，connector 保持 paused；migration 成功后只允许前向修复。
+4. **恢复 publication。** PostgreSQL 18+ 使用
+   `CREATE PUBLICATION <publication> FOR TABLE outbox_log WITH (publish_generated_columns = stored)`；若
+   publication 已存在，则在同一维护窗口按存档 membership 重建并逐行比对 `pg_publication_tables`。
+   低于 PostgreSQL 18 直接终止 cutover，不省略 generated column。
+5. **恢复 connector/offset。** connector 必须 stopped 时，以存档 config 原样 `PUT /connectors/<name>/config`，
+   再用 `PATCH /connectors/<name>/offsets` 恢复已存档 partition/LSN offset；读取 `/offsets` 做精确比对后才
+   resume。禁止 `snapshot.mode=initial`、新 consumer group 或从 earliest 重放来替代 offset restore。
+6. **验收与解冻。** 写入一个新 logical fact，确认 connector 只发布一次且消息包含 generated
+   fingerprint/header；重试同事实得到 SameFact，异事实得到 typed Conflict。记录 publication、connector
+   config/offset、archive checksum 和 golden-vector 结果后，才恢复 producer 流量。archive 按事件数据保留
+   策略存入受控对象存储；不得把 payload/metadata 写入工单或日志。
+
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
 `saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，

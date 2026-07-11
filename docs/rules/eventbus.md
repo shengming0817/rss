@@ -76,6 +76,15 @@ outbox relay/subscriber rehydrate 的受控路径调用 `insert_wire_pair`。
 
 PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback / 双写兼容：
 
+**事实同一性（OUTBOX-FACT-FUNNEL-01）**：mutable 与 CDC 模式共用
+`rss-outbox-fact-v1` canonical identity。首次写入返回 `Inserted`；同 `event_id` 且稳定事实
+完全相同返回 `SameFact`；任一稳定字段不同返回 typed `FactConflict`并在 commit
+前退出。identity 包含 event/tenant/domain/topic/contract/schema/payload/partition/causation
+与 persisted stable metadata；仅 `occurredAt` / `trace` / `correlation` 是可重试漂移的观测
+字段而被排除。status/retry/lease/seq/行时间不属于事实。fingerprint 由类型化
+identity 产生，DB 以 stored generated column 重算；任一边界不得记录 fingerprint 或原
+材料。
+
 - **relay mode**：默认 `PgInfraDeps::emitter(clock)` 与各域 `PgDomainDeps::*::outbox(...)` 写 mutable
   `outbox` 状态表。`PgOutbox` relay / backlog / sweeper / DLX redrive 只读取 `outbox` 与 `rss_outbox_*`
   SECURITY DEFINER 函数，不读取 `outbox_log`。

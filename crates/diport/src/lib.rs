@@ -164,7 +164,7 @@ pub use object_store::{
 };
 pub use outbox_emitter::{
     DynOutboxEmitter, EnvelopeCausationId, EnvelopeIdentityError, EnvelopeSubjectId, OpaqueActorId,
-    OutboxActor, OutboxEmitError, OutboxEmitter, OutboxEnvelopeParts,
+    OutboxActor, OutboxEmitError, OutboxEmitErrorKind, OutboxEmitter, OutboxEnvelopeParts,
 };
 pub use pdp::{
     CredentialScheme, DynPdp, Pdp, PdpError, RawCredential, SERVICE_TOKEN_TENANT_HEADER,

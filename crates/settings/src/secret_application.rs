@@ -369,7 +369,7 @@ fn parse_secret_publish(
 fn secret_error_response(err: &SecretServiceError, tenant: TenantId, request_id: &str) -> Response {
     let kind = match err {
         SecretServiceError::InvalidKey => CoreErrorKind::Validation,
-        SecretServiceError::VersionConflict => CoreErrorKind::Conflict,
+        SecretServiceError::VersionConflict => CoreErrorKind::VersionConflict,
         SecretServiceError::NotFound | SecretServiceError::VersionNotFound => {
             CoreErrorKind::NotFound
         }

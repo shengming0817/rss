@@ -195,10 +195,11 @@ fn scan_pg_adapter_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         }
     }
 
-    match function_body(&proof_content, "record_action_and_enqueue_command")
-        .and_then(transactional_write_body)
-    {
-        Some(body) if has_ordered_transactional_seam_tokens(body) => {}
+    match function_body(&proof_content, "record_action_and_enqueue_command") {
+        Some(function)
+            if transactional_write_body(function)
+                .is_some_and(has_ordered_transactional_seam_tokens)
+                && function.contains("ReconcileScheduleError::fact_conflict") => {}
         Some(_) | None => findings.push(finding(
             Rule::MissingTransactionalSeam,
             path.display().to_string(),
@@ -237,6 +238,10 @@ fn has_ordered_transactional_seam_tokens(content: &str) -> bool {
     };
     let action = lock + action_rel;
     content[action..].contains("append_outbox(tx,")
+        && content.contains("begin_reconcile_command_savepoint(tx)")
+        && content.contains("rollback_reconcile_command_savepoint(tx)")
+        && content.contains("status = 'disabled'")
+        && content.contains("CommittedActionOutcome::FactConflictQuarantined")
 }
 
 fn braced_range(content: &str, open: usize) -> Option<Range<usize>> {
@@ -375,8 +380,13 @@ mod tests {
                     self.pool.write(tenant, move |tx| {
                         Box::pin(async move {
                             let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
+                            begin_reconcile_command_savepoint(tx).await?;
                             sqlx::query("INSERT INTO reconcile_actions (tenant_id) VALUES ($1)");
                             append_outbox(tx, &entry, &env).await?;
+                            rollback_reconcile_command_savepoint(tx).await?;
+                            sqlx::query("UPDATE reconcile_targets SET status = 'disabled'");
+                            Ok(CommittedActionOutcome::FactConflictQuarantined)
+                            ReconcileScheduleError::fact_conflict(reason)
                         })
                     });
                 }
@@ -385,6 +395,31 @@ mod tests {
         );
         assert!(scheduler_findings.is_empty(), "{scheduler_findings:?}");
         assert!(pg_findings.is_empty(), "{pg_findings:?}");
+    }
+
+    #[test]
+    fn reconcile_outbox_command_guard_requires_fact_conflict_quarantine() {
+        let findings = scan_pg_adapter_content(
+            Path::new("adapters/postgres/src/reconcile.rs"),
+            r#"
+            impl ReconcileScheduleStore for PgReconcileStore {
+                async fn record_action_and_enqueue_command(&self) {
+                    self.pool.write(tenant, move |tx| {
+                        Box::pin(async move {
+                            let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
+                            sqlx::query("INSERT INTO reconcile_actions (tenant_id) VALUES ($1)");
+                            append_outbox(tx, &entry, &env).await?;
+                        })
+                    });
+                }
+            }
+            "#,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingTransactionalSeam)
+        );
     }
 
     #[test]

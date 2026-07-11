@@ -22,14 +22,15 @@ use std::time::{Duration, SystemTime};
 
 use consistency::{
     BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, EventEntry, IdemKey,
-    OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxPayload, OutboxRelay, OutboxSource,
-    PendingEntry, RetentionSweeper, StoredOutboxEntry,
+    OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactConflict,
+    OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject, OutboxPayload, OutboxRelay,
+    OutboxSource, PendingEntry, RetentionSweeper, StoredOutboxEntry,
 };
 use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
     EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT, KEY_SCHEMA_HASH,
     KEY_SCHEMA_VERSION, KEY_SUBJECT_ID, KEY_TENANT_ID, KEY_TRACE, MetadataError, OutboxActor,
-    PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
+    OutboxEmitError, PublishRequest, Publisher, PublisherError, RESERVED_METADATA_KEYS,
 };
 use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use sqlx::Row;
@@ -524,10 +525,46 @@ impl OutboxEnvelope {
 
 // ── append_outbox ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutboxAppendOutcome {
-    Inserted,
-    AlreadyExists,
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OutboxAppendError {
+    #[error("outbox append storage failed")]
+    Storage(#[from] sqlx::Error),
+    #[error(transparent)]
+    Conflict(#[from] OutboxFactConflict),
+    #[error("outbox canonical fingerprint drift")]
+    CanonicalDrift,
+    #[error("outbox canonical identity is invalid")]
+    InvalidIdentity,
+}
+
+impl OutboxAppendError {
+    pub(crate) const fn identity_failure_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Conflict(_) => Some("fact_conflict"),
+            Self::CanonicalDrift => Some("canonical_drift"),
+            Self::InvalidIdentity => Some("canonical_identity_invalid"),
+            Self::Storage(_) => None,
+        }
+    }
+
+    pub(crate) fn into_emit_error(self) -> OutboxEmitError {
+        match self {
+            Self::Conflict(conflict) => OutboxEmitError::fact_conflict(conflict),
+            other => OutboxEmitError::new(other),
+        }
+    }
+
+    pub(crate) fn into_observed_emit_error(self) -> OutboxEmitError {
+        if let Some(reason) = self.identity_failure_reason() {
+            tracing::warn!(
+                target: "postgres",
+                stage = "append-outbox",
+                reason,
+                "outbox: append rejected; transaction will roll back"
+            );
+        }
+        self.into_emit_error()
+    }
 }
 
 /// DLQ replay 重新创建 outbox 行的受控输入。
@@ -548,6 +585,31 @@ pub(crate) struct ReplayedOutboxAppend {
     pub(crate) causation_id: Option<String>,
 }
 
+impl ReplayedOutboxAppend {
+    fn envelope(&self) -> Result<OutboxEnvelope, OutboxAppendError> {
+        let metadata = serde_json::from_str::<serde_json::Value>(&self.metadata_json)
+            .map_err(|_| OutboxAppendError::InvalidIdentity)?;
+        let serde_json::Value::Object(map) = metadata else {
+            return Err(OutboxAppendError::InvalidIdentity);
+        };
+        Ok(OutboxEnvelope {
+            domain: self.domain.clone(),
+            contract_id: self.contract_id.clone(),
+            contract_version: self.contract_version.clone(),
+            schema_hash: self.schema_hash.clone(),
+            tenant: self.tenant,
+            metadata: OutboxMetadata {
+                tenant: self.tenant,
+                contract_version: self.contract_version.clone(),
+                schema_hash: self.schema_hash.clone(),
+                map,
+            },
+            causation_id: self.causation_id.clone(),
+            partition_key: None,
+        })
+    }
+}
+
 /// 在事务内向 outbox 双写一条 entry（L1 原子性硬约束）。
 ///
 /// **`pub(crate)`，收 `&mut TxCapability`**——类型系统保证只能经 postgres adapter 从 live
@@ -564,7 +626,7 @@ pub(crate) struct ReplayedOutboxAppend {
 // adapter（域→adapter 反向依赖被 deny.toml 禁），域侧只经 `OutboxEmitter` port 触发该 durable 写路径（T008/#1100）。
 pub(crate) trait OutboxWriteEntry {
     fn topic_str(&self) -> &str;
-    fn idem_key(&self) -> &IdemKey;
+    fn event_id(&self) -> &str;
     fn payload(&self) -> &[u8];
 }
 
@@ -573,8 +635,8 @@ impl OutboxWriteEntry for EventEntry {
         self.topic().as_str()
     }
 
-    fn idem_key(&self) -> &IdemKey {
-        self.idem_key()
+    fn event_id(&self) -> &str {
+        self.idem_key().as_str()
     }
 
     fn payload(&self) -> &[u8] {
@@ -587,8 +649,8 @@ impl OutboxWriteEntry for StoredOutboxEntry {
         self.topic().as_str()
     }
 
-    fn idem_key(&self) -> &IdemKey {
-        self.idem_key()
+    fn event_id(&self) -> &str {
+        self.idem_key().as_str()
     }
 
     fn payload(&self) -> &[u8] {
@@ -596,12 +658,133 @@ impl OutboxWriteEntry for StoredOutboxEntry {
     }
 }
 
+impl OutboxWriteEntry for ReplayedOutboxAppend {
+    fn topic_str(&self) -> &str {
+        &self.topic
+    }
+
+    fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// Adapter-private durable fact assembled from the complete write entry + envelope pair.
+///
+/// This is the only production site that may construct [`OutboxFactIdentity`]. SQL writers bind
+/// every stable identity column through this value, so the bytes hashed by Rust and the values
+/// submitted for the database generated column cannot be assembled along separate paths.
+pub(crate) struct CanonicalOutboxFact<'a> {
+    event_id: &'a str,
+    tenant_id: String,
+    domain: &'a str,
+    topic: &'a str,
+    contract_id: &'a str,
+    contract_version: &'a str,
+    schema_hash: &'a str,
+    payload: &'a [u8],
+    metadata_json: String,
+    partition_key: Option<&'a str>,
+    causation_id: Option<&'a str>,
+    fingerprint: OutboxFactFingerprint,
+}
+
+impl<'a> CanonicalOutboxFact<'a> {
+    pub(crate) fn from_entry_env<E: OutboxWriteEntry>(
+        entry: &'a E,
+        env: &'a OutboxEnvelope,
+    ) -> Self {
+        let tenant_id = env.tenant().to_string();
+        let metadata = serde_json::Value::Object(env.metadata.map.clone());
+        let fingerprint = OutboxFactIdentity::new(
+            entry.event_id(),
+            &tenant_id,
+            env.domain(),
+            entry.topic_str(),
+            env.contract_id(),
+            env.contract_version(),
+            env.schema_hash(),
+            entry.payload(),
+            env.partition_key(),
+            env.causation_id(),
+            &metadata,
+        )
+        .fingerprint();
+        Self {
+            event_id: entry.event_id(),
+            tenant_id,
+            domain: env.domain(),
+            topic: entry.topic_str(),
+            contract_id: env.contract_id(),
+            contract_version: env.contract_version(),
+            schema_hash: env.schema_hash(),
+            payload: entry.payload(),
+            metadata_json: env.metadata_json(),
+            partition_key: env.partition_key(),
+            causation_id: env.causation_id(),
+            fingerprint,
+        }
+    }
+
+    pub(crate) fn event_id(&self) -> &str {
+        self.event_id
+    }
+
+    pub(crate) fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    pub(crate) fn domain(&self) -> &str {
+        self.domain
+    }
+
+    pub(crate) fn topic(&self) -> &str {
+        self.topic
+    }
+
+    pub(crate) fn contract_id(&self) -> &str {
+        self.contract_id
+    }
+
+    pub(crate) fn contract_version(&self) -> &str {
+        self.contract_version
+    }
+
+    pub(crate) fn schema_hash(&self) -> &str {
+        self.schema_hash
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        self.payload
+    }
+
+    pub(crate) fn metadata_json(&self) -> &str {
+        &self.metadata_json
+    }
+
+    pub(crate) fn partition_key(&self) -> Option<&str> {
+        self.partition_key
+    }
+
+    pub(crate) fn causation_id(&self) -> Option<&str> {
+        self.causation_id
+    }
+
+    pub(crate) fn fingerprint(&self) -> OutboxFactFingerprint {
+        self.fingerprint
+    }
+}
+
 pub(crate) async fn append_outbox<E: OutboxWriteEntry>(
     tx: &mut TxCapability<'_>,
     entry: &E,
     env: &OutboxEnvelope,
-) -> Result<OutboxAppendOutcome, sqlx::Error> {
-    let result = sqlx::query(
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    let fact = CanonicalOutboxFact::from_entry_env(entry, env);
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>(
         r#"
         INSERT INTO outbox (
             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
@@ -609,27 +792,24 @@ pub(crate) async fn append_outbox<E: OutboxWriteEntry>(
         )
         VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
         ON CONFLICT (event_id) DO NOTHING
+        RETURNING fact_fingerprint
         "#,
     )
-    .bind(entry.idem_key().as_str())
-    .bind(env.tenant().to_string())
-    .bind(env.domain())
-    .bind(entry.topic_str())
-    .bind(env.contract_id())
-    .bind(env.contract_version())
-    .bind(env.schema_hash())
-    .bind(entry.payload())
-    .bind(env.metadata_json())
+    .bind(fact.event_id())
+    .bind(fact.tenant_id())
+    .bind(fact.domain())
+    .bind(fact.topic())
+    .bind(fact.contract_id())
+    .bind(fact.contract_version())
+    .bind(fact.schema_hash())
+    .bind(fact.payload())
+    .bind(fact.metadata_json())
     .bind(STATUS_PENDING)
-    .bind(env.partition_key())
-    .bind(env.causation_id())
-    .execute(tx.conn())
+    .bind(fact.partition_key())
+    .bind(fact.causation_id())
+    .fetch_optional(tx.conn())
     .await?;
-    Ok(if result.rows_affected() == 1 {
-        OutboxAppendOutcome::Inserted
-    } else {
-        OutboxAppendOutcome::AlreadyExists
-    })
+    classify_append(tx, fact.event_id(), fact.fingerprint(), inserted).await
 }
 
 /// Append outbox and mirror to projection_events only for newly inserted generated-bound facts.
@@ -638,22 +818,28 @@ pub(crate) async fn append_outbox_with_projection(
     entry: &EventEntry,
     env: &OutboxEnvelope,
     projection_registry: &ProjectionWriteRegistry,
-) -> Result<OutboxAppendOutcome, sqlx::Error> {
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
     let outcome = append_outbox(tx, entry, env).await?;
-    if outcome == OutboxAppendOutcome::Inserted {
-        append_projection_event_if_bound(tx, entry, env, projection_registry).await?;
+    match outcome {
+        OutboxAppendOutcome::Inserted => {
+            append_projection_event_if_bound(tx, entry, env, projection_registry).await?;
+        }
+        OutboxAppendOutcome::SameFact => {}
     }
     Ok(outcome)
 }
 
 /// 在事务内 replay 一条 dead-letter 消息为新的 outbox 行。
 ///
-/// 与 [`append_outbox`] 共用同一文件内 SQL 写面；返回插入行数供 caller 区分 `Inserted` / `AlreadyExists`。
+/// 与 [`append_outbox`] 共用 canonical fingerprint 语义；返回 `Inserted` / `SameFact`，
+/// 异事实的同 event id 以 typed conflict 失败。
 pub(crate) async fn append_replayed_outbox(
     tx: &mut TxCapability<'_>,
     replay: &ReplayedOutboxAppend,
-) -> Result<OutboxAppendOutcome, sqlx::Error> {
-    let result = sqlx::query(
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    let env = replay.envelope()?;
+    let fact = CanonicalOutboxFact::from_entry_env(replay, &env);
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>(
         r#"
         INSERT INTO outbox (
             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
@@ -661,38 +847,83 @@ pub(crate) async fn append_replayed_outbox(
         )
         VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NULL, $11)
         ON CONFLICT (event_id) DO NOTHING
+        RETURNING fact_fingerprint
         "#,
     )
-    .bind(&replay.event_id)
-    .bind(replay.tenant.to_string())
-    .bind(&replay.domain)
-    .bind(&replay.topic)
-    .bind(&replay.contract_id)
-    .bind(&replay.contract_version)
-    .bind(&replay.schema_hash)
-    .bind(&replay.payload)
-    .bind(&replay.metadata_json)
+    .bind(fact.event_id())
+    .bind(fact.tenant_id())
+    .bind(fact.domain())
+    .bind(fact.topic())
+    .bind(fact.contract_id())
+    .bind(fact.contract_version())
+    .bind(fact.schema_hash())
+    .bind(fact.payload())
+    .bind(fact.metadata_json())
     .bind(STATUS_PENDING)
-    .bind(replay.causation_id.as_deref())
-    .execute(tx.conn())
+    .bind(fact.causation_id())
+    .fetch_optional(tx.conn())
     .await?;
-    Ok(if result.rows_affected() == 1 {
-        OutboxAppendOutcome::Inserted
-    } else {
-        OutboxAppendOutcome::AlreadyExists
-    })
+    classify_append(tx, fact.event_id(), fact.fingerprint(), inserted).await
 }
 
 pub(crate) async fn append_replayed_outbox_with_projection(
     tx: &mut TxCapability<'_>,
     replay: ReplayedOutboxAppend,
     projection_registry: &ProjectionWriteRegistry,
-) -> Result<OutboxAppendOutcome, sqlx::Error> {
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
     let outcome = append_replayed_outbox(tx, &replay).await?;
-    if outcome == OutboxAppendOutcome::Inserted {
-        append_replayed_projection_event_if_bound(tx, &replay, projection_registry).await?;
+    match outcome {
+        OutboxAppendOutcome::Inserted => {
+            append_replayed_projection_event_if_bound(tx, &replay, projection_registry).await?;
+        }
+        OutboxAppendOutcome::SameFact => {}
     }
     Ok(outcome)
+}
+
+async fn classify_append(
+    tx: &mut TxCapability<'_>,
+    event_id: &str,
+    expected: OutboxFactFingerprint,
+    inserted: Option<Vec<u8>>,
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    if let Some(stored) = inserted.as_deref() {
+        return classify_append_fingerprint(
+            expected,
+            AppendFingerprintObservation::Inserted(stored),
+        );
+    }
+
+    let stored =
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT fact_fingerprint FROM outbox WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_optional(tx.conn())
+            .await?;
+    classify_append_fingerprint(
+        expected,
+        AppendFingerprintObservation::Existing(stored.as_deref()),
+    )
+}
+
+pub(crate) enum AppendFingerprintObservation<'a> {
+    Inserted(&'a [u8]),
+    Existing(Option<&'a [u8]>),
+}
+
+pub(crate) fn classify_append_fingerprint(
+    expected: OutboxFactFingerprint,
+    observed: AppendFingerprintObservation<'_>,
+) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+    match observed {
+        AppendFingerprintObservation::Inserted(stored) if stored == expected.as_bytes() => {
+            Ok(OutboxAppendOutcome::Inserted)
+        }
+        AppendFingerprintObservation::Inserted(_) => Err(OutboxAppendError::CanonicalDrift),
+        AppendFingerprintObservation::Existing(Some(stored)) if stored == expected.as_bytes() => {
+            Ok(OutboxAppendOutcome::SameFact)
+        }
+        AppendFingerprintObservation::Existing(Some(_) | None) => Err(OutboxFactConflict.into()),
+    }
 }
 
 // ── PgOutbox ──────────────────────────────────────────────────────────────────
@@ -1691,10 +1922,12 @@ pub(crate) const fn max_redelivery_window_secs() -> i64 {
 mod tests {
     // reserved key / subject key 常量来自 diport 单源（#1160 A4）。
     use super::{
-        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OutboxEnvelope, OutboxMetadata, OutboxWriteEntry,
+        AppendFingerprintObservation, CanonicalOutboxFact, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS,
+        OutboxAppendError, OutboxEnvelope, OutboxMetadata, OutboxWriteEntry,
         RelayEnvelopeValidationReason, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED,
-        STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds, dlx_decision,
-        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient,
+        STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
+        classify_append_fingerprint, dlx_decision, hydrate_envelope_metadata,
+        max_redelivery_window_secs, metadata_with_ambient,
         record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
     };
     use diport::{
@@ -1705,6 +1938,25 @@ mod tests {
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn append_identity_failure_reasons_are_closed_and_payload_free() {
+        let cases = [
+            (
+                OutboxAppendError::Conflict(consistency::OutboxFactConflict),
+                Some("fact_conflict"),
+            ),
+            (OutboxAppendError::CanonicalDrift, Some("canonical_drift")),
+            (
+                OutboxAppendError::InvalidIdentity,
+                Some("canonical_identity_invalid"),
+            ),
+            (OutboxAppendError::Storage(sqlx::Error::RowNotFound), None),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.identity_failure_reason(), expected);
+        }
+    }
 
     fn contract() -> vocab::ContractBinding {
         vocab::ContractBinding::from_static("identity", "identity.session-created", "v1", HASH)
@@ -1748,10 +2000,7 @@ mod tests {
             OutboxWriteEntry::topic_str(&event),
             "identity.session-created"
         );
-        assert_eq!(
-            OutboxWriteEntry::idem_key(&event).as_str(),
-            "event-entry-id"
-        );
+        assert_eq!(OutboxWriteEntry::event_id(&event), "event-entry-id");
         assert_eq!(OutboxWriteEntry::payload(&event), b"event");
 
         let stored = consistency::StoredOutboxEntry::hydrate(
@@ -1764,11 +2013,59 @@ mod tests {
             OutboxWriteEntry::topic_str(&stored),
             "seed.commands.do-thing"
         );
-        assert_eq!(
-            OutboxWriteEntry::idem_key(&stored).as_str(),
-            "stored-entry-id"
-        );
+        assert_eq!(OutboxWriteEntry::event_id(&stored), "stored-entry-id");
         assert_eq!(OutboxWriteEntry::payload(&stored), b"stored");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn append_fingerprint_classifier_is_single_and_exhaustive() {
+        let entry = consistency::EventEntry::new(
+            consistency::EventTopic::parse("identity.session-created").expect("event topic"),
+            consistency::IdemKey::parse("classifier-event-id").expect("event id"),
+            consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
+        );
+        let env = OutboxEnvelope::new(
+            "identity".to_string(),
+            "identity.session-created".to_string(),
+            metadata(42),
+        );
+        let expected = CanonicalOutboxFact::from_entry_env(&entry, &env).fingerprint();
+        let matching = expected.as_bytes();
+        let mismatching = [0_u8; 32];
+
+        assert_eq!(
+            classify_append_fingerprint(
+                expected,
+                AppendFingerprintObservation::Inserted(matching),
+            )
+            .expect("matching inserted fingerprint"),
+            consistency::OutboxAppendOutcome::Inserted
+        );
+        assert!(matches!(
+            classify_append_fingerprint(
+                expected,
+                AppendFingerprintObservation::Inserted(&mismatching),
+            ),
+            Err(OutboxAppendError::CanonicalDrift)
+        ));
+        assert_eq!(
+            classify_append_fingerprint(
+                expected,
+                AppendFingerprintObservation::Existing(Some(matching)),
+            )
+            .expect("matching existing fingerprint"),
+            consistency::OutboxAppendOutcome::SameFact
+        );
+        for existing in [Some(mismatching.as_slice()), None] {
+            assert!(matches!(
+                classify_append_fingerprint(
+                    expected,
+                    AppendFingerprintObservation::Existing(existing),
+                ),
+                Err(OutboxAppendError::Conflict(_))
+            ));
+        }
     }
 
     #[allow(clippy::expect_used)]
