@@ -18,6 +18,8 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/funnel_pass.rs");
+    t.pass("tests/ui/local_only_classified_state_pass.rs");
+    t.pass("tests/ui/primary_local_only_classified_state_pass.rs");
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/nonprimary_cannot_mount_primary.rs");
@@ -28,4 +30,12 @@ fn ui() {
     t.compile_fail("tests/ui/generated_endpoint_requires_handler.rs");
     t.compile_fail("tests/ui/old_route_api_is_removed.rs");
     t.compile_fail("tests/ui/raw_method_router_cannot_mount.rs");
+    t.compile_fail("tests/ui/local_only_cannot_with_state.rs");
+    t.compile_fail("tests/ui/local_only_rejects_write_state.rs");
+    t.compile_fail("tests/ui/local_only_rejects_cross_tenant_state.rs");
+    t.compile_fail("tests/ui/consistency_marker_mismatch.rs");
+    t.compile_fail("tests/ui/primary_local_only_cannot_with_state.rs");
+    t.compile_fail("tests/ui/primary_local_only_rejects_write_state.rs");
+    t.compile_fail("tests/ui/primary_local_only_rejects_cross_tenant_state.rs");
+    t.compile_fail("tests/ui/primary_consistency_marker_mismatch.rs");
 }

@@ -14604,12 +14604,12 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
 // ───────────────────────────────────────────────────────────────────────────
 
 use identity::ports::{
-    AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleRepo, IdentityError, Operator,
-    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyLifecycle,
-    PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule, PolicyVersion,
-    ResourceAttribute, ResourceAttributeKey, ResourceAttributeRepo, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle,
-    RolePage, RoleRepo,
+    AttributeKey, AttributeValue, DynRoleBindingLifecycle, DynRoleReadRepo, IdentityError,
+    Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyId,
+    PolicyLifecycle, PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule,
+    PolicyVersion, ResourceAttribute, ResourceAttributeKey, ResourceAttributeRepo,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
+    RoleBinding, RoleBindingLifecycle, RolePage, RoleReadRepo, RoleWriteRepo,
 };
 
 use crate::{
@@ -16460,7 +16460,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     repo.save(identity_scope(tenant_b), role).await?;
 
     let svc = identity::RbacAdminService::new(
-        Arc::from(DynRoleRepo::new_box(PgRoleRepo::new(&store))),
+        Arc::from(DynRoleReadRepo::new_box(PgRoleRepo::new(&store))),
         Arc::from(DynRoleBindingLifecycle::new_box(
             PgRoleBindingLifecycle::new(&store, fixed_clock()),
         )),

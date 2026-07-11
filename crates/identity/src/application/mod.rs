@@ -118,17 +118,20 @@ use crate::domain::{
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
     Session, SessionId, evaluate_policies_for_tenant,
 };
+#[cfg(test)]
+use crate::ports::RoleWriteRepo;
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeRepo,
-    DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, Operator, PolicyPage, PolicyRepo,
-    RefreshTokenStore, ResourceAttributeRepo, RoleBindingLifecycle, RolePage, RoleRepo,
-    SessionLifecycle, TenantRepoScope,
+    DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle, Operator, PolicyPage,
+    PolicyRepo, RefreshTokenStore, ResourceAttributeRepo, RoleBindingLifecycle, RolePage,
+    RoleReadRepo, SessionLifecycle, TenantRepoScope,
 };
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
 pub use rbac_admin::{RbacAdminError, RbacAdminService};
 mod policy_manage;
+use policy_manage::PolicyQueryService;
 pub use policy_manage::{PolicyManageError, PolicyManageService};
 
 /// 发布域（tracing span 标签）。从契约绑定 `CONTRACT` 单源派生（= contract.toml `domain`，#1193），
@@ -1108,7 +1111,7 @@ struct AuthUserContext {
 
 #[derive(Clone)]
 struct ContractAuthorizer {
-    roles: Arc<DynRoleRepo<'static>>,
+    roles: Arc<DynRoleReadRepo<'static>>,
     bindings: Arc<DynRoleBindingLifecycle<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
     resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
@@ -1211,7 +1214,7 @@ fn contract_auth_policy(
 
 impl ContractAuthorizer {
     fn new(
-        roles: Arc<DynRoleRepo<'static>>,
+        roles: Arc<DynRoleReadRepo<'static>>,
         bindings: Arc<DynRoleBindingLifecycle<'static>>,
         policies: Arc<DynPolicyRepo<'static>>,
         resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
@@ -1827,7 +1830,12 @@ impl<S> Clone for SelfServiceHandlerState<S> {
 
 #[derive(Clone)]
 struct RolesListHandlerState {
-    roles: Arc<DynRoleRepo<'static>>,
+    roles: Arc<DynRoleReadRepo<'static>>,
+}
+
+impl httpserve::ClassifiedRouteState for RolesListHandlerState {
+    type Effect = diport::ReadEffect;
+    type Privilege = diport::LocalPrivilege;
 }
 
 /// 认证拒因（small；避免 `Result<_, Response>` 触 clippy `result_large_err`）。
@@ -2176,7 +2184,7 @@ async fn policies_update_handler(
     };
     let current = match state
         .service
-        .get_policy(auth.tenant, draft.policy_id().clone())
+        .find_policy_for_management(auth.tenant, draft.policy_id().clone())
         .await
     {
         Ok(policy) => policy,
@@ -2244,7 +2252,7 @@ async fn policies_deactivate_handler(
     };
     let current = match state
         .service
-        .get_policy(auth.tenant, draft.policy_id().clone())
+        .find_policy_for_management(auth.tenant, draft.policy_id().clone())
         .await
     {
         Ok(policy) => policy,
@@ -2282,7 +2290,7 @@ async fn policies_deactivate_handler(
 
 async fn policies_get_handler(
     _: ContractMarker<::generated::http::identity_v1::policies_get::RouteMarker>,
-    State(state): State<PolicyManageHandlerState>,
+    State(query): State<PolicyQueryService>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
 ) -> Response {
@@ -2295,8 +2303,7 @@ async fn policies_get_handler(
         Ok(policy_id) => policy_id,
         Err(()) => return httpserve::error::validation_bad_request(&request_id),
     };
-    match state
-        .service
+    match query
         .get_policy(subject.tenant, policy_id)
         .await
         .and_then(|policy| policy_manage::get_response(&policy))
@@ -2310,7 +2317,7 @@ async fn policies_get_handler(
 
 async fn policies_list_handler(
     _: ContractMarker<::generated::http::identity_v1::policies_list::RouteMarker>,
-    State(state): State<PolicyManageHandlerState>,
+    State(query): State<PolicyQueryService>,
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
@@ -2338,8 +2345,7 @@ async fn policies_list_handler(
         Ok(after) => after,
         Err(()) => return httpserve::error::validation_bad_request(&request_id),
     };
-    let result = match state
-        .service
+    let result = match query
         .list_policies(subject.tenant, PolicyPage { limit, after })
         .await
     {
@@ -2599,7 +2605,7 @@ pub struct IdentityDomainDeps<S> {
     pub refresh: Arc<RefreshService<S>>,
     pub rbac_admin: Arc<RbacAdminService>,
     pub policy_manage: Arc<PolicyManageService>,
-    pub roles: Arc<DynRoleRepo<'static>>,
+    pub roles: Arc<DynRoleReadRepo<'static>>,
     pub bindings: Arc<DynRoleBindingLifecycle<'static>>,
     pub policies: Arc<DynPolicyRepo<'static>>,
     pub resource_attrs: Arc<DynResourceAttributeRepo<'static>>,
@@ -2611,7 +2617,7 @@ pub struct IdentityDomain<S> {
     refresh: Arc<RefreshService<S>>,
     rbac_admin: Arc<RbacAdminService>,
     policy_manage: Arc<PolicyManageService>,
-    roles: Arc<DynRoleRepo<'static>>,
+    roles: Arc<DynRoleReadRepo<'static>>,
     authorizer: Arc<ContractAuthorizer>,
 }
 
@@ -2631,7 +2637,7 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
         let authorizer = Arc::new(ContractAuthorizer::new(
             Arc::clone(&roles),
             bindings,
-            policies,
+            Arc::clone(&policies),
             resource_attrs,
             clock,
         ));
@@ -2662,8 +2668,10 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
         };
         let policies_update = policies_create.clone();
         let policies_deactivate = policies_create.clone();
-        let policies_get = policies_create.clone();
-        let policies_list = policies_create.clone();
+        let policies_get = PolicyQueryService {
+            policies: Arc::clone(&self.authorizer.policies),
+        };
+        let policies_list = policies_get.clone();
         let roles = RolesListHandlerState {
             roles: Arc::clone(&self.roles),
         };
@@ -2690,7 +2698,7 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(ROLES_LIST_HTTP_ROUTE, roles_list_handler)?
-                    .with_state(roles),
+                    .with_classified_state(roles),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(POLICIES_CREATE_HTTP_ROUTE, policies_create_handler)?
@@ -2709,11 +2717,11 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(POLICIES_GET_HTTP_ROUTE, policies_get_handler)?
-                    .with_state(policies_get),
+                    .with_classified_state(policies_get),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(POLICIES_LIST_HTTP_ROUTE, policies_list_handler)?
-                    .with_state(policies_list),
+                    .with_classified_state(policies_list),
             )?;
             let rb = rb.mount(GeneratedPrimaryEndpoint::new(
                 PROFILE_HTTP_ROUTE,
@@ -2942,10 +2950,10 @@ mod tests {
             )
             .expect("seed_domain login ok"),
         );
-        let roles_for_admin = Arc::from(DynRoleRepo::new_box(
+        let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let roles_for_list = Arc::from(DynRoleRepo::new_box(
+        let roles_for_list = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings = Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
@@ -3124,7 +3132,7 @@ mod tests {
             management_permissions,
         );
         let manager_role_id = manager_role.id().clone();
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), manager_role),
         ));
@@ -3154,16 +3162,30 @@ mod tests {
     }
 
     fn policy_manage_router(state: PolicyManageHandlerState) -> axum::Router {
+        let read = PolicyQueryService {
+            policies: Arc::clone(&state.authorizer.policies),
+        };
         axum::Router::new()
-            .route("/policies", post(policies_create_handler))
-            .route("/policies", get(policies_list_handler))
-            .route("/policies/{policyId}", put(policies_update_handler))
-            .route("/policies/{policyId}", get(policies_get_handler))
+            .route(
+                "/policies",
+                post(policies_create_handler).with_state(state.clone()),
+            )
+            .route(
+                "/policies",
+                get(policies_list_handler).with_state(read.clone()),
+            )
+            .route(
+                "/policies/{policyId}",
+                put(policies_update_handler).with_state(state.clone()),
+            )
+            .route(
+                "/policies/{policyId}",
+                get(policies_get_handler).with_state(read),
+            )
             .route(
                 "/policies/{policyId}/deactivate",
-                post(policies_deactivate_handler),
+                post(policies_deactivate_handler).with_state(state),
             )
-            .with_state(state)
     }
 
     fn policy_repo(repo: crate::internal::mem::InMemPolicyRepo) -> Arc<DynPolicyRepo<'static>> {
@@ -3359,7 +3381,7 @@ mod tests {
             role.id(),
             CANON_USER,
         );
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let binding_lifecycle: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(
             crate::ports::DynRoleBindingLifecycle::new_box(bindings.clone()),
         );
@@ -4314,7 +4336,7 @@ mod tests {
         )
         .await
         .expect("save role");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
@@ -4346,7 +4368,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_allows_builtin_admin_settings_permissions_without_role_binding() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4395,7 +4417,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_denies_unbound_user_settings_permissions() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4444,7 +4466,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_empty_durable_store_grants_nothing_without_baseline() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4475,7 +4497,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_durable_allow_permits_without_rbac_binding() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4515,7 +4537,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_resource_attr_allow_permits_owner_policy_without_rbac_binding() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4559,7 +4581,7 @@ mod tests {
             &["identity:policy:read"],
         );
         let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
@@ -4605,7 +4627,7 @@ mod tests {
             &["identity:policy:read"],
         );
         let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
@@ -4655,7 +4677,7 @@ mod tests {
             &["identity:policy:read"],
         );
         let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
@@ -4704,7 +4726,7 @@ mod tests {
             &["identity:policy:read"],
         );
         let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), baseline_role),
         ));
@@ -4773,7 +4795,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_durable_deny_overrides_builtin_baseline() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4818,7 +4840,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_non_empty_obligation_denies_at_route_gate() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -4879,7 +4901,7 @@ mod tests {
         )
         .await
         .expect("save role");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
@@ -4931,7 +4953,7 @@ mod tests {
         )
         .await
         .expect("save role");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
@@ -4965,7 +4987,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_super_admin_audit_read_defaults_masked() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -5040,7 +5062,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_audit_projection_policy_field_mask_becomes_projection()
     -> Result<(), String> {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -5092,7 +5114,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_profile_projection_policy_field_mask_becomes_projection()
     -> Result<(), String> {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -5151,7 +5173,7 @@ mod tests {
             &[vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION.as_str()],
         );
         let profile_role_id = profile_role.id().clone();
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new()
                 .with_role_entity(tid(CANON_TENANT), profile_role),
         ));
@@ -5194,7 +5216,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_audit_projection_unknown_field_mask_obligation_denies() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -5235,7 +5257,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_policy_store_error_denies_before_baseline() {
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
@@ -5280,7 +5302,7 @@ mod tests {
         )
         .await
         .expect("save role");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let bindings: Arc<DynRoleBindingLifecycle<'static>> =
             Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
                 crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
@@ -5383,7 +5405,7 @@ mod tests {
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new()
             .with_binding(tid(CANON_TENANT), seeded_role.id(), CANON_USER)
             .with_binding(tid(CANON_TENANT), seeded_role.id(), "target-user");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let binding_lifecycle: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(
             crate::ports::DynRoleBindingLifecycle::new_box(bindings.clone()),
         );
@@ -5434,7 +5456,7 @@ mod tests {
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new()
             .with_binding(tid(CANON_TENANT), seeded_role.id(), CANON_USER)
             .with_binding(tid(CANON_TENANT), seeded_role.id(), "target-user");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let binding_lifecycle: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(
             crate::ports::DynRoleBindingLifecycle::new_box(bindings.clone()),
         );
@@ -5497,7 +5519,7 @@ mod tests {
         )
         .await
         .expect("save b");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let state = RolesListHandlerState {
             roles: Arc::clone(&roles),
         };
@@ -5534,7 +5556,7 @@ mod tests {
         )
         .await
         .expect("save role");
-        let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(repo));
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(repo));
         let state = RolesListHandlerState {
             roles: Arc::clone(&roles),
         };
@@ -5966,6 +5988,7 @@ mod tests {
     async fn password_change_handler_rejects_missing_auth_malformed_json_and_bad_subject() {
         const _: ::vocab::HttpRouteBinding<
             ::generated::http::identity_v1::password_change::RouteMarker,
+            ::vocab::http::LocalTx,
         > = ::generated::http::identity_v1::password_change::ROUTE;
 
         let capture = CapturingSessionLifecycle::default();
@@ -6024,6 +6047,7 @@ mod tests {
         {
             const _: ::vocab::HttpRouteBinding<
                 ::generated::http::identity_v1::logout::RouteMarker,
+                ::vocab::http::LocalTx,
             > = ::generated::http::identity_v1::logout::ROUTE;
         }
 
@@ -6957,6 +6981,7 @@ mod tests {
         {
             const _: ::vocab::HttpRouteBinding<
                 ::generated::http::identity_v1::refresh::RouteMarker,
+                ::vocab::http::LocalTx,
             > = ::generated::http::identity_v1::refresh::ROUTE;
         }
 

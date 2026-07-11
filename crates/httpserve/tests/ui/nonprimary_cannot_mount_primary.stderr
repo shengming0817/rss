@@ -1,39 +1,39 @@
 error[E0308]: mismatched types
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:32:79
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:31:79
    |
-32 |     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
-   |                                                                         ----- ^^^^^^^^^^ expected `GeneratedEndpoint<()>`, found `GeneratedPrimaryEndpoint<()>`
+31 |     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
+   |                                                                         ----- ^^^^^^^^^^ expected `GeneratedEndpoint<(), _>`, found `GeneratedPrimaryEndpoint<(), LocalOnly>`
    |                                                                         |
    |                                                                         arguments to this method are incorrect
    |
-   = note: expected struct `GeneratedEndpoint<()>`
-              found struct `GeneratedPrimaryEndpoint<()>`
+   = note: expected struct `GeneratedEndpoint<(), _>`
+              found struct `GeneratedPrimaryEndpoint<(), vocab::http::LocalOnly>`
 note: method defined here
   --> src/routes.rs
    |
-   |     pub fn mount(self, endpoint: GeneratedEndpoint<()>) -> Result<Self, RouteGroupError> {
+   |     pub fn mount<C: HttpConsistencyClass>(
    |            ^^^^^
 
 error[E0308]: mismatched types
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:33:73
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:32:73
    |
-33 |     let _admin = unfinalized_for_test::<httpserve::Admin>(|rb| rb.mount(endpoint()));
-   |                                                                   ----- ^^^^^^^^^^ expected `GeneratedEndpoint<()>`, found `GeneratedPrimaryEndpoint<()>`
+32 |     let _admin = unfinalized_for_test::<httpserve::Admin>(|rb| rb.mount(endpoint()));
+   |                                                                   ----- ^^^^^^^^^^ expected `GeneratedEndpoint<(), _>`, found `GeneratedPrimaryEndpoint<(), LocalOnly>`
    |                                                                   |
    |                                                                   arguments to this method are incorrect
    |
-   = note: expected struct `GeneratedEndpoint<()>`
-              found struct `GeneratedPrimaryEndpoint<()>`
+   = note: expected struct `GeneratedEndpoint<(), _>`
+              found struct `GeneratedPrimaryEndpoint<(), vocab::http::LocalOnly>`
 note: method defined here
   --> src/routes.rs
    |
-   |     pub fn mount(self, endpoint: GeneratedEndpoint<()>) -> Result<Self, RouteGroupError> {
+   |     pub fn mount<C: HttpConsistencyClass>(
    |            ^^^^^
 
 error[E0599]: the method `mount` exists for struct `ListenerRouter<Health>`, but its trait bounds were not satisfied
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:34:69
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:33:69
    |
-34 |     let _health = unfinalized_for_test::<httpserve::Health>(|rb| rb.mount(endpoint()));
+33 |     let _health = unfinalized_for_test::<httpserve::Health>(|rb| rb.mount(endpoint()));
    |                                                                     ^^^^^ method cannot be called on `ListenerRouter<Health>` due to unsatisfied trait bounds
    |
   ::: src/routes.rs

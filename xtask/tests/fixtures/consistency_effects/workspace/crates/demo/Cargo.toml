@@ -1,0 +1,10 @@
+[package]
+name = "demo"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+bootstrap = { path = "../bootstrap" }
+diport = { path = "../diport" }
+generated = { path = "../../generated" }
+httpserve = { path = "../httpserve" }
+vocab = { path = "../vocab" }

@@ -93,6 +93,15 @@
 | ROUTE-LISTENER-TYPED-01（listener 隔离） | 类型系统（typed marker + `NonPrimaryListener` 门 + typed-fold） | **Hard** |
 | LAYER-DEPS-ROUTE-FUNNEL-01（受控边收口） | `xtask` layers 白名单（rstest + 端到端 check_layers 正反例 anti-vacuity） | **Medium** |
 
+### 2026-07-11 amendment：consistency typestate（#1693）
+
+本 ADR 在 2026-06-25 记录的单参数 `HttpRouteBinding<RouteMarker>` 保留为历史语义；现行接口已破坏式
+收窄为 `HttpRouteBinding<RouteMarker, ConsistencyMarker>`。`ConsistencyMarker` 由 codegen 从 contract manifest
+`consistencyLevel` 单源生成，是 sealed marker，不允许域代码替换。非 L0 endpoint 使用 `.with_state`；
+L0 (`LocalOnly`) endpoint 不提供该方法，只能 stateless 或使用 `.with_classified_state` 绑定
+`ReadEffect`/`AuthEffect` + `LocalPrivilege` state。这一修订不改变本 ADR 的 listener 隔离与
+auth-before-bind 结论，只在同一 generated endpoint funnel 上新增 consistency/effect typestate。
+
 ## 7. 实施
 
 见 #1113/#1103 落地 PR。改动矩阵：`crates/httpserve/src/{routes.rs(新),lib.rs}`（含**删除旧 `RouteGroup` struct** +

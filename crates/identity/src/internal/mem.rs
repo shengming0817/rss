@@ -43,7 +43,7 @@ use crate::domain::{
 #[cfg(test)]
 use crate::ports::{
     PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, ResourceAttributeRepo,
-    RoleBindingLifecycle, RoleRepo,
+    RoleBindingLifecycle, RoleReadRepo, RoleWriteRepo,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -763,7 +763,7 @@ impl ResourceAttributeRepo for InMemResourceAttributeRepo {
 // InMemRoleRepo / InMemRoleBindingLifecycle — RBAC 角色仓储 + 绑定生命周期 in-mem 替身（#1190，US5）
 // ---------------------------------------------------------------------------
 
-/// `RoleRepo` 的 in-memory 替身：保存完整 [`Role`]，供 assign/revoke 校验与列表 handler 测试共用。
+/// `RoleReadRepo` 的 in-memory 替身：保存完整 [`Role`]，供 assign/revoke 校验与列表 handler 测试共用。
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct InMemRoleRepo {
@@ -793,7 +793,7 @@ impl InMemRoleRepo {
 }
 
 #[cfg(test)]
-impl RoleRepo for InMemRoleRepo {
+impl RoleReadRepo for InMemRoleRepo {
     async fn find(
         &self,
         scope: TenantRepoScope,
@@ -803,12 +803,6 @@ impl RoleRepo for InMemRoleRepo {
         Ok(recover(&self.roles)
             .get(&(tenant.to_string(), id.as_str().to_string()))
             .cloned())
-    }
-
-    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
-        let tenant = scope.tenant();
-        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
-        Ok(())
     }
 
     async fn list(
@@ -830,6 +824,15 @@ impl RoleRepo for InMemRoleRepo {
         let has_more = roles.len() > limit;
         roles.truncate(limit);
         Ok(crate::ports::RoleListResult { roles, has_more })
+    }
+}
+
+#[cfg(test)]
+impl RoleWriteRepo for InMemRoleRepo {
+    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
+        let tenant = scope.tenant();
+        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
+        Ok(())
     }
 }
 

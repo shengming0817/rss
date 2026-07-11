@@ -23,10 +23,11 @@ pub use auth::{
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
-    Admin, AuthenticatedRoutes, ContractMarker, GeneratedEndpoint, GeneratedPrimaryEndpoint,
-    Health, Internal, Listener, ListenerRouter, NonPrimaryListener, Primary, UnfinalizedRoutes,
-    finalize_auth, finalize_auth_with_audit, finalize_auth_with_audit_and_authorizer,
-    finalize_primary_auth, finalize_primary_auth_with_audit,
+    Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker, GeneratedEndpoint,
+    GeneratedPrimaryEndpoint, Health, Internal, Listener, ListenerRouter, LocalOnlyAllowedEffect,
+    NonPrimaryListener, Primary, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
+    finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
+    finalize_primary_auth_with_audit,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};

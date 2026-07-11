@@ -1,15 +1,15 @@
 error[E0061]: this function takes 2 arguments but 1 argument was supplied
-  --> tests/ui/generated_endpoint_requires_handler.rs:22:13
+  --> tests/ui/generated_endpoint_requires_handler.rs:21:13
    |
-22 |     let _ = httpserve::GeneratedEndpoint::<()>::new(binding);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------- argument #2 is missing
+21 |     let _ = httpserve::GeneratedEndpoint::<(), vocab::http::LocalOnly>::new(binding);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------- argument #2 is missing
    |
 note: associated function defined here
   --> src/routes.rs
    |
-   |     pub fn new<M, H, T>(binding: HttpRouteBinding<M>, handler: H) -> Result<Self, RouteGroupError>
+   |     pub fn new<M, H, T>(
    |            ^^^
 help: provide the argument
    |
-22 |     let _ = httpserve::GeneratedEndpoint::<()>::new(binding, /* handler */);
-   |                                                            +++++++++++++++
+21 |     let _ = httpserve::GeneratedEndpoint::<(), vocab::http::LocalOnly>::new(binding, /* handler */);
+   |                                                                                    +++++++++++++++

@@ -26,8 +26,8 @@ use generated::http::identity_v1::roles_assign::SPEC as ROLES_ASSIGN_SPEC;
 use generated::http::identity_v1::roles_list::SPEC as ROLES_LIST_SPEC;
 use generated::http::identity_v1::roles_revoke::SPEC as ROLES_REVOKE_SPEC;
 use generated::http::settings_v1::SPEC as SETTINGS_CONFIG_SPEC;
-use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleRepo};
-use identity::ports::{Role, RoleRepo as _, TenantId, TenantRepoScope};
+use identity::ports::{Credential, CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo};
+use identity::ports::{Role, RoleWriteRepo as _, TenantId, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::ListenerKind;
@@ -597,7 +597,8 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
             )?,
         )
         .await?;
-    let setup_roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(id.role_repo()));
+    let setup_roles: Arc<DynRoleReadRepo<'static>> =
+        Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let setup_bindings: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(
         DynRoleBindingLifecycle::new_box(id.role_binding_lifecycle(Box::new(SystemClock))),
     );

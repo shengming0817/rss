@@ -1,7 +1,7 @@
 use diport::ReadEffect;
-use identity::ports::{DynRoleRepo, IdentityPortEffect};
+use identity::ports::{DynRoleWriteRepo, IdentityPortEffect};
 
-type AllegedlyRead = DynRoleRepo<'static>;
+type AllegedlyRead = DynRoleWriteRepo<'static>;
 
 fn require_read<T: IdentityPortEffect<Effect = ReadEffect> + ?Sized>() {}
 

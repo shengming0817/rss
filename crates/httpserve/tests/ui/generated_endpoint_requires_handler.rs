@@ -4,7 +4,7 @@ const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
 enum RouteMarker {}
 
 fn main() {
-    let binding = vocab::HttpRouteBinding::<RouteMarker>::from_static(
+    let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(
         vocab::ContractBinding::from_static(
             "test",
             "ui.missing-handler",
@@ -16,8 +16,7 @@ fn main() {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
-        vocab::HttpConsistencyLevel::LocalOnly,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
-    let _ = httpserve::GeneratedEndpoint::<()>::new(binding);
+    let _ = httpserve::GeneratedEndpoint::<(), vocab::http::LocalOnly>::new(binding);
 }

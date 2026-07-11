@@ -212,7 +212,7 @@ pub mod login {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -220,7 +220,6 @@ pub mod login {
             ::vocab::HttpRouteAuth::Public,
             None,
             false,
-            ::vocab::HttpConsistencyLevel::OutboxFact,
             EFFECT_PROFILE,
         );
 
@@ -391,7 +390,7 @@ pub mod logout {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -399,7 +398,6 @@ pub mod logout {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentitySessionWrite),
             None,
             true,
-            ::vocab::HttpConsistencyLevel::LocalTx,
             EFFECT_PROFILE,
         );
 
@@ -579,7 +577,7 @@ pub mod password_change {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -587,7 +585,6 @@ pub mod password_change {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileWrite),
             None,
             true,
-            ::vocab::HttpConsistencyLevel::LocalTx,
             EFFECT_PROFILE,
         );
 
@@ -2462,7 +2459,7 @@ pub mod policies_create {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -2470,7 +2467,6 @@ pub mod policies_create {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyCreate),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::OutboxFact,
             EFFECT_PROFILE,
         );
 
@@ -2654,7 +2650,7 @@ pub mod policies_deactivate {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -2664,7 +2660,6 @@ pub mod policies_deactivate {
             ),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::OutboxFact,
             EFFECT_PROFILE,
         );
 
@@ -3573,7 +3568,7 @@ pub mod policies_get {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -3581,7 +3576,6 @@ pub mod policies_get {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::LocalOnly,
             EFFECT_PROFILE,
         );
 
@@ -4545,7 +4539,7 @@ pub mod policies_list {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -4553,7 +4547,6 @@ pub mod policies_list {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::LocalOnly,
             EFFECT_PROFILE,
         );
 
@@ -6425,7 +6418,7 @@ pub mod policies_update {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -6433,7 +6426,6 @@ pub mod policies_update {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyUpdate),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::OutboxFact,
             EFFECT_PROFILE,
         );
 
@@ -6737,7 +6729,7 @@ pub mod profile {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -6745,7 +6737,6 @@ pub mod profile {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileRead),
             None,
             true,
-            ::vocab::HttpConsistencyLevel::LocalOnly,
             EFFECT_PROFILE,
         );
 
@@ -6941,7 +6932,7 @@ pub mod refresh {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -6949,7 +6940,6 @@ pub mod refresh {
             ::vocab::HttpRouteAuth::Public,
             None,
             false,
-            ::vocab::HttpConsistencyLevel::LocalTx,
             EFFECT_PROFILE,
         );
 
@@ -7125,7 +7115,7 @@ pub mod roles_assign {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -7133,7 +7123,6 @@ pub mod roles_assign {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleAssign),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::OutboxFact,
             EFFECT_PROFILE,
         );
 
@@ -7372,7 +7361,7 @@ pub mod roles_list {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -7380,7 +7369,6 @@ pub mod roles_list {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRead),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::LocalOnly,
             EFFECT_PROFILE,
         );
 
@@ -7542,7 +7530,7 @@ pub mod roles_revoke {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -7550,7 +7538,6 @@ pub mod roles_revoke {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRevoke),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::OutboxFact,
             EFFECT_PROFILE,
         );
 

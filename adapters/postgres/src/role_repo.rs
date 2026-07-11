@@ -1,6 +1,7 @@
 //! `PgRoleRepo` —— identity 角色仓储的 postgres adapter（#1250）。
 //!
-//! impl `identity::ports::RoleRepo`（find / save），替换原 `#[cfg(test)]` `RoleRepoEdgeProof`（body `todo!()`
+//! impl `identity::ports::{RoleReadRepo, RoleWriteRepo}`（find/list 与 save 分口），替换原
+//! `#[cfg(test)]` `RoleRepoEdgeProof`（body `todo!()`
 //! 的纯编译证明）。adapter→域 DIP 内向边（postgres 依赖 identity、native AFIT impl 其域形 port，经 deny.toml
 //! identity wrapper + `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）。
 //!
@@ -15,7 +16,8 @@
 //! ref: adapters/postgres/src/config_repo.rs（#1249，pool 注入 / SET LOCAL / storage 收口 / hydrate 范本）
 
 use identity::ports::{
-    IdentityError, Role, RoleId, RoleListResult, RolePage, RoleRepo, TenantId, TenantRepoScope,
+    IdentityError, Role, RoleId, RoleListResult, RolePage, RoleReadRepo, RoleWriteRepo, TenantId,
+    TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -51,7 +53,7 @@ fn tenant_param(tenant: TenantId) -> String {
     tenant.as_uuid().to_string()
 }
 
-impl RoleRepo for PgRoleRepo {
+impl RoleReadRepo for PgRoleRepo {
     async fn find(
         &self,
         scope: TenantRepoScope,
@@ -104,40 +106,6 @@ impl RoleRepo for PgRoleRepo {
         }
     }
 
-    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
-        let tenant = scope.tenant();
-        let tenant_uuid = tenant_param(tenant);
-        let permissions: Vec<String> = role.permission_ids().collect();
-        // tenant-scoped 事务（SET LOCAL 锚点，与 config / session 写路径统一收口）内 upsert。
-        // save 是本 adapter **唯一**写路径（find 为 plain read）⇒ 不抽 `tenant_scoped` helper，直接 inline。
-        self.pool
-            .write(
-                scope,
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            r#"
-                            INSERT INTO roles (tenant_id, id, name, permissions)
-                            VALUES ($1::uuid, $2, $3, $4)
-                            ON CONFLICT (tenant_id, id) DO UPDATE
-                            SET name = EXCLUDED.name, permissions = EXCLUDED.permissions
-                            "#,
-                        )
-                        .bind(&tenant_uuid)
-                        .bind(role.id().as_str())
-                        .bind(role.name())
-                        .bind(&permissions)
-                        .execute(conn.conn())
-                        .await
-                        .map_err(storage)
-                        .map(|_| ())
-                    })
-                },
-                storage,
-            )
-            .await
-    }
-
     async fn list(
         &self,
         scope: TenantRepoScope,
@@ -188,5 +156,38 @@ impl RoleRepo for PgRoleRepo {
             .map(|(id, name, permissions)| Role::hydrate(&id, name, &permissions))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(RoleListResult { roles, has_more })
+    }
+}
+
+impl RoleWriteRepo for PgRoleRepo {
+    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
+        let tenant_uuid = tenant_param(scope.tenant());
+        let permissions: Vec<String> = role.permission_ids().collect();
+        self.pool
+            .write(
+                scope,
+                move |conn| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO roles (tenant_id, id, name, permissions)
+                            VALUES ($1::uuid, $2, $3, $4)
+                            ON CONFLICT (tenant_id, id) DO UPDATE
+                            SET name = EXCLUDED.name, permissions = EXCLUDED.permissions
+                            "#,
+                        )
+                        .bind(&tenant_uuid)
+                        .bind(role.id().as_str())
+                        .bind(role.name())
+                        .bind(&permissions)
+                        .execute(conn.conn())
+                        .await
+                        .map_err(storage)
+                        .map(|_| ())
+                    })
+                },
+                storage,
+            )
+            .await
     }
 }

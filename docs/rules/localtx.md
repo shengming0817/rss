@@ -59,6 +59,7 @@ inline 流入 closure router 参数的 `mount`，或经同 lexical scope 内唯�
 ```rust
 const _: ::vocab::HttpRouteBinding<
     ::generated::http::identity_v1::logout::RouteMarker,
+    ::vocab::http::LocalTx,
 > = ::generated::http::identity_v1::logout::ROUTE;
 ```
 
@@ -76,7 +77,7 @@ block 无效，因为父 scope 的 opaque 风险会向下传播。
 `Expr::Macro` 只能在表达式位置展开，不能向外层注入 item namespace，因此可接受。若违反该边界，门会
 按 fail-closed 报 marker 缺失。
 
-`HttpRouteBinding<RouteMarker>` 与 generated `ROUTE`
+`HttpRouteBinding<RouteMarker, LocalTx>` 与 generated `ROUTE`
 的身份对应由 rustc 编译期强制（`LOCALTX-TEST-MARKER-TYPED-01`，Hard）；active manifest 到
 generated/owner/route/test 的跨文件存在性由 `localtx-coverage` 在 verify/CI 阻断
 （`LOCALTX-COVERAGE-CLOSURE-01`，Medium）。该 marker 只锚定至少一个现有 route/domain 测试，不表示完整

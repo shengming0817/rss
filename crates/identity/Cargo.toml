@@ -55,7 +55,7 @@ base64 = { workspace = true }
 [dev-dependencies]
 # 登录服务异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate，
 # rust-standards.md §命名）。
-# ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynRoleRepo（PORT-SHAPE-01/02）。
+# ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynRoleReadRepo（PORT-SHAPE-01/02）。
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 mockall = { workspace = true }
 # 表驱动域单测（newtype parse / RBAC authz；rust-standards.md §一致性级别 L0）。

@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use diport::{
-    AuthEffect, LocalPrivilege, OutboxEffect, PortEffectClass, PortPrivilegeClass, WriteEffect,
+    AuthEffect, LocalPrivilege, OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect,
+    WriteEffect,
 };
 use identity::ports::{
     DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-    DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
-    IdentityPortEffect,
+    DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleReadRepo, DynRoleWriteRepo,
+    DynSessionLifecycle, IdentityPortEffect,
 };
 
 fn assert_effect<T, E, P>()
@@ -21,7 +22,8 @@ fn main() {
     assert_effect::<DynPolicyRepo<'static>, AuthEffect, LocalPrivilege>();
 
     assert_effect::<DynResourceAttributeRepo<'static>, WriteEffect, LocalPrivilege>();
-    assert_effect::<DynRoleRepo<'static>, WriteEffect, LocalPrivilege>();
+    assert_effect::<DynRoleReadRepo<'static>, ReadEffect, LocalPrivilege>();
+    assert_effect::<DynRoleWriteRepo<'static>, WriteEffect, LocalPrivilege>();
     assert_effect::<DynCredentialRepo<'static>, WriteEffect, LocalPrivilege>();
     assert_effect::<DynRefreshTokenStore<'static>, WriteEffect, LocalPrivilege>();
 
@@ -30,5 +32,5 @@ fn main() {
     assert_effect::<DynSessionLifecycle<'static>, OutboxEffect, LocalPrivilege>();
 
     assert_effect::<Arc<DynPolicyRepo<'static>>, AuthEffect, LocalPrivilege>();
-    assert_effect::<Box<DynRoleRepo<'static>>, WriteEffect, LocalPrivilege>();
+    assert_effect::<Box<DynRoleReadRepo<'static>>, ReadEffect, LocalPrivilege>();
 }

@@ -35,7 +35,7 @@ mod resource_attr;
 mod session;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
-// Role / RoleBinding 是 pub（ports::{RoleRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
+// Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
 pub use rbac::{Role, RoleBinding};
 // Session / SessionId 是 pub（ports::SessionLifecycle 签名实体，跨 crate 命名）；与 RoleId 不同，二者有
 // 生产消费方（application 构造 + postgres adapter 读取），非 ADR-004 C8 冻结期 dead，故不带 allow(dead_code)。
@@ -153,7 +153,7 @@ pub enum IdParseError {
 
 /// 角色标识 newtype（私有字段；构造经 funnel；不 derive Serialize——域类型）。
 ///
-/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 签名实体被独立 adapter crate 跨 crate 命名/收发；
+/// `pub`（ADR-005 Option 2）：作 `ports::RoleReadRepo` 签名实体被独立 adapter crate 跨 crate 命名/收发；
 /// 字段仍私有、构造器仍 `pub(crate)`（funnel）——外部可命名/接收 `RoleId` 但**不可伪造**（fail-closed）。
 // reason: 类型作 ports 签名实体已被引用；其 pub(crate) 方法生产调用方待 W ⇒ 非 test 构建 dead（ADR-004 C8）。
 #[allow(dead_code)]
@@ -376,17 +376,17 @@ impl PolicyId {
 
 /// 身份域错误（库枚举；用 `thiserror`；message 为 const 静态字面量）。
 ///
-/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 方法错误类型被 adapter 跨 crate 命名（adapter 把内部
+/// `pub`（ADR-005 Option 2）：作 `ports::RoleReadRepo` 方法错误类型被 adapter 跨 crate 命名（adapter 把内部
 /// 持久化错误映射成本枚举）。`#[non_exhaustive]` 保留扩展窗口。
 ///
 /// **与 authz 决策分轨**：`authorize_rbac` / `evaluate_abac` 的允许/拒绝经 `vocab::Decision` 表达，**不**
 /// 走本枚举。本枚举是 repo / 服务操作的失败通道，各 variant 触发路径：
-/// - `RoleNotFound`：`RoleRepo` 查无角色。
+/// - `RoleNotFound`：`RoleReadRepo` 查无角色。
 /// - `InvalidPolicy`：策略构造 / 校验失败。
 /// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
 /// - `CredentialNotFound`：`CredentialRepo` 查无凭据（PR3）。
 /// - `VersionConflict`：`CredentialRepo::bump_version` CAS 期望版本不匹配（并发密码变更，PR3）。
-/// - `Storage`：持久化层错误（`RoleRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。
+/// - `Storage`：持久化层错误（`RoleReadRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。
 ///   原始错误进 `#[source]`，不进 Display / wire——message 是 `&'static str` const literal，
 ///   runtime 细节仅进服务端日志（error-handling.md §Message 与 PII）。
 // reason: `RoleNotFound` / `PermissionDenied` / `InvalidPolicy` / `CredentialNotFound` / `VersionConflict`

@@ -4,9 +4,9 @@ use vocab::{HttpRouteAuth, HttpRouteBinding, ProjectionField, RoutePermissionId}
 
 enum ProfileRoute {}
 
-fn profile_endpoint<M: 'static>(
-    binding: HttpRouteBinding<M>,
-) -> Result<GeneratedPrimaryEndpoint<()>> {
+fn profile_endpoint<M: 'static, C: vocab::http::HttpConsistencyClass>(
+    binding: HttpRouteBinding<M, C>,
+) -> Result<GeneratedPrimaryEndpoint<(), C>> {
     let evidence = binding.evidence();
     ensure!(evidence.auth() == HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead));
     ensure!(evidence.self_scoped());
@@ -17,7 +17,7 @@ fn profile_endpoint<M: 'static>(
 }
 
 fn main() -> Result<()> {
-    let _profile_endpoint_factory = profile_endpoint::<ProfileRoute>;
+    let _profile_endpoint_factory = profile_endpoint::<ProfileRoute, vocab::http::LocalOnly>;
 
     ensure!(
         ProjectionField::from_obligation_key("audit.actor") == Some(ProjectionField::AuditActor)

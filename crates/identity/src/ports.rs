@@ -209,16 +209,16 @@ pub trait PolicyLifecycleLocal: Send + Sync {
     ) -> Result<bool, IdentityError>;
 }
 
-/// 角色仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
+/// 角色只读仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
-/// 公开 [`RoleRepo`] 是 **Send 变体**（adapter `impl RoleRepo for ...`），[`DynRoleRepo`] 是其
-/// dyn-compatible wrapper（组合根经 `Box<DynRoleRepo>` 注入）。非 Send 基 trait [`RoleRepoLocal`] 仅供
+/// 公开 [`RoleReadRepo`] 是 **Send 变体**（adapter `impl RoleReadRepo for ...`），[`DynRoleReadRepo`] 是其
+/// dyn-compatible wrapper（组合根经 `Box<DynRoleReadRepo>` 注入）。非 Send 基 trait [`RoleReadRepoLocal`] 仅供
 /// 静态分发窄场景，不在 crate 根 re-export（同 diport `XLocal` 约定）。
 ///
 /// dyn-safe（ADR-003 §4.6）：方法 `&self`、参数/返回为具体类型、supertrait 仅 Send。归属为域形 port
 /// （签名引用 `Role`/`RoleId`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
 ///
-/// **当前方法集 = PR5b 最小生产接缝（find / save / tenant-scoped list），非完整 repo 设计范式（勿照抄查询集）**。
+/// **当前方法集 = 只读接缝（find / tenant-scoped list）；save 仅由独立 [`RoleWriteRepo`] 暴露。**
 /// 安全 scope 由签名承载：`Role` 按租户内角色建模，repo 方法必须接收 [`TenantRepoScope`] 做 store scope
 /// （pre-GA：显式 `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨
 /// roles/sessions/config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立
@@ -227,19 +227,16 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 /// #1250；PR5b 补齐 `list` 分页查询）——签名实体 accessor（`RoleId::as_str` / `Role::id|name|permission_ids`
 /// / `Role::hydrate`）已按需升 `pub`（字段私有 + 构造经 funnel，外部可读不可伪造）。
 /// **查询形态后续**：按业务补 `find_by_name` / `exists` 等惯用方法；列表查询继续强制分页（`limit≤500`）。
-#[trait_variant::make(RoleRepo: Send)]
-#[dynosaur(pub DynRoleRepo = dyn(box) RoleRepo, bridge(dyn))]
+#[trait_variant::make(RoleReadRepo: Send)]
+#[dynosaur(pub DynRoleReadRepo = dyn(box) RoleReadRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RoleRepo` 变体 + dynosaur
-// `DynRoleRepo` 承载（DI 注入走 Send wrapper）。与 diport DI port 同范式（ADR-003/ADR-004 C1）。body=todo!()
+// reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `RoleReadRepo` 变体 + dynosaur
+// `DynRoleReadRepo` 承载（DI 注入走 Send wrapper）。与 diport DI port 同范式（ADR-003/ADR-004 C1）。body=todo!()
 // （签名冻结，ADR-004 C8）。
-pub trait RoleRepoLocal: Send + Sync {
+pub trait RoleReadRepoLocal: Send + Sync {
     /// 按 ID 查角色（不存在返回 `Ok(None)`）。
     async fn find(&self, scope: TenantRepoScope, id: RoleId)
     -> Result<Option<Role>, IdentityError>;
-
-    /// 持久化角色（upsert）。
-    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError>;
 
     /// 租户内分页列出角色（按 role id 升序稳定排序）。
     async fn list(
@@ -247,6 +244,15 @@ pub trait RoleRepoLocal: Send + Sync {
         scope: TenantRepoScope,
         page: RolePage,
     ) -> Result<RoleListResult, IdentityError>;
+}
+
+/// 角色写仓储 DI port。与 [`RoleReadRepo`] 破坏式分离，使读路由类型系统排除写能力。
+#[trait_variant::make(RoleWriteRepo: Send)]
+#[dynosaur(pub DynRoleWriteRepo = dyn(box) RoleWriteRepo, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait RoleWriteRepoLocal: Send + Sync {
+    /// 持久化角色（upsert）。
+    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError>;
 }
 
 /// 角色列表分页参数（handler 已完成 query/cursor 校验，repo 只接收 typed page）。
@@ -343,10 +349,10 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// 经 tenant-keyed 查找天然失败——`find(t ≠ cred.tenant)` → `None`，`authenticate` → `InvalidUnknown`，
 /// 不创建会话、不推进锁定计数（spec 003 US3 跨租红用例）。
 ///
-/// **与 `RoleRepo` 差异**：本 port 在 PR3 已有写实 in-mem 替身（[`crate::internal`]），非纯签名冻结——
+/// **与 `RoleReadRepo` 差异**：本 port 在 PR3 已有写实 in-mem 替身（[`crate::internal`]），非纯签名冻结——
 /// 锁定态推进是多实例暴破防御的硬需求（内存态多实例不共享则失效），由**原子 port 方法**承载（见下）。
 /// 生产 postgres adapter impl 仍留 W（随 #1116 postgres adapter 落地）；届时 `Credential` / `AccountLockout`
-/// 的跨 crate 重建 + 只读 accessor 公开化与 `RoleRepo` 同步走 W（accessor 升 `pub` / `from_persisted` funnel，
+/// 的跨 crate 重建 + 只读 accessor 公开化与 `RoleReadRepo` 同步走 W（accessor 升 `pub` / `from_persisted` funnel，
 /// 见 #1258）——本 PR 编译证明阶段无独立 adapter，替身在同 crate 用 `pub(crate)`。
 ///
 /// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `bump_version`）**不收**
@@ -366,12 +372,12 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// `permanentUserLockOut` 的 `getUserById != null` guard：brute-force 计数仅对已知主体推进；RSS 以
 /// `AuthOutcome` typed 分流强化为类型层 Hard——`InvalidUnknown` 变体在类型层即与计数路径隔离）。
 ///
-/// **owned 参数**：与既有 DI port（diport / `RoleRepo`）一致——async dyn port 用 owned 参规避借用生命周期、简化
+/// **owned 参数**：与既有 DI port（diport / `RoleReadRepo`）一致——async dyn port 用 owned 参规避借用生命周期、简化
 /// dynosaur `bridge(dyn)` 装配；消费方调用即弃，代价仅一次 `LoginIdentifier::new`。
 #[trait_variant::make(CredentialRepo: Send)]
 #[dynosaur(pub DynCredentialRepo = dyn(box) CredentialRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-// reason: 同 RoleRepo——base trait 非 Send native AFIT，Send 由 trait_variant `CredentialRepo` 变体 +
+// reason: 同 RoleReadRepo——base trait 非 Send native AFIT，Send 由 trait_variant `CredentialRepo` 变体 +
 // dynosaur `DynCredentialRepo` 承载（ADR-003/ADR-004 C1）。`Send + Sync` supertrait 使
 // `Arc<DynCredentialRepo>` 可被 axum handler state 间接共享。
 pub trait CredentialRepoLocal: Send + Sync {
@@ -468,7 +474,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 /// 经 [`IdentityError`] 冒泡。
 ///
 /// 归属：域形 port（签名引用域内实体 [`Session`]）→ 本 crate `ports`，非 diport（ADR-005 category line，同
-/// [`RoleRepo`]）。durable `find` / `revoke` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE +
+/// [`RoleReadRepo`]）。durable `find` / `revoke` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE +
 /// `sessions.revoked` 列，#1278——补齐原 #1116 session durable 闭合，provider 无 `todo!()` 半实现）。
 ///
 /// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
@@ -627,7 +633,8 @@ macro_rules! classify_identity_ports {
 classify_identity_ports! {
     DynPolicyRepo => diport::AuthEffect,
     DynResourceAttributeRepo => diport::WriteEffect,
-    DynRoleRepo => diport::WriteEffect,
+    DynRoleReadRepo => diport::ReadEffect,
+    DynRoleWriteRepo => diport::WriteEffect,
     DynCredentialRepo => diport::WriteEffect,
     DynRefreshTokenStore => diport::WriteEffect,
     DynPolicyLifecycle => diport::OutboxEffect,
@@ -664,29 +671,26 @@ where
 #[cfg(test)]
 mod smoke {
     //! build smoke：域形 async repo port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
-    //! `Box<DynRoleRepo>` 装入（PORT-SHAPE-01/02）。
+    //! `Box<DynRoleReadRepo>` 装入（PORT-SHAPE-01/02）。
     //!
     //! 与 diport `signer.rs` smoke 的差异：identity 域类型（`RoleId`/`Role`）构造器 **PR1 已写实**，但本 port
     //! 的 repo impl（`NoopRoleRepo` / mock）方法 body 仍 `todo!()`（真实 repo 接缝待 W，issue #1083），故本
     //! smoke **只构造 Dyn wrapper + 断言 `Send`，不 `.await`**（不触 repo `todo!()`）。async future 的 Send + 跨
     //! `tokio::spawn` 调度由 diport `signer.rs` `mockall_mock_loads_into_dyn_signer` 同范式已证（dynosaur Send 变体保证）。
     use super::{
-        DynRoleRepo, DynSessionLifecycle, EventEntry, IdentityError, OutboxEmitError,
-        OutboxEnvelopeParts, Role, RoleId, RoleRepo, Session, SessionId, SessionLifecycle,
+        DynRoleReadRepo, DynSessionLifecycle, EventEntry, IdentityError, OutboxEmitError,
+        OutboxEnvelopeParts, Role, RoleId, RoleReadRepo, Session, SessionId, SessionLifecycle,
         TenantRepoScope,
     };
     use std::sync::Arc;
 
     struct NoopRoleRepo;
-    impl RoleRepo for NoopRoleRepo {
+    impl RoleReadRepo for NoopRoleRepo {
         async fn find(
             &self,
             _scope: TenantRepoScope,
             _id: RoleId,
         ) -> Result<Option<Role>, IdentityError> {
-            todo!()
-        }
-        async fn save(&self, _scope: TenantRepoScope, _role: Role) -> Result<(), IdentityError> {
             todo!()
         }
         async fn list(
@@ -702,45 +706,44 @@ mod smoke {
     fn assert_send_sync<T: Send + Sync>(_: &T) {}
 
     // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体
-    // `DynRoleRepo` 且 wrapper `Send`（可跨 spawn 注入）。不调用方法 → 不触 `todo!()`。
+    // `DynRoleReadRepo` 且 wrapper `Send`（可跨 spawn 注入）。不调用方法 → 不触 `todo!()`。
     #[test]
     fn role_repo_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynRoleRepo> = DynRoleRepo::new_box(NoopRoleRepo);
+        let from_impl: Box<DynRoleReadRepo> = DynRoleReadRepo::new_box(NoopRoleRepo);
         assert_send(&from_impl);
-        let from_mock: Box<DynRoleRepo> = DynRoleRepo::new_box(MockTestRoleRepo::new());
+        let from_mock: Box<DynRoleReadRepo> = DynRoleReadRepo::new_box(MockTestRoleRepo::new());
         assert_send(&from_mock);
     }
 
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynRoleRepo>` 作必填
+    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynRoleReadRepo>` 作必填
     // 位置参（非 Option），缺失即编译错误（ADR-004 C5）。impl/mock 各注入一次，证明域形 repo port 与
     // 既有 DI port 一致经 `Box<DynX>` 注入（不调用方法 → 不触 `todo!()`）。
     struct RoleService {
-        _repo: Box<DynRoleRepo<'static>>,
+        _repo: Box<DynRoleReadRepo<'static>>,
     }
     impl RoleService {
-        fn new(repo: Box<DynRoleRepo<'static>>) -> Self {
+        fn new(repo: Box<DynRoleReadRepo<'static>>) -> Self {
             Self { _repo: repo }
         }
     }
 
     #[test]
     fn role_repo_is_required_ctor_injectable() {
-        let from_impl = RoleService::new(DynRoleRepo::new_box(NoopRoleRepo));
+        let from_impl = RoleService::new(DynRoleReadRepo::new_box(NoopRoleRepo));
         assert_send(&from_impl._repo);
-        let from_mock = RoleService::new(DynRoleRepo::new_box(MockTestRoleRepo::new()));
+        let from_mock = RoleService::new(DynRoleReadRepo::new_box(MockTestRoleRepo::new()));
         assert_send(&from_mock._repo);
     }
 
-    // mock 是 native trait impl（`async fn` 直接声明，非 `#[async_trait]`），经 `new_box` 进 `DynRoleRepo`。
+    // mock 是 native trait impl（`async fn` 直接声明，非 `#[async_trait]`），经 `new_box` 进 `DynRoleReadRepo`。
     mockall::mock! {
         TestRoleRepo {}
-        impl RoleRepo for TestRoleRepo {
+        impl RoleReadRepo for TestRoleRepo {
             async fn find(
                 &self,
                 scope: TenantRepoScope,
                 id: RoleId,
             ) -> Result<Option<Role>, IdentityError>;
-            async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError>;
             async fn list(
                 &self,
                 scope: TenantRepoScope,
@@ -750,7 +753,7 @@ mod smoke {
     }
 
     // ── SessionLifecycle（co-tx 创建 + 查询 + 软撤销，单一域形 port，#1278）PORT-SHAPE ────────────
-    // 与 RoleRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionLifecycle 的 co-tx 创建；
+    // 与 RoleReadRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionLifecycle 的 co-tx 创建；
     // find/revoke 冻结 #1116），但本 smoke 仍只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop
     // `todo!()`）；co-tx 行为由 adapter 集成测试守。三方法（create/find/revoke）同一 trait，证明合并后仍
     // 经单一 `Arc<DynSessionLifecycle>` 注入。

@@ -5,8 +5,8 @@ use httpserve::routes::unfinalized_for_test;
 const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
 enum RouteMarker {}
 
-fn endpoint() -> httpserve::GeneratedEndpoint<()> {
-    let binding = vocab::HttpRouteBinding::<RouteMarker>::from_static(
+fn endpoint() -> httpserve::GeneratedEndpoint<(), vocab::http::LocalOnly> {
+    let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(
         vocab::ContractBinding::from_static(
             "test",
             "ui.non-primary",
@@ -18,7 +18,6 @@ fn endpoint() -> httpserve::GeneratedEndpoint<()> {
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
-        vocab::HttpConsistencyLevel::LocalOnly,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
     httpserve::GeneratedEndpoint::new(

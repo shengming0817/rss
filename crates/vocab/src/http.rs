@@ -8,6 +8,57 @@
 use crate::{ContractBinding, RoutePermissionId};
 use core::marker::PhantomData;
 
+mod consistency_sealed {
+    pub trait HttpConsistencyClass {}
+    pub trait NonLocalHttpConsistency {}
+}
+
+/// Sealed consistency class carried by generated HTTP route bindings.
+pub trait HttpConsistencyClass: consistency_sealed::HttpConsistencyClass {
+    /// Runtime evidence corresponding to this compile-time class.
+    const LEVEL: HttpConsistencyLevel;
+}
+
+/// Sealed marker for consistency classes that may bind arbitrary Axum state.
+pub trait NonLocalHttpConsistency:
+    HttpConsistencyClass + consistency_sealed::NonLocalHttpConsistency
+{
+}
+
+macro_rules! define_consistency_classes {
+    ($($class:ident => $level:ident),+ $(,)?) => {
+        $(
+            #[doc = concat!("Compile-time marker for `HttpConsistencyLevel::", stringify!($level), "`.")]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub struct $class;
+
+            impl consistency_sealed::HttpConsistencyClass for $class {}
+            impl HttpConsistencyClass for $class {
+                const LEVEL: HttpConsistencyLevel = HttpConsistencyLevel::$level;
+            }
+        )+
+    };
+}
+
+define_consistency_classes!(
+    LocalOnly => LocalOnly,
+    LocalTx => LocalTx,
+    OutboxFact => OutboxFact,
+    WorkflowEventual => WorkflowEventual,
+    DeviceLatent => DeviceLatent,
+);
+
+macro_rules! impl_non_local_consistency {
+    ($($class:ident),+ $(,)?) => {
+        $(
+            impl consistency_sealed::NonLocalHttpConsistency for $class {}
+            impl NonLocalHttpConsistency for $class {}
+        )+
+    };
+}
+
+impl_non_local_consistency!(LocalTx, OutboxFact, WorkflowEventual, DeviceLatent);
+
 /// Runtime consistency semantics declared by an HTTP contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpConsistencyLevel {
@@ -126,25 +177,27 @@ pub struct HttpRouteEvidence {
 
 /// Contract-specific route binding emitted by code generation.
 ///
-/// `M` is a unique generated marker for one HTTP contract. Serving code can only pair this
-/// binding with a handler carrying the same marker, while runtime middleware receives the
-/// enclosed [`HttpRouteEvidence`].
+/// `M` is a unique generated marker for one HTTP contract. `C` is the sealed consistency marker
+/// selected by code generation from that contract's manifest; callers cannot substitute a custom
+/// consistency class. Serving code can only pair this binding with a handler carrying `M`, while
+/// endpoint typestate uses `C` to expose the appropriate state-closing operation and runtime
+/// middleware receives the enclosed [`HttpRouteEvidence`].
 ///
-/// INVARIANT: LOCALTX-TEST-MARKER-TYPED-01 { level = "Hard", exec = "native-compile", source = "rustdoc", native = "an anonymous const typed as HttpRouteBinding<RouteMarker> rejects a mismatched generated ROUTE at compile time" }
-pub struct HttpRouteBinding<M> {
+/// INVARIANT: LOCALTX-TEST-MARKER-TYPED-01 { level = "Hard", exec = "native-compile", source = "rustdoc", native = "an anonymous const typed as HttpRouteBinding<RouteMarker, ConsistencyMarker> rejects a mismatched generated ROUTE at compile time" }
+pub struct HttpRouteBinding<M, C> {
     evidence: HttpRouteEvidence,
-    marker: PhantomData<fn() -> M>,
+    marker: PhantomData<fn() -> (M, C)>,
 }
 
-impl<M> Copy for HttpRouteBinding<M> {}
+impl<M, C> Copy for HttpRouteBinding<M, C> {}
 
-impl<M> Clone for HttpRouteBinding<M> {
+impl<M, C> Clone for HttpRouteBinding<M, C> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<M> HttpRouteBinding<M> {
+impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
     /// Construct a generated, contract-specific route binding from static manifest values.
     ///
     /// # Panics
@@ -159,7 +212,6 @@ impl<M> HttpRouteBinding<M> {
         auth: HttpRouteAuth,
         resource: Option<&'static str>,
         self_scoped: bool,
-        consistency_level: HttpConsistencyLevel,
         effect_profile: HttpEffectProfile,
     ) -> Self {
         Self {
@@ -170,7 +222,7 @@ impl<M> HttpRouteBinding<M> {
                 auth,
                 resource,
                 self_scoped,
-                consistency_level,
+                C::LEVEL,
                 effect_profile,
             ),
             marker: PhantomData,
@@ -324,6 +376,26 @@ mod tests {
             HttpConsistencyLevel::LocalOnly
         );
         assert_eq!(EVIDENCE.effect_profile().effects(), EFFECTS);
+    }
+
+    #[test]
+    fn binding_derives_runtime_consistency_from_its_marker() {
+        enum Marker {}
+
+        let binding = HttpRouteBinding::<Marker, OutboxFact>::from_static(
+            CONTRACT,
+            "/v1/profile",
+            "GET",
+            HttpRouteAuth::Public,
+            None,
+            false,
+            PROFILE,
+        );
+
+        assert_eq!(
+            binding.evidence().consistency_level(),
+            HttpConsistencyLevel::OutboxFact
+        );
     }
 
     #[test]

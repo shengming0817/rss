@@ -66,7 +66,7 @@ impl Permission {
 
 /// 角色实体（含权限集；私有字段；不 derive Serialize——域类型）。
 ///
-/// `pub`（ADR-005 Option 2）：作 `ports::RoleRepo` 返回聚合被 adapter 跨 crate 命名；字段私有、构造经
+/// `pub`（ADR-005 Option 2）：作 `ports::RoleReadRepo` 返回聚合被 adapter 跨 crate 命名；字段私有、构造经
 /// `Role::new`（crate 内信任 funnel）/ `Role::hydrate`（跨 crate 受控重建 funnel）——adapter 可接收/返回
 /// `Role`、按需读其访问器，但**不可伪造其不变式**（id / permission 必经 parse 白名单）。`permissions`
 /// 字段类型 `GrantPermission` 来自 `vocab::authz` 闭值集；adapter 读侧经 `permission_ids()` 存储 helper 输出字符串。
@@ -96,7 +96,7 @@ impl Role {
     /// `id` / 各 `permission_ids` 经 `parse` 白名单复核——持久化值写入时已校验，复核失败属**数据完整性**
     /// 问题（损坏行），归 [`IdentityError::Storage`]（保留原 `IdParseError` 于 source 链，fail-closed，不静默
     /// 接受脏数据）。返 `IdentityError`（非 `pub(crate)` 的 `IdParseError`）避免私有类型泄漏 `pub` 签名，
-    /// 且 adapter 直接 `?` 冒泡即落 `RoleRepo` 错误通道。`RoleId`/`PermissionId` 构造仍封闭（外部不可伪造）。
+    /// 且 adapter 直接 `?` 冒泡即落 `RoleReadRepo` 错误通道。`RoleId`/`PermissionId` 构造仍封闭（外部不可伪造）。
     pub fn hydrate(
         id: &str,
         name: impl Into<String>,

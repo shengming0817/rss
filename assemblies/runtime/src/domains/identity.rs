@@ -10,7 +10,7 @@ use identity::{
     RefreshService,
     ports::{
         DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-        DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle,
+        DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle,
     },
 };
 use postgres::{PgDomainDeps, caps};
@@ -181,8 +181,8 @@ fn wire_identity_from(
     let lifecycle = Arc::from(DynSessionLifecycle::new_box(
         identity_pg.session_lifecycle(Box::new(SystemClock)),
     ));
-    let roles_for_admin = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
-    let roles_for_list = Arc::from(DynRoleRepo::new_box(identity_pg.role_repo()));
+    let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(identity_pg.role_repo()));
+    let roles_for_list = Arc::from(DynRoleReadRepo::new_box(identity_pg.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(identity_pg.policy_repo()));
     let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
         identity_pg.resource_attribute_repo(),

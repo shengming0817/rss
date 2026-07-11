@@ -8,7 +8,7 @@ pub struct GeneratedPrimaryEndpoint;
 pub struct Error;
 
 impl GeneratedPrimaryEndpoint {
-    pub fn new<R, H>(_: vocab::HttpRouteBinding<R>, _: H) -> Result<Self, Error> {
+    pub fn new<R, C, H>(_: vocab::HttpRouteBinding<R, C>, _: H) -> Result<Self, Error> {
         Ok(Self)
     }
 }

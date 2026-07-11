@@ -1,6 +1,6 @@
 //! RBAC 角色管理应用服务（#1190 US5）——角色分配 / 撤销编排 + L2 OutboxFact 角色事件发布。
 //!
-//! [`RbacAdminService`] 经注入的 [`RoleRepo`](crate::ports::RoleRepo)（校验角色存在）+
+//! [`RbacAdminService`] 经注入的 [`RoleReadRepo`](crate::ports::RoleReadRepo)（校验角色存在）+
 //! [`RoleBindingLifecycle`](crate::ports::RoleBindingLifecycle)（binding co-tx 写 + 角色事件 outbox 同事务）
 //! 落角色绑定，并在同一本地事务发布 `identity.role-{assigned,revoked}`（L2，事件 draft——audit 消费延 #1017）。
 //!
@@ -28,7 +28,7 @@ use vocab::TenantId;
 use super::unix_secs;
 use crate::domain::{IdentityError, RoleBinding, RoleId};
 use crate::ports::{
-    DynRoleBindingLifecycle, DynRoleRepo, RoleBindingLifecycle, RoleRepo, TenantRepoScope,
+    DynRoleBindingLifecycle, DynRoleReadRepo, RoleBindingLifecycle, RoleReadRepo, TenantRepoScope,
 };
 
 /// 发布域（tracing span 标签）。从契约绑定单源派生（= contract.toml `domain`，两 role 事件同域 `identity`）。
@@ -41,7 +41,7 @@ pub enum RbacAdminError {
     /// 目标角色不存在（assign 前置校验失败）。
     #[error("role not found")]
     RoleNotFound,
-    /// 角色仓储查询失败（RoleRepo 错误通道）。
+    /// 角色仓储查询失败（RoleReadRepo 错误通道）。
     #[error("role lookup failed")]
     RoleLookup(#[source] IdentityError),
     /// 角色事件 payload 编码失败（原始错误进 source，不进 Display）。
@@ -57,10 +57,10 @@ pub enum RbacAdminError {
 
 /// RBAC 角色管理应用服务。必填依赖走构造器位置参（缺失即编译错误）。
 ///
-/// 注入形态 `Arc<DynRoleRepo>` + `Arc<DynRoleBindingLifecycle>`：域形端口基 trait 为 `Send + Sync`，使本
+/// 注入形态 `Arc<DynRoleReadRepo>` + `Arc<DynRoleBindingLifecycle>`：域形端口基 trait 为 `Send + Sync`，使本
 /// service 可作 axum handler 共享 state（PR5b），且 `assign_role`/`revoke_role` future 为 `Send`。
 pub struct RbacAdminService {
-    roles: Arc<DynRoleRepo<'static>>,
+    roles: Arc<DynRoleReadRepo<'static>>,
     bindings: Arc<DynRoleBindingLifecycle<'static>>,
     clock: Box<dyn Clock>,
 }
@@ -68,7 +68,7 @@ pub struct RbacAdminService {
 impl RbacAdminService {
     /// 组合根构造：3 必填依赖位置参（缺失即编译错误）。`clock` 位置参注入（禁系统时钟）。
     pub fn new(
-        roles: Arc<DynRoleRepo<'static>>,
+        roles: Arc<DynRoleReadRepo<'static>>,
         bindings: Arc<DynRoleBindingLifecycle<'static>>,
         clock: Box<dyn Clock>,
     ) -> Self {
@@ -243,7 +243,7 @@ mod tests {
 
     use super::*;
     use crate::internal::mem::{InMemRoleBindingLifecycle, InMemRoleRepo};
-    use crate::ports::{DynRoleBindingLifecycle, DynRoleRepo};
+    use crate::ports::{DynRoleBindingLifecycle, DynRoleReadRepo};
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "00000000-0000-4000-8000-000000000001";
@@ -288,7 +288,7 @@ mod tests {
     ) -> (RbacAdminService, InMemRoleBindingLifecycle) {
         let probe = bindings.clone();
         let svc = RbacAdminService::new(
-            Arc::from(DynRoleRepo::new_box(repo)),
+            Arc::from(DynRoleReadRepo::new_box(repo)),
             Arc::from(DynRoleBindingLifecycle::new_box(bindings)),
             clock(),
         );

@@ -8,7 +8,7 @@ async fn config_delete_handler(
 }
 
 fn main() {
-    let _ = httpserve::GeneratedPrimaryEndpoint::<()>::new(
+    let _ = httpserve::GeneratedPrimaryEndpoint::<(), vocab::http::LocalOnly>::new(
         CONFIG_GET_HTTP_ROUTE,
         config_delete_handler,
     );

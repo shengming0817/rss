@@ -960,7 +960,7 @@ pub const generated::http::audit_v1::list_entries::EFFECTS: &[vocab::http::HttpE
 pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_entries::PATH: &str
 pub const generated::http::audit_v1::list_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::audit_v1::list_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_entries::RouteMarker>
+pub const generated::http::audit_v1::list_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_entries::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::audit_v1::list_entries::SPEC: generated::http::HttpSpec
 pub mod generated::http::audit_v1::list_tenant_entries
 pub mod generated::http::audit_v1::list_tenant_entries::defaults
@@ -1067,7 +1067,7 @@ pub const generated::http::audit_v1::list_tenant_entries::EFFECTS: &[vocab::http
 pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_tenant_entries::PATH: &str
 pub const generated::http::audit_v1::list_tenant_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::audit_v1::list_tenant_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_tenant_entries::RouteMarker>
+pub const generated::http::audit_v1::list_tenant_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_tenant_entries::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::audit_v1::list_tenant_entries::SPEC: generated::http::HttpSpec
 pub mod generated::http::audit_v2
 pub mod generated::http::audit_v2::error
@@ -1226,7 +1226,7 @@ pub const generated::http::identity_v1::login::EFFECTS: &[vocab::http::HttpEffec
 pub const generated::http::identity_v1::login::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::login::PATH: &str
 pub const generated::http::identity_v1::login::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::login::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::login::RouteMarker>
+pub const generated::http::identity_v1::login::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::login::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::login::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::logout
 pub mod generated::http::identity_v1::logout::error
@@ -1318,7 +1318,7 @@ pub const generated::http::identity_v1::logout::EFFECTS: &[vocab::http::HttpEffe
 pub const generated::http::identity_v1::logout::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::logout::PATH: &str
 pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker>
+pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::identity_v1::logout::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::password_change
 pub mod generated::http::identity_v1::password_change::error
@@ -1411,7 +1411,7 @@ pub const generated::http::identity_v1::password_change::EFFECTS: &[vocab::http:
 pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::password_change::PATH: &str
 pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker>
+pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::identity_v1::password_change::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_create
 pub mod generated::http::identity_v1::policies_create::error
@@ -1911,7 +1911,7 @@ pub const generated::http::identity_v1::policies_create::EFFECTS: &[vocab::http:
 pub const generated::http::identity_v1::policies_create::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_create::PATH: &str
 pub const generated::http::identity_v1::policies_create::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::policies_create::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_create::RouteMarker>
+pub const generated::http::identity_v1::policies_create::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_create::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_create::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_deactivate
 pub mod generated::http::identity_v1::policies_deactivate::error
@@ -2004,7 +2004,7 @@ pub const generated::http::identity_v1::policies_deactivate::EFFECTS: &[vocab::h
 pub const generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_deactivate::PATH: &str
 pub const generated::http::identity_v1::policies_deactivate::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::policies_deactivate::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_deactivate::RouteMarker>
+pub const generated::http::identity_v1::policies_deactivate::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_deactivate::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_deactivate::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_get
 pub mod generated::http::identity_v1::policies_get::error
@@ -2322,7 +2322,7 @@ pub const generated::http::identity_v1::policies_get::EFFECTS: &[vocab::http::Ht
 pub const generated::http::identity_v1::policies_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_get::PATH: &str
 pub const generated::http::identity_v1::policies_get::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::policies_get::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_get::RouteMarker>
+pub const generated::http::identity_v1::policies_get::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_get::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::policies_get::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_list
 pub mod generated::http::identity_v1::policies_list::defaults
@@ -2645,7 +2645,7 @@ pub const generated::http::identity_v1::policies_list::EFFECTS: &[vocab::http::H
 pub const generated::http::identity_v1::policies_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_list::PATH: &str
 pub const generated::http::identity_v1::policies_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::policies_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_list::RouteMarker>
+pub const generated::http::identity_v1::policies_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_list::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::policies_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_update
 pub mod generated::http::identity_v1::policies_update::error
@@ -3145,7 +3145,7 @@ pub const generated::http::identity_v1::policies_update::EFFECTS: &[vocab::http:
 pub const generated::http::identity_v1::policies_update::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_update::PATH: &str
 pub const generated::http::identity_v1::policies_update::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::policies_update::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_update::RouteMarker>
+pub const generated::http::identity_v1::policies_update::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_update::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_update::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::profile
 pub mod generated::http::identity_v1::profile::error
@@ -3287,7 +3287,7 @@ pub const generated::http::identity_v1::profile::EFFECTS: &[vocab::http::HttpEff
 pub const generated::http::identity_v1::profile::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::profile::PATH: &str
 pub const generated::http::identity_v1::profile::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::profile::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::profile::RouteMarker>
+pub const generated::http::identity_v1::profile::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::profile::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::profile::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::refresh
 pub mod generated::http::identity_v1::refresh::error
@@ -3381,7 +3381,7 @@ pub const generated::http::identity_v1::refresh::EFFECTS: &[vocab::http::HttpEff
 pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::refresh::PATH: &str
 pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker>
+pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::identity_v1::refresh::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_assign
 pub mod generated::http::identity_v1::roles_assign::error
@@ -3473,7 +3473,7 @@ pub const generated::http::identity_v1::roles_assign::EFFECTS: &[vocab::http::Ht
 pub const generated::http::identity_v1::roles_assign::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_assign::PATH: &str
 pub const generated::http::identity_v1::roles_assign::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::roles_assign::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_assign::RouteMarker>
+pub const generated::http::identity_v1::roles_assign::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_assign::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::roles_assign::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_list
 pub mod generated::http::identity_v1::roles_list::defaults
@@ -3573,7 +3573,7 @@ pub const generated::http::identity_v1::roles_list::EFFECTS: &[vocab::http::Http
 pub const generated::http::identity_v1::roles_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_list::PATH: &str
 pub const generated::http::identity_v1::roles_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::roles_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_list::RouteMarker>
+pub const generated::http::identity_v1::roles_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_list::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::roles_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_revoke
 pub mod generated::http::identity_v1::roles_revoke::error
@@ -3666,7 +3666,7 @@ pub const generated::http::identity_v1::roles_revoke::EFFECTS: &[vocab::http::Ht
 pub const generated::http::identity_v1::roles_revoke::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
 pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::identity_v1::roles_revoke::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_revoke::RouteMarker>
+pub const generated::http::identity_v1::roles_revoke::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_revoke::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v2
 pub mod generated::http::identity_v2::error
@@ -3823,7 +3823,7 @@ pub const generated::http::settings_v1::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v1::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v1::PATH: &str
 pub const generated::http::settings_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::settings_v1::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v1::RouteMarker>
+pub const generated::http::settings_v1::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v1::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v1::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v2
 pub mod generated::http::settings_v2::error
@@ -3919,7 +3919,7 @@ pub const generated::http::settings_v2::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v2::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v2::PATH: &str
 pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::settings_v2::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v2::RouteMarker>
+pub const generated::http::settings_v2::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v2::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::settings_v2::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v3
 pub mod generated::http::settings_v3::error
@@ -4075,7 +4075,7 @@ pub const generated::http::settings_v4::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v4::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v4::PATH: &str
 pub const generated::http::settings_v4::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker>
+pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::settings_v4::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v5
 pub mod generated::http::settings_v5::error
@@ -4150,7 +4150,7 @@ pub const generated::http::settings_v5::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v5::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v5::PATH: &str
 pub const generated::http::settings_v5::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::settings_v5::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v5::RouteMarker>
+pub const generated::http::settings_v5::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v5::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v5::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v6
 pub mod generated::http::settings_v6::error
@@ -4244,7 +4244,7 @@ pub const generated::http::settings_v6::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v6::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v6::PATH: &str
 pub const generated::http::settings_v6::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
-pub const generated::http::settings_v6::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v6::RouteMarker>
+pub const generated::http::settings_v6::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v6::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v6::SPEC: generated::http::HttpSpec
 pub enum generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderMode::PopulateOnly

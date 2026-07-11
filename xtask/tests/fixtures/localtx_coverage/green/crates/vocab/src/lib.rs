@@ -1,8 +1,12 @@
 use core::marker::PhantomData;
 
-pub struct HttpRouteBinding<R>(PhantomData<fn() -> R>);
+pub mod http {
+    pub struct LocalTx;
+}
 
-impl<R> HttpRouteBinding<R> {
+pub struct HttpRouteBinding<R, C>(PhantomData<fn() -> (R, C)>);
+
+impl<R, C> HttpRouteBinding<R, C> {
     pub const fn new() -> Self {
         Self(PhantomData)
     }

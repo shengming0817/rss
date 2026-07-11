@@ -623,10 +623,53 @@ fn spec_has_local_tx(expr: &Expr) -> bool {
 #[derive(Default)]
 struct OwnerEvidence {
     routes: BTreeSet<String>,
+    canonical_mounts: BTreeMap<String, BTreeSet<CanonicalRouteMount>>,
+    reachable_production_sources: BTreeSet<String>,
     markers: Vec<MarkerOccurrence>,
     test_macros: BTreeSet<String>,
     production_macros: BTreeSet<String>,
     opaque_triggers: BTreeSet<OpaqueTrigger>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CanonicalMountedState {
+    Stateless,
+    Ordinary,
+    Classified(String),
+    Opaque,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CanonicalRouteMount {
+    pub(crate) source: String,
+    pub(crate) state: CanonicalMountedState,
+}
+
+pub(crate) struct CanonicalOwnerEvidence {
+    pub(crate) mounts: BTreeMap<String, BTreeSet<CanonicalRouteMount>>,
+    pub(crate) reachable_production_sources: BTreeSet<String>,
+}
+
+/// Canonical production routes mounted by one `crates/*` owner.
+///
+/// This is deliberately the same evidence used by the LocalTx closure gate: Cargo targets,
+/// reachable modules, cfg state, aliases, handler markers, `Domain::init`, `route_group`, and
+/// `mount` are resolved once instead of being reimplemented by sibling consistency checks.
+pub(crate) fn canonical_owner_evidence(root: &Path, owner: &str) -> Result<CanonicalOwnerEvidence> {
+    let workspace_crates = load_workspace_crates(root)?;
+    let expected_packages: BTreeMap<_, _> = workspace_crates
+        .iter()
+        .map(|member| (member.name.clone(), member.root.clone()))
+        .collect();
+    let member = workspace_crates
+        .iter()
+        .find(|member| member.name == owner && member.relative == Path::new("crates").join(owner))
+        .ok_or_else(|| anyhow!("owner `{owner}` is not a canonical crates/* workspace member"))?;
+    let evidence = scan_owner(root, member, &expected_packages)?;
+    Ok(CanonicalOwnerEvidence {
+        mounts: evidence.canonical_mounts,
+        reachable_production_sources: evidence.reachable_production_sources,
+    })
 }
 
 struct FileUnit {
@@ -684,6 +727,22 @@ impl Reachability {
         }
         reach
     }
+}
+
+/// Whether an attributed item/field can exist in a production build.
+///
+/// Unknown cfg predicates are production-possible and therefore retained for fail-closed static
+/// analysis. Only an expression proven false when `test = false` is excluded.
+pub(crate) fn attrs_may_be_production(attrs: &[Attribute]) -> bool {
+    attrs.iter().all(|attr| {
+        if attr.path().is_ident("cfg_attr") {
+            return true;
+        }
+        if !attr.path().is_ident("cfg") {
+            return true;
+        }
+        cfg_expression(attr).is_none_or(|meta| cfg_truth(&meta, false) != Truth::False)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -782,6 +841,16 @@ fn scan_owner(
         scan_units(&member.name, &units, &mut target_evidence)?;
         validate_evidence_dependencies(member, &target_evidence, expected_packages)?;
         evidence.routes.extend(target_evidence.routes);
+        for (key, mounts) in target_evidence.canonical_mounts {
+            evidence
+                .canonical_mounts
+                .entry(key)
+                .or_default()
+                .extend(mounts);
+        }
+        evidence
+            .reachable_production_sources
+            .extend(target_evidence.reachable_production_sources);
         evidence.markers.extend(target_evidence.markers);
         evidence.test_macros.extend(target_evidence.test_macros);
         evidence
@@ -1083,6 +1152,11 @@ fn module_path_attribute(attrs: &[Attribute]) -> Result<Option<PathBuf>> {
 fn scan_units(owner: &str, units: &[FileUnit], evidence: &mut OwnerEvidence) -> Result<()> {
     let mut handlers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for unit in units {
+        if unit.reachability.prod && !unit.reachability.unknown {
+            evidence
+                .reachable_production_sources
+                .insert(unit.relative.clone());
+        }
         let mut collector = HandlerCollector {
             module: unit.module.clone(),
             resolvers: &unit.resolvers,
@@ -1882,7 +1956,7 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             && let Some(registry) = self.domain_init_router.as_deref()
         {
             self.domain_init_body_pending = false;
-            let routes = direct_domain_init_route_keys(
+            let mounts = direct_domain_init_route_mounts(
                 node,
                 registry,
                 &resolver,
@@ -1891,8 +1965,15 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
                 self.reachability,
                 self.attribute_safe,
             );
-            if !routes.is_empty() {
-                self.evidence.routes.extend(routes);
+            if !mounts.is_empty() {
+                self.evidence.routes.extend(mounts.keys().cloned());
+                for (key, states) in mounts {
+                    let destination = self.evidence.canonical_mounts.entry(key).or_default();
+                    destination.extend(states.into_iter().map(|state| CanonicalRouteMount {
+                        source: self.source.to_string(),
+                        state,
+                    }));
+                }
                 self.evidence
                     .production_macros
                     .extend(resolver.trusted_macros.iter().cloned());
@@ -1990,7 +2071,7 @@ fn canonical_domain_init_router(signature: &syn::Signature, resolver: &Resolver)
     .then(|| binding.ident.to_string())
 }
 
-fn direct_domain_init_route_keys(
+fn direct_domain_init_route_mounts(
     block: &syn::Block,
     registry: &str,
     resolver: &Resolver,
@@ -1998,8 +2079,8 @@ fn direct_domain_init_route_keys(
     handlers: &BTreeMap<String, BTreeSet<String>>,
     reachability: Reachability,
     attribute_safe: bool,
-) -> BTreeSet<String> {
-    let mut routes = BTreeSet::new();
+) -> BTreeMap<String, BTreeSet<CanonicalMountedState>> {
+    let mut routes = BTreeMap::<String, BTreeSet<CanonicalMountedState>>::new();
     for statement in &block.stmts {
         let Stmt::Expr(expr, _) = statement else {
             continue;
@@ -2043,7 +2124,7 @@ fn direct_domain_init_route_keys(
         {
             closure_resolver.opaque_empty_item_macro = true;
         }
-        routes.extend(mounted_route_keys(
+        for (key, states) in mounted_route_states(
             &body.block,
             &router,
             &closure_resolver,
@@ -2051,7 +2132,9 @@ fn direct_domain_init_route_keys(
             handlers,
             call_reachability.with_attrs(&register.attrs),
             call_attribute_safe && attrs_safe_for_evidence(&register.attrs),
-        ));
+        ) {
+            routes.entry(key).or_default().extend(states);
+        }
     }
     routes
 }
@@ -2076,7 +2159,7 @@ fn direct_method_call(
     }
 }
 
-fn mounted_route_keys(
+fn mounted_route_states(
     block: &syn::Block,
     router: &str,
     resolver: &Resolver,
@@ -2084,9 +2167,9 @@ fn mounted_route_keys(
     handlers: &BTreeMap<String, BTreeSet<String>>,
     reachability: Reachability,
     attribute_safe: bool,
-) -> BTreeSet<String> {
+) -> BTreeMap<String, BTreeSet<CanonicalMountedState>> {
     let mut binding_counts = BTreeMap::<String, usize>::new();
-    let mut endpoint_bindings = BTreeMap::<String, String>::new();
+    let mut endpoint_bindings = BTreeMap::<String, (String, CanonicalMountedState)>::new();
     for statement in &block.stmts {
         let Stmt::Local(local) = statement else {
             continue;
@@ -2104,7 +2187,7 @@ fn mounted_route_keys(
             && let Some(init) = &local.init
             && let Some(route) = endpoint_route(&init.expr, resolver, module, handlers)
         {
-            endpoint_bindings.insert(name, route);
+            endpoint_bindings.insert(name, (route, mounted_state(&init.expr)));
         }
     }
 
@@ -2113,7 +2196,7 @@ fn mounted_route_keys(
         resolver,
         module,
         handlers,
-        inline_routes: BTreeSet::new(),
+        inline_routes: BTreeMap::new(),
         mounted_bindings: BTreeMap::new(),
         binding_uses: BTreeMap::new(),
         reachability,
@@ -2139,12 +2222,12 @@ fn mounted_route_keys(
     }
 
     let mut routes = collector.inline_routes;
-    for (binding, route) in endpoint_bindings {
+    for (binding, (route, state)) in endpoint_bindings {
         if binding_counts.get(&binding) == Some(&1)
             && collector.binding_uses.get(&binding) == Some(&1)
             && collector.mounted_bindings.get(&binding) == Some(&1)
         {
-            routes.insert(route);
+            routes.entry(route).or_default().insert(state);
         }
     }
     routes
@@ -2155,7 +2238,7 @@ struct SameScopeMountCollector<'a> {
     resolver: &'a Resolver,
     module: &'a [String],
     handlers: &'a BTreeMap<String, BTreeSet<String>>,
-    inline_routes: BTreeSet<String>,
+    inline_routes: BTreeMap<String, BTreeSet<CanonicalMountedState>>,
     mounted_bindings: BTreeMap<String, usize>,
     binding_uses: BTreeMap<String, usize>,
     reachability: Reachability,
@@ -2196,7 +2279,10 @@ impl<'ast> Visit<'ast> for SameScopeMountCollector<'_> {
         {
             if let Some(route) = endpoint_route(argument, self.resolver, self.module, self.handlers)
             {
-                self.inline_routes.insert(route);
+                self.inline_routes
+                    .entry(route)
+                    .or_default()
+                    .insert(mounted_state(argument));
             } else if let Some(binding) = simple_ident(argument) {
                 *self.mounted_bindings.entry(binding).or_default() += 1;
             }
@@ -2207,6 +2293,27 @@ impl<'ast> Visit<'ast> for SameScopeMountCollector<'_> {
     fn visit_block(&mut self, _node: &'ast syn::Block) {}
 
     fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
+}
+
+fn mounted_state(expr: &Expr) -> CanonicalMountedState {
+    use quote::ToTokens as _;
+    match peel_expr(expr) {
+        Expr::Try(value) => mounted_state(&value.expr),
+        Expr::MethodCall(call) if call.method == "with_state" && call.args.len() == 1 => {
+            CanonicalMountedState::Ordinary
+        }
+        Expr::MethodCall(call)
+            if call.method == "with_classified_state" && call.args.len() == 1 =>
+        {
+            call.args
+                .first()
+                .map_or(CanonicalMountedState::Opaque, |state| {
+                    CanonicalMountedState::Classified(state.to_token_stream().to_string())
+                })
+        }
+        Expr::Call(_) => CanonicalMountedState::Stateless,
+        _ => CanonicalMountedState::Opaque,
+    }
 }
 
 fn simple_pattern_ident(pattern: &syn::Pat) -> Option<String> {
@@ -2254,7 +2361,12 @@ fn endpoint_route(
 fn peel_endpoint_expr(expr: &Expr) -> &Expr {
     match peel_expr(expr) {
         Expr::Try(expr) => peel_endpoint_expr(&expr.expr),
-        Expr::MethodCall(call) if call.method == "with_state" && call.args.len() == 1 => {
+        Expr::MethodCall(call)
+            if matches!(
+                call.method.to_string().as_str(),
+                "with_state" | "with_classified_state"
+            ) && call.args.len() == 1 =>
+        {
             peel_endpoint_expr(&call.receiver)
         }
         other => other,
@@ -2388,7 +2500,7 @@ fn strict_test_marker_key(item: &ItemConst, resolver: &Resolver) -> Option<Strin
     let PathArguments::AngleBracketed(arguments) = &binding.path.segments.last()?.arguments else {
         return None;
     };
-    if arguments.args.len() != 1 {
+    if arguments.args.len() != 2 {
         return None;
     }
     let GenericArgument::Type(Type::Path(marker)) = arguments.args.first()? else {
@@ -2399,6 +2511,23 @@ fn strict_test_marker_key(item: &ItemConst, resolver: &Resolver) -> Option<Strin
     }
     let marker_segments = raw_segments(&marker.path);
     if canonical_segments(&marker.path, resolver).as_deref() != Some(marker_segments.as_slice()) {
+        return None;
+    }
+    let GenericArgument::Type(Type::Path(consistency)) = arguments.args.iter().nth(1)? else {
+        return None;
+    };
+    if consistency.qself.is_some()
+        || consistency.path.leading_colon.is_none()
+        || canonical_segments(&consistency.path, resolver).as_deref()
+            != Some(
+                [
+                    "vocab".to_string(),
+                    "http".to_string(),
+                    "LocalTx".to_string(),
+                ]
+                .as_slice(),
+            )
+    {
         return None;
     }
     let key = key_from_segments(&marker_segments, "RouteMarker")?;
@@ -2839,7 +2968,7 @@ fn init(fake: FakeMount) {
             fs::write(
                 &owner,
                 format!(
-                    "{source}\n#[test] fn covered() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }}\n"
+                    "{source}\n#[test] fn covered() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }}\n"
                 ),
             )?;
             let (_, findings) = check_root(&temp.path)?;
@@ -2924,7 +3053,7 @@ impl ::bootstrap::Domain for Demo {
             fs::write(
                 temp.path.join("crates/demo/src/lib.rs"),
                 format!(
-                    "{source}\n#[test] fn covered() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }}\n"
+                    "{source}\n#[test] fn covered() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }}\n"
                 ),
             )?;
             let (_, findings) = check_root(&temp.path)?;
@@ -2943,7 +3072,7 @@ impl ::bootstrap::Domain for Demo {
         let missing = FixtureCopy::new("localtx-missing-route")?;
         fs::write(
             missing.path.join("crates/demo/src/lib.rs"),
-            "#[test] fn covered() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn covered() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         let (_, route_findings) = check_root(&missing.path)?;
         assert!(
@@ -2956,7 +3085,7 @@ impl ::bootstrap::Domain for Demo {
         fs::write(
             &owner,
             format!(
-                "{}\n#[test] fn second() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }}\n",
+                "{}\n#[test] fn second() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }}\n",
                 fs::read_to_string(&owner)?
             ),
         )?;
@@ -3106,7 +3235,7 @@ impl ::bootstrap::Domain for Demo {
         fs::write(
             &owner,
             format!(
-                "{source}\n#[cfg(test)] mod orphan_marker {{\n    #[test] fn covered() {{\n        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::orphan::RouteMarker> = ::generated::http::demo_v1::orphan::ROUTE;\n    }}\n}}\n"
+                "{source}\n#[cfg(test)] mod orphan_marker {{\n    #[test] fn covered() {{\n        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::orphan::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::orphan::ROUTE;\n    }}\n}}\n"
             ),
         )?;
         let (_, findings) = check_root(&orphan.path)?;
@@ -3185,7 +3314,7 @@ impl ::bootstrap::Domain for Demo {
         )?;
         fs::write(
             temp.path.join("crates/other/src/lib.rs"),
-            "#[test] fn wrong_owner() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn wrong_owner() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         let (_, findings) = check_root(&temp.path)?;
         assert!(
@@ -3221,7 +3350,7 @@ use ::generated::http::demo_v1::write::ROUTE as WRITE_ROUTE;
 fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn init() { httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3257,7 +3386,7 @@ use ::generated::http::demo_v1::write::ROUTE as WRITE_ROUTE;
 fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn bait() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3297,7 +3426,7 @@ mod right {
 }
 fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, wrong::handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3331,7 +3460,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, wrong::handle
         fs::write(
             &owner,
             format!(
-                "{}\n#[test] fn second() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }}\n",
+                "{}\n#[test] fn second() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }}\n",
                 fs::read_to_string(&owner)?
             ),
         )?;
@@ -3351,7 +3480,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, wrong::handle
             temp.path.join("crates/demo/src/lib.rs"),
             r#"
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3384,7 +3513,7 @@ use ::generated::http::demo_v1::write::ROUTE as WRITE_ROUTE;
 fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn bait() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3415,7 +3544,7 @@ impl ::bootstrap::Domain for Demo {
     }
 }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3447,7 +3576,7 @@ use crate::fake_vocab as vocab;
 fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn init() { httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3480,7 +3609,7 @@ fake_roots!();
 fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn init() { httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3509,7 +3638,7 @@ pub mod http { pub mod demo_v1 { pub mod write {
 fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn init() { httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3545,7 +3674,7 @@ fn init() {
 #[test] fn covered() {
     use crate::fake_generated as generated;
     use crate::fake_vocab as vocab;
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3571,7 +3700,7 @@ fn init() {
         )?;
         fs::write(
             temp.path.join("adapters/other/src/lib.rs"),
-            "#[test] fn wrong_owner() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn wrong_owner() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         let (_, findings) = check_root(&temp.path)?;
         assert!(
@@ -3615,7 +3744,7 @@ fn hidden() {
 }
 fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3659,7 +3788,7 @@ use fake_vocab as vocab;
 fn handler(_: httpserve::ContractMarker<generated::http::demo_v1::write::RouteMarker>) {}
 fn init() { httpserve::GeneratedEndpoint::new(generated::http::demo_v1::write::ROUTE, handler); }
 #[test] fn covered() {
-    const _: vocab::HttpRouteBinding<generated::http::demo_v1::write::RouteMarker> =
+    const _: vocab::HttpRouteBinding<generated::http::demo_v1::write::RouteMarker, vocab::http::LocalTx> =
         generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3680,7 +3809,7 @@ fn init() { httpserve::GeneratedEndpoint::new(generated::http::demo_v1::write::R
         )?;
         fs::write(
             temp.path.join("crates/demo/src/extra.rs"),
-            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         assert!(check_root(&temp.path).is_err());
         Ok(())
@@ -3715,7 +3844,7 @@ fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::Route
 fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }
 #[cfg(any())]
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3737,7 +3866,7 @@ fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::Route
 fn handler() {}
 fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -3754,8 +3883,8 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
         fs::write(
             &owner,
             fs::read_to_string(&owner)?.replace(
-                "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =\n            ::generated::http::demo_v1::write::ROUTE;",
-                "use ::generated::http::demo_v1::write::{ROUTE as R, RouteMarker as M};\n        use ::vocab::HttpRouteBinding as B;\n        const _: B<M> = R;",
+                "const _: ::vocab::HttpRouteBinding<\n            ::generated::http::demo_v1::write::RouteMarker,\n            ::vocab::http::LocalTx,\n        > =\n            ::generated::http::demo_v1::write::ROUTE;",
+                "use ::generated::http::demo_v1::write::{ROUTE as R, RouteMarker as M};\n        use ::vocab::HttpRouteBinding as B;\n        const _: B<M, ::vocab::http::LocalTx> = R;",
             ),
         )?;
         let (_, findings) = check_root(&temp.path)?;
@@ -3913,7 +4042,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
         fs::create_dir_all(temp.path.join("crates/demo/tests"))?;
         fs::write(
             temp.path.join("crates/demo/tests/duplicate.rs"),
-            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         let cargo = temp.path.join("crates/demo/Cargo.toml");
         fs::write(
@@ -3945,11 +4074,11 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
     fn strict_marker_rejects_near_miss_grammar() -> anyhow::Result<()> {
         let resolver = Resolver::default();
         for source in [
-            "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::other::ROUTE;",
+            "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::other::ROUTE;",
             "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::WrongMarker> = ::generated::http::demo_v1::write::ROUTE;",
-            "const _: vocab::HttpRouteBinding<generated::http::demo_v1::write::RouteMarker> = generated::http::demo_v1::write::ROUTE;",
+            "const _: vocab::HttpRouteBinding<generated::http::demo_v1::write::RouteMarker, vocab::http::LocalTx> = generated::http::demo_v1::write::ROUTE;",
             "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ()> = ::generated::http::demo_v1::write::ROUTE;",
-            "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = (::generated::http::demo_v1::write::ROUTE);",
+            "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = (::generated::http::demo_v1::write::ROUTE);",
         ] {
             let item: ItemConst = syn::parse_str(source)?;
             assert!(
@@ -3958,7 +4087,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
             );
         }
         let canonical: ItemConst = syn::parse_str(
-            "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE;",
+            "const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE;",
         )?;
         assert_eq!(
             strict_test_marker_key(&canonical, &resolver).as_deref(),
@@ -4029,7 +4158,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
         fs::write(
             &owner,
             r#"#[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -4052,7 +4181,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
         fs::create_dir_all(disabled.path.join("crates/demo/tests"))?;
         fs::write(
             disabled.path.join("crates/demo/tests/orphan.rs"),
-            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         let cargo = disabled.path.join("crates/demo/Cargo.toml");
         fs::write(
@@ -4067,7 +4196,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
         fs::create_dir_all(explicit.path.join("crates/demo/checks"))?;
         fs::write(
             explicit.path.join("crates/demo/checks/contract.rs"),
-            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> = ::generated::http::demo_v1::write::ROUTE; }\n",
+            "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
         let cargo = explicit.path.join("crates/demo/Cargo.toml");
         fs::write(
@@ -4250,7 +4379,7 @@ fn init() {{
     poison!();
     {bait}
     {{
-        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
             ::generated::http::demo_v1::write::ROUTE;
     }}
 }}
@@ -4356,7 +4485,7 @@ fn init() {{
                     r#"fn handler(_: ::httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {{}}
 #[{attr}] fn bait() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }}
 #[test] fn covered() {{
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }}
 "#,
@@ -4409,7 +4538,7 @@ const ROUTE: () = ();
 fn handler(_: ::httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {}
 fn init() { Endpoint::new(ROUTE, handler); }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#;
@@ -4477,7 +4606,7 @@ fn init() { Endpoint::new(ROUTE, handler); }
                     r#"fn handler(_: ::httpserve::ContractMarker<::generated::http::demo_v1::write::RouteMarker>) {{}}
 fn init(reg: &mut ::httpserve::Registry) {{ reg.route_group(|rb| {{ {body} Ok(rb) }}); }}
 #[test] fn covered() {{
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }}
 "#,
@@ -4496,7 +4625,7 @@ impl ::bootstrap::Domain for Domain {
     fn init(&self, reg: &mut ::bootstrap::Registry) { reg.route_group(|rb| { Ok(rb.mount(::httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, Domain::handler))) }); }
 }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -4581,7 +4710,7 @@ impl Domain {{
     }}
 }}
 #[test] fn covered() {{
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }}
 "#,
@@ -4613,7 +4742,7 @@ impl Domain {{
                 format!(
                     r#"{bait}
 #[test] fn covered() {{
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }}
 "#,
@@ -4645,7 +4774,7 @@ fn init() {{
     }};
 }}
 #[test] fn covered() {{
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }}
 "#,
@@ -4670,7 +4799,7 @@ impl ::bootstrap::Domain for Demo {
     }
 }
 #[test] fn covered() {
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }
 "#,
@@ -4707,7 +4836,7 @@ impl ::bootstrap::Domain for Demo {
         let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler);
     }}
     helper();
-    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+    const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
         ::generated::http::demo_v1::write::ROUTE;
 }}
 "#,
@@ -4743,7 +4872,7 @@ impl ::bootstrap::Domain for Demo {
                     r#"use evil_macros as {root};
 #[{attr}] fn outer() {{
     fn nested() {{
-        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> =
             ::generated::http::demo_v1::write::ROUTE;
     }}
     nested();

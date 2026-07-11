@@ -413,7 +413,7 @@ mod tests {
             "pub enum generated::ProtectionAtRest",
             "pub enum generated::ProtectionMode",
             "pub generated::http::HttpSpec::route: vocab::http::HttpRouteEvidence",
-            "pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker>",
+            "pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker, vocab::http::LocalOnly>",
             "pub enum generated::http::settings_v4::RouteMarker",
             "pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>",
             "pub struct generated::http::LocalTxSpec",
@@ -490,13 +490,16 @@ mod tests {
         let baseline = std::fs::read_to_string(baseline_dir()?.join("vocab.txt"))?;
         for required in [
             "pub enum vocab::http::HttpConsistencyLevel",
+            "pub trait vocab::http::HttpConsistencyClass",
+            "pub trait vocab::http::NonLocalHttpConsistency",
+            "pub struct vocab::http::LocalOnly",
             "pub enum vocab::http::HttpEffectKind",
             "pub struct vocab::http::HttpEffectProfile",
             "pub const fn vocab::http::HttpEffectProfile::new",
             "pub enum vocab::http::HttpRouteAuth",
-            "pub struct vocab::http::HttpRouteBinding<M>",
-            "pub const fn vocab::http::HttpRouteBinding<M>::from_static",
-            "pub const fn vocab::http::HttpRouteBinding<M>::evidence",
+            "pub struct vocab::http::HttpRouteBinding<M, C>",
+            "pub const fn vocab::http::HttpRouteBinding<M, C>::from_static",
+            "pub const fn vocab::http::HttpRouteBinding<M, C>::evidence",
             "pub struct vocab::http::HttpRouteEvidence",
             "pub const fn vocab::http::HttpRouteEvidence::from_static",
             "pub const fn vocab::http::HttpRouteEvidence::effect_profile",
@@ -515,7 +518,7 @@ mod tests {
             "pub vocab::http::HttpEffectProfile::effects:",
             "pub vocab::http::HttpRouteBinding::evidence:",
             "pub vocab::http::HttpRouteBinding::marker:",
-            "impl<M> core::default::Default for vocab::http::HttpRouteBinding<M>",
+            "impl<M, C> core::default::Default for vocab::http::HttpRouteBinding<M, C>",
             "impl core::default::Default for vocab::http::HttpEffectProfile",
         ] {
             assert!(

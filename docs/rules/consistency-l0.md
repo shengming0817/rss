@@ -71,7 +71,21 @@ LocalOnly 注入面只允许 `read` 与 `auth`。`auth` 可包含限流、replay
 effect 后把跨租户读取当作普通本地 read。
 
 该 marker 证明的是 canonical port 注入面，不声称覆盖 handler 直接使用文件系统、网络 client 或全局状态的
-副作用；route state 的 fail-closed 消费与非 port 副作用检查由 #1693/#1694 继续闭合。
+副作用；非 port 副作用与实际调用次数由 #1694 conformance testkit 继续闭合。
+
+## LocalOnly route state funnel
+
+`HttpRouteBinding<M, C>` 的 `C` 由 contract codegen 单源派生。`LocalOnly` endpoint 在类型层不提供普通
+`with_state`，只能无状态 mount，或经 `with_classified_state` 注入实现 `ClassifiedRouteState` 的 state；后者的
+关联类型必须满足 sealed `LocalOnlyAllowedEffect`（仅 `ReadEffect` / `AuthEffect`）与
+`LocalPrivilege`。因此把已分类的 write/outbox/workflow/cross-tenant state 绑定给 LocalOnly route 在 Rust
+类型层不可表达（Hard）。
+
+跨域 state 对最强 port effect / privilege 的声明仍需关联其私有字段与 owner-sealed port 分类；Rust orphan
+与 crate 依赖方向无法让 `httpserve` 的私有 sealed trait 同时开放给各域实现又禁止域内谎报。因此
+`cargo xtask consistency local-only-effects` 对 production `Domain::init → route_group → mount` 做 type-aware
+源码闭环，拒绝普通 `with_state`、未分类/不透明 state、marker 谎报及不可证明挂载（Medium CI 门；synthetic
+red + compiling green anti-vacuity）。该门不从方法名猜能力，混合 port 始终按最强能力判定。
 
 ## Audit route split
 
@@ -98,5 +112,5 @@ effect 后把跨租户读取当作普通本地 read。
   consistency/effects；旧平行字段与 generated 镜像类型均已删除。
 - `GeneratedEndpoint` / `GeneratedPrimaryEndpoint` 把 evidence 与 handler 原子绑定，并原样传播到 `RouteMeta`。
 
-#1691 已补 owner-sealed port effect 分类与 audit 读写 capability 拆分；#1693 等继续在该 route proof 基础上
-补 state 绑定与运行时的进一步可执行证明。
+#1691 已补 owner-sealed port effect 分类与 audit 读写 capability 拆分；#1693 在 typed route proof 基础上
+补齐 LocalOnly state Hard funnel 与 Medium 注入面闭环；#1694 继续补非 port 的运行时 conformance 证明。

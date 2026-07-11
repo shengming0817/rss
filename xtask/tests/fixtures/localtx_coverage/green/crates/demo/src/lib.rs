@@ -16,7 +16,10 @@ impl ::bootstrap::Domain for Demo {
 }
 #[cfg(test)] mod tests {
     #[test] fn covered() {
-        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker> =
+        const _: ::vocab::HttpRouteBinding<
+            ::generated::http::demo_v1::write::RouteMarker,
+            ::vocab::http::LocalTx,
+        > =
             ::generated::http::demo_v1::write::ROUTE;
     }
 }

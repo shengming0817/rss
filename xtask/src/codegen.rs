@@ -697,14 +697,13 @@ pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fie
 pub enum RouteMarker {{}}
 
 /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> = ::vocab::HttpRouteBinding::from_static(
+pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consistency_level}> = ::vocab::HttpRouteBinding::from_static(
     CONTRACT,
     PATH,
     "{method}",
     {auth},
     {resource},
     {self_scoped},
-    ::vocab::HttpConsistencyLevel::{consistency_level},
     EFFECT_PROFILE,
 );
 
@@ -2939,10 +2938,9 @@ mod tests {
             !root_mod.contains("pub enum HttpConsistencyLevel"),
             "generated must not mirror the canonical vocab consistency enum"
         );
-        assert_generated_contains(
-            &rendered,
-            "::vocab::HttpConsistencyLevel::LocalOnly",
-            "route evidence should carry manifest consistencyLevel through vocab",
+        assert!(
+            !rendered.contains("::vocab::HttpConsistencyLevel::LocalOnly"),
+            "runtime consistency must derive from the typed binding marker"
         );
         assert_generated_contains(
             &root_mod,
@@ -2967,7 +2965,7 @@ mod tests {
         }
         assert_generated_contains(
             &rendered,
-            "pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker>",
+            "pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly>",
             "endpoint should expose a contract-specific typed route binding",
         );
         assert_generated_contains(

@@ -46,7 +46,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use bootstrap::{KernelError, SubscriberEffect, SubscriberExecution};
 use consistency::{
     ConsumerGroup, EngineError, EngineErrorKind, EventEntry, EventTopic, HandleResult, IdemKey,
@@ -103,6 +103,60 @@ impl ConfigCache {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.remove(&(tenant, key.as_str().to_string()));
     }
+}
+
+/// Read-only state for `settings.config-get`.
+///
+/// The state owns only the tenant-scoped read repository and its correctness-preserving cache. It
+/// cannot reach the config UoW, outbox append, flag mutation, clock, or secret write capability.
+#[derive(Clone)]
+pub struct ConfigQueryService {
+    configs: Arc<DynConfigRepo<'static>>,
+    cache: Arc<ConfigCache>,
+}
+
+impl ConfigQueryService {
+    fn new(configs: Arc<DynConfigRepo<'static>>, cache: Arc<ConfigCache>) -> Self {
+        Self { configs, cache }
+    }
+
+    /// Read the active value for a key, returning `None` for absent or deleted values.
+    ///
+    /// The authoritative head is checked before consulting the cache, so delayed subscriber
+    /// delivery cannot make this query return stale data.
+    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    pub async fn get_config(
+        &self,
+        tenant: TenantId,
+        key: &str,
+    ) -> Result<Option<ConfigEntry>, SettingsServiceError> {
+        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        let key = SettingKey::parse(key)?;
+        match self.configs.head(scope, &key).await? {
+            Some(ConfigHead::Active(version)) => {
+                if let Some(entry) = self.cache.find(tenant, &key)
+                    && entry.version() == version
+                {
+                    return Ok(Some(entry));
+                }
+            }
+            Some(ConfigHead::Deleted(_)) | None => {
+                self.cache.remove(tenant, &key);
+                return Ok(None);
+            }
+        }
+        let entry = self.configs.find(scope, &key).await?;
+        match &entry {
+            Some(entry) => self.cache.upsert(entry.clone()),
+            None => self.cache.remove(tenant, &key),
+        }
+        Ok(entry)
+    }
+}
+
+impl httpserve::ClassifiedRouteState for ConfigQueryService {
+    type Effect = diport::ReadEffect;
+    type Privilege = diport::LocalPrivilege;
 }
 
 /// settings 应用层错误。库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射）。
@@ -250,10 +304,9 @@ pub fn config_version_changed_event_from_message(
 /// （`writer`）——CAS 配置写 + outbox append 同事务原子（#1232），消除「先 save 后 emit」write-without-event
 /// 窗口（旧 emitter 字段已删除，发射收口进 `writer`）。
 pub struct SettingsService {
-    configs: Box<DynConfigRepo<'static>>,
+    query: ConfigQueryService,
     writer: Box<DynConfigUnitOfWork<'static>>,
     flags: Box<dyn FlagStore>,
-    cache: Arc<ConfigCache>,
     clock: Box<dyn Clock>,
 }
 
@@ -270,11 +323,12 @@ impl SettingsService {
         flags: FlagStoreBox,
         clock: Box<dyn Clock>,
     ) -> Self {
+        let configs = Arc::from(configs);
+        let cache = Arc::new(ConfigCache::default());
         Self {
-            configs,
+            query: ConfigQueryService::new(configs, cache),
             writer,
             flags: flags.0,
-            cache: Arc::new(ConfigCache::default()),
             clock,
         }
     }
@@ -288,11 +342,12 @@ impl SettingsService {
         flags: Box<dyn FlagStore>,
         clock: Box<dyn Clock>,
     ) -> Self {
+        let configs = Arc::from(configs);
+        let cache = Arc::new(ConfigCache::default());
         Self {
-            configs,
+            query: ConfigQueryService::new(configs, cache),
             writer,
             flags,
-            cache: Arc::new(ConfigCache::default()),
             clock,
         }
     }
@@ -321,6 +376,12 @@ impl SettingsService {
         )
     }
 
+    /// Return the narrow read-only state used by the LocalOnly config query route.
+    #[must_use]
+    pub fn config_query_service(&self) -> ConfigQueryService {
+        self.query.clone()
+    }
+
     /// 当前 key 的下一版本号（无历史 → 1）。
     async fn next_version(
         &self,
@@ -329,7 +390,7 @@ impl SettingsService {
     ) -> Result<u64, SettingsServiceError> {
         // 真实最高版本（含 tombstone）+ 1——delete 软删后 version 单调不重置，防 event_id 复用（#1249 F1）。
         // 用 `head` 而非 `find`：`find` 排除 tombstone，删后返 `None` 会误回 v1 → 复用旧 event_id。
-        let current = self.configs.head(scope, key).await?;
+        let current = self.query.configs.head(scope, key).await?;
         Ok(current.map_or(1, |head| head.version().saturating_add(1)))
     }
 
@@ -415,7 +476,7 @@ impl SettingsService {
                 envelope,
             )
             .await?;
-        self.cache.upsert(entry);
+        self.query.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
             data: SettingsConfigPublishData {
                 key: key.as_str().to_string(),
@@ -438,6 +499,7 @@ impl SettingsService {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
         let source = self
+            .query
             .configs
             .find_version(scope, &key, to_version)
             .await?
@@ -464,47 +526,13 @@ impl SettingsService {
                 envelope,
             )
             .await?;
-        self.cache.upsert(entry);
+        self.query.cache.upsert(entry);
         Ok(SettingsConfigPublishResponse {
             data: SettingsConfigPublishData {
                 key: key.as_str().to_string(),
                 version: wire_version(version),
             },
         })
-    }
-
-    /// 读取 key 当前活跃配置（不存在或已删除返回 `Ok(None)`）。
-    ///
-    /// cache 只作为本实例的值缓存：每次读取都先向权威仓储查询 head revision，只有 active head
-    /// 与缓存版本一致时才命中。版本变化重新加载；tombstone / 不存在清缓存；head/find 错误直接返回，
-    /// 不允许用旧缓存降级，因而事件订阅只负责预热与提前失效，不参与读取正确性证明。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
-    pub async fn get_config(
-        &self,
-        tenant: TenantId,
-        key: &str,
-    ) -> Result<Option<ConfigEntry>, SettingsServiceError> {
-        let scope = TenantRepoScope::from_authenticated_tenant(tenant);
-        let key = SettingKey::parse(key)?;
-        match self.configs.head(scope, &key).await? {
-            Some(ConfigHead::Active(version)) => {
-                if let Some(entry) = self.cache.find(tenant, &key)
-                    && entry.version() == version
-                {
-                    return Ok(Some(entry));
-                }
-            }
-            Some(ConfigHead::Deleted(_)) | None => {
-                self.cache.remove(tenant, &key);
-                return Ok(None);
-            }
-        }
-        let entry = self.configs.find(scope, &key).await?;
-        match &entry {
-            Some(entry) => self.cache.upsert(entry.clone()),
-            None => self.cache.remove(tenant, &key),
-        }
-        Ok(entry)
     }
 
     /// 软删除 key（tombstone，幂等）：仓储在 `max+1` 追加 tombstone 版本 → version 单调不重置（防 event_id
@@ -521,10 +549,10 @@ impl SettingsService {
     ) -> Result<(), SettingsServiceError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let key = SettingKey::parse(key)?;
-        let current = match self.configs.head(scope, &key).await? {
+        let current = match self.query.configs.head(scope, &key).await? {
             Some(ConfigHead::Active(current)) => current,
             Some(ConfigHead::Deleted(_)) | None => {
-                self.cache.remove(tenant, &key);
+                self.query.cache.remove(tenant, &key);
                 return Ok(());
             }
         };
@@ -550,12 +578,12 @@ impl SettingsService {
             Ok(()) => {}
             Err(ConfigRepoError::VersionConflict)
                 if matches!(
-                    self.configs.head(scope, &key).await?,
+                    self.query.configs.head(scope, &key).await?,
                     Some(ConfigHead::Deleted(_))
                 ) => {}
             Err(error) => return Err(error.into()),
         }
-        self.cache.remove(tenant, &key);
+        self.query.cache.remove(tenant, &key);
         Ok(())
     }
 
@@ -601,6 +629,7 @@ impl SettingsService {
     ) -> Result<(), EngineError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
         let latest = self
+            .query
             .configs
             .head(scope, &key)
             .await
@@ -608,13 +637,14 @@ impl SettingsService {
         match latest {
             Some(current) if current.version() > version => {
                 let current = self
+                    .query
                     .configs
                     .find(scope, &key)
                     .await
                     .map_err(|_| config_refresh_error())?;
                 match current {
-                    Some(entry) => self.cache.upsert(entry),
-                    None => self.cache.remove(tenant, &key),
+                    Some(entry) => self.query.cache.upsert(entry),
+                    None => self.query.cache.remove(tenant, &key),
                 }
                 return Ok(());
             }
@@ -622,7 +652,7 @@ impl SettingsService {
                 return Err(config_refresh_error());
             }
             Some(ConfigHead::Deleted(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
-                self.cache.remove(tenant, &key);
+                self.query.cache.remove(tenant, &key);
                 return Ok(());
             }
             Some(ConfigHead::Active(_)) if change_kind == SettingsConfigChangeKind::Deleted => {
@@ -638,12 +668,13 @@ impl SettingsService {
         }
 
         let entry = self
+            .query
             .configs
             .find_version(scope, &key, version)
             .await
             .map_err(|_| config_refresh_error())?
             .ok_or_else(config_refresh_error)?;
-        self.cache.upsert(entry);
+        self.query.cache.upsert(entry);
         Ok(())
     }
 }
@@ -778,7 +809,7 @@ pub(crate) async fn config_publish_handler_bytes(
 async fn config_get_handler(
     _: ContractMarker<::generated::http::settings_v4::RouteMarker>,
     Path(key): Path<String>,
-    State(service): State<Arc<SettingsService>>,
+    State(service): State<ConfigQueryService>,
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
@@ -933,14 +964,17 @@ fn config_error_response(
 /// `PgDbReadiness`（adapter 类型，域 crate 不可依赖 adapter），故不在此声明（层序约束）。
 pub struct SettingsDomain {
     config: Arc<SettingsService>,
+    config_query: ConfigQueryService,
     secret_repo: Arc<DynSecretRepo<'static>>,
 }
 
 impl SettingsDomain {
     /// 组合根构造：注入 config 应用服务 + secret 仓储端口（已装配域形 repo / UoW provider）。
     pub fn new(config: Arc<SettingsService>, secret_repo: Arc<DynSecretRepo<'static>>) -> Self {
+        let config_query = config.config_query_service();
         Self {
             config,
+            config_query,
             secret_repo,
         }
     }
@@ -1006,6 +1040,7 @@ impl ::bootstrap::Domain for SettingsDomain {
         )?;
 
         let config = Arc::clone(&self.config);
+        let config_query = self.config_query.clone();
         let secret_repo = Arc::clone(&self.secret_repo);
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
@@ -1014,7 +1049,7 @@ impl ::bootstrap::Domain for SettingsDomain {
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)?
-                    .with_state(Arc::clone(&config)),
+                    .with_classified_state(config_query),
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)?
@@ -1043,6 +1078,20 @@ mod tests {
     use diport::{OutboxEmitError, OutboxEmitter};
 
     use crate::domain::{FlagState, RolloutPercentage, RolloutRule};
+
+    fn assert_local_read_state<T>()
+    where
+        T: httpserve::ClassifiedRouteState<
+                Effect = diport::ReadEffect,
+                Privilege = diport::LocalPrivilege,
+            >,
+    {
+    }
+
+    #[test]
+    fn config_query_service_is_local_read_state() {
+        assert_local_read_state::<ConfigQueryService>();
+    }
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
@@ -1193,7 +1242,8 @@ mod tests {
             .expect("v2");
         assert_eq!(resp.data.version, 2);
         assert_eq!(
-            svc.get_config(tenant(), "app.k")
+            svc.config_query_service()
+                .get_config(tenant(), "app.k")
                 .await
                 .expect("get")
                 .map(|entry| entry.value().to_string()),
@@ -1232,7 +1282,8 @@ mod tests {
             .expect("rollback");
         assert_eq!(resp.data.version, 3, "回滚生成新版本 v3");
         assert_eq!(
-            svc.get_config(tenant(), "app.k")
+            svc.config_query_service()
+                .get_config(tenant(), "app.k")
                 .await
                 .expect("get")
                 .map(|entry| entry.value().to_string()),
@@ -1278,7 +1329,8 @@ mod tests {
             .await
             .expect("delete");
         assert!(
-            svc.get_config(tenant(), "app.k")
+            svc.config_query_service()
+                .get_config(tenant(), "app.k")
                 .await
                 .expect("get")
                 .is_none()
@@ -1390,10 +1442,16 @@ mod tests {
         let router = axum::Router::new()
             .route(
                 "/configs/{key}",
-                get(config_get_handler).delete(config_delete_handler),
+                get(config_get_handler).with_state(service.config_query_service()),
             )
-            .route("/configs/{key}/rollbacks", post(config_rollback_handler))
-            .with_state(service);
+            .route(
+                "/configs/{key}",
+                delete(config_delete_handler).with_state(Arc::clone(&service)),
+            )
+            .route(
+                "/configs/{key}/rollbacks",
+                post(config_rollback_handler).with_state(service),
+            );
         match auth {
             Some(evidence) => router.layer(axum::Extension(evidence)),
             None => router,
@@ -1482,7 +1540,7 @@ mod tests {
             .await
             .expect("delete config");
         let key = SettingKey::parse("app.feature").expect("valid key");
-        assert!(service.cache.find(tenant(), &key).is_none());
+        assert!(service.query.cache.find(tenant(), &key).is_none());
 
         let message = Message::new(
             "m-settings-deleted",
@@ -1496,7 +1554,7 @@ mod tests {
         let event = config_version_changed_event_from_message(&message).expect("parse event");
         let result = service.handle_config_version_changed_event(event).await;
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
-        assert!(service.cache.find(tenant(), &key).is_none());
+        assert!(service.query.cache.find(tenant(), &key).is_none());
     }
 
     #[tokio::test]
@@ -1509,9 +1567,9 @@ mod tests {
             .await
             .expect("publish config");
         let key = SettingKey::parse("app.feature").expect("valid key");
-        service.cache.remove(tenant(), &key);
+        service.query.cache.remove(tenant(), &key);
         assert!(
-            service.cache.find(tenant(), &key).is_none(),
+            service.query.cache.find(tenant(), &key).is_none(),
             "test must start with an empty cache slot"
         );
 
@@ -1520,6 +1578,7 @@ mod tests {
         let result = service.handle_config_version_changed_event(event).await;
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
+            .query
             .cache
             .find(tenant(), &key)
             .expect("subscriber refreshed cache");
@@ -1536,7 +1595,7 @@ mod tests {
             .await
             .expect("publish config");
         let key = SettingKey::parse("app.feature").expect("valid key");
-        service.cache.remove(tenant(), &key);
+        service.query.cache.remove(tenant(), &key);
 
         let message = Message::new("m-settings", version_changed_payload(TENANT));
         let event = config_version_changed_event_from_message(&message).expect("parse event");
@@ -1544,6 +1603,7 @@ mod tests {
 
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
+            .query
             .cache
             .find(tenant(), &key)
             .expect("ConsumerTx refresh method refreshed cache");
@@ -1560,7 +1620,7 @@ mod tests {
             .await
             .expect("publish config");
         let key = SettingKey::parse("app.feature").expect("valid key");
-        service.cache.remove(tenant(), &key);
+        service.query.cache.remove(tenant(), &key);
         let effect = subscriber_effect_for(Arc::clone(&service));
 
         let result = effect(
@@ -1572,6 +1632,7 @@ mod tests {
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         assert_eq!(
             service
+                .query
                 .cache
                 .find(tenant(), &key)
                 .expect("shared service cache refreshed")
@@ -1737,7 +1798,7 @@ mod tests {
             .await
             .expect("publish v2");
         let key = SettingKey::parse("app.feature").expect("valid key");
-        service.cache.remove(tenant(), &key);
+        service.query.cache.remove(tenant(), &key);
 
         let message = Message::new(
             "m-settings-stale",
@@ -1747,6 +1808,7 @@ mod tests {
         let result = service.handle_config_version_changed_event(event).await;
         assert_eq!(result.disposition(), consistency::Disposition::Ack);
         let cached = service
+            .query
             .cache
             .find(tenant(), &key)
             .expect("stale event refreshes to latest active value");
@@ -1854,8 +1916,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn generated_primary_endpoints_preserve_all_five_route_proofs() {
         {
-            const _: ::vocab::HttpRouteBinding<::generated::http::settings_v2::RouteMarker> =
-                ::generated::http::settings_v2::ROUTE;
+            const _: ::vocab::HttpRouteBinding<
+                ::generated::http::settings_v2::RouteMarker,
+                ::vocab::http::LocalTx,
+            > = ::generated::http::settings_v2::ROUTE;
         }
 
         {
@@ -2263,6 +2327,7 @@ mod tests {
             .await
             .expect("tenant_a publish");
         let val = svc
+            .config_query_service()
             .get_config(tenant_b(), "app.k")
             .await
             .expect("tenant_b get");
@@ -2333,6 +2398,7 @@ mod tests {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
+            .config_query_service()
             .get_config(tenant(), "nodot")
             .await
             .expect_err("invalid");
@@ -2369,7 +2435,8 @@ mod tests {
 
         // get_config 已是 None（latest 为 tombstone）。
         assert!(
-            svc.get_config(tenant(), "app.k")
+            svc.config_query_service()
+                .get_config(tenant(), "app.k")
                 .await
                 .expect("get")
                 .is_none()
@@ -2408,6 +2475,7 @@ mod tests {
             .expect("publish");
         assert_eq!(
             stale_reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2425,6 +2493,7 @@ mod tests {
             .expect("idempotent delete");
         assert_eq!(
             stale_reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2460,6 +2529,7 @@ mod tests {
             .expect("publish v1");
         assert_eq!(
             stale_reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2473,6 +2543,7 @@ mod tests {
             .expect("publish v2");
         assert_eq!(
             stale_reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2487,6 +2558,7 @@ mod tests {
             .expect("rollback to v1");
         assert_eq!(
             stale_reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2500,6 +2572,7 @@ mod tests {
             .expect("remote delete");
         assert_eq!(
             stale_reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2578,6 +2651,7 @@ mod tests {
             .expect("publish");
         assert_eq!(
             reader
+                .config_query_service()
                 .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
@@ -2587,6 +2661,7 @@ mod tests {
 
         fail_head.store(true, Ordering::SeqCst);
         let error = reader
+            .config_query_service()
             .get_config(tenant(), "app.k")
             .await
             .expect_err("authoritative failure must be visible");
@@ -2660,7 +2735,8 @@ mod tests {
         first.expect("first delete");
         second.expect("second delete converges to tombstone");
         assert!(
-            svc.get_config(tenant(), "app.k")
+            svc.config_query_service()
+                .get_config(tenant(), "app.k")
                 .await
                 .expect("get")
                 .is_none()
@@ -2700,7 +2776,8 @@ mod tests {
             "delete 软删后 republish 版本应继续（v3），不重置回 1"
         );
         assert_eq!(
-            svc.get_config(tenant(), "app.k")
+            svc.config_query_service()
+                .get_config(tenant(), "app.k")
                 .await
                 .map(config_value)
                 .expect("get"),
@@ -2834,6 +2911,7 @@ mod tests {
 
         // 最终活跃版本是某个胜者的值（v1）。
         let val = svc
+            .config_query_service()
             .get_config(tenant(), "app.k")
             .await
             .map(config_value)

@@ -205,6 +205,63 @@ pub trait SecretRepoLocal: Send + Sync {
     async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError>;
 }
 
+mod settings_port_effect_sealed {
+    pub trait Sealed {}
+}
+
+/// Closed, owner-defined effect classification for settings domain storage ports.
+///
+/// Only canonical wrappers owned by this module can receive a classification. [`Arc`](std::sync::Arc)
+/// and [`Box`] preserve the wrapped port's effect and privilege.
+#[allow(private_bounds)]
+pub trait SettingsPortEffect: settings_port_effect_sealed::Sealed {
+    /// Strongest capability exposed by this port.
+    type Effect: diport::PortEffectClass;
+    /// Whether the port can cross tenant boundaries.
+    type Privilege: diport::PortPrivilegeClass;
+}
+
+macro_rules! classify_settings_ports {
+    ($($port:ident => $effect:ty),+ $(,)?) => {
+        $(
+            impl<'a> settings_port_effect_sealed::Sealed for $port<'a> {}
+            impl<'a> SettingsPortEffect for $port<'a> {
+                type Effect = $effect;
+                type Privilege = diport::LocalPrivilege;
+            }
+        )+
+
+        const _: fn() = || {
+            fn assert_effect<T, E>()
+            where
+                T: SettingsPortEffect<Effect = E, Privilege = diport::LocalPrivilege> + ?Sized,
+                E: diport::PortEffectClass,
+            {
+            }
+
+            $(assert_effect::<$port<'static>, $effect>();)+
+        };
+    };
+}
+
+classify_settings_ports! {
+    DynConfigRepo => diport::ReadEffect,
+    DynConfigUnitOfWork => diport::OutboxEffect,
+    DynSecretRepo => diport::WriteEffect,
+}
+
+impl<T: SettingsPortEffect + ?Sized> settings_port_effect_sealed::Sealed for std::sync::Arc<T> {}
+impl<T: SettingsPortEffect + ?Sized> SettingsPortEffect for std::sync::Arc<T> {
+    type Effect = T::Effect;
+    type Privilege = T::Privilege;
+}
+
+impl<T: SettingsPortEffect + ?Sized> settings_port_effect_sealed::Sealed for Box<T> {}
+impl<T: SettingsPortEffect + ?Sized> SettingsPortEffect for Box<T> {
+    type Effect = T::Effect;
+    type Privilege = T::Privilege;
+}
+
 #[cfg(test)]
 mod smoke {
     //! build smoke：域形 async repo / UoW port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
@@ -214,8 +271,25 @@ mod smoke {
 
     use super::{
         ConfigEntry, ConfigHead, ConfigMutation, ConfigRepo, ConfigRepoError, ConfigUnitOfWork,
-        DynConfigRepo, DynConfigUnitOfWork, SettingKey, TenantRepoScope,
+        DynConfigRepo, DynConfigUnitOfWork, SettingKey, SettingsPortEffect, TenantRepoScope,
     };
+
+    fn assert_effect<T, E, P>()
+    where
+        T: SettingsPortEffect<Effect = E, Privilege = P> + ?Sized,
+        E: diport::PortEffectClass,
+        P: diport::PortPrivilegeClass,
+    {
+    }
+
+    #[test]
+    fn settings_ports_have_closed_effect_classifications() {
+        assert_effect::<DynConfigRepo<'static>, diport::ReadEffect, diport::LocalPrivilege>();
+        assert_effect::<DynConfigUnitOfWork<'static>, diport::OutboxEffect, diport::LocalPrivilege>(
+        );
+        assert_effect::<super::DynSecretRepo<'static>, diport::WriteEffect, diport::LocalPrivilege>(
+        );
+    }
 
     struct NoopConfigRepo;
     impl ConfigRepo for NoopConfigRepo {

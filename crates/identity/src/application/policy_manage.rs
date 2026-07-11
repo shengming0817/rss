@@ -152,6 +152,44 @@ pub struct PolicyManageService {
     http_specs: &'static [HttpSpec],
 }
 
+/// Policy 查询侧：仅持有已分类的认证读 port，不暴露 lifecycle、clock 或 outbox 能力。
+#[derive(Clone)]
+pub(crate) struct PolicyQueryService {
+    pub(super) policies: Arc<DynPolicyRepo<'static>>,
+}
+
+impl PolicyQueryService {
+    pub(crate) async fn get_policy(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+    ) -> Result<Policy, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        self.policies
+            .find(tenant_scope, id)
+            .await
+            .map_err(map_identity_error)?
+            .ok_or(PolicyManageError::PolicyNotFound)
+    }
+
+    pub(crate) async fn list_policies(
+        &self,
+        tenant: TenantId,
+        page: PolicyPage,
+    ) -> Result<crate::ports::PolicyListResult, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        self.policies
+            .list_active(tenant_scope, page)
+            .await
+            .map_err(map_identity_error)
+    }
+}
+
+impl httpserve::ClassifiedRouteState for PolicyQueryService {
+    type Effect = diport::AuthEffect;
+    type Privilege = diport::LocalPrivilege;
+}
+
 struct PolicyEventDraft<'a> {
     tenant: TenantId,
     actor: ids::UserId,
@@ -174,6 +212,19 @@ impl PolicyManageService {
             clock,
             http_specs: HTTP_SPECS,
         }
+    }
+
+    pub(crate) async fn find_policy_for_management(
+        &self,
+        tenant: TenantId,
+        id: PolicyId,
+    ) -> Result<Policy, PolicyManageError> {
+        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
+        self.policies
+            .find(tenant_scope, id)
+            .await
+            .map_err(map_identity_error)?
+            .ok_or(PolicyManageError::PolicyNotFound)
     }
 
     #[cfg(test)]
@@ -316,31 +367,6 @@ impl PolicyManageService {
             true => Ok(next),
             false => Err(PolicyManageError::PolicyNotFound),
         }
-    }
-
-    pub async fn get_policy(
-        &self,
-        tenant: TenantId,
-        id: PolicyId,
-    ) -> Result<Policy, PolicyManageError> {
-        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
-        self.policies
-            .find(tenant_scope, id)
-            .await
-            .map_err(map_identity_error)?
-            .ok_or(PolicyManageError::PolicyNotFound)
-    }
-
-    pub async fn list_policies(
-        &self,
-        tenant: TenantId,
-        page: PolicyPage,
-    ) -> Result<crate::ports::PolicyListResult, PolicyManageError> {
-        let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
-        self.policies
-            .list_active(tenant_scope, page)
-            .await
-            .map_err(map_identity_error)
     }
 
     fn event_parts(
@@ -1083,7 +1109,10 @@ mod tests {
         assert!(probe.emitted().is_empty(), "rejected create must not emit");
         assert!(matches!(
             service
-                .get_policy(t, PolicyId::parse("policy-global-dyn").expect("policy id"))
+                .find_policy_for_management(
+                    t,
+                    PolicyId::parse("policy-global-dyn").expect("policy id"),
+                )
                 .await,
             Err(PolicyManageError::PolicyNotFound)
         ));
@@ -1127,7 +1156,7 @@ mod tests {
         assert!(matches!(err, PolicyManageError::InvalidPolicy));
         assert_eq!(probe.emitted().len(), 1, "rejected update must not emit");
         let stored = service
-            .get_policy(t, policy_id)
+            .find_policy_for_management(t, policy_id)
             .await
             .expect("original policy remains");
         assert_eq!(stored.version().get(), 1);
@@ -1194,7 +1223,7 @@ mod tests {
         );
         assert!(
             service
-                .get_policy(t, PolicyId::parse("policy-a").expect("policy id"))
+                .find_policy_for_management(t, PolicyId::parse("policy-a").expect("policy id"))
                 .await
                 .is_err(),
             "deactivated policy must be hidden from get"
@@ -1216,11 +1245,14 @@ mod tests {
             .expect("create policy");
         assert_eq!(probe.emitted().len(), 1);
 
-        service
+        let query = PolicyQueryService {
+            policies: Arc::from(DynPolicyRepo::new_box(probe.clone())),
+        };
+        query
             .get_policy(t, PolicyId::parse("policy-read").expect("policy id"))
             .await
             .expect("get policy");
-        service
+        query
             .list_policies(
                 t,
                 PolicyPage {
@@ -1251,7 +1283,7 @@ mod tests {
         assert!(probe.emitted().is_empty(), "failed co-tx must not emit");
         assert!(
             service
-                .get_policy(t, PolicyId::parse("policy-fail").expect("policy id"))
+                .find_policy_for_management(t, PolicyId::parse("policy-fail").expect("policy id"),)
                 .await
                 .is_err(),
             "failed co-tx must not leave policy"

@@ -90,7 +90,7 @@ fn permission_binding(
     path: &'static str,
     resource: Option<&'static str>,
     self_scoped: bool,
-) -> vocab::HttpRouteBinding<PermissionRouteMarker> {
+) -> vocab::HttpRouteBinding<PermissionRouteMarker, vocab::http::LocalOnly> {
     vocab::HttpRouteBinding::from_static(
         TEST_BINDING,
         path,
@@ -98,7 +98,6 @@ fn permission_binding(
         vocab::HttpRouteAuth::Permission(TEST_PERMISSION),
         resource,
         self_scoped,
-        vocab::HttpConsistencyLevel::LocalOnly,
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
     )
 }
@@ -682,7 +681,7 @@ async fn route_meta_in_request_extension() {
     const META_EFFECTS: &[vocab::HttpEffectKind] =
         &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read];
     enum MetaRouteMarker {}
-    const META_BINDING: vocab::HttpRouteBinding<MetaRouteMarker> =
+    const META_BINDING: vocab::HttpRouteBinding<MetaRouteMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
             vocab::ContractBinding::from_static(
                 "test",
@@ -695,7 +694,6 @@ async fn route_meta_in_request_extension() {
             vocab::HttpRouteAuth::Public,
             None,
             false,
-            vocab::HttpConsistencyLevel::LocalOnly,
             vocab::HttpEffectProfile::new(META_EFFECTS),
         );
 

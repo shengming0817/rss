@@ -29,10 +29,10 @@ note: required by a bound in `IdentityPortEffect`
   = help: the following types implement the trait:
             identity::ports::DynPolicyRepo<'a>
             identity::ports::DynResourceAttributeRepo<'a>
-            identity::ports::DynRoleRepo<'a>
+            identity::ports::DynRoleReadRepo<'a>
+            identity::ports::DynRoleWriteRepo<'a>
             identity::ports::DynCredentialRepo<'a>
             identity::ports::DynRefreshTokenStore<'a>
             identity::ports::DynPolicyLifecycle<'a>
             identity::ports::DynRoleBindingLifecycle<'a>
-            identity::ports::DynSessionLifecycle<'a>
           and $N others

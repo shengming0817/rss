@@ -19,11 +19,11 @@ use eventexec::{TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
     DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo, DynRoleBindingLifecycle,
-    DynRoleRepo, IdentityError, Policy, PolicyId, PolicyLifecycle, PolicyListResult, PolicyPage,
-    PolicyRepo, PolicyRouteScope, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
-    ResourceAttributeRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
-    ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle, RoleId, RoleListResult,
-    RolePage, RoleRepo, TenantRepoScope,
+    DynRoleReadRepo, IdentityError, Policy, PolicyId, PolicyLifecycle, PolicyListResult,
+    PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion, ResourceAttribute,
+    ResourceAttributeKey, ResourceAttributeRepo, ResourceAttributeResolution,
+    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleBindingLifecycle,
+    RoleId, RoleListResult, RolePage, RoleReadRepo, TenantRepoScope,
 };
 use identity::{
     IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
@@ -275,17 +275,13 @@ pub fn audit_domain() -> (
 
 struct NoopRoleRepo;
 
-impl RoleRepo for NoopRoleRepo {
+impl RoleReadRepo for NoopRoleRepo {
     async fn find(
         &self,
         _scope: TenantRepoScope,
         _id: RoleId,
     ) -> Result<Option<Role>, IdentityError> {
         Ok(None)
-    }
-
-    async fn save(&self, _scope: TenantRepoScope, _role: Role) -> Result<(), IdentityError> {
-        Ok(())
     }
 
     async fn list(
@@ -449,7 +445,7 @@ pub fn identity_domain<S>(
 where
     S: diport::Signer + Send + Sync + 'static,
 {
-    let roles: Arc<DynRoleRepo<'static>> = Arc::from(DynRoleRepo::new_box(NoopRoleRepo));
+    let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(NoopRoleRepo));
     let bindings: Arc<DynRoleBindingLifecycle<'static>> =
         Arc::from(DynRoleBindingLifecycle::new_box(NoopRoleBindingLifecycle));
     let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(NoopPolicyRepo));

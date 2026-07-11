@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/consistency_marker_mismatch.rs:19:9
+   |
+18 |     let _ = httpserve::GeneratedEndpoint::<(), vocab::http::LocalOnly>::new(
+   |             --------------------------------------------------------------- arguments to this function are incorrect
+19 |         binding,
+   |         ^^^^^^^ expected `HttpRouteBinding<_, LocalOnly>`, found `HttpRouteBinding<RouteMarker, LocalTx>`
+   |
+   = note: expected struct `HttpRouteBinding<_, vocab::http::LocalOnly>`
+              found struct `HttpRouteBinding<RouteMarker, vocab::http::LocalTx>`
+note: associated function defined here
+  --> src/routes.rs
+   |
+   |     pub fn new<M, H, T>(
+   |            ^^^

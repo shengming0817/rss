@@ -19,10 +19,14 @@ Result<httpserve::ListenerRouter<L>, KernelError>`，错误必须冒泡到 boots
 
 - 非-`Primary` generated route（`Internal` / `Admin`）：`GeneratedEndpoint::new(ROUTE, handler)`。
 - `Primary` generated route：`GeneratedPrimaryEndpoint::new(ROUTE, handler)`；`ROUTE` 是 codegen 产出的
-  `HttpRouteBinding<RouteMarker>`，handler 首 extractor 必须是同一契约的 `ContractMarker<RouteMarker>`；
+  `HttpRouteBinding<RouteMarker, ConsistencyMarker>`，handler 首 extractor 必须是同一契约的
+  `ContractMarker<RouteMarker>`；`ConsistencyMarker` 由 codegen 从 manifest `consistencyLevel` 单源选择，
+  调用方不得自行替换；
   method/path/auth/resource scope 全由 binding 内的同一 `HttpRouteEvidence` 推导。`SPEC.route` 仅供元数据查询，
   不再是 production endpoint 构造入口。
-- stateful handler 必须在 endpoint 上调用 `.with_state(state)`；`ListenerRouter::mount` 只接受 state 已闭合的
+- 非 L0 stateful handler 在 endpoint 上调用 `.with_state(state)`。L0 (`LocalOnly`) 只能保持
+  stateless，或调用 `.with_classified_state(state)` 闭合为 owner-sealed `ReadEffect`/`AuthEffect` +
+  `LocalPrivilege`；L0 类型上不存在普通 `.with_state`。`ListenerRouter::mount` 只接受 state 已闭合的
   endpoint，不接受 raw `MethodRouter`、path、method 或 auth 字段。
 - `Health` 不接受业务 mount；组合根只能调用 `httpserve::health::routes(report, render)` 得到固定
   `/health/v1/{healthz,readyz,metrics}`。

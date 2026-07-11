@@ -327,7 +327,7 @@ pub mod list_entries {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -335,7 +335,6 @@ pub mod list_entries {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::AuditRead),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::LocalOnly,
             EFFECT_PROFILE,
         );
 
@@ -682,7 +681,7 @@ pub mod list_tenant_entries {
     pub enum RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker> =
+    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
             CONTRACT,
             PATH,
@@ -690,7 +689,6 @@ pub mod list_tenant_entries {
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::AuditRead),
             None,
             false,
-            ::vocab::HttpConsistencyLevel::LocalTx,
             EFFECT_PROFILE,
         );
 

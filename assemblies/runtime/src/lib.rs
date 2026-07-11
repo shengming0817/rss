@@ -4410,23 +4410,13 @@ mod tests {
         }
     }
 
-    impl identity::ports::RoleRepo for StaticRoleRepo {
+    impl identity::ports::RoleReadRepo for StaticRoleRepo {
         async fn find(
             &self,
             _scope: IdentityTenantRepoScope,
             id: identity::ports::RoleId,
         ) -> Result<Option<identity::ports::Role>, identity::ports::IdentityError> {
             Ok(self.roles.get(id.as_str()).cloned())
-        }
-
-        async fn save(
-            &self,
-            _scope: IdentityTenantRepoScope,
-            _role: identity::ports::Role,
-        ) -> Result<(), identity::ports::IdentityError> {
-            Err(identity_storage_error(
-                "runtime test role repo is read-only",
-            ))
         }
 
         async fn list(
@@ -4827,9 +4817,9 @@ mod tests {
             &[vocab::AUDIT_READ_PERMISSION.to_string()],
         )
         .expect("audit role");
-        let roles = Arc::from(identity::ports::DynRoleRepo::new_box(StaticRoleRepo::new(
-            vec![audit_role],
-        )));
+        let roles = Arc::from(identity::ports::DynRoleReadRepo::new_box(
+            StaticRoleRepo::new(vec![audit_role]),
+        ));
         let bindings = Arc::from(identity::ports::DynRoleBindingLifecycle::new_box(
             StaticRoleBindings::new(vec![(
                 tenant,

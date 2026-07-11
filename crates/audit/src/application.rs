@@ -33,7 +33,7 @@ use ::generated::http::audit_v1::{
 use ::httpserve::{Admin, ContractMarker, GeneratedEndpoint, ResourceProjection, RouteAuthorizer};
 use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Extension, Path, Query};
+use axum::extract::{Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use bootstrap::{KernelError, Registry, SubscriberExecution};
@@ -543,6 +543,33 @@ async fn list_entries(
     }
 }
 
+#[derive(Clone)]
+struct AuditListHandlerState {
+    repo: Arc<DynAuditReadRepo<'static>>,
+}
+
+impl httpserve::ClassifiedRouteState for AuditListHandlerState {
+    type Effect = diport::ReadEffect;
+    type Privilege = diport::LocalPrivilege;
+}
+
+async fn list_entries_handler(
+    _: ContractMarker<::generated::http::audit_v1::list_entries::RouteMarker>,
+    State(state): State<AuditListHandlerState>,
+    authenticated: Option<Extension<httpserve::Authenticated>>,
+    authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
+    query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
+    request: axum::extract::Request,
+) -> Response {
+    let authenticated = authenticated.map(|Extension(authenticated)| authenticated);
+    let authorizer = authorizer.map(|Extension(authorizer)| authorizer);
+    let request_id = request_id_from_parts(request.headers(), request.extensions());
+    let Ok(query) = query else {
+        return httpserve::error::validation_bad_request(&request_id);
+    };
+    list_entries(state.repo, authenticated, authorizer, query.0, request_id).await
+}
+
 fn log_cross_tenant_audit_append_failure(
     target: vocab::TenantId,
     request: &TargetReadRequest,
@@ -884,27 +911,11 @@ where
             audit_clock: self.audit_clock.clone(),
         };
         reg.route_group::<Admin>(AUDIT_ROUTE_PREFIX, move |rb| {
-            let scoped_repo = scoped_repo.clone();
-            let scoped_endpoint = GeneratedEndpoint::new(
-                AUDIT_LIST_HTTP_ROUTE,
-                move |_: ContractMarker<::generated::http::audit_v1::list_entries::RouteMarker>,
-                      authenticated: Option<Extension<httpserve::Authenticated>>,
-                      authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
-                      query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
-                      request: axum::extract::Request| {
-                    let repo = scoped_repo.clone();
-                    let authenticated = authenticated.map(|Extension(authenticated)| authenticated);
-                    let authorizer = authorizer.map(|Extension(authorizer)| authorizer);
-                    let request_id = request_id_from_parts(request.headers(), request.extensions());
-                    async move {
-                        // Query 解析失败（含旧 tenantId query）统一映射到 validation envelope。
-                        let Ok(query) = query else {
-                            return httpserve::error::validation_bad_request(&request_id);
-                        };
-                        list_entries(repo, authenticated, authorizer, query.0, request_id).await
-                    }
-                },
-            )?;
+            let scoped_endpoint =
+                GeneratedEndpoint::new(AUDIT_LIST_HTTP_ROUTE, list_entries_handler)?
+                    .with_classified_state(AuditListHandlerState {
+                        repo: scoped_repo.clone(),
+                    });
             let rb = rb.mount(scoped_endpoint)?;
             let target_deps = target_deps.clone();
             let target_endpoint = GeneratedEndpoint::new(
@@ -978,6 +989,20 @@ mod tests {
     /// finalize 后真实挂载路径 + 直挂 handler-logic 测试路径。
     const AUDIT_ENTRIES_PATH: &str = "/api/v1/audit/entries";
     const AUDIT_TENANT_ENTRIES_PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";
+
+    #[test]
+    fn scoped_list_state_is_local_read_only() {
+        fn assert_local_read<T>()
+        where
+            T: httpserve::ClassifiedRouteState<
+                    Effect = diport::ReadEffect,
+                    Privilege = diport::LocalPrivilege,
+                >,
+        {
+        }
+
+        assert_local_read::<AuditListHandlerState>();
+    }
 
     #[derive(Clone)]
     struct TestRepo {
@@ -2318,6 +2343,7 @@ mod tests {
         {
             const _: ::vocab::HttpRouteBinding<
                 ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                ::vocab::http::LocalTx,
             > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
         }
 

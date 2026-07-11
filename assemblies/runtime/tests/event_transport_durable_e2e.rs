@@ -37,7 +37,7 @@ use generated::http::identity_v1::login::IdentityLoginRequest;
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use identity::ports::{
     AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeRepo,
-    DynRoleBindingLifecycle, DynRoleRepo, DynSessionLifecycle, Operator,
+    DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle, Operator,
     POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
     PolicyObligations, PolicyRouteScope, PolicyRule, TenantId, TenantRepoScope,
 };
@@ -538,8 +538,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
         PASSWORD,
         TenantId::parse(CANON_TENANT)?,
     )?);
-    let roles_for_admin = Arc::from(DynRoleRepo::new_box(id.role_repo()));
-    let roles_for_list = Arc::from(DynRoleRepo::new_box(id.role_repo()));
+    let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
+    let roles_for_list = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
     let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
         id.resource_attribute_repo(),
@@ -624,6 +624,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
     assert_eq!(
         subscriber_settings_service
+            .config_query_service()
             .get_config(tenant, settings_key)
             .await?
             .as_ref()
@@ -799,6 +800,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await?;
     assert_eq!(
         subscriber_settings_service
+            .config_query_service()
             .get_config(tenant, settings_key)
             .await?
             .as_ref()

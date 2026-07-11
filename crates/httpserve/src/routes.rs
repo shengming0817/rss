@@ -21,14 +21,42 @@ use crate::{PrimaryRouteAuthz, RouteGroupError, RoutePermission, RouteResourceSc
 use axum::extract::FromRequestParts;
 use axum::handler::Handler;
 use core::marker::PhantomData;
+use diport::{AuthEffect, LocalPrivilege, PortEffectClass, PortPrivilegeClass, ReadEffect};
 use primitives::{AuthPlan, ListenerKind};
 use std::convert::Infallible;
 use std::sync::Arc;
+use vocab::http::{HttpConsistencyClass, LocalOnly, NonLocalHttpConsistency};
 use vocab::{HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence};
+
+mod local_only_state_sealed {
+    pub trait LocalOnlyAllowedEffect {}
+}
+
+/// Sealed effect set accepted by a `LocalOnly` route state.
+pub trait LocalOnlyAllowedEffect:
+    PortEffectClass + local_only_state_sealed::LocalOnlyAllowedEffect
+{
+}
+
+impl local_only_state_sealed::LocalOnlyAllowedEffect for ReadEffect {}
+impl LocalOnlyAllowedEffect for ReadEffect {}
+impl local_only_state_sealed::LocalOnlyAllowedEffect for AuthEffect {}
+impl LocalOnlyAllowedEffect for AuthEffect {}
+
+/// Static effect and privilege proof attached to state injected into a `LocalOnly` route.
+///
+/// Domain state types implement this trait explicitly. The consistency gate verifies that this
+/// declaration matches the strongest owner-sealed port held by the state.
+pub trait ClassifiedRouteState {
+    /// Strongest effect reachable through the state.
+    type Effect: PortEffectClass;
+    /// Strongest privilege reachable through the state.
+    type Privilege: PortPrivilegeClass;
+}
 
 /// Zero-cost extractor carrying one generated HTTP contract identity into a handler signature.
 ///
-/// A handler can only bind to [`HttpRouteBinding<M>`] when its first extractor is
+/// A handler can only bind to [`HttpRouteBinding<M, C>`] when its first extractor is
 /// `ContractMarker<M>`. Extraction is infallible and stores no request data.
 pub struct ContractMarker<M>(PhantomData<fn() -> M>);
 
@@ -98,7 +126,7 @@ struct Endpoint<S> {
     handler: axum::routing::MethodRouter<S>,
 }
 
-/// INVARIANT: ROUTE-ENDPOINT-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "public endpoint constructors require a non-optional HttpRouteBinding<M> plus a handler whose argument tuple starts with ContractMarker<M>; trybuild omits each and rejects cross-contract markers" }
+/// INVARIANT: ROUTE-ENDPOINT-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "public endpoint constructors require a non-optional HttpRouteBinding<M, C> plus a handler whose argument tuple starts with ContractMarker<M>; trybuild omits each and rejects cross-contract markers" }
 /// INVARIANT: ROUTE-ENDPOINT-ATOMIC-01 { level = "Hard", exec = "native-compile", source = "code", native = "private Endpoint owns evidence, parsed method, and MethodRouter as one move-only mount value" }
 impl<S> Endpoint<S>
 where
@@ -132,27 +160,25 @@ where
 /// A generated endpoint for a non-Primary listener.
 ///
 /// Construction atomically binds one generated [`HttpRouteBinding`] to a handler carrying the same
-/// contract marker. The method router is private and derives its filter from the enclosed evidence; stateful handlers must call
-/// [`with_state`](Self::with_state) before the endpoint can be mounted.
-pub struct GeneratedEndpoint<S>(Endpoint<S>);
+/// contract marker. The method router is private and derives its filter from the enclosed evidence;
+/// stateful handlers must use the consistency-specific state binding method before mounting.
+pub struct GeneratedEndpoint<S, C>(Endpoint<S>, PhantomData<fn() -> C>);
 
-impl<S> GeneratedEndpoint<S>
+impl<S, C> GeneratedEndpoint<S, C>
 where
     S: Clone + Send + Sync + 'static,
+    C: HttpConsistencyClass,
 {
     /// Bind a contract-specific generated route to its matching handler and derive the method filter.
-    pub fn new<M, H, T>(binding: HttpRouteBinding<M>, handler: H) -> Result<Self, RouteGroupError>
+    pub fn new<M, H, T>(
+        binding: HttpRouteBinding<M, C>,
+        handler: H,
+    ) -> Result<Self, RouteGroupError>
     where
         H: Handler<T, S>,
         T: ContractHandlerArgs<M> + 'static,
     {
-        Endpoint::new(binding.evidence(), handler).map(Self)
-    }
-
-    /// Supply the handler state, producing the only endpoint state accepted by mounting.
-    #[must_use]
-    pub fn with_state(self, state: S) -> GeneratedEndpoint<()> {
-        GeneratedEndpoint(self.0.with_state(state))
+        Endpoint::new(binding.evidence(), handler).map(|endpoint| Self(endpoint, PhantomData))
     }
 
     /// Borrow the atomic route proof.
@@ -162,35 +188,81 @@ where
     }
 }
 
+impl<S, C> GeneratedEndpoint<S, C>
+where
+    S: Clone + Send + Sync + 'static,
+    C: NonLocalHttpConsistency,
+{
+    /// Supply state to a transactional or asynchronous route.
+    #[must_use]
+    pub fn with_state(self, state: S) -> GeneratedEndpoint<(), C> {
+        GeneratedEndpoint(self.0.with_state(state), PhantomData)
+    }
+}
+
+impl<S> GeneratedEndpoint<S, LocalOnly>
+where
+    S: Clone + Send + Sync + 'static + ClassifiedRouteState<Privilege = LocalPrivilege>,
+    S::Effect: LocalOnlyAllowedEffect,
+{
+    /// Supply explicitly classified local read/auth state to a `LocalOnly` route.
+    #[must_use]
+    pub fn with_classified_state(self, state: S) -> GeneratedEndpoint<(), LocalOnly> {
+        GeneratedEndpoint(self.0.with_state(state), PhantomData)
+    }
+}
+
 /// A generated endpoint for the Primary listener.
 ///
 /// In addition to method and path, Primary authorization and resource scope are derived directly
 /// from the same evidence when the endpoint is mounted.
-pub struct GeneratedPrimaryEndpoint<S>(Endpoint<S>);
+pub struct GeneratedPrimaryEndpoint<S, C>(Endpoint<S>, PhantomData<fn() -> C>);
 
-impl<S> GeneratedPrimaryEndpoint<S>
+impl<S, C> GeneratedPrimaryEndpoint<S, C>
 where
     S: Clone + Send + Sync + 'static,
+    C: HttpConsistencyClass,
 {
     /// Bind a contract-specific generated route to its matching handler and derive the method filter.
-    pub fn new<M, H, T>(binding: HttpRouteBinding<M>, handler: H) -> Result<Self, RouteGroupError>
+    pub fn new<M, H, T>(
+        binding: HttpRouteBinding<M, C>,
+        handler: H,
+    ) -> Result<Self, RouteGroupError>
     where
         H: Handler<T, S>,
         T: ContractHandlerArgs<M> + 'static,
     {
-        Endpoint::new(binding.evidence(), handler).map(Self)
-    }
-
-    /// Supply the handler state, producing the only endpoint state accepted by mounting.
-    #[must_use]
-    pub fn with_state(self, state: S) -> GeneratedPrimaryEndpoint<()> {
-        GeneratedPrimaryEndpoint(self.0.with_state(state))
+        Endpoint::new(binding.evidence(), handler).map(|endpoint| Self(endpoint, PhantomData))
     }
 
     /// Borrow the atomic route proof.
     #[must_use]
     pub const fn evidence(&self) -> &HttpRouteEvidence {
         &self.0.evidence
+    }
+}
+
+impl<S, C> GeneratedPrimaryEndpoint<S, C>
+where
+    S: Clone + Send + Sync + 'static,
+    C: NonLocalHttpConsistency,
+{
+    /// Supply state to a transactional or asynchronous Primary route.
+    #[must_use]
+    pub fn with_state(self, state: S) -> GeneratedPrimaryEndpoint<(), C> {
+        GeneratedPrimaryEndpoint(self.0.with_state(state), PhantomData)
+    }
+}
+
+impl<S> GeneratedPrimaryEndpoint<S, LocalOnly>
+where
+    S: Clone + Send + Sync + 'static + ClassifiedRouteState<Privilege = LocalPrivilege>,
+    S::Effect: LocalOnlyAllowedEffect,
+{
+    /// Supply explicitly classified local read/auth state to a `LocalOnly` Primary route.
+    #[must_use]
+    pub fn with_classified_state(self, state: S) -> GeneratedPrimaryEndpoint<(), LocalOnly> {
+        GeneratedPrimaryEndpoint(self.0.with_state(state), PhantomData)
     }
 }
 
@@ -461,7 +533,10 @@ impl ListenerRouter<Primary> {
 impl<L: NonPrimaryListener> ListenerRouter<L> {
     /// Mount one complete generated endpoint. Raw paths, method routers, and metadata are not
     /// accepted by the production API.
-    pub fn mount(self, endpoint: GeneratedEndpoint<()>) -> Result<Self, RouteGroupError> {
+    pub fn mount<C: HttpConsistencyClass>(
+        self,
+        endpoint: GeneratedEndpoint<(), C>,
+    ) -> Result<Self, RouteGroupError> {
         let Endpoint {
             evidence,
             method,
@@ -481,7 +556,10 @@ impl<L: NonPrimaryListener> ListenerRouter<L> {
 
 impl ListenerRouter<Primary> {
     /// Mount one complete generated Primary endpoint.
-    pub fn mount(self, endpoint: GeneratedPrimaryEndpoint<()>) -> Result<Self, RouteGroupError> {
+    pub fn mount<C: HttpConsistencyClass>(
+        self,
+        endpoint: GeneratedPrimaryEndpoint<(), C>,
+    ) -> Result<Self, RouteGroupError> {
         let Endpoint {
             evidence,
             method,
@@ -974,7 +1052,7 @@ mod tests {
         path: &'static str,
         contract_id: &'static str,
         auth: vocab::HttpRouteAuth,
-    ) -> vocab::HttpRouteBinding<TestRouteMarker> {
+    ) -> vocab::HttpRouteBinding<TestRouteMarker, vocab::http::LocalOnly> {
         test_binding_with_method(path, contract_id, "GET", auth)
     }
 
@@ -983,7 +1061,7 @@ mod tests {
         contract_id: &'static str,
         method: &'static str,
         auth: vocab::HttpRouteAuth,
-    ) -> vocab::HttpRouteBinding<TestRouteMarker> {
+    ) -> vocab::HttpRouteBinding<TestRouteMarker, vocab::http::LocalOnly> {
         vocab::HttpRouteBinding::from_static(
             vocab::ContractBinding::from_static(
                 "test",
@@ -996,7 +1074,6 @@ mod tests {
             auth,
             None,
             false,
-            vocab::HttpConsistencyLevel::LocalOnly,
             vocab::HttpEffectProfile::new(TEST_EFFECTS),
         )
     }
@@ -1146,7 +1223,7 @@ mod tests {
 
     #[test]
     fn generated_endpoint_rejects_unsupported_method_with_route_context() {
-        let result = GeneratedEndpoint::<()>::new(
+        let result = GeneratedEndpoint::<(), vocab::http::LocalOnly>::new(
             test_binding_with_method(
                 "/api/v1/x",
                 "test.invalid-method",

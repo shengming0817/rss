@@ -6,15 +6,15 @@
 //! `diport::ManagedResource`（关池接入 `bootstrap::ShutdownStack` 逆序编排）。
 //!
 //! port 来源两类：provider-agnostic 基建 port 来自 `diport`（`ManagedResource`…）；**域形** repo port 来自
-//! 所属域 crate（`identity::ports::RoleRepo`…，Option 2/ADR-005）。事务运行器是**普通 inherent 方法**
+//! 所属域 crate（`identity::ports::RoleReadRepo`…，Option 2/ADR-005）。事务运行器是**普通 inherent 方法**
 //! （非 dynosaur DI port）——签名暴露 crate-private `TxCapability`，该令牌只能由 postgres
 //! adapter 从 live `sqlx::Transaction` 铸造；裸 `sqlx::PgConnection` 只在 capability 生命周期内经 `conn()`
 //! 借出。放 provider-agnostic 的 `diport` 会破坏其不变式（#1116 决策 1）；且为 `pub(crate)`（未做 tenant
 //! scope 的事务 capability 非公开 API，review F2）。
 //!
-//! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleRepo`，经 deny.toml identity wrapper +
+//! adapter→域 DIP 内向边（postgres 依赖 identity、impl 其 `RoleReadRepo`，经 deny.toml identity wrapper +
 //! `allows(Adapter,Domain)` 放行；adapter 仍不被域依赖）由生产 [`PgRoleRepo`]（impl
-//! `identity::ports::RoleRepo`，roles 表 + tenant scope，#1250）承载——替换原 `#[cfg(test)]` `RoleRepoEdgeProof`
+//! `identity::ports::RoleReadRepo`，roles 表 + tenant scope，#1250）承载——替换原 `#[cfg(test)]` `RoleRepoEdgeProof`
 //! 编译证明（body `todo!()`）。同 DIP 内向边另由 [`PgCredentialRepo`]（impl `identity::ports::CredentialRepo`，
 //! credentials 表 + 折叠锁定态 + `SELECT FOR UPDATE` 行锁原子 RMW，#1316）承载——login 密码校验 durable 真依赖。
 
@@ -191,10 +191,10 @@ impl ManagedResource for PgStoreGuard {
 #[cfg(test)]
 mod smoke {
     //! build smoke：编译期断言冻结的 DI port trait——生产 `PgStore` impl `diport::ManagedResource`；
-    //! adapter→域 DIP 内向边（postgres impl `identity::ports::RoleRepo`，命名其 pub 实体 Role/RoleId）由生产
+    //! adapter→域 DIP 内向边（postgres impl `identity::ports::RoleReadRepo`，命名其 pub 实体 Role/RoleId）由生产
     //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
-    //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleRepo on PgRoleRepo（真实 impl，#1250）+
+    //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleReadRepo on PgRoleRepo（真实 impl，#1250）+
     //! InboxStore/InboxBacklog on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
@@ -210,7 +210,8 @@ mod smoke {
 
     fn assert_pg_domain<D: super::PgDomain>(_: PhantomData<D>) {}
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
-    fn assert_role_repo<T: identity::ports::RoleRepo>(_: PhantomData<T>) {}
+    fn assert_role_repo<T: identity::ports::RoleReadRepo>(_: PhantomData<T>) {}
+    fn assert_role_write_repo<T: identity::ports::RoleWriteRepo>(_: PhantomData<T>) {}
     fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_session_lifecycle<T: identity::ports::SessionLifecycle>(_: PhantomData<T>) {}
@@ -242,8 +243,9 @@ mod smoke {
     #[test]
     fn impls_frozen_ports() {
         assert_managed_resource(PhantomData::<super::PgStore>);
-        // `PgRoleRepo: RoleRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
+        // `PgRoleRepo: RoleReadRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
         assert_role_repo(PhantomData::<super::PgRoleRepo>);
+        assert_role_write_repo(PhantomData::<super::PgRoleRepo>);
         // `PgPolicyRepo: PolicyRepo` 真实 impl——tenant-scoped durable ABAC policy store（#1588）。
         assert_policy_repo(PhantomData::<super::PgPolicyRepo>);
         // `PgCredentialRepo: CredentialRepo` 真实 impl（非 edge proof）——credentials 表 + 折叠锁定态 +
