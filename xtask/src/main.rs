@@ -20,6 +20,7 @@
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
 //!   `cargo xtask consistency local-only-effects`
 //!                                      active LocalOnly HTTP effect profile 治理门（#1689，CI 门）
+//!   `cargo xtask localtx-coverage`       active LocalTx manifest/generated/route/test closure 门（CI 门）
 //!   `cargo xtask consistency-fault-matrix [--allow-missing-tools]`
 //!                                      N-028 consistency fault crash matrix 真后端 opt-in runner（Postgres+RabbitMQ）。
 //!   `cargo xtask runtime-baseline list|verify`
@@ -79,6 +80,7 @@ mod event_transport_guard;
 mod inbox_cutover_guard;
 mod layerdeps;
 mod layers;
+mod localtx_coverage;
 mod migrations;
 mod pathsafe;
 mod pdpallow;
@@ -135,6 +137,7 @@ enum Command {
     DocContracts,
     ConsistencyFixtures,
     ConsistencyLocalOnlyEffects,
+    LocalTxCoverage,
     Verify {
         fast: bool,
         allow_missing_tools: bool,
@@ -197,6 +200,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["doc-contracts"] => Ok(Command::DocContracts),
         ["consistency-fixtures"] => Ok(Command::ConsistencyFixtures),
         ["consistency", rest @ ..] => parse_consistency(rest),
+        ["localtx-coverage"] => Ok(Command::LocalTxCoverage),
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
@@ -218,7 +222,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly <validate | generate-modules [--check]> | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly <validate | generate-modules [--check]> | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | localtx-coverage | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -495,6 +499,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ConsistencyLocalOnlyEffects => {
             diagnostic::run_check(&consistency_effects::LocalOnlyEffects)
         }
+        Command::LocalTxCoverage => diagnostic::run_check(&localtx_coverage::LocalTxCoverage),
         Command::Verify {
             fast,
             allow_missing_tools,
@@ -568,6 +573,27 @@ mod tests {
             parse_command(&s(&["codegen", "--check"]))?,
             Command::Codegen { check: true }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_localtx_coverage_is_exact() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["localtx-coverage"]))?,
+            Command::LocalTxCoverage
+        );
+        assert!(parse_command(&s(&["localtx-coverage", "--check"])).is_err());
+        assert!(parse_command(&s(&["localtx_coverage"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_usage_lists_localtx_coverage() -> anyhow::Result<()> {
+        let error = match parse_command(&s(&[])) {
+            Ok(command) => anyhow::bail!("empty argv unexpectedly parsed as {command:?}"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("localtx-coverage"), "{error}");
         Ok(())
     }
 

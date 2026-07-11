@@ -283,6 +283,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            LocalTxCoverage => (step_localtx_coverage, Some("xtask/src/localtx_coverage.rs"),
+                gate(
+                        GateId::LocalTxCoverage,
+                        "localtx-coverage",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             LocalOnlyEffects => (step_local_only_effects, Some("xtask/src/consistency_effects.rs"),
                 gate(
                         GateId::LocalOnlyEffects,

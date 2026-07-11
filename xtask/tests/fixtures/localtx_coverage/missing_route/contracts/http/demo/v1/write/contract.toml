@@ -1,0 +1,17 @@
+id = "demo.write"
+kind = "http"
+domain = "demo"
+version = "v1"
+owner = "demo"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+path = "/demo"
+method = "POST"
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+[capabilities.localTx]
+boundary = "single-domain"
+txModel = "tenant-scoped-uow"
+retry = "bounded-transient"
+commitUnknown = "not-retryable"

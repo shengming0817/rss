@@ -14,17 +14,17 @@
 
 use std::sync::Arc;
 
+use ::generated::http::settings_v2::{
+    SPEC as SECRET_HTTP_SPEC, SettingsSecretPublishData, SettingsSecretPublishRequest,
+    SettingsSecretPublishResponse,
+};
+use ::httpserve::ContractMarker;
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use diport::{Clock, DynSecretResolver, SecretMaterial, SecretResolver};
-use generated::http::settings_v2::{
-    SPEC as SECRET_HTTP_SPEC, SettingsSecretPublishData, SettingsSecretPublishRequest,
-    SettingsSecretPublishResponse,
-};
-use httpserve::ContractMarker;
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
 use crate::application::{authenticated_tenant_scope, request_id_from, wire_version};
@@ -306,7 +306,7 @@ pub(crate) async fn publish_secret_to_repo(
 /// [`publish_secret_to_repo`]（CAS 写引用坐标，L1 无 outbox）→ 201。请求 / 响应**绝无 secret 材料**（只写坐标）。
 /// State 仅持 `Arc<DynSecretRepo>`（见 [`publish_secret_to_repo`] 说明：避开 `SecretService` 非 `Sync`）。
 pub(crate) async fn secret_publish_handler(
-    _: ContractMarker<generated::http::settings_v2::RouteMarker>,
+    _: ContractMarker<::generated::http::settings_v2::RouteMarker>,
     State(secrets): State<Arc<DynSecretRepo<'static>>>,
     req: Request<Body>,
 ) -> Response {

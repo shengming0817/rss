@@ -2004,6 +2004,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
+        path: "xtask/src/localtx_coverage.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
         path: "xtask/src/command_symmetry.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,

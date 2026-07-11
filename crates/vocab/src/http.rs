@@ -129,6 +129,8 @@ pub struct HttpRouteEvidence {
 /// `M` is a unique generated marker for one HTTP contract. Serving code can only pair this
 /// binding with a handler carrying the same marker, while runtime middleware receives the
 /// enclosed [`HttpRouteEvidence`].
+///
+/// INVARIANT: LOCALTX-TEST-MARKER-TYPED-01 { level = "Hard", exec = "native-compile", source = "rustdoc", native = "an anonymous const typed as HttpRouteBinding<RouteMarker> rejects a mismatched generated ROUTE at compile time" }
 pub struct HttpRouteBinding<M> {
     evidence: HttpRouteEvidence,
     marker: PhantomData<fn() -> M>,

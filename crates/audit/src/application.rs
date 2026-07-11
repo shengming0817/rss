@@ -20,12 +20,23 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use ::generated::http::audit_v1::{
+    list_entries::{
+        AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
+        ROUTE as AUDIT_LIST_HTTP_ROUTE, SPEC as AUDIT_LIST_HTTP_SPEC,
+    },
+    list_tenant_entries::{
+        AuditListTenantEntriesRequest, AuditListTenantEntriesResponse, AuditTenantEntryView,
+        ROUTE as AUDIT_LIST_TENANT_HTTP_ROUTE, SPEC as AUDIT_LIST_TENANT_HTTP_SPEC,
+    },
+};
+use ::httpserve::{Admin, ContractMarker, GeneratedEndpoint, ResourceProjection, RouteAuthorizer};
 use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use bootstrap::{Domain, KernelError, Registry, SubscriberExecution};
+use bootstrap::{KernelError, Registry, SubscriberExecution};
 use consistency::ConsumerGroup;
 use diport::Message;
 use generated::event::EventSpec;
@@ -43,17 +54,6 @@ use generated::event::identity_v1::{
     },
     session_created::{IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC},
 };
-use generated::http::audit_v1::{
-    list_entries::{
-        AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
-        ROUTE as AUDIT_LIST_HTTP_ROUTE, SPEC as AUDIT_LIST_HTTP_SPEC,
-    },
-    list_tenant_entries::{
-        AuditListTenantEntriesRequest, AuditListTenantEntriesResponse, AuditTenantEntryView,
-        ROUTE as AUDIT_LIST_TENANT_HTTP_ROUTE, SPEC as AUDIT_LIST_TENANT_HTTP_SPEC,
-    },
-};
-use httpserve::{Admin, ContractMarker, GeneratedEndpoint, ResourceProjection, RouteAuthorizer};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Admin>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -342,29 +342,33 @@ fn project_audit_entry(entry: &AuditEntry, projection: ResourceProjection) -> Pr
     }
 }
 
-macro_rules! impl_projected_audit_entry_view {
-    ($view:ty) => {
-        impl From<ProjectedAuditEntry> for $view {
-            fn from(projected: ProjectedAuditEntry) -> Self {
-                Self {
-                    seq: projected.seq,
-                    tenant_id: projected.tenant_id,
-                    actor: projected.actor,
-                    actor_kind: projected.actor_kind,
-                    action: projected.action,
-                    resource_kind: projected.resource_kind,
-                    resource_id: projected.resource_id,
-                    outcome: projected.outcome,
-                    recorded_at: projected.recorded_at,
-                    entry_hash: projected.entry_hash,
+mod projected_audit_entry_views {
+    use super::*;
+
+    macro_rules! impl_projected_audit_entry_view {
+        ($view:ty) => {
+            impl From<ProjectedAuditEntry> for $view {
+                fn from(projected: ProjectedAuditEntry) -> Self {
+                    Self {
+                        seq: projected.seq,
+                        tenant_id: projected.tenant_id,
+                        actor: projected.actor,
+                        actor_kind: projected.actor_kind,
+                        action: projected.action,
+                        resource_kind: projected.resource_kind,
+                        resource_id: projected.resource_id,
+                        outcome: projected.outcome,
+                        recorded_at: projected.recorded_at,
+                        entry_hash: projected.entry_hash,
+                    }
                 }
             }
-        }
-    };
-}
+        };
+    }
 
-impl_projected_audit_entry_view!(AuditEntryView);
-impl_projected_audit_entry_view!(AuditTenantEntryView);
+    impl_projected_audit_entry_view!(AuditEntryView);
+    impl_projected_audit_entry_view!(AuditTenantEntryView);
+}
 
 /// 域条目 → scoped wire view。
 fn to_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditEntryView {
@@ -733,7 +737,7 @@ async fn authorize_read_projection(
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
     authenticated: Option<&httpserve::Authenticated>,
     tenant: vocab::TenantId,
-    spec: &'static generated::http::HttpSpec,
+    spec: &'static ::generated::http::HttpSpec,
 ) -> Result<ResourceProjection, AuditReadAuthError> {
     let vocab::HttpRouteAuth::Permission(permission) = spec.route.auth() else {
         return Err(AuditReadAuthError::Forbidden);
@@ -860,11 +864,11 @@ where
     }
 }
 
-impl<S> Domain for AuditDomain<S>
+impl<S> ::bootstrap::Domain for AuditDomain<S>
 where
     S: diport::AuditSink + Send + Sync + 'static,
 {
-    fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+    fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         // 订阅元数据（contract_id / topic / group）单源自 generated event `SPEC`（契约 codegen 派生）——
         // 不手维护平行 const，消除 contract↔consumer 漂移（AI-HARD：codegen funnel + golden）。缺失即 fail-fast。
         register_audit_subscriber(reg, SESSION_CREATED_SPEC)?;
@@ -883,7 +887,7 @@ where
             let scoped_repo = scoped_repo.clone();
             let scoped_endpoint = GeneratedEndpoint::new(
                 AUDIT_LIST_HTTP_ROUTE,
-                move |_: ContractMarker<generated::http::audit_v1::list_entries::RouteMarker>,
+                move |_: ContractMarker<::generated::http::audit_v1::list_entries::RouteMarker>,
                       authenticated: Option<Extension<httpserve::Authenticated>>,
                       authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
                       query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
@@ -906,7 +910,7 @@ where
             let target_endpoint = GeneratedEndpoint::new(
                 AUDIT_LIST_TENANT_HTTP_ROUTE,
                 move |_: ContractMarker<
-                    generated::http::audit_v1::list_tenant_entries::RouteMarker,
+                    ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
                 >,
                       principal: Option<Extension<Arc<authn::Principal>>>,
                       authenticated: Option<Extension<httpserve::Authenticated>>,
@@ -2311,110 +2315,120 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_via_sealed_router_uses_generated_request_context() {
-        let repo = repo();
-        append_event_for_test(
-            repo.clone(),
-            AuditEventKind::SessionCreated,
-            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
-        )
-        .await
-        .expect("append");
-        let sink = RecordingAuditSink::ok();
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
-        let domain = AuditDomain::new(
-            repo.read.clone(),
-            Some(admin_repo(repo)),
-            sink.clone(),
-            audit_clock(),
-        );
-        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
-        let routes = reg.finalize_routes().expect("finalize ok");
-        let (_, admin) = routes
-            .into_iter()
-            .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
-            .expect("admin routes");
-        let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
-            .expect("admin jwt plan");
-        let principal_for_bridge = principal.clone();
-        let router = httpserve::finalize_auth_with_audit_and_authorizer(
-            admin,
-            plan,
-            httpserve::AuditSinkHandle::new(audit_sink()),
-            audit_clock(),
-            projection_authorizer(&[]),
-        )
-        .expect("finalize auth")
-        .layer(axum::middleware::from_fn(
-            move |mut req: axum::extract::Request, next: axum::middleware::Next| {
-                let principal = principal_for_bridge.clone();
-                async move {
-                    req.extensions_mut().insert(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::Jwt,
-                        vocab::PrincipalKind::SuperAdmin,
-                        CANON_SUBJECT,
-                        None,
-                    ));
-                    req.extensions_mut().insert(principal);
-                    next.run(req).await
-                }
-            },
-        ))
-        .into_router_for_test();
-        let request = axum::http::Request::builder()
-            .uri(AUDIT_TENANT_ENTRIES_PATH.replace("{tenantId}", CANON_TENANT))
-            .body(axum::body::Body::empty())
-            .expect("request");
+        {
+            const _: ::vocab::HttpRouteBinding<
+                ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+            > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+        }
 
-        let response = router.clone().oneshot(request).await.expect("oneshot");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let response_request_id = response
-            .headers()
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .expect("sealed router generated request id")
-            .to_string();
-        let response_correlation_id = response
-            .headers()
-            .get("x-correlation-id")
-            .and_then(|v| v.to_str().ok())
-            .expect("sealed router generated correlation id")
-            .to_string();
-        assert!(
-            !response_request_id.is_empty(),
-            "generated request id must be non-empty"
-        );
-        assert!(
-            !response_correlation_id.is_empty(),
-            "generated correlation id must be non-empty"
-        );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        {
+            let repo = repo();
+            append_event_for_test(
+                repo.clone(),
+                AuditEventKind::SessionCreated,
+                Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            )
             .await
-            .expect("body");
-        let page: AuditListTenantEntriesResponse = serde_json::from_slice(&body).expect("decode");
-        assert_eq!(page.data.len(), 1);
-        let events = sink.events();
-        assert_eq!(events.len(), 1, "target read must write audit event");
-        assert_eq!(
-            events[0].request_id.as_deref(),
-            Some(response_request_id.as_str())
-        );
-        assert_eq!(
-            events[0].correlation_id.as_deref(),
-            Some(response_correlation_id.as_str())
-        );
+            .expect("append");
+            let sink = RecordingAuditSink::ok();
+            let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+            let domain = AuditDomain::new(
+                repo.read.clone(),
+                Some(admin_repo(repo)),
+                sink.clone(),
+                audit_clock(),
+            );
+            let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
+            let routes = reg.finalize_routes().expect("finalize ok");
+            let (_, admin) = routes
+                .into_iter()
+                .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
+                .expect("admin routes");
+            let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
+                .expect("admin jwt plan");
+            let principal_for_bridge = principal.clone();
+            let router = httpserve::finalize_auth_with_audit_and_authorizer(
+                admin,
+                plan,
+                httpserve::AuditSinkHandle::new(audit_sink()),
+                audit_clock(),
+                projection_authorizer(&[]),
+            )
+            .expect("finalize auth")
+            .layer(axum::middleware::from_fn(
+                move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                    let principal = principal_for_bridge.clone();
+                    async move {
+                        req.extensions_mut().insert(httpserve::Authenticated::new(
+                            primitives::RequiredScheme::Jwt,
+                            vocab::PrincipalKind::SuperAdmin,
+                            CANON_SUBJECT,
+                            None,
+                        ));
+                        req.extensions_mut().insert(principal);
+                        next.run(req).await
+                    }
+                },
+            ))
+            .into_router_for_test();
+            let request = axum::http::Request::builder()
+                .uri(AUDIT_TENANT_ENTRIES_PATH.replace("{tenantId}", CANON_TENANT))
+                .body(axum::body::Body::empty())
+                .expect("request");
 
-        let invalid_path = axum::http::Request::builder()
-            .uri("/api/v1/audit/tenants/%FF/entries")
-            .body(axum::body::Body::empty())
-            .expect("invalid UTF-8 path URI");
-        let response = router.oneshot(invalid_path).await.expect("oneshot");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("validation envelope");
-        assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION");
+            let response = router.clone().oneshot(request).await.expect("oneshot");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let response_request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .expect("sealed router generated request id")
+                .to_string();
+            let response_correlation_id = response
+                .headers()
+                .get("x-correlation-id")
+                .and_then(|v| v.to_str().ok())
+                .expect("sealed router generated correlation id")
+                .to_string();
+            assert!(
+                !response_request_id.is_empty(),
+                "generated request id must be non-empty"
+            );
+            assert!(
+                !response_correlation_id.is_empty(),
+                "generated correlation id must be non-empty"
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let page: AuditListTenantEntriesResponse =
+                serde_json::from_slice(&body).expect("decode");
+            assert_eq!(page.data.len(), 1);
+            let events = sink.events();
+            assert_eq!(events.len(), 1, "target read must write audit event");
+            assert_eq!(
+                events[0].request_id.as_deref(),
+                Some(response_request_id.as_str())
+            );
+            assert_eq!(
+                events[0].correlation_id.as_deref(),
+                Some(response_correlation_id.as_str())
+            );
+
+            let invalid_path = axum::http::Request::builder()
+                .uri("/api/v1/audit/tenants/%FF/entries")
+                .body(axum::body::Body::empty())
+                .expect("invalid UTF-8 path URI");
+            let response = router.oneshot(invalid_path).await.expect("oneshot");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("validation envelope");
+            assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION");
+        }
     }
 
     #[tokio::test]

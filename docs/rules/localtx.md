@@ -1,7 +1,7 @@
 # LocalTx 规则
 
 本文件记录 L1/LocalTx 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest、R22 校验与
-`generated::http::LOCAL_TX_SPECS`；后续可执行覆盖率、runner、metrics 与 journey 见
+`::generated::http::LOCAL_TX_SPECS`；后续可执行覆盖率、runner、metrics 与 journey 见
 `docs/spec/006-l0-l1-consistency-hardening/` 的 #1697+ 分解。
 
 ## Contract evidence
@@ -39,6 +39,49 @@ append+read 序列。
 `commitUnknown = "not-retryable"` 的含义是：当提交结果未知时，不允许按普通 transient path 自动重放整个副作用序列。
 后续 runtime/status/metrics 可以把该状态细分，但默认治理语义必须 fail-closed。
 
+## Static coverage gate
+
+`cargo xtask localtx-coverage` 以 active LocalTx HTTP manifest 为真源，逐条闭合 generated
+`LOCAL_TX_SPECS`、owner domain、生产 typed route mount 与测试 marker。该检查是无需编译的静态门，进入
+`cargo xtask verify --fast`；缺失、重复、孤儿或错误 owner 的证据均 fail-closed。
+
+生产 route 证据只接受绝对 typed `impl ::bootstrap::Domain for ...` 的 `init` 方法：registry 参数必须写成
+`&mut ::bootstrap::Registry`，且 `route_group` 必须是该参数在 `init` 顶层语句中的直接调用。endpoint 必须
+inline 流入 closure router 参数的 `mount`，或经同 lexical scope 内唯一 local binding 单次流入。普通 helper、
+未调用 closure、match/child block、同名自定义 `route_group`/`mount` 以及仅构造 endpoint 都不构成生产接线证据；
+旧的 bare `Domain` / `Registry` 证据语法不兼容。
+`bootstrap` 与 `generated` / `httpserve` 一样属于 protected workspace dependency：Cargo dependency key 必须指向
+同名真实 workspace package，package rename、self-alias、local shadow 或宏注入均不能提供 route carrier 身份。
+
+每条 active LocalTx contract 必须在 owner crate 的一个真实 `#[test]`、`#[tokio::test]` 或
+`#[rstest::rstest]` 函数内声明且只声明一个 typed marker：
+
+```rust
+const _: ::vocab::HttpRouteBinding<
+    ::generated::http::identity_v1::logout::RouteMarker,
+> = ::generated::http::identity_v1::logout::ROUTE;
+```
+
+marker 只接受上述以 `::vocab` / `::generated` 开头的 extern-prelude absolute 语法；旧 bare path、alias、
+注释、字符串、宏或集中 allowlist 均不兼容。`#[tokio::test]` / `#[rstest::rstest]` 还必须由 Cargo metadata
+证明其 dependency key 指向真实 registry package，不接受本地 path 或 package rename 替身。
+
+marker 所在 lexical block 及其全部 enclosing lexical scopes 都必须没有 item/statement-position macro
+invocation：这类宏可以展开 `use`、`extern crate` 或 item，静态门无法证明其不会重绑定 carrier
+namespace，因此该 scope 及其 children 都会被视为 opaque。
+例如独立语句 `assert_eq!(actual, expected);` 在 AST 中属于 `Stmt::Macro`；需要与 marker 共处时，必须把
+marker 与包含惯用 `assert_*!` 语句的测试体分别放入两个 sibling child blocks，确保共同父 scope 本身不含
+macro invocation。不要把断言改写成需要 lint carve-out 的 unit-value binding。仅给 marker 套一层 child
+block 无效，因为父 scope 的 opaque 风险会向下传播。
+`Expr::Macro` 只能在表达式位置展开，不能向外层注入 item namespace，因此可接受。若违反该边界，门会
+按 fail-closed 报 marker 缺失。
+
+`HttpRouteBinding<RouteMarker>` 与 generated `ROUTE`
+的身份对应由 rustc 编译期强制（`LOCALTX-TEST-MARKER-TYPED-01`，Hard）；active manifest 到
+generated/owner/route/test 的跨文件存在性由 `localtx-coverage` 在 verify/CI 阻断
+（`LOCALTX-COVERAGE-CLOSURE-01`，Medium）。该 marker 只锚定至少一个现有 route/domain 测试，不表示完整
+rollback、conflict 或 backend conformance 已兑现。
+
 ## Follow-up boundary
 
 #1687 的边界是 manifest authoring：
@@ -49,12 +92,12 @@ append+read 序列。
 
 #1688 的边界是 generated metadata：
 
-- `generated::http` 暴露 `LocalTxSpec` 与 LocalTx 闭枚举。
+- `::generated::http` 暴露 `LocalTxSpec` 与 LocalTx 闭枚举。
 - LocalTx active HTTP `SPEC` 必填 `local_tx: Some(...)`，非 LocalTx 为 `None`。
 - `LOCAL_TX_SPECS` active-only 派生当前 L1 HTTP contract 子集。
 - consistency/effect/auth/path/method 已由 #1690 收进 `SPEC.route: HttpRouteEvidence` 并随 endpoint/RouteMeta
   原样传播；`local_tx` 继续只表达 L1 专属 transaction capability，不复制 route proof。
 - 不做 LocalTx runner、coverage gate、metrics label 或 domain proof。
 
-#1697 建 LocalTx coverage gate；#1698 收口 LocalTx vocabulary/closed labels；#1699 以后才接 Postgres runner 与真实
-域路径证明。
+#1697 建立上述 LocalTx coverage gate；#1698 收口 LocalTx vocabulary/closed labels；#1699 以后接 Postgres runner，
+#1700+ 再补真实域路径、rollback/conflict 与 conformance 证明。

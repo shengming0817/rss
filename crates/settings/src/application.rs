@@ -21,6 +21,25 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use ::generated::http::settings_v1::{
+    ROUTE as CONFIG_HTTP_ROUTE, SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData,
+    SettingsConfigPublishRequest, SettingsConfigPublishResponse,
+};
+use ::generated::http::settings_v2::ROUTE as SECRET_HTTP_ROUTE;
+#[cfg(test)]
+use ::generated::http::settings_v2::SPEC as SECRET_HTTP_SPEC;
+use ::generated::http::settings_v4::{
+    ROUTE as CONFIG_GET_HTTP_ROUTE, SPEC as CONFIG_GET_HTTP_SPEC, SettingsConfigGetData,
+    SettingsConfigGetResponse,
+};
+use ::generated::http::settings_v5::{
+    ROUTE as CONFIG_DELETE_HTTP_ROUTE, SPEC as CONFIG_DELETE_HTTP_SPEC,
+};
+use ::generated::http::settings_v6::{
+    ROUTE as CONFIG_ROLLBACK_HTTP_ROUTE, SPEC as CONFIG_ROLLBACK_HTTP_SPEC,
+    SettingsConfigRollbackData, SettingsConfigRollbackRequest, SettingsConfigRollbackResponse,
+};
+use ::httpserve::{AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary};
 use axum::Json;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, Request, State};
@@ -28,7 +47,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use axum::routing::{get, post};
-use bootstrap::{Domain, KernelError, Registry, SubscriberEffect, SubscriberExecution};
+use bootstrap::{KernelError, SubscriberEffect, SubscriberExecution};
 use consistency::{
     ConsumerGroup, EngineError, EngineErrorKind, EventEntry, EventTopic, HandleResult, IdemKey,
     OutboxPayload, PermanentError, PermanentErrorKind,
@@ -37,25 +56,6 @@ use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, Outb
 use generated::event::settings_v1::{
     SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
-use generated::http::settings_v1::{
-    ROUTE as CONFIG_HTTP_ROUTE, SPEC as CONFIG_HTTP_SPEC, SettingsConfigPublishData,
-    SettingsConfigPublishRequest, SettingsConfigPublishResponse,
-};
-use generated::http::settings_v2::ROUTE as SECRET_HTTP_ROUTE;
-#[cfg(test)]
-use generated::http::settings_v2::SPEC as SECRET_HTTP_SPEC;
-use generated::http::settings_v4::{
-    ROUTE as CONFIG_GET_HTTP_ROUTE, SPEC as CONFIG_GET_HTTP_SPEC, SettingsConfigGetData,
-    SettingsConfigGetResponse,
-};
-use generated::http::settings_v5::{
-    ROUTE as CONFIG_DELETE_HTTP_ROUTE, SPEC as CONFIG_DELETE_HTTP_SPEC,
-};
-use generated::http::settings_v6::{
-    ROUTE as CONFIG_ROLLBACK_HTTP_ROUTE, SPEC as CONFIG_ROLLBACK_HTTP_SPEC,
-    SettingsConfigRollbackData, SettingsConfigRollbackRequest, SettingsConfigRollbackResponse,
-};
-use httpserve::{AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -697,7 +697,7 @@ pub(crate) fn authenticated_tenant_scope(
 
 fn authenticated_actor(
     req: &Request<Body>,
-    spec: &generated::http::HttpSpec,
+    spec: &::generated::http::HttpSpec,
 ) -> Result<(TenantId, OutboxActor), AuthReject> {
     let auth = req
         .extensions()
@@ -728,7 +728,7 @@ fn authenticated_actor(
 /// `settings.config-publish` handler（Primary listener，JWT 认证）：route gate 授权证据取租户 → parse body →
 /// `publish_config`（CAS 写 + outbox co-tx，L2）→ 201。租户来自 `AuthorizedSubject`，非 pre-auth header。
 async fn config_publish_handler(
-    _: ContractMarker<generated::http::settings_v1::RouteMarker>,
+    _: ContractMarker<::generated::http::settings_v1::RouteMarker>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
 ) -> Response {
@@ -772,7 +772,7 @@ pub(crate) async fn config_publish_handler_bytes(
 /// `settings.config-get` handler：租户只来自 route gate 的 [`AuthorizedSubject`]；读取先验证权威
 /// revision，事件未送达也不会返回 stale cache。
 async fn config_get_handler(
-    _: ContractMarker<generated::http::settings_v4::RouteMarker>,
+    _: ContractMarker<::generated::http::settings_v4::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -813,7 +813,7 @@ async fn config_get_handler(
 
 /// `settings.config-delete` handler：首次删除提交 tombstone + Deleted fact，已删除/不存在为 204 no-op。
 async fn config_delete_handler(
-    _: ContractMarker<generated::http::settings_v5::RouteMarker>,
+    _: ContractMarker<::generated::http::settings_v5::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -837,7 +837,7 @@ async fn config_delete_handler(
 
 /// `settings.config-rollback` handler：历史版本值作为新 active version 原子写入并发出 RolledBack fact。
 async fn config_rollback_handler(
-    _: ContractMarker<generated::http::settings_v6::RouteMarker>,
+    _: ContractMarker<::generated::http::settings_v6::RouteMarker>,
     Path(key): Path<String>,
     State(service): State<Arc<SettingsService>>,
     req: Request<Body>,
@@ -886,7 +886,7 @@ fn config_error_response(
     err: &SettingsServiceError,
     tenant: TenantId,
     request_id: &str,
-    spec: &generated::http::HttpSpec,
+    spec: &::generated::http::HttpSpec,
     operation: &'static str,
 ) -> Response {
     let kind = match err {
@@ -954,8 +954,8 @@ fn log_config_version_tenant_mismatch(
     );
 }
 
-impl Domain for SettingsDomain {
-    fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+impl ::bootstrap::Domain for SettingsDomain {
+    fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         let spec = VERSION_CHANGED_SPEC
             .subscriptions()
             .iter()
@@ -1848,29 +1848,37 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn generated_primary_endpoints_preserve_all_five_route_proofs() {
-        let config_publish =
-            GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)
-                .expect("config publish endpoint");
-        assert_eq!(config_publish.evidence(), &CONFIG_HTTP_SPEC.route);
+        {
+            const _: ::vocab::HttpRouteBinding<::generated::http::settings_v2::RouteMarker> =
+                ::generated::http::settings_v2::ROUTE;
+        }
 
-        let secret_publish =
-            GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)
-                .expect("secret publish endpoint");
-        assert_eq!(secret_publish.evidence(), &SECRET_HTTP_SPEC.route);
+        {
+            let config_publish =
+                GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)
+                    .expect("config publish endpoint");
+            assert_eq!(config_publish.evidence(), &CONFIG_HTTP_SPEC.route);
 
-        let config_get = GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)
-            .expect("config get endpoint");
-        assert_eq!(config_get.evidence(), &CONFIG_GET_HTTP_SPEC.route);
+            let secret_publish =
+                GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)
+                    .expect("secret publish endpoint");
+            assert_eq!(secret_publish.evidence(), &SECRET_HTTP_SPEC.route);
 
-        let config_delete =
-            GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)
-                .expect("config delete endpoint");
-        assert_eq!(config_delete.evidence(), &CONFIG_DELETE_HTTP_SPEC.route);
+            let config_get =
+                GeneratedPrimaryEndpoint::new(CONFIG_GET_HTTP_ROUTE, config_get_handler)
+                    .expect("config get endpoint");
+            assert_eq!(config_get.evidence(), &CONFIG_GET_HTTP_SPEC.route);
 
-        let config_rollback =
-            GeneratedPrimaryEndpoint::new(CONFIG_ROLLBACK_HTTP_ROUTE, config_rollback_handler)
-                .expect("config rollback endpoint");
-        assert_eq!(config_rollback.evidence(), &CONFIG_ROLLBACK_HTTP_SPEC.route);
+            let config_delete =
+                GeneratedPrimaryEndpoint::new(CONFIG_DELETE_HTTP_ROUTE, config_delete_handler)
+                    .expect("config delete endpoint");
+            assert_eq!(config_delete.evidence(), &CONFIG_DELETE_HTTP_SPEC.route);
+
+            let config_rollback =
+                GeneratedPrimaryEndpoint::new(CONFIG_ROLLBACK_HTTP_ROUTE, config_rollback_handler)
+                    .expect("config rollback endpoint");
+            assert_eq!(config_rollback.evidence(), &CONFIG_ROLLBACK_HTTP_SPEC.route);
+        }
     }
 
     #[test]

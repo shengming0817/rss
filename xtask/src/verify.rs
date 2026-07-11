@@ -4,7 +4,7 @@
 //! stable-only 本地快门。聚合（fail-fast，无编译的步最先）：
 //!
 //!   1. `cargo fmt --all -- --check`
-//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + local-only-effects + repo-scope-guard + tenancy-closeout
+//!   2. in-process meta：contract validate + assembly validate + runtime-baseline + runtime-deps-guard + archrules + layer-deps + codegen --check + localtx-coverage + local-only-effects + repo-scope-guard + tenancy-closeout
 //!   3. `cargo build --workspace`
 //!   4. `cargo clippy --workspace --all-targets -- -D warnings`
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
@@ -112,6 +112,8 @@ enum InternalCheck {
     /// ArchRules 派生索引 + 11 行持久化 funnel matrix 文档漂移门。
     ArchRules,
     CodegenCheck,
+    /// active LocalTx manifest/generated/owner route/test typed marker closure.
+    LocalTxCoverage,
     /// active LocalOnly HTTP contracts effect profile allowlist（LOCAL-ONLY-EFFECTS-01）。
     LocalOnlyEffects,
     /// bins 生产 src 的 `#[allow(rss_pdp_impl_adapter_only)]` 逃生门计数门（信任根二次门，PDP-ALLOW-CONFINE-01）。
@@ -316,6 +318,14 @@ fn step_codegen_check() -> Step {
         id: GateId::CodegenCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::CodegenCheck),
+        env: &[],
+    }
+}
+fn step_localtx_coverage() -> Step {
+    Step {
+        id: GateId::LocalTxCoverage,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::LocalTxCoverage),
         env: &[],
     }
 }
@@ -1078,6 +1088,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
+        InternalCheck::LocalTxCoverage => run_check(&crate::localtx_coverage::LocalTxCoverage),
         InternalCheck::LocalOnlyEffects => run_check(&consistency_effects::LocalOnlyEffects),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::ContractBindingGuard => {
@@ -1187,7 +1198,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 28);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 29);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1234,14 +1245,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_42_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_43_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 42);
+        assert_eq!(plan.len(), 43);
         assert!(!labels(&plan).contains(&"nextest"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 42);
+        assert_eq!(ids.len(), 43);
     }
 
     #[test]
@@ -1275,6 +1286,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
                 "contract-binding-guard",
@@ -1340,6 +1352,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
                 "contract-binding-guard",
@@ -1392,6 +1405,7 @@ mod tests {
                     "runtime-deps-guard",
                     "archrules",
                     "codegen-check",
+                    "localtx-coverage",
                     "local-only-effects",
                     "pdp-allow-guard",
                     "contract-binding-guard",
@@ -1446,7 +1460,7 @@ mod tests {
                 .iter()
                 .position(|label| *label == "local-only-effects")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 local-only-effects"))?;
-            assert_eq!(effects, codegen + 1, "{name} lane order drift");
+            assert_eq!(effects, codegen + 2, "{name} lane order drift");
             assert!(
                 !plan[effects].needs_compile(),
                 "{name} gate must be no-compile"
@@ -1454,6 +1468,33 @@ mod tests {
             assert!(matches!(
                 plan[effects].kind,
                 StepKind::Internal(InternalCheck::LocalOnlyEffects)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_coverage_is_no_compile_internal_gate_immediately_after_codegen() -> anyhow::Result<()>
+    {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            let labels = labels(&plan);
+            let codegen = labels
+                .iter()
+                .position(|label| *label == "codegen-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 codegen-check"))?;
+            let coverage = labels
+                .iter()
+                .position(|label| *label == "localtx-coverage")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 localtx-coverage"))?;
+            assert_eq!(coverage, codegen + 1, "{name} lane order drift");
+            assert!(!plan[coverage].needs_compile());
+            assert!(matches!(
+                plan[coverage].kind,
+                StepKind::Internal(InternalCheck::LocalTxCoverage)
             ));
         }
         Ok(())
@@ -1659,6 +1700,7 @@ mod tests {
                 "runtime-deps-guard",
                 "archrules",
                 "codegen-check",
+                "localtx-coverage",
                 "local-only-effects",
                 "pdp-allow-guard",
                 "contract-binding-guard",
@@ -1771,6 +1813,7 @@ mod tests {
             "runtime-deps-guard",
             "archrules",
             "codegen-check",
+            "localtx-coverage",
             "local-only-effects",
             "pdp-allow-guard",
             "contract-binding-guard",

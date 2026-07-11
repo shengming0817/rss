@@ -17,25 +17,9 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum::Json;
-use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Path, Query, Request, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 #[cfg(test)]
-use axum::routing::{delete, get, post, put};
-use base64::Engine as _;
-use bootstrap::{Domain, KernelError, Registry};
-use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
-use diport::{
-    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
-};
-use generated::event::identity_v1::session_created::{
-    IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
-};
-#[cfg(test)]
-use generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
-use generated::http::identity_v1::{
+use ::generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
+use ::generated::http::identity_v1::{
     login::{
         IdentityLoginData, IdentityLoginRequest, IdentityLoginResponse, ROUTE as LOGIN_HTTP_ROUTE,
         SPEC as LOGIN_HTTP_SPEC,
@@ -86,16 +70,34 @@ use generated::http::identity_v1::{
         SPEC as ROLES_REVOKE_HTTP_SPEC,
     },
 };
-use generated::http::{
+use ::generated::http::{
     HttpHeaderMode, HttpResourceSharingMode, HttpSpec, SPECS as HTTP_SPECS,
     settings_v1::SPEC as SETTINGS_CONFIG_HTTP_SPEC, settings_v2::SPEC as SETTINGS_SECRET_HTTP_SPEC,
     settings_v4::SPEC as SETTINGS_CONFIG_GET_HTTP_SPEC,
     settings_v5::SPEC as SETTINGS_CONFIG_DELETE_HTTP_SPEC,
     settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
 };
-use httpserve::{
+use ::httpserve::{
     AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, Primary, ResourceProjection,
     RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
+};
+use axum::Json;
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+#[cfg(test)]
+use axum::routing::{delete, get, post, put};
+use base64::Engine as _;
+#[cfg(test)]
+use bootstrap::Domain as _;
+use bootstrap::KernelError;
+use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
+use diport::{
+    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEnvelopeParts,
+};
+use generated::event::identity_v1::session_created::{
+    IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
@@ -960,7 +962,7 @@ async fn parse_tenant_and_body(
 }
 
 async fn login_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<generated::http::identity_v1::login::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::login::RouteMarker>,
     State(service): State<Arc<LoginService<S>>>,
     req: Request<Body>,
 ) -> Response {
@@ -1033,7 +1035,7 @@ async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
 }
 
 async fn refresh_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<generated::http::identity_v1::refresh::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::refresh::RouteMarker>,
     State(service): State<Arc<RefreshService<S>>>,
     req: Request<Body>,
 ) -> Response {
@@ -1919,7 +1921,7 @@ fn encode_policy_cursor(policy_id: &PolicyId) -> String {
 }
 
 async fn roles_assign_handler(
-    _: ContractMarker<generated::http::identity_v1::roles_assign::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::roles_assign::RouteMarker>,
     State(state): State<RbacHandlerState>,
     Path(role_id_raw): Path<String>,
     req: Request<Body>,
@@ -1971,7 +1973,7 @@ async fn roles_assign_handler(
 }
 
 async fn roles_revoke_handler(
-    _: ContractMarker<generated::http::identity_v1::roles_revoke::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::roles_revoke::RouteMarker>,
     State(state): State<RbacHandlerState>,
     Path((role_id_raw, subject_raw)): Path<(String, String)>,
     req: Request<Body>,
@@ -2009,7 +2011,7 @@ async fn roles_revoke_handler(
 }
 
 async fn roles_list_handler(
-    _: ContractMarker<generated::http::identity_v1::roles_list::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::roles_list::RouteMarker>,
     State(state): State<RolesListHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2088,7 +2090,7 @@ async fn roles_list_handler(
 }
 
 async fn policies_create_handler(
-    _: ContractMarker<generated::http::identity_v1::policies_create::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::policies_create::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2134,7 +2136,7 @@ async fn policies_create_handler(
 }
 
 async fn policies_update_handler(
-    _: ContractMarker<generated::http::identity_v1::policies_update::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::policies_update::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2202,7 +2204,7 @@ async fn policies_update_handler(
 }
 
 async fn policies_deactivate_handler(
-    _: ContractMarker<generated::http::identity_v1::policies_deactivate::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::policies_deactivate::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2271,7 +2273,7 @@ async fn policies_deactivate_handler(
 }
 
 async fn policies_get_handler(
-    _: ContractMarker<generated::http::identity_v1::policies_get::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::policies_get::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     Path(policy_id_raw): Path<String>,
     req: Request<Body>,
@@ -2299,7 +2301,7 @@ async fn policies_get_handler(
 }
 
 async fn policies_list_handler(
-    _: ContractMarker<generated::http::identity_v1::policies_list::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::policies_list::RouteMarker>,
     State(state): State<PolicyManageHandlerState>,
     req: Request<Body>,
 ) -> Response {
@@ -2360,7 +2362,7 @@ async fn policies_list_handler(
 }
 
 async fn profile_handler(
-    _: ContractMarker<generated::http::identity_v1::profile::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::profile::RouteMarker>,
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
@@ -2393,7 +2395,7 @@ async fn profile_handler(
 }
 
 async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<generated::http::identity_v1::password_change::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::password_change::RouteMarker>,
     State(state): State<SelfServiceHandlerState<S>>,
     req: Request<Body>,
 ) -> Response {
@@ -2436,7 +2438,7 @@ async fn password_change_handler<S: diport::Signer + Send + Sync + 'static>(
 }
 
 async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
-    _: ContractMarker<generated::http::identity_v1::logout::RouteMarker>,
+    _: ContractMarker<::generated::http::identity_v1::logout::RouteMarker>,
     State(state): State<SelfServiceHandlerState<S>>,
     req: Request<Body>,
 ) -> Response {
@@ -2625,8 +2627,8 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
     }
 }
 
-impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
-    fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for IdentityDomain<S> {
+    fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
         let primary_authorizer: Arc<dyn RouteAuthorizer> = self.authorizer.clone();
         reg.register_primary_authorizer(primary_authorizer)?;
         let login = Arc::clone(&self.login);
@@ -3267,7 +3269,7 @@ mod tests {
                 ]),
             ),
             local_tx: None,
-            resource_sharing: generated::http::HttpResourceSharingSpec {
+            resource_sharing: ::generated::http::HttpResourceSharingSpec {
                 mode: HttpResourceSharingMode::Global,
                 reason: Some("shared synthetic test route"),
             },
@@ -4035,13 +4037,13 @@ mod tests {
                 .path()
                 .strip_prefix(LOGIN_ROUTE_PREFIX)
                 .expect("generated path has identity prefix"),
-            generated::http::identity_v1::login::PATH
+            ::generated::http::identity_v1::login::PATH
                 .strip_prefix(LOGIN_ROUTE_PREFIX)
                 .expect("generated path has prefix")
         );
         assert_eq!(
             LOGIN_HTTP_SPEC.route.contract_id(),
-            generated::http::identity_v1::login::CONTRACT_ID
+            ::generated::http::identity_v1::login::CONTRACT_ID
         );
         assert_eq!(LOGIN_HTTP_SPEC.route.method(), "POST");
         assert_eq!(LOGIN_HTTP_SPEC.route.auth(), HttpRouteAuth::Public);
@@ -5897,6 +5899,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn password_change_handler_rejects_missing_auth_malformed_json_and_bad_subject() {
+        const _: ::vocab::HttpRouteBinding<
+            ::generated::http::identity_v1::password_change::RouteMarker,
+        > = ::generated::http::identity_v1::password_change::ROUTE;
+
         let capture = CapturingSessionLifecycle::default();
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
         let router = axum::Router::new().route(
@@ -5950,47 +5956,55 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn logout_handler_soft_revokes_session() {
-        let capture = CapturingSessionLifecycle::default();
-        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
-        let login_resp = svc
-            .login(
-                tid(CANON_TENANT),
-                IdentityLoginRequest {
-                    username: "alice".to_string(),
-                    password: "correct-horse".to_string(),
-                },
-            )
-            .await
-            .expect("login ok");
-        let router = with_auth(
-            axum::Router::new().route(
-                "/logout",
-                post(logout_handler::<TestSigner>).with_state(self_service_state(svc)),
-            ),
-            user_evidence(CANON_USER),
-        );
-        let resp = testkit::call(
-            router,
-            ContractRequest::post("/logout").json(&IdentityLogoutRequest {
-                session_id: login_resp.data.session_id.clone(),
-            }),
-        )
-        .await
-        .expect("call");
-        resp.ensure_status(StatusCode::OK).expect("200");
-        let decoded: IdentityLogoutResponse = resp.json().expect("json");
-        assert!(decoded.data.logged_out);
-        assert!(
-            capture
-                .find(
-                    tenant_repo_scope(tid(CANON_TENANT)),
-                    SessionId::new(login_resp.data.session_id)
+        {
+            const _: ::vocab::HttpRouteBinding<
+                ::generated::http::identity_v1::logout::RouteMarker,
+            > = ::generated::http::identity_v1::logout::ROUTE;
+        }
+
+        {
+            let capture = CapturingSessionLifecycle::default();
+            let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
+            let login_resp = svc
+                .login(
+                    tid(CANON_TENANT),
+                    IdentityLoginRequest {
+                        username: "alice".to_string(),
+                        password: "correct-horse".to_string(),
+                    },
                 )
                 .await
-                .expect("find revoked")
-                .is_none(),
-            "logout 后 session find 应不可见"
-        );
+                .expect("login ok");
+            let router = with_auth(
+                axum::Router::new().route(
+                    "/logout",
+                    post(logout_handler::<TestSigner>).with_state(self_service_state(svc)),
+                ),
+                user_evidence(CANON_USER),
+            );
+            let resp = testkit::call(
+                router,
+                ContractRequest::post("/logout").json(&IdentityLogoutRequest {
+                    session_id: login_resp.data.session_id.clone(),
+                }),
+            )
+            .await
+            .expect("call");
+            resp.ensure_status(StatusCode::OK).expect("200");
+            let decoded: IdentityLogoutResponse = resp.json().expect("json");
+            assert!(decoded.data.logged_out);
+            assert!(
+                capture
+                    .find(
+                        tenant_repo_scope(tid(CANON_TENANT)),
+                        SessionId::new(login_resp.data.session_id)
+                    )
+                    .await
+                    .expect("find revoked")
+                    .is_none(),
+                "logout 后 session find 应不可见"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6875,43 +6889,51 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn refresh_handler_happy_path_returns_201_with_token_bundle()
     -> Result<(), Box<dyn std::error::Error>> {
-        use testkit::ContractRequest;
+        {
+            const _: ::vocab::HttpRouteBinding<
+                ::generated::http::identity_v1::refresh::RouteMarker,
+            > = ::generated::http::identity_v1::refresh::ROUTE;
+        }
 
-        let store = crate::internal::mem::InMemRefreshTokenStore::new();
-        let svc = Arc::new(make_refresh_svc(
-            store,
-            make_clock(1_700_000_000),
-            Duration::from_secs(3_600),
-        ));
-        let ta = tid(CANON_TENANT);
+        {
+            use testkit::ContractRequest;
 
-        // 先签发一个 refresh token 落库，供 handler 轮换。
-        let rf = svc
-            .issue(RefreshPrincipal::User {
-                subject: "alice-subject",
-                tenant: ta,
-            })
-            .await
-            .expect("issue ok");
+            let store = crate::internal::mem::InMemRefreshTokenStore::new();
+            let svc = Arc::new(make_refresh_svc(
+                store,
+                make_clock(1_700_000_000),
+                Duration::from_secs(3_600),
+            ));
+            let ta = tid(CANON_TENANT);
 
-        let router = refresh_router_for_test(Arc::clone(&svc));
+            // 先签发一个 refresh token 落库，供 handler 轮换。
+            let rf = svc
+                .issue(RefreshPrincipal::User {
+                    subject: "alice-subject",
+                    tenant: ta,
+                })
+                .await
+                .expect("issue ok");
 
-        let resp = testkit::call(
-            router,
-            ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
-                .header("X-Tenant-ID", CANON_TENANT)
-                .json(&IdentityRefreshRequest {
-                    refresh_token: rf.as_str().to_string(),
-                }),
-        )
-        .await?;
+            let router = refresh_router_for_test(Arc::clone(&svc));
 
-        resp.ensure_status(axum::http::StatusCode::CREATED)?;
-        let decoded: IdentityRefreshResponse = resp.json()?;
-        assert!(!decoded.data.access_token.is_empty(), "access_token 非空");
-        assert!(!decoded.data.refresh_token.is_empty(), "refresh_token 非空");
-        assert!(decoded.data.access_expires_at > 0, "access_expires_at > 0");
-        Ok(())
+            let resp = testkit::call(
+                router,
+                ContractRequest::post(REFRESH_HTTP_SPEC.route.path())
+                    .header("X-Tenant-ID", CANON_TENANT)
+                    .json(&IdentityRefreshRequest {
+                        refresh_token: rf.as_str().to_string(),
+                    }),
+            )
+            .await?;
+
+            resp.ensure_status(axum::http::StatusCode::CREATED)?;
+            let decoded: IdentityRefreshResponse = resp.json()?;
+            assert!(!decoded.data.access_token.is_empty(), "access_token 非空");
+            assert!(!decoded.data.refresh_token.is_empty(), "refresh_token 非空");
+            assert!(decoded.data.access_expires_at > 0, "access_expires_at > 0");
+            Ok(())
+        }
     }
 
     #[tokio::test]
