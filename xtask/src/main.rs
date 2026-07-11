@@ -45,6 +45,8 @@
 //!                                      （`cargo llvm-cov nextest` 替 nextest，单跑两子门：basis/engine ≥90% 绝对
 //!                                      地板 + 本 PR diff 增量 ≥80%，见 `coverage.rs`/`diffcov.rs`）+ public-api
 //!                                      --check（轴 A）+ cargo-audit（供应链漏洞，#1133）。verify 仍是本地 stable-only 快门，ci 是 CI 全工具超集。详见 `verify.rs`。
+//!   `cargo xtask ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools]`
+//!                                      registry 派生的独立 CI lanes；参数精确匹配、缺工具默认 fail-closed。
 //!   `cargo xtask audit [--allow-missing-tools]`
 //!                                      供应链漏洞**定时刷新** lane（issue #1133，GitHub Actions `schedule:`
 //!                                      cron 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit`
@@ -57,6 +59,7 @@
 mod archrules;
 mod assembly;
 mod cdc_config;
+mod ci_lanes;
 mod cmd;
 mod codegen;
 mod command_symmetry;
@@ -138,6 +141,10 @@ enum Command {
     Ci {
         allow_missing_tools: bool,
     },
+    CiLane {
+        lane: ci_lanes::CiLane,
+        allow_missing_tools: bool,
+    },
     Audit {
         allow_missing_tools: bool,
     },
@@ -187,6 +194,10 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
+        ["ci-meta", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Meta, rest),
+        ["ci-core", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Core, rest),
+        ["ci-security", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Security, rest),
+        ["ci-coverage", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Coverage, rest),
         ["audit", rest @ ..] => parse_audit(rest),
         ["integration", rest @ ..] => parse_integration(rest),
         ["consistency-fault-matrix", rest @ ..] => parse_consistency_fault_matrix(rest),
@@ -201,7 +212,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
+                "未知命令: {other:?}；用法: cargo xtask <codegen [--check] | cdc-config debezium | archrules <list | verify | matrix [--write|--check]> | runtime-baseline <list | verify> | runtime-deps guard | contract <validate | breaking [--against <git-ref>] [--deny]> | assembly validate | layer-deps | wsdeps-drift | doc-contracts | consistency-fixtures | consistency local-only-effects | consistency-fault-matrix [--allow-missing-tools] | migrations | schema-rls | inbox-cutover-guard | setlocal-funnel | pg-tenant-tx-guard | repo-scope-guard | reconcile-outbox-command-guard | tenancy-closeout | defer-gate | verify [--fast] [--allow-missing-tools] | public-api [--layer basis|engine|curated] [--check] [--allow-missing] | ci [--allow-missing-tools] | ci-meta|ci-core|ci-security|ci-coverage [--allow-missing-tools] | audit [--allow-missing-tools] | integration [--allow-missing-tools]>"
             )
         }
     }
@@ -338,6 +349,25 @@ fn parse_ci(args: &[&str]) -> Result<Command> {
     })
 }
 
+fn parse_ci_lane(lane: ci_lanes::CiLane, args: &[&str]) -> Result<Command> {
+    match args {
+        [] => Ok(Command::CiLane {
+            lane,
+            allow_missing_tools: false,
+        }),
+        ["--allow-missing-tools"] => Ok(Command::CiLane {
+            lane,
+            allow_missing_tools: true,
+        }),
+        other => {
+            let command = lane.command_name();
+            bail!(
+                "{command} 未知参数: {other:?}；用法: cargo xtask {command} [--allow-missing-tools]"
+            )
+        }
+    }
+}
+
 /// 解析 `audit` 的可选 flag（fail-closed：未知 flag 即 `Err`）。`audit` 无 `--fast`——供应链 lane 恒全量跑。
 fn parse_audit(args: &[&str]) -> Result<Command> {
     let mut allow_missing_tools = false;
@@ -466,6 +496,10 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::Ci {
             allow_missing_tools,
         } => verify::run_ci(allow_missing_tools),
+        Command::CiLane {
+            lane,
+            allow_missing_tools,
+        } => verify::run_lane(lane, allow_missing_tools),
         Command::Audit {
             allow_missing_tools,
         } => verify::run_audit(allow_missing_tools),
@@ -903,6 +937,45 @@ mod tests {
         assert!(parse_command(&s(&["ci", "--bogus"])).is_err());
         assert!(parse_command(&s(&["ci", "--fast"])).is_err()); // ci 无 --fast
         assert!(parse_command(&s(&["ci", "extra"])).is_err());
+    }
+
+    #[test]
+    fn ci_lane_commands_parse_exactly_and_fail_closed() -> anyhow::Result<()> {
+        for (name, lane) in [
+            ("ci-meta", ci_lanes::CiLane::Meta),
+            ("ci-core", ci_lanes::CiLane::Core),
+            ("ci-security", ci_lanes::CiLane::Security),
+            ("ci-coverage", ci_lanes::CiLane::Coverage),
+        ] {
+            assert_eq!(
+                parse_command(&s(&[name]))?,
+                Command::CiLane {
+                    lane,
+                    allow_missing_tools: false,
+                }
+            );
+            assert_eq!(
+                parse_command(&s(&[name, "--allow-missing-tools"]))?,
+                Command::CiLane {
+                    lane,
+                    allow_missing_tools: true,
+                }
+            );
+            for invalid in ["--bogus", "extra"] {
+                let Err(error) = parse_command(&s(&[name, invalid])) else {
+                    bail!("split lane unknown arguments must fail closed")
+                };
+                let error = error.to_string();
+                assert!(error.contains(name), "missing command in `{error}`");
+                assert!(
+                    error.contains(&format!("用法: cargo xtask {name} [--allow-missing-tools]")),
+                    "missing copyable usage in `{error}`"
+                );
+            }
+        }
+        assert!(parse_command(&s(&["ci-nightly"])).is_err());
+        assert!(parse_command(&s(&["ci-integration"])).is_err());
+        Ok(())
     }
 
     #[test]

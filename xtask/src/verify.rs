@@ -10,7 +10,7 @@
 //!   5. `cargo nextest run --workspace --no-tests=pass`（外部工具）
 //!   6. feature-gated 行为测试门（确定性 mock / lazy）：`cargo nextest run -p s3 --features backend` +
 //!      `-p redis-adapter --features backend`（默认 feature workspace nextest 不编入这些 `#[cfg(feature)]`
-//!      测试模块；按包显式补跑，见 [`feature_test_steps`]——不用 `--all-features --workspace` 以免误触
+//!      测试模块；按 registry 的 Core gate 显式补跑——不用 `--all-features --workspace` 以免误触
 //!      postgres/redis 的 `integration`（需 live 后端）门）
 //!   7. `cargo deny check`（外部工具）
 //!   8. `cargo dylint --all`（外部工具；跑 `lints/` 嵌套 nightly workspace；`DYLINT_RUSTFLAGS=-D warnings`
@@ -23,7 +23,7 @@
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 是 **CI 全工具超集**——二者经
-//! [`full_plan`] / [`ci_plan`] 共享 fmt/meta/deny/dylint 同一构造，杜绝两份计划漂移。
+//! [`plan_for`] 从 registry 派生 verify、兼容 CI 与独立 lane，杜绝多份计划漂移。
 //!
 //! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
@@ -44,6 +44,10 @@
 //!   采集资源证据，且在昂贵构建前 fail-closed 检查磁盘预算。该约束无法用 Rust 类型系统
 //!   表达，由结构化 YAML 谓词、synthetic red / anti-vacuity 与脚本 selftest 联合承载。
 
+use crate::ci_lanes::{
+    CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
+    VerifyMembership,
+};
 use crate::diagnostic::run_check;
 use crate::workspace_root;
 use crate::{
@@ -66,15 +70,6 @@ const CI_TOOL_SPECS: &[&str] = &[
     "cargo-public-api@0.52.0",
     "cargo-audit@0.22.2",
 ];
-const INSTALL_HINT_DENY: &str = "cargo install cargo-deny@0.19.9 --locked";
-const INSTALL_HINT_AUDIT: &str = "cargo install cargo-audit@0.22.2 --locked";
-const INSTALL_HINT_DYLINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
-const INSTALL_HINT_NEXTEST: &str = "cargo install cargo-nextest@0.9.137 --locked";
-const INSTALL_HINT_INTEGRATION: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker 或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL + RSS_MQTT_TEST_URL 等 env URL）";
-const INSTALL_HINT_FAULT_MATRIX: &str = "cargo install cargo-nextest@0.9.137 --locked（实跑还需 docker，或设 RSS_TEST_ALLOW_EXTERNAL_POSTGRES + PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD + REDIS_TEST_URL + RSS_AMQP_TEST_URL；RabbitMQ env 路径需预建 vhost rss_fault_matrix 并授权）";
-const INSTALL_HINT_LLVM_COV: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
-const INSTALL_HINT_PUBLIC_API: &str =
-    "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
 
 /// verify 选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,82 +139,30 @@ enum InternalCheck {
     PublicApiCheck,
 }
 
-impl InternalCheck {
-    /// 该 in-process 检查的 xtask 源文件（archrules `xtask_gate` 表里的 carrier 路径）。
-    /// 穷举 match（无 `_` 臂）⇒ 新增 `InternalCheck` 变体必须同步登记 carrier，否则编译失败；
-    /// 供 `archrules::tests::gate_strings_bound_to_verify_ci_plan_membership` 把 gate 字符串与
-    /// plan 成员资格机器绑定（ARCHRULES-GATE-PLAN-BIND-01，#1574）。
-    #[cfg(test)]
-    pub(crate) fn carrier_file(self) -> &'static str {
-        match self {
-            Self::ContractValidate => "xtask/src/contract/validate.rs",
-            Self::AssemblyValidate => "xtask/src/assembly.rs",
-            Self::ContractBreaking => "xtask/src/contract/breaking.rs",
-            Self::LayerDeps => "xtask/src/layerdeps.rs",
-            Self::ShippedFeatureGuard => "xtask/src/shipped_feature_guard.rs",
-            Self::WsDepsDrift => "xtask/src/wsdeps.rs",
-            Self::DocContracts => "xtask/src/doc_contracts.rs",
-            Self::ConsistencyFixtures => "xtask/src/consistency_fixtures.rs",
-            Self::EventTransportGuard => "xtask/src/event_transport_guard.rs",
-            Self::InboxCutoverGuard => "xtask/src/inbox_cutover_guard.rs",
-            Self::RuntimeBaseline => "xtask/src/runtime_baseline.rs",
-            Self::RuntimeDepsGuard => "xtask/src/runtime_deps_guard.rs",
-            Self::ArchRules => "xtask/src/archrules.rs",
-            Self::CodegenCheck => "xtask/src/codegen.rs",
-            Self::LocalOnlyEffects => "xtask/src/consistency_effects.rs",
-            Self::PdpAllowGuard => "xtask/src/pdpallow.rs",
-            Self::ContractBindingGuard => "xtask/src/contract_binding_guard.rs",
-            Self::SchemaRlsGuard => "xtask/src/schema_rls.rs",
-            Self::SetLocalFunnel => "xtask/src/setlocal_funnel.rs",
-            Self::PgTenantTxGuard => "xtask/src/pg_tenant_tx_guard.rs",
-            Self::RepoScopeGuard => "xtask/src/repo_scope_guard.rs",
-            Self::TenancyCloseout => "xtask/src/tenancy_closeout.rs",
-            Self::MigrationsSerial => "xtask/src/migrations.rs",
-            Self::CommandSymmetry => "xtask/src/command_symmetry.rs",
-            Self::ReconcileOutboxCommandGuard => "xtask/src/reconcile_outbox_command_guard.rs",
-            Self::DeferGate => "xtask/src/defergate.rs",
-            Self::Coverage => "xtask/src/coverage.rs",
-            Self::PublicApiCheck => "xtask/src/publicapi.rs",
-        }
-    }
-}
-
-/// 门步载体。`Internal` 在进程内跑；`CargoBuiltin` 是 toolchain 自带子命令（免探测）；
-/// `Tool` 是第三方 cargo 子命令（先探测，缺则按 [`resolve_tool`] 决策）。
+/// 门步 executor。工具要求、探测和安装提示只由 gate registry 提供。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StepKind {
     Internal(InternalCheck),
-    CargoBuiltin,
-    Tool {
-        /// 探测子命令名（`cargo <probe> --version`）。
-        probe: &'static str,
-        /// 缺工具时给的安装指引。
-        install_hint: &'static str,
-    },
-    /// 工具门控的进程内门：先探测 `probe`（缺则按 `allow_missing_tools` 经 [`resolve_tool`] 决策），
-    /// 在则跑 `check` 内部逻辑（其自管子进程，如 coverage 跑 llvm-cov、public-api 跑 cargo-public-api）。
-    ToolGatedInternal {
-        probe: &'static str,
-        install_hint: &'static str,
-        check: InternalCheck,
-    },
+    Cargo,
 }
 
 /// 单个门步。`program` 恒为 `cargo`，故只存 `args`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Step {
-    label: &'static str,
+    id: GateId,
     args: &'static [&'static str],
     kind: StepKind,
     /// 该步额外设置的环境变量（如 dylint 的 `DYLINT_RUSTFLAGS=-D warnings` 把 lint 升为 fail-closed）。
     env: &'static [(&'static str, &'static str)],
-    /// 是否需要编译全 workspace —— `--fast` 据此裁剪（true 的步在 fast 下跳过）。
-    needs_compile: bool,
 }
 
 impl Step {
     pub(crate) fn label(&self) -> &'static str {
-        self.label
+        self.id.spec().label()
+    }
+
+    fn needs_compile(&self) -> bool {
+        self.id.spec().compile_kind() != CompileKind::NoCompile
     }
 
     /// 该步对应的 xtask carrier 源文件——仅 in-process 检查（`Internal` / `ToolGatedInternal`）有；
@@ -227,12 +170,7 @@ impl Step {
     /// 供 gate↔plan 绑定测试遍历（ARCHRULES-GATE-PLAN-BIND-01，#1574）。
     #[cfg(test)]
     pub(crate) fn carrier_file(&self) -> Option<&'static str> {
-        match &self.kind {
-            StepKind::Internal(check) | StepKind::ToolGatedInternal { check, .. } => {
-                Some(check.carrier_file())
-            }
-            StepKind::CargoBuiltin | StepKind::Tool { .. } => None,
-        }
+        self.id.carrier_file()
     }
 }
 
@@ -251,271 +189,236 @@ enum ToolAction {
 
 fn step_fmt() -> Step {
     Step {
-        label: "fmt",
+        id: GateId::Fmt,
         args: &["fmt", "--all", "--", "--check"],
-        kind: StepKind::CargoBuiltin,
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_contract_validate() -> Step {
     Step {
-        label: "contract-validate",
+        id: GateId::ContractValidate,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ContractValidate),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_assembly_validate() -> Step {
     Step {
-        label: "assembly-validate",
+        id: GateId::AssemblyValidate,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyValidate),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_contract_breaking() -> Step {
     Step {
-        label: "contract-breaking",
+        id: GateId::ContractBreaking,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ContractBreaking),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_layer_deps() -> Step {
     Step {
-        label: "layer-deps",
+        id: GateId::LayerDeps,
         args: &[],
         kind: StepKind::Internal(InternalCheck::LayerDeps),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_shipped_feature_guard() -> Step {
     Step {
-        label: "shipped-feature-guard",
+        id: GateId::ShippedFeatureGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ShippedFeatureGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_wsdeps_drift() -> Step {
     Step {
-        label: "wsdeps-drift",
+        id: GateId::WsDepsDrift,
         args: &[],
         kind: StepKind::Internal(InternalCheck::WsDepsDrift),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_doc_contracts() -> Step {
     Step {
-        label: "doc-contracts",
+        id: GateId::DocContracts,
         args: &[],
         kind: StepKind::Internal(InternalCheck::DocContracts),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_consistency_fixtures() -> Step {
     Step {
-        label: "consistency-fixtures",
+        id: GateId::ConsistencyFixtures,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ConsistencyFixtures),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_event_transport_guard() -> Step {
     Step {
-        label: "event-transport-guard",
+        id: GateId::EventTransportGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::EventTransportGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_inbox_cutover_guard() -> Step {
     Step {
-        label: "inbox-cutover-guard",
+        id: GateId::InboxCutoverGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::InboxCutoverGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_runtime_baseline() -> Step {
     Step {
-        label: "runtime-baseline",
+        id: GateId::RuntimeBaseline,
         args: &[],
         kind: StepKind::Internal(InternalCheck::RuntimeBaseline),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_runtime_deps_guard() -> Step {
     Step {
-        label: "runtime-deps-guard",
+        id: GateId::RuntimeDepsGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::RuntimeDepsGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_archrules() -> Step {
     Step {
-        label: "archrules",
+        id: GateId::ArchRules,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ArchRules),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_codegen_check() -> Step {
     Step {
-        label: "codegen-check",
+        id: GateId::CodegenCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::CodegenCheck),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_local_only_effects() -> Step {
     Step {
-        label: "local-only-effects",
+        id: GateId::LocalOnlyEffects,
         args: &[],
         kind: StepKind::Internal(InternalCheck::LocalOnlyEffects),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_pdp_allow_guard() -> Step {
     Step {
-        label: "pdp-allow-guard",
+        id: GateId::PdpAllowGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::PdpAllowGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_contract_binding_guard() -> Step {
     Step {
-        label: "contract-binding-guard",
+        id: GateId::ContractBindingGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ContractBindingGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_schema_rls_guard() -> Step {
     Step {
-        label: "schema-rls",
+        id: GateId::SchemaRls,
         args: &[],
         kind: StepKind::Internal(InternalCheck::SchemaRlsGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_setlocal_funnel() -> Step {
     Step {
-        label: "setlocal-funnel",
+        id: GateId::SetLocalFunnel,
         args: &[],
         kind: StepKind::Internal(InternalCheck::SetLocalFunnel),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_pg_tenant_tx_guard() -> Step {
     Step {
-        label: "pg-tenant-tx-guard",
+        id: GateId::PgTenantTxGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::PgTenantTxGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_repo_scope_guard() -> Step {
     Step {
-        label: "repo-scope-guard",
+        id: GateId::RepoScopeGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::RepoScopeGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_tenancy_closeout() -> Step {
     Step {
-        label: "tenancy-closeout",
+        id: GateId::TenancyCloseout,
         args: &[],
         kind: StepKind::Internal(InternalCheck::TenancyCloseout),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_migrations_serial() -> Step {
     Step {
-        label: "migrations-serial",
+        id: GateId::MigrationsSerial,
         args: &[],
         kind: StepKind::Internal(InternalCheck::MigrationsSerial),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_command_symmetry() -> Step {
     Step {
-        label: "command-symmetry",
+        id: GateId::CommandSymmetry,
         args: &[],
         kind: StepKind::Internal(InternalCheck::CommandSymmetry),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_reconcile_outbox_command_guard() -> Step {
     Step {
-        label: "reconcile-outbox-command-guard",
+        id: GateId::ReconcileOutboxCommandGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::ReconcileOutboxCommandGuard),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_defer_gate() -> Step {
     Step {
-        label: "defer-gate",
+        id: GateId::DeferGate,
         args: &[],
         kind: StepKind::Internal(InternalCheck::DeferGate),
         env: &[],
-        needs_compile: false,
     }
 }
 fn step_deny() -> Step {
     Step {
-        label: "deny",
+        id: GateId::Deny,
         args: &["deny", "check"],
-        kind: StepKind::Tool {
-            probe: "deny",
-            install_hint: INSTALL_HINT_DENY,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: false,
     }
 }
 /// audit 定时 lane 专用：advisory-scoped `cargo deny check advisories`（只查 RustSec 漏洞库，
 /// licenses/bans 留给 PR 门的全量 [`step_deny`]）。issue #1133 每日 cron 刷新只需漏洞维度。
 fn step_deny_advisories() -> Step {
     Step {
-        label: "deny-advisories",
+        id: GateId::DenyAdvisories,
         args: &["deny", "check", "advisories"],
-        kind: StepKind::Tool {
-            probe: "deny",
-            install_hint: INSTALL_HINT_DENY,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: false,
     }
 }
 /// 供应链漏洞门（issue #1133）：`cargo audit` 查 RustSec advisory-db，命中漏洞即非零退出。
@@ -535,14 +438,10 @@ fn step_deny_advisories() -> Step {
 /// 且该 advisory「无可升级修复版」。故按 phantom-only 形态 ignore（deny 侧无需 ignore——其图里根本没有 rsa）。
 fn step_cargo_audit() -> Step {
     Step {
-        label: "audit",
+        id: GateId::CargoAudit,
         args: &["audit", "--ignore", "RUSTSEC-2023-0071"],
-        kind: StepKind::Tool {
-            probe: "audit",
-            install_hint: INSTALL_HINT_AUDIT,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: false,
     }
 }
 
@@ -563,28 +462,23 @@ fn cargo_audit_ignored_ids() -> Vec<&'static str> {
 }
 fn step_dylint() -> Step {
     Step {
-        label: "dylint",
+        id: GateId::Dylint,
         args: &["dylint", "--all"],
-        kind: StepKind::Tool {
-            probe: "dylint",
-            install_hint: INSTALL_HINT_DYLINT,
-        },
+        kind: StepKind::Cargo,
         // `rss_domain_no_serialize` 默认 `Warn`（warning 不退非零）；`-D warnings` 把它（及其它
         // 注册 lint）升为 deny ⇒ 违例即非零退出，使 dylint 成 fail-closed 门（#1023 的核心诉求）。
         // 已验证干净树下 exit 0、无 nightly 误报。
         env: &[("DYLINT_RUSTFLAGS", "-D warnings")],
-        needs_compile: true,
     }
 }
 
 // verify 专用：workspace 默认 feature 的 build/clippy/nextest（stable-only 本地快门）。
 fn step_build_workspace() -> Step {
     Step {
-        label: "build",
+        id: GateId::BuildWorkspace,
         args: &["build", "--workspace"],
-        kind: StepKind::CargoBuiltin,
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 /// F7 + #1137：postgres/redis/amqp 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的
@@ -592,10 +486,10 @@ fn step_build_workspace() -> Step {
 /// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
 /// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经 `cargo xtask integration`
 /// 行实跑（[`integration_plan`]）。ci lane 经 `--all-features --all-targets` 已覆盖该编译面，故仅入
-/// [`full_plan`]、不入 [`ci_plan`]。
+/// `Verify` 计划、不入 `CompatibilityCi` 计划。
 fn step_integration_compile() -> Step {
     Step {
-        label: "integration-compile",
+        id: GateId::IntegrationCompile,
         args: &[
             "test",
             "-p",
@@ -614,9 +508,8 @@ fn step_integration_compile() -> Step {
             "integration",
             "--no-run",
         ],
-        kind: StepKind::CargoBuiltin,
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 
@@ -627,7 +520,7 @@ fn step_integration_compile() -> Step {
 /// 须无 docker 可跑；实跑需 docker / 长存后端，由 [`run_integration`] 的 docker 门把守）。
 fn step_integration_run() -> Step {
     Step {
-        label: "integration-tests",
+        id: GateId::IntegrationRun,
         args: &[
             "nextest",
             "run",
@@ -650,10 +543,7 @@ fn step_integration_run() -> Step {
             "-E",
             "not test(consistency_fault_matrix)",
         ],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_INTEGRATION,
-        },
+        kind: StepKind::Cargo,
         // Production ConsumerTx wiring fail-closes without an audit chain key. The integration
         // lane gives each nextest-isolated process a deterministic 32-byte test key instead of
         // mutating ambient env from a multi-threaded Rust test.
@@ -661,13 +551,12 @@ fn step_integration_run() -> Step {
             "RSS_AUDIT_CHAIN_KEY_B64URL",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         )],
-        needs_compile: true,
     }
 }
 
 fn step_consistency_fault_matrix_run() -> Step {
     Step {
-        label: "consistency-fault-matrix",
+        id: GateId::ConsistencyFaultMatrix,
         args: &[
             "nextest",
             "run",
@@ -680,17 +569,13 @@ fn step_consistency_fault_matrix_run() -> Step {
             "-E",
             "test(consistency_fault_matrix)",
         ],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_FAULT_MATRIX,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_clippy_workspace() -> Step {
     Step {
-        label: "clippy",
+        id: GateId::ClippyWorkspace,
         args: &[
             "clippy",
             "--workspace",
@@ -699,21 +584,16 @@ fn step_clippy_workspace() -> Step {
             "-D",
             "warnings",
         ],
-        kind: StepKind::CargoBuiltin,
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_nextest() -> Step {
     Step {
-        label: "nextest",
+        id: GateId::DefaultNextest,
         args: &["nextest", "run", "--workspace", "--no-tests=pass"],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 
@@ -729,19 +609,15 @@ fn step_nextest() -> Step {
 // 与 coverage STRICT_CRATES 同款机制）。
 fn step_s3_backend_tests() -> Step {
     Step {
-        label: "s3-backend-tests",
+        id: GateId::S3BackendTests,
         args: &["nextest", "run", "-p", "s3", "--features", "backend"],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_redis_backend_tests() -> Step {
     Step {
-        label: "redis-backend-tests",
+        id: GateId::RedisBackendTests,
         args: &[
             "nextest",
             "run",
@@ -750,29 +626,21 @@ fn step_redis_backend_tests() -> Step {
             "--features",
             "backend",
         ],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_oidc_backend_tests() -> Step {
     Step {
-        label: "oidc-backend-tests",
+        id: GateId::OidcBackendTests,
         args: &["nextest", "run", "-p", "oidc", "--features", "backend"],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_prometheus_backend_tests() -> Step {
     Step {
-        label: "prometheus-backend-tests",
+        id: GateId::PrometheusBackendTests,
         args: &[
             "nextest",
             "run",
@@ -781,12 +649,8 @@ fn step_prometheus_backend_tests() -> Step {
             "--features",
             "backend",
         ],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_otel_backend_tests() -> Step {
@@ -794,26 +658,18 @@ fn step_otel_backend_tests() -> Step {
     // 映射 + OtelEndpoint typed 安全边界 + 导出边界脱敏）。`backend` feature 的 `#[cfg(feature)]` 测试模块默认
     // workspace nextest 不编入，按包显式补跑——#1253 让 otel 成为 runtime 生产依赖后，确定性测试须入机器门（同 prometheus 范式）。
     Step {
-        label: "otel-backend-tests",
+        id: GateId::OtelBackendTests,
         args: &["nextest", "run", "-p", "otel", "--features", "backend"],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_grpc_backend_tests() -> Step {
     Step {
-        label: "grpc-backend-tests",
+        id: GateId::GrpcBackendTests,
         args: &["nextest", "run", "-p", "grpc", "--features", "backend"],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_vault_backend_tests() -> Step {
@@ -821,33 +677,12 @@ fn step_vault_backend_tests() -> Step {
     // header）+ 非 2xx 状态分级（#1180：classify_status 表驱动）。`backend` feature 的 `#[cfg(feature)]` 测试模块
     // 默认 workspace nextest 不编入，按包显式补跑——否则 azure 无 CI 下这些确定性测试不被任何 gate 实跑。
     Step {
-        label: "vault-backend-tests",
+        id: GateId::VaultBackendTests,
         args: &["nextest", "run", "-p", "vault", "--features", "backend"],
-        kind: StepKind::Tool {
-            probe: "nextest",
-            install_hint: INSTALL_HINT_NEXTEST,
-        },
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
-/// 确定性 feature 行为测试门集（verify 与 ci 共用，单一事实源；新增确定性 feature 行为测试的 adapter 在此追加）。
-fn feature_test_steps() -> Vec<Step> {
-    vec![
-        step_s3_backend_tests(),
-        step_redis_backend_tests(),
-        step_oidc_backend_tests(),
-        step_prometheus_backend_tests(),
-        // otel backend 行为测试（OTLP/gRPC trace 导出 round-trip via InMemorySpanExporter）：确定性 + hermetic
-        // （connect_lazy，无 live collector），同 prometheus 范式入机器门（#1253 otel 升为 runtime 生产依赖）。
-        step_otel_backend_tests(),
-        // grpc backend 行为测试（tonic 0.14 health server）：自绑 127.0.0.1:0 ephemeral loopback、in-process
-        // tonic client roundtrip，确定性 + hermetic（无 live 后端），同 s3/redis 范式入机器门（#1011）。
-        step_grpc_backend_tests(),
-        step_vault_backend_tests(),
-    ]
-}
-
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
 // public-api --check（轴 A）。
@@ -856,7 +691,7 @@ fn feature_test_steps() -> Vec<Step> {
 // 全 workspace 依赖解析）。verify（本地快门）**不**带 --locked，留本地迭代余地（review #206 codex F2）。
 fn step_build_all_features() -> Step {
     Step {
-        label: "build",
+        id: GateId::BuildAllFeatures,
         args: &[
             "build",
             "--workspace",
@@ -864,14 +699,13 @@ fn step_build_all_features() -> Step {
             "--all-targets",
             "--locked",
         ],
-        kind: StepKind::CargoBuiltin,
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_clippy_all_features() -> Step {
     Step {
-        label: "clippy",
+        id: GateId::ClippyAllFeatures,
         args: &[
             "clippy",
             "--workspace",
@@ -882,142 +716,87 @@ fn step_clippy_all_features() -> Step {
             "-D",
             "warnings",
         ],
-        kind: StepKind::CargoBuiltin,
+        kind: StepKind::Cargo,
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_coverage() -> Step {
     Step {
-        label: "coverage",
+        id: GateId::Coverage,
         args: &[],
-        kind: StepKind::ToolGatedInternal {
-            probe: "llvm-cov",
-            install_hint: INSTALL_HINT_LLVM_COV,
-            check: InternalCheck::Coverage,
-        },
+        kind: StepKind::Internal(InternalCheck::Coverage),
         env: &[],
-        needs_compile: true,
     }
 }
 fn step_public_api() -> Step {
     Step {
-        label: "public-api",
+        id: GateId::PublicApi,
         args: &[],
-        kind: StepKind::ToolGatedInternal {
-            probe: "public-api",
-            // 钉版 nightly + 钉版工具：须含 publicapi::PINNED_NIGHTLY（`&'static str` 字段无法引 const，
-            // 故字面量）；NIGHTLY-PIN-01 治理测试断言 verify.rs 含该值，bump 漏改即 fail。
-            install_hint: INSTALL_HINT_PUBLIC_API,
-            check: InternalCheck::PublicApiCheck,
-        },
+        kind: StepKind::Internal(InternalCheck::PublicApiCheck),
         env: &[],
-        needs_compile: true,
     }
 }
 
-/// verify 全量门步计划（单一事实源；顺序 = 执行顺序）。feature-test 门紧随 nextest（同测试相位）。
-pub(crate) fn full_plan() -> Vec<Step> {
-    let mut plan = vec![
-        step_fmt(),
-        step_contract_validate(),
-        step_assembly_validate(),
-        step_contract_breaking(),
-        step_layer_deps(),
-        step_shipped_feature_guard(),
-        step_wsdeps_drift(),
-        step_doc_contracts(),
-        step_consistency_fixtures(),
-        step_event_transport_guard(),
-        step_inbox_cutover_guard(),
-        step_runtime_baseline(),
-        step_runtime_deps_guard(),
-        step_archrules(),
-        step_codegen_check(),
-        step_local_only_effects(),
-        step_pdp_allow_guard(),
-        step_contract_binding_guard(),
-        step_schema_rls_guard(),
-        step_setlocal_funnel(),
-        step_pg_tenant_tx_guard(),
-        step_repo_scope_guard(),
-        step_tenancy_closeout(),
-        step_migrations_serial(),
-        step_command_symmetry(),
-        step_reconcile_outbox_command_guard(),
-        step_defer_gate(),
-        step_build_workspace(),
-        step_integration_compile(),
-        step_clippy_workspace(),
-        step_nextest(),
-    ];
-    plan.extend(feature_test_steps());
-    plan.push(step_deny());
-    plan.push(step_dylint());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanTarget {
+    Verify,
+    CompatibilityCi,
+    Lane(CiLane),
+}
+
+fn selected_for(target: PlanTarget, id: GateId) -> bool {
+    let spec = id.spec();
+    match target {
+        PlanTarget::CompatibilityCi => spec.compat() == CompatMembership::Included,
+        PlanTarget::Lane(CiLane::Core) => {
+            spec.belongs_to(CiLane::Core)
+                && spec.compat() != CompatMembership::Standalone(StandaloneReason::VerifyOnly)
+        }
+        PlanTarget::Lane(lane) => spec.belongs_to(lane),
+        PlanTarget::Verify => spec.verify_membership() == VerifyMembership::Included,
+    }
+}
+
+pub(crate) fn plan_for(target: PlanTarget) -> Vec<Step> {
+    let mut plan: Vec<_> = REGISTRY
+        .iter()
+        .filter(|spec| selected_for(target, spec.id()))
+        .map(|spec| step_for_id(spec.id()))
+        .collect();
+    if target == PlanTarget::Lane(CiLane::Nightly) {
+        plan.sort_by_key(|step| usize::from(step.id == GateId::CargoAudit));
+    }
     plan
 }
 
-/// ci 超集门步计划（issue #1132 CI lane）。与 verify 共享 fmt/meta/deny/dylint 同一构造；build/clippy 升
-/// `--all-features --all-targets`；覆盖率门替 nextest（兼跑 workspace 测试）；尾追 public-api --check（轴 A）。
-/// `audit`（cargo-audit）紧随 `deny` 后（issue #1133：供应链漏洞门入 PR 阻断 lane，独立于 deny advisories 的
-/// 防御纵深）。ci 恒全量（无 `--fast`）。
-pub(crate) fn ci_plan() -> Vec<Step> {
-    let mut plan = vec![
-        step_fmt(),
-        step_contract_validate(),
-        step_assembly_validate(),
-        step_contract_breaking(),
-        step_layer_deps(),
-        step_shipped_feature_guard(),
-        step_wsdeps_drift(),
-        step_doc_contracts(),
-        step_consistency_fixtures(),
-        step_event_transport_guard(),
-        step_inbox_cutover_guard(),
-        step_runtime_baseline(),
-        step_runtime_deps_guard(),
-        step_archrules(),
-        step_codegen_check(),
-        step_local_only_effects(),
-        step_pdp_allow_guard(),
-        step_contract_binding_guard(),
-        step_schema_rls_guard(),
-        step_setlocal_funnel(),
-        step_pg_tenant_tx_guard(),
-        step_repo_scope_guard(),
-        step_tenancy_closeout(),
-        step_migrations_serial(),
-        step_command_symmetry(),
-        step_reconcile_outbox_command_guard(),
-        step_defer_gate(),
-        step_build_all_features(),
-        step_clippy_all_features(),
-        step_coverage(),
-    ];
-    plan.extend(feature_test_steps());
-    plan.push(step_deny());
-    plan.push(step_cargo_audit());
-    plan.push(step_dylint());
-    plan.push(step_public_api());
-    plan
+macro_rules! define_step_dispatch {
+    ($( $id:ident => ($step:ident, $carrier:expr, $spec:expr), )*) => {
+        fn step_for_id(id: GateId) -> Step {
+            let step = match id { $( GateId::$id => $step(), )* };
+            debug_assert_eq!(step.id, id);
+            step
+        }
+    };
 }
+crate::ci_lanes::gate_catalog!(define_step_dispatch);
 
 /// audit 精简供应链门步计划（issue #1133；GitHub Actions schedule 调 `cargo xtask audit`）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
-/// [`ci_plan`] 已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一 [`step_cargo_audit`] 构造。
+/// `CompatibilityCi` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
+/// [`step_cargo_audit`] 构造。
 ///
 /// INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
 /// 由 `github_audit_workflow_has_scheduled_audit_lane` 守。
 fn audit_plan() -> Vec<Step> {
-    vec![step_deny_advisories(), step_cargo_audit()]
+    plan_for(PlanTarget::Lane(CiLane::Nightly))
 }
 
 /// #1137：真集成 lane 门步计划（opt-in `cargo xtask integration`）。先跑常规 integration tests，再显式跑
 /// N-028 consistency fault matrix；与 verify/ci 完全隔离（默认门只编译 integration 代码、不实跑——见
 /// [`step_integration_compile`]）。
 fn integration_plan() -> Vec<Step> {
-    vec![step_integration_run(), step_consistency_fault_matrix_run()]
+    plan_for(PlanTarget::Lane(CiLane::Integration))
 }
 
 fn consistency_fault_matrix_plan() -> Vec<Step> {
@@ -1108,8 +887,14 @@ pub(crate) fn run_integration(allow_missing_tools: bool) -> Result<()> {
         plan.len()
     );
     for (i, step) in plan.iter().enumerate() {
-        eprintln!("integration: [{}/{}] {}", i + 1, plan.len(), step.label);
-        run_one("integration", step, &opts, &root)?;
+        eprintln!("integration: [{}/{}] {}", i + 1, plan.len(), step.label());
+        run_one(
+            "integration",
+            step,
+            &opts,
+            &root,
+            crate::cmd::tool_available,
+        )?;
     }
     eprintln!("integration：全部通过");
     Ok(())
@@ -1153,9 +938,9 @@ pub(crate) fn run_consistency_fault_matrix(allow_missing_tools: bool) -> Result<
 
 /// 纯函数：按 opts 产出有序门步计划。`--fast` 裁掉 `needs_compile` 步（fmt+meta+deny 保留）。
 fn verify_plan(opts: &VerifyOpts) -> Vec<Step> {
-    let plan = full_plan();
+    let plan = plan_for(PlanTarget::Verify);
     if opts.fast {
-        plan.into_iter().filter(|s| !s.needs_compile).collect()
+        plan.into_iter().filter(|s| !s.needs_compile()).collect()
     } else {
         plan
     }
@@ -1200,39 +985,35 @@ fn run_step(
 }
 
 /// 跑单步：Internal 进程内执行；CargoBuiltin 直接 spawn；Tool 先探测再按决策分派。
-fn run_one(lane: &str, step: &Step, opts: &VerifyOpts, root: &Path) -> Result<()> {
-    match &step.kind {
-        StepKind::Internal(check) => run_internal(*check),
-        StepKind::CargoBuiltin => run_step(lane, step.label, step.args, step.env, root),
-        StepKind::Tool {
+fn run_one(
+    lane: &str,
+    step: &Step,
+    opts: &VerifyOpts,
+    root: &Path,
+    tool_available: impl Fn(&str) -> bool,
+) -> Result<()> {
+    let execute = || match step.kind {
+        StepKind::Internal(check) => run_internal(check),
+        StepKind::Cargo => run_step(lane, step.label(), step.args, step.env, root),
+    };
+    match step.id.spec().tool() {
+        ToolRequirement::InProcess | ToolRequirement::CargoBuiltin => execute(),
+        ToolRequirement::CargoTool {
             probe,
             install_hint,
         } => run_tool_gated(
             lane,
-            crate::cmd::tool_available(probe),
+            tool_available(probe),
             opts.allow_missing_tools,
             probe,
             install_hint,
-            step.label,
-            || run_step(lane, step.label, step.args, step.env, root),
-        ),
-        StepKind::ToolGatedInternal {
-            probe,
-            install_hint,
-            check,
-        } => run_tool_gated(
-            lane,
-            crate::cmd::tool_available(probe),
-            opts.allow_missing_tools,
-            probe,
-            install_hint,
-            step.label,
-            || run_internal(*check),
+            step.label(),
+            execute,
         ),
     }
 }
 
-/// 工具门控分派（[`StepKind::Tool`] 与 [`StepKind::ToolGatedInternal`] 共用）：探测结果 + 宽限标志经
+/// Registry 声明的工具门控分派：探测结果 + 宽限标志经
 /// [`resolve_tool`] 决策——在则跑 `on_run`，缺+宽限则警告跳过，缺+不宽限则 fail-closed
 /// （INVARIANT VERIFY-TOOL-GATE-01）。
 fn run_tool_gated(
@@ -1308,8 +1089,8 @@ fn run_internal(check: InternalCheck) -> Result<()> {
 
 fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -> Result<()> {
     for (i, step) in plan.iter().enumerate() {
-        eprintln!("{lane}: [{}/{}] {}", i + 1, plan.len(), step.label);
-        run_one(lane, step, opts, root)?;
+        eprintln!("{lane}: [{}/{}] {}", i + 1, plan.len(), step.label());
+        run_one(lane, step, opts, root, crate::cmd::tool_available)?;
     }
     Ok(())
 }
@@ -1330,7 +1111,7 @@ pub(crate) fn run(fast: bool, allow_missing_tools: bool) -> Result<()> {
     Ok(())
 }
 
-/// ci 入口（issue #1132 CI lane 超集）：按 [`ci_plan`] 顺序跑每步，fail-fast。CI 由 GitHub Actions
+/// ci 入口（issue #1132 CI lane 超集）：按 [`plan_for`] 的兼容计划顺序跑每步，fail-fast。CI 由 GitHub Actions
 /// 调 `cargo xtask ci`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01）；本地全工具机器亦可 `make ci`。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
 pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
@@ -1339,10 +1120,24 @@ pub(crate) fn run_ci(allow_missing_tools: bool) -> Result<()> {
         allow_missing_tools,
     };
     let root = workspace_root()?;
-    let plan = ci_plan();
+    let plan = plan_for(PlanTarget::CompatibilityCi);
     eprintln!("ci：{} 步（CI lane 超集）", plan.len());
     run_labeled_plan("ci", &plan, &opts, &root)?;
     eprintln!("ci：全部通过");
+    Ok(())
+}
+
+pub(crate) fn run_lane(lane: CiLane, allow_missing_tools: bool) -> Result<()> {
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools,
+    };
+    let root = workspace_root()?;
+    let plan = plan_for(PlanTarget::Lane(lane));
+    let name = lane.command_name();
+    eprintln!("{name}：{} 步", plan.len());
+    run_labeled_plan(name, &plan, &opts, &root)?;
+    eprintln!("{name}：全部通过");
     Ok(())
 }
 
@@ -1374,11 +1169,79 @@ mod tests {
     }
 
     fn labels(plan: &[Step]) -> Vec<&'static str> {
-        plan.iter().map(|s| s.label).collect()
+        plan.iter().map(|s| s.label()).collect()
     }
 
     #[test]
-    fn full_plan_order_and_count() {
+    fn ci_lane_plans_are_registry_derived_and_partitioned() {
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 27);
+        assert_eq!(
+            labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
+            vec!["deny", "audit"]
+        );
+        assert_eq!(
+            labels(&plan_for(PlanTarget::Lane(CiLane::Coverage))),
+            vec!["coverage", "public-api"]
+        );
+        let core = labels(&plan_for(PlanTarget::Lane(CiLane::Core)));
+        assert_eq!(core.first(), Some(&"build"));
+        assert!(core.contains(&"nextest"));
+        assert!(!core.contains(&"coverage"));
+        assert!(!core.contains(&"integration-compile"));
+
+        let compatibility: std::collections::BTreeSet<_> = plan_for(PlanTarget::CompatibilityCi)
+            .into_iter()
+            .map(|step| step.id as usize)
+            .collect();
+        let split: Vec<std::collections::BTreeSet<_>> = [
+            CiLane::Meta,
+            CiLane::Core,
+            CiLane::Security,
+            CiLane::Coverage,
+        ]
+        .into_iter()
+        .map(|lane| {
+            plan_for(PlanTarget::Lane(lane))
+                .into_iter()
+                .filter(|step| step.id.spec().compat() == CompatMembership::Included)
+                .map(|step| step.id as usize)
+                .collect()
+        })
+        .collect();
+        for (index, lane) in split.iter().enumerate() {
+            for other in &split[index + 1..] {
+                assert!(lane.is_disjoint(other), "split CI lanes must be disjoint");
+            }
+        }
+        let union: std::collections::BTreeSet<_> = split.into_iter().flatten().collect();
+        assert_eq!(
+            union, compatibility,
+            "split CI lanes must cover compatibility CI"
+        );
+    }
+
+    #[test]
+    fn ci_lane_compatibility_plan_keeps_41_unique_gates_and_supersedes_nextest() {
+        let plan = plan_for(PlanTarget::CompatibilityCi);
+        assert_eq!(plan.len(), 41);
+        assert!(!labels(&plan).contains(&"nextest"));
+        let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 41);
+    }
+
+    #[test]
+    fn ci_lane_catalog_generates_executor_dispatch_for_every_gate() {
+        for spec in REGISTRY {
+            let step = step_for_id(spec.id());
+            assert_eq!(step.id, spec.id());
+        }
+        assert_eq!(GateId::ALL.len(), REGISTRY.len());
+    }
+
+    #[test]
+    fn verify_plan_order_and_count() {
         let plan = verify_plan(&opts(false, false));
         assert_eq!(
             labels(&plan),
@@ -1429,7 +1292,10 @@ mod tests {
 
     #[test]
     fn shipped_feature_guard_is_shared_by_verify_and_ci() {
-        for (lane, plan) in [("verify", full_plan()), ("ci", ci_plan())] {
+        for (lane, plan) in [
+            ("verify", plan_for(PlanTarget::Verify)),
+            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
             assert!(
                 labels(&plan).contains(&"shipped-feature-guard"),
                 "{lane} must check the actual server/rss feature graph"
@@ -1491,7 +1357,7 @@ mod tests {
             let internals: Vec<_> = plan
                 .iter()
                 .filter(|s| matches!(s.kind, StepKind::Internal(_)))
-                .map(|s| s.label)
+                .map(|s| s.label())
                 .collect();
             assert_eq!(
                 internals,
@@ -1530,12 +1396,15 @@ mod tests {
 
     #[test]
     fn archrules_matrix_is_no_compile_internal_gate_in_fast_and_ci() -> anyhow::Result<()> {
-        for (name, plan) in [("fast", verify_plan(&opts(true, false))), ("ci", ci_plan())] {
+        for (name, plan) in [
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
             let step = plan
                 .iter()
-                .find(|s| s.label == "archrules")
+                .find(|s| s.label() == "archrules")
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 archrules 步"))?;
-            assert!(!step.needs_compile, "archrules 须是 no-compile gate");
+            assert!(!step.needs_compile(), "archrules 须是 no-compile gate");
             assert!(matches!(
                 step.kind,
                 StepKind::Internal(InternalCheck::ArchRules)
@@ -1548,9 +1417,9 @@ mod tests {
     fn local_only_effects_is_no_compile_internal_gate_after_codegen_in_all_lanes()
     -> anyhow::Result<()> {
         for (name, plan) in [
-            ("full", full_plan()),
+            ("full", plan_for(PlanTarget::Verify)),
             ("fast", verify_plan(&opts(true, false))),
-            ("ci", ci_plan()),
+            ("ci", plan_for(PlanTarget::CompatibilityCi)),
         ] {
             let labels = labels(&plan);
             let codegen = labels
@@ -1563,7 +1432,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 local-only-effects"))?;
             assert_eq!(effects, codegen + 1, "{name} lane order drift");
             assert!(
-                !plan[effects].needs_compile,
+                !plan[effects].needs_compile(),
                 "{name} gate must be no-compile"
             );
             assert!(matches!(
@@ -1577,7 +1446,10 @@ mod tests {
     #[test]
     fn runtime_deps_guard_is_no_compile_internal_gate_between_baseline_and_archrules()
     -> anyhow::Result<()> {
-        for (name, plan) in [("fast", verify_plan(&opts(true, false))), ("ci", ci_plan())] {
+        for (name, plan) in [
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
             let labels = labels(&plan);
             let baseline_pos = labels
                 .iter()
@@ -1597,7 +1469,7 @@ mod tests {
             );
             let step = &plan[guard_pos];
             assert!(
-                !step.needs_compile,
+                !step.needs_compile(),
                 "runtime-deps-guard 须是 no-compile gate"
             );
             assert!(matches!(
@@ -1646,11 +1518,10 @@ mod tests {
     fn run_labeled_plan_executes_small_plan_with_lane_prefix() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let plan = [Step {
-            label: "cargo-version",
+            id: GateId::Fmt,
             args: &["--version"],
-            kind: StepKind::CargoBuiltin,
+            kind: StepKind::Cargo,
             env: &[],
-            needs_compile: false,
         }];
         run_labeled_plan("ci", &plan, &opts(false, false), &root)
     }
@@ -1662,10 +1533,10 @@ mod tests {
     /// 非零）经手跑 `cargo xtask verify` 验证——xtask 测试策略不含跑 nightly dylint 的集成测试。
     #[test]
     fn dylint_step_is_fail_closed_via_deny_warnings() -> anyhow::Result<()> {
-        let plan = full_plan();
+        let plan = plan_for(PlanTarget::Verify);
         let dylint = plan
             .iter()
-            .find(|s| s.label == "dylint")
+            .find(|s| s.label() == "dylint")
             .ok_or_else(|| anyhow::anyhow!("plan 缺 dylint 步"))?;
         assert!(
             dylint
@@ -1681,42 +1552,46 @@ mod tests {
     #[test]
     fn run_one_missing_tool_fail_closed_is_err() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let step = missing_tool_step();
-        assert!(run_one("verify", &step, &opts(false, false), &root).is_err());
+        let step = missing_coverage_tool_step();
+        let probed = std::cell::Cell::new(false);
+        assert!(
+            run_one("verify", &step, &opts(false, false), &root, |probe| {
+                assert_eq!(probe, "llvm-cov");
+                probed.set(true);
+                false
+            })
+            .is_err()
+        );
+        assert!(probed.get(), "run_one must query registry tool metadata");
         Ok(())
     }
 
     /// 缺工具 + 显式宽限 ⇒ `run_one` 警告跳过、返回 `Ok`（`--allow-missing-tools` 路径）。
     #[test]
-    fn run_one_missing_tool_skipwarn_is_ok() -> anyhow::Result<()> {
+    fn run_one_missing_tool_skipwarn_does_not_touch_executor() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let step = missing_tool_step();
-        assert!(run_one("verify", &step, &opts(false, true), &root).is_ok());
+        let step = missing_coverage_tool_step();
+        assert!(run_one("verify", &step, &opts(false, true), &root, |_| false).is_ok());
         Ok(())
     }
 
-    /// 构造一个探测必失败的 Tool 步（`cargo zzz-... --version` 非零 ⇒ tool_available=false）。
-    fn missing_tool_step() -> Step {
+    fn missing_coverage_tool_step() -> Step {
         Step {
-            label: "redtool",
-            args: &["zzz-not-a-cargo-subcommand"],
-            kind: StepKind::Tool {
-                probe: "zzz-not-a-cargo-subcommand",
-                install_hint: "（测试用，不存在）",
-            },
+            id: GateId::Coverage,
+            args: &["zzz-executor-must-not-run"],
+            kind: StepKind::Cargo,
             env: &[],
-            needs_compile: false,
         }
     }
 
     // ---- ci 超集计划（issue #1132）----
 
-    /// ci_plan 顺序与门集（单一事实源；CI lane 实跑顺序）。`audit`（cargo-audit）紧随 `deny` 后
+    /// CompatibilityCi 顺序与门集（单一事实源；CI lane 实跑顺序）。`audit`（cargo-audit）紧随 `deny` 后
     /// （issue #1133：供应链漏洞门入 PR 阻断 lane，防御纵深独立于 deny advisories）。
     #[test]
-    fn ci_plan_order_and_count() {
+    fn compatibility_plan_order_and_count() {
         assert_eq!(
-            labels(&ci_plan()),
+            labels(&plan_for(PlanTarget::CompatibilityCi)),
             vec![
                 "fmt",
                 "contract-validate",
@@ -1766,12 +1641,12 @@ mod tests {
     /// ci 的 build/clippy 升 `--all-features --all-targets`（issue 验收：编译态全覆盖）。
     #[test]
     fn ci_build_clippy_use_all_features_all_targets() -> anyhow::Result<()> {
-        let plan = ci_plan();
+        let plan = plan_for(PlanTarget::CompatibilityCi);
         for label in ["build", "clippy"] {
             let step = plan
                 .iter()
-                .find(|s| s.label == label)
-                .ok_or_else(|| anyhow::anyhow!("ci_plan 缺 `{label}` 步"))?;
+                .find(|s| s.label() == label)
+                .ok_or_else(|| anyhow::anyhow!("CompatibilityCi 缺 `{label}` 步"))?;
             assert!(
                 step.args.contains(&"--all-features") && step.args.contains(&"--all-targets"),
                 "ci `{label}` 须 --all-features --all-targets，实际 {:?}",
@@ -1784,30 +1659,38 @@ mod tests {
     /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 public-api（轴 A）；二者皆 ToolGatedInternal。
     #[test]
     fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
-        let plan = ci_plan();
+        let plan = plan_for(PlanTarget::CompatibilityCi);
         assert!(
             !labels(&plan).contains(&"nextest"),
             "ci 不应有独立 nextest 步（已并入 coverage）"
         );
         let cov = plan
             .iter()
-            .find(|s| s.label == "coverage")
-            .ok_or_else(|| anyhow::anyhow!("ci_plan 缺 coverage 步"))?;
+            .find(|s| s.label() == "coverage")
+            .ok_or_else(|| anyhow::anyhow!("CompatibilityCi 缺 coverage 步"))?;
         assert!(matches!(
             cov.kind,
-            StepKind::ToolGatedInternal {
-                check: InternalCheck::Coverage,
+            StepKind::Internal(InternalCheck::Coverage)
+        ));
+        assert!(matches!(
+            cov.id.spec().tool(),
+            ToolRequirement::CargoTool {
+                probe: "llvm-cov",
                 ..
             }
         ));
         let pa = plan
             .iter()
-            .find(|s| s.label == "public-api")
-            .ok_or_else(|| anyhow::anyhow!("ci_plan 缺 public-api 步"))?;
+            .find(|s| s.label() == "public-api")
+            .ok_or_else(|| anyhow::anyhow!("CompatibilityCi 缺 public-api 步"))?;
         assert!(matches!(
             pa.kind,
-            StepKind::ToolGatedInternal {
-                check: InternalCheck::PublicApiCheck,
+            StepKind::Internal(InternalCheck::PublicApiCheck)
+        ));
+        assert!(matches!(
+            pa.id.spec().tool(),
+            ToolRequirement::CargoTool {
+                probe: "public-api",
                 ..
             }
         ));
@@ -1817,9 +1700,9 @@ mod tests {
     /// 共享门步在 verify 与 ci 里**逐字相同**（同一构造，不漂移）。Step 派生 PartialEq ⇒ 直接比对。
     #[test]
     fn ci_shares_meta_deny_dylint_with_verify_verbatim() {
-        let v = full_plan();
-        let c = ci_plan();
-        let find = |plan: &[Step], label: &str| plan.iter().find(|s| s.label == label).cloned();
+        let v = plan_for(PlanTarget::Verify);
+        let c = plan_for(PlanTarget::CompatibilityCi);
+        let find = |plan: &[Step], label: &str| plan.iter().find(|s| s.label() == label).cloned();
         for label in [
             "fmt",
             "contract-validate",
@@ -1877,9 +1760,11 @@ mod tests {
             vec!["integration-tests", "consistency-fault-matrix"]
         );
         assert!(!labels(&verify_plan(&opts(false, false))).contains(&"integration-tests"));
-        assert!(!labels(&ci_plan()).contains(&"integration-tests"));
+        assert!(!labels(&plan_for(PlanTarget::CompatibilityCi)).contains(&"integration-tests"));
         assert!(!labels(&verify_plan(&opts(false, false))).contains(&"consistency-fault-matrix"));
-        assert!(!labels(&ci_plan()).contains(&"consistency-fault-matrix"));
+        assert!(
+            !labels(&plan_for(PlanTarget::CompatibilityCi)).contains(&"consistency-fault-matrix")
+        );
     }
 
     #[test]
@@ -1889,16 +1774,18 @@ mod tests {
             vec!["consistency-fault-matrix"]
         );
         assert!(!labels(&verify_plan(&opts(false, false))).contains(&"consistency-fault-matrix"));
-        assert!(!labels(&ci_plan()).contains(&"consistency-fault-matrix"));
+        assert!(
+            !labels(&plan_for(PlanTarget::CompatibilityCi)).contains(&"consistency-fault-matrix")
+        );
     }
 
     #[test]
     fn consistency_fault_matrix_step_targets_journeys_matrix_test() {
         let step = step_consistency_fault_matrix_run();
-        assert_eq!(step.label, "consistency-fault-matrix");
+        assert_eq!(step.label(), "consistency-fault-matrix");
         assert!(matches!(
-            step.kind,
-            StepKind::Tool {
+            step.id.spec().tool(),
+            ToolRequirement::CargoTool {
                 probe: "nextest",
                 ..
             }
@@ -1926,10 +1813,10 @@ mod tests {
     #[test]
     fn integration_run_step_profile_feature_and_coverage() {
         let step = step_integration_run();
-        assert_eq!(step.label, "integration-tests");
+        assert_eq!(step.label(), "integration-tests");
         assert!(matches!(
-            step.kind,
-            StepKind::Tool {
+            step.id.spec().tool(),
+            ToolRequirement::CargoTool {
                 probe: "nextest",
                 ..
             }
@@ -1971,7 +1858,7 @@ mod tests {
     #[test]
     fn integration_compile_covers_adapters_and_journeys_no_run() {
         let step = step_integration_compile();
-        assert_eq!(step.label, "integration-compile");
+        assert_eq!(step.label(), "integration-compile");
         assert!(step.args.contains(&"--no-run"), "默认门只编译不实跑");
         for p in [
             "postgres",
@@ -1992,10 +1879,13 @@ mod tests {
         let plan = audit_plan();
         let deny = plan
             .iter()
-            .find(|s| s.label == "deny-advisories")
+            .find(|s| s.label() == "deny-advisories")
             .ok_or_else(|| anyhow::anyhow!("audit_plan 缺 deny-advisories 步"))?;
         assert_eq!(deny.args, &["deny", "check", "advisories"]);
-        assert!(matches!(deny.kind, StepKind::Tool { probe: "deny", .. }));
+        assert!(matches!(
+            deny.id.spec().tool(),
+            ToolRequirement::CargoTool { probe: "deny", .. }
+        ));
         Ok(())
     }
 
@@ -2004,10 +1894,16 @@ mod tests {
     #[test]
     fn cargo_audit_step_is_tool_gate_probe_audit() {
         let step = step_cargo_audit();
-        assert_eq!(step.label, "audit");
+        assert_eq!(step.label(), "audit");
         assert_eq!(step.args.first(), Some(&"audit"));
-        assert!(matches!(step.kind, StepKind::Tool { probe: "audit", .. }));
-        assert!(!step.needs_compile, "cargo audit 只读 Cargo.lock，无需编译");
+        assert!(matches!(
+            step.id.spec().tool(),
+            ToolRequirement::CargoTool { probe: "audit", .. }
+        ));
+        assert!(
+            !step.needs_compile(),
+            "cargo audit 只读 Cargo.lock，无需编译"
+        );
         // phantom rsa 豁免须在 args（唯一 cargo-audit ignore 单源）；删掉它定时 lane 会在 phantom 条目上误红。
         assert!(
             step.args
@@ -2021,22 +1917,24 @@ mod tests {
     /// cargo-audit 步在 ci（PR 阻断门）与 audit（定时 lane）里**逐字相同**（同一构造，不漂移）。
     #[test]
     fn cargo_audit_step_shared_between_ci_and_audit_verbatim() {
-        let find = |plan: &[Step]| plan.iter().find(|s| s.label == "audit").cloned();
-        assert_eq!(find(&ci_plan()), find(&audit_plan()));
-        assert!(find(&ci_plan()).is_some(), "ci_plan 须含 audit 步");
+        let find = |plan: &[Step]| plan.iter().find(|s| s.label() == "audit").cloned();
+        assert_eq!(
+            find(&plan_for(PlanTarget::CompatibilityCi)),
+            find(&audit_plan())
+        );
+        assert!(
+            find(&plan_for(PlanTarget::CompatibilityCi)).is_some(),
+            "CompatibilityCi 须含 audit 步"
+        );
     }
 
     /// ToolGatedInternal 缺工具 + 不宽限 ⇒ `Err`（fail-closed；不执行内部逻辑）。INVARIANT VERIFY-TOOL-GATE-01。
     #[test]
     fn run_one_toolgated_missing_fail_closed_is_err() -> anyhow::Result<()> {
-        let root = workspace_root()?;
         assert!(
-            run_one(
-                "verify",
-                &missing_toolgated_step(),
-                &opts(false, false),
-                &root
-            )
+            run_tool_gated("verify", false, false, "missing", "install", "red", || Ok(
+                ()
+            ))
             .is_err()
         );
         Ok(())
@@ -2045,33 +1943,19 @@ mod tests {
     /// ToolGatedInternal 缺工具 + 宽限 ⇒ `Ok`（SkipWarn；不执行内部逻辑）。
     #[test]
     fn run_one_toolgated_missing_skipwarn_is_ok() -> anyhow::Result<()> {
-        let root = workspace_root()?;
         assert!(
-            run_one(
+            run_tool_gated(
                 "verify",
-                &missing_toolgated_step(),
-                &opts(false, true),
-                &root
+                false,
+                true,
+                "missing",
+                "install",
+                "red",
+                || Ok(())
             )
             .is_ok()
         );
         Ok(())
-    }
-
-    /// 探测必失败的 ToolGatedInternal 步——若误执行内部 CodegenCheck 会真跑 codegen，但 probe 缺 ⇒
-    /// 决策在执行前短路，故内部逻辑不被触达（验证 gate 先于 run）。
-    fn missing_toolgated_step() -> Step {
-        Step {
-            label: "redtoolgated",
-            args: &[],
-            kind: StepKind::ToolGatedInternal {
-                probe: "zzz-not-a-cargo-subcommand",
-                install_hint: "（测试用，不存在）",
-                check: InternalCheck::CodegenCheck,
-            },
-            env: &[],
-            needs_compile: true,
-        }
     }
 
     // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托 `cargo xtask ci`、不逐条重列门 ----
@@ -3587,8 +3471,8 @@ mod tests {
         let pin = crate::publicapi::PINNED_NIGHTLY;
         // reason: 非 ToolGatedInternal 变体回退空串（必不含 pin），令下面 assert 以失败信息暴露形态变化，
         // 而非 panic（生产代码禁 panic，clippy Medium）。
-        let install_hint = match step_public_api().kind {
-            StepKind::ToolGatedInternal { install_hint, .. } => install_hint,
+        let install_hint = match step_public_api().id.spec().tool() {
+            ToolRequirement::CargoTool { install_hint, .. } => install_hint,
             _ => "",
         };
         assert!(

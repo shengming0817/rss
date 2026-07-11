@@ -668,10 +668,198 @@ fn scan_xtask(root: &Path, index: &mut Index) -> Result<()> {
         if path.ends_with("xtask/src/publicapi.rs") {
             continue;
         }
+        if path.ends_with("xtask/src/ci_lanes.rs") {
+            let found_invariants = extract_invariants(root, &path)?;
+            record_invalid_invariants(index, &found_invariants);
+            validate_closed_invariant_bindings(
+                index,
+                &path,
+                &found_invariants,
+                CI_LANE_INVARIANT_BINDINGS,
+            );
+            for binding in CI_LANE_INVARIANT_BINDINGS {
+                debug_assert_eq!(binding.path, rel(root, &path));
+                scan_extracted_invariant_rules_filtered(
+                    root,
+                    index,
+                    &found_invariants,
+                    binding.carrier,
+                    binding.evidence,
+                    Some(binding.gates),
+                    |rule| binding.matches(rule) && binding.accepts(rule),
+                )?;
+            }
+            continue;
+        }
         let gate = xtask_gate(root, &path);
         scan_invariant_file(root, index, &path, "xtask", xtask_evidence(&path), gate)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvariantCarrierBinding {
+    path: &'static str,
+    id: &'static str,
+    facet: Option<&'static str>,
+    carrier: &'static str,
+    evidence: &'static str,
+    gates: &'static str,
+}
+
+impl InvariantCarrierBinding {
+    fn matches(self, rule: &FoundRule) -> bool {
+        rule.id == self.id
+            && rule
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.facet.as_deref())
+                == self.facet
+    }
+
+    fn accepts(self, rule: &FoundRule) -> bool {
+        let Some(metadata) = rule.metadata.as_ref() else {
+            return false;
+        };
+        !(metadata.level == RuleLevel::Medium
+            && metadata.synthetic_red.is_some()
+            && self.carrier == "native-hard")
+    }
+}
+
+const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_lanes.rs",
+        id: "CI-LANE-REGISTRY-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "gate_catalog generated closed enum and registry",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_lanes.rs",
+        id: "CI-LANE-PLAN-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "bound synthetic red and anti-vacuity tests",
+        gates: "verify,ci,ci-core,ci-coverage",
+    },
+];
+
+fn invariant_key(rule: &FoundRule) -> (String, Option<String>) {
+    (
+        rule.id.clone(),
+        rule.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.facet.clone()),
+    )
+}
+
+fn binding_key(binding: InvariantCarrierBinding) -> (String, Option<String>) {
+    (binding.id.to_string(), binding.facet.map(str::to_string))
+}
+
+fn invariant_key_label((id, facet): &(String, Option<String>)) -> String {
+    format!("{id}#{}", facet.as_deref().unwrap_or("<default>"))
+}
+
+fn validate_closed_invariant_bindings(
+    index: &mut Index,
+    path: &Path,
+    found_invariants: &[FoundInvariant],
+    bindings: &[InvariantCarrierBinding],
+) {
+    let mut source_counts = BTreeMap::new();
+    for rule in found_invariants
+        .iter()
+        .flat_map(|invariant| &invariant.rules)
+    {
+        *source_counts.entry(invariant_key(rule)).or_insert(0usize) += 1;
+    }
+    let mut binding_counts = BTreeMap::new();
+    for binding in bindings {
+        *binding_counts
+            .entry(binding_key(*binding))
+            .or_insert(0usize) += 1;
+    }
+    let subject = path.to_string_lossy();
+    for (key, count) in &source_counts {
+        if *count > 1 {
+            index.findings.push(finding(
+                Rule::ConflictingInvariantFacet,
+                subject.as_ref(),
+                format!(
+                    "源码 invariant key `{}` 重复 {count} 次",
+                    invariant_key_label(key)
+                ),
+            ));
+        }
+        if !binding_counts.contains_key(key) {
+            index.findings.push(finding(
+                Rule::MissingInvariant,
+                subject.as_ref(),
+                format!(
+                    "源码 invariant key `{}` 缺 carrier binding",
+                    invariant_key_label(key)
+                ),
+            ));
+        }
+    }
+    for (key, count) in &binding_counts {
+        if *count > 1 {
+            index.findings.push(finding(
+                Rule::CarrierBindingMismatch,
+                subject.as_ref(),
+                format!(
+                    "carrier binding key `{}` 重复 {count} 次",
+                    invariant_key_label(key)
+                ),
+            ));
+        }
+        if !source_counts.contains_key(key) {
+            index.findings.push(finding(
+                Rule::MissingInvariant,
+                subject.as_ref(),
+                format!(
+                    "carrier binding key `{}` 缺源码 invariant",
+                    invariant_key_label(key)
+                ),
+            ));
+        }
+        let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding_key(**binding) == *key)
+        else {
+            continue;
+        };
+        if !path.ends_with(binding.path) {
+            index.findings.push(finding(
+                Rule::CarrierBindingMismatch,
+                subject.as_ref(),
+                format!(
+                    "carrier binding key `{}` 声明路径 `{}` 与源码不符",
+                    invariant_key_label(key),
+                    binding.path
+                ),
+            ));
+        }
+        for rule in found_invariants
+            .iter()
+            .flat_map(|invariant| &invariant.rules)
+            .filter(|rule| invariant_key(rule) == *key)
+        {
+            if !binding.accepts(rule) {
+                index.findings.push(finding(
+                    Rule::CarrierBindingMismatch,
+                    subject.as_ref(),
+                    format!(
+                        "carrier binding key `{}` 与 invariant metadata 不兼容",
+                        invariant_key_label(key)
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
@@ -692,13 +880,14 @@ fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
         return Ok(());
     }
     let path = root.join("xtask/src/publicapi.rs");
+    let gate = xtask_gate(root, &path);
     scan_invariant_file(
         root,
         index,
         &path,
         "public-api",
         format!("{} baseline", target_crates.len()),
-        Some("ci,standalone"),
+        gate,
     )
 }
 
@@ -975,7 +1164,7 @@ fn scan_invariant_file_filtered(
     carrier: &str,
     evidence: impl Into<String>,
     gate: Option<&'static str>,
-    mut include_rule: impl FnMut(&FoundRule) -> bool,
+    include_rule: impl FnMut(&FoundRule) -> bool,
 ) -> Result<()> {
     if !path.exists() {
         index.findings.push(finding(
@@ -985,11 +1174,29 @@ fn scan_invariant_file_filtered(
         ));
         return Ok(());
     }
-    let evidence = evidence.into();
-    let gate_text = gate.unwrap_or("missing").to_string();
-    let status = if gate.is_some() { "ok" } else { "missing-gate" }.to_string();
     let found_invariants = extract_invariants(root, path)?;
-    for found in &found_invariants {
+    record_invalid_invariants(index, &found_invariants);
+    scan_extracted_invariant_rules_filtered(
+        root,
+        index,
+        &found_invariants,
+        carrier,
+        evidence,
+        gate,
+        include_rule,
+    )?;
+    if gate.is_none() && !found_invariants.is_empty() {
+        index.findings.push(finding(
+            Rule::MissingGate,
+            rel(root, path),
+            "carrier 缺 gate 证据",
+        ));
+    }
+    Ok(())
+}
+
+fn record_invalid_invariants(index: &mut Index, found_invariants: &[FoundInvariant]) {
+    for found in found_invariants {
         for invalid in &found.invalid {
             let rule = if invalid.starts_with("metadata-") {
                 Rule::InvalidInvariantMetadata
@@ -1006,6 +1213,22 @@ fn scan_invariant_file_filtered(
                 },
             ));
         }
+    }
+}
+
+fn scan_extracted_invariant_rules_filtered(
+    root: &Path,
+    index: &mut Index,
+    found_invariants: &[FoundInvariant],
+    carrier: &str,
+    evidence: impl Into<String>,
+    gate: Option<&'static str>,
+    mut include_rule: impl FnMut(&FoundRule) -> bool,
+) -> Result<()> {
+    let evidence = evidence.into();
+    let gate_text = gate.unwrap_or("missing").to_string();
+    let status = if gate.is_some() { "ok" } else { "missing-gate" }.to_string();
+    for found in found_invariants {
         for rule in found.rules.iter().filter(|rule| include_rule(rule)) {
             let Some(metadata) =
                 validated_metadata(root, index, &found.source, carrier, gate, rule)
@@ -1029,13 +1252,6 @@ fn scan_invariant_file_filtered(
                 anti_vacuity: metadata.anti_vacuity.clone(),
             });
         }
-    }
-    if gate.is_none() && !found_invariants.is_empty() {
-        index.findings.push(finding(
-            Rule::MissingGate,
-            rel(root, path),
-            "carrier 缺 gate 证据",
-        ));
     }
     Ok(())
 }
@@ -1728,46 +1944,242 @@ fn declarative_comment_invariant_rest<'a>(line: &'a str, prefixes: &[&str]) -> O
     trimmed.strip_prefix("INVARIANT:")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrchestratorReason {
+    RegistryAndPlanDerivation,
+    PlanExecution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportReason {
+    SharedGateImplementation,
+    CommandInfrastructure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateDeclarationRole {
+    PlanStep,
+    Orchestrator(OrchestratorReason),
+    Support(SupportReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GateDeclaration {
+    path: &'static str,
+    tokens: &'static str,
+    role: GateDeclarationRole,
+}
+
+const META_TOKENS: &str = "verify,ci,ci-meta";
+const COVERAGE_TOKENS: &str = "ci,ci-coverage";
+const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
+    GateDeclaration {
+        path: "xtask/src/ci_lanes.rs",
+        tokens: "native-compile,verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        role: GateDeclarationRole::Orchestrator(OrchestratorReason::RegistryAndPlanDerivation),
+    },
+    GateDeclaration {
+        path: "xtask/src/verify.rs",
+        tokens: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+        role: GateDeclarationRole::Orchestrator(OrchestratorReason::PlanExecution),
+    },
+    GateDeclaration {
+        path: "xtask/src/archrules.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/assembly.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/codegen.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/command_symmetry.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/consistency_effects.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/contract_binding_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/consistency_fixtures.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/defergate.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/doc_contracts.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/event_transport_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/inbox_cutover_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/layerdeps.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/migrations.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/pdpallow.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/pg_tenant_tx_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/reconcile_outbox_command_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/repo_scope_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/runtime_baseline.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/runtime_deps_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/schema_rls.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/setlocal_funnel.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/shipped_feature_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/tenancy_closeout.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/wsdeps.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/contract/breaking.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/contract/validate.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/coverage.rs",
+        tokens: COVERAGE_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/publicapi.rs",
+        tokens: "ci,ci-coverage,standalone",
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/layers.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/src_scan.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/contract/manifest.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/contract/protection.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/contract/redaction.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/pathsafe.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/diffcov.rs",
+        tokens: COVERAGE_TOKENS,
+        role: GateDeclarationRole::Support(SupportReason::SharedGateImplementation),
+    },
+    GateDeclaration {
+        path: "xtask/src/cmd.rs",
+        tokens: "manual/opt-in",
+        role: GateDeclarationRole::Support(SupportReason::CommandInfrastructure),
+    },
+    GateDeclaration {
+        path: "xtask/src/diagnostic.rs",
+        tokens: "manual/opt-in",
+        role: GateDeclarationRole::Support(SupportReason::CommandInfrastructure),
+    },
+];
+
+fn xtask_gate_declarations() -> &'static [GateDeclaration] {
+    XTASK_GATE_DECLARATIONS
+}
+
 fn xtask_gate(root: &Path, path: &Path) -> Option<&'static str> {
-    match rel(root, path).as_str() {
-        "xtask/src/archrules.rs"
-        | "xtask/src/assembly.rs"
-        | "xtask/src/codegen.rs"
-        | "xtask/src/command_symmetry.rs"
-        | "xtask/src/consistency_effects.rs"
-        | "xtask/src/contract_binding_guard.rs"
-        | "xtask/src/consistency_fixtures.rs"
-        | "xtask/src/defergate.rs"
-        | "xtask/src/doc_contracts.rs"
-        | "xtask/src/event_transport_guard.rs"
-        | "xtask/src/inbox_cutover_guard.rs"
-        | "xtask/src/layers.rs"
-        | "xtask/src/layerdeps.rs"
-        | "xtask/src/migrations.rs"
-        | "xtask/src/pdpallow.rs"
-        | "xtask/src/pg_tenant_tx_guard.rs"
-        | "xtask/src/reconcile_outbox_command_guard.rs"
-        | "xtask/src/repo_scope_guard.rs"
-        | "xtask/src/runtime_baseline.rs"
-        | "xtask/src/runtime_deps_guard.rs"
-        | "xtask/src/schema_rls.rs"
-        | "xtask/src/setlocal_funnel.rs"
-        | "xtask/src/shipped_feature_guard.rs"
-        | "xtask/src/src_scan.rs"
-        | "xtask/src/tenancy_closeout.rs"
-        | "xtask/src/wsdeps.rs"
-        | "xtask/src/contract/breaking.rs"
-        | "xtask/src/contract/manifest.rs"
-        | "xtask/src/contract/protection.rs"
-        | "xtask/src/contract/redaction.rs"
-        | "xtask/src/contract/validate.rs"
-        | "xtask/src/pathsafe.rs" => Some("verify,ci"),
-        "xtask/src/coverage.rs" | "xtask/src/diffcov.rs" => Some("ci"),
-        "xtask/src/publicapi.rs" => Some("ci,standalone"),
-        "xtask/src/verify.rs" => Some("verify,ci,audit"),
-        "xtask/src/cmd.rs" | "xtask/src/diagnostic.rs" => Some("manual/opt-in"),
-        _ => None,
-    }
+    let relative = rel(root, path);
+    xtask_gate_declarations()
+        .iter()
+        .find(|declaration| declaration.path == relative)
+        .map(|declaration| declaration.tokens)
 }
 
 fn xtask_evidence(path: &Path) -> String {
@@ -2506,11 +2918,11 @@ members = ["rss_demo", "rss_orphan"]
         let root = Path::new("/repo");
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/contract/validate.rs")),
-            Some("verify,ci")
+            Some("verify,ci,ci-meta")
         );
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/contract/breaking.rs")),
-            Some("verify,ci")
+            Some("verify,ci,ci-meta")
         );
     }
 
@@ -2519,11 +2931,11 @@ members = ["rss_demo", "rss_orphan"]
         // assembly validate 在 verify.rs 的 verify 与 ci step 列表中均运行 ⇒ assembly.rs
         // 的 INVARIANT 锚点（ASSEMBLY-PROVIDER-CRATE-01）必须登记 `verify,ci` gate，否则
         // archrules 判 MissingGate（#1572）。gate 字符串 ↔ plan 实际成员的双向绑定由下方
-        // `gate_strings_bound_to_verify_ci_plan_membership` 机器守（review F2 / #1574）。
+        // `gate_strings_bound_to_registry_plan_membership` 机器守（review F2 / #1574）。
         let root = Path::new("/repo");
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/assembly.rs")),
-            Some("verify,ci")
+            Some("verify,ci,ci-meta")
         );
     }
 
@@ -2532,46 +2944,133 @@ members = ["rss_demo", "rss_orphan"]
         let root = Path::new("/repo");
         assert_eq!(
             xtask_gate(root, &root.join("xtask/src/consistency_effects.rs")),
-            Some("verify,ci")
+            Some("verify,ci,ci-meta")
         );
     }
 
-    /// INVARIANT: ARCHRULES-GATE-PLAN-BIND-01 { level = "Medium", exec = "verify", source = "code" }—— `xtask_gate` 的 gate 字符串与 verify plan 成员资格
-    /// 机器绑定：`full_plan` / `ci_plan` 中每个 in-process carrier 步（`Internal` / `ToolGatedInternal`），
-    /// 其 carrier 文件的 `xtask_gate` 必须 token-含对应 lane（full→`verify`、ci→`ci`）。闭合 #1574——
-    /// gate 字符串原为无机器校验的自由文本，既可相对 plan 漂移（plan 删步但 gate 仍声明），也可拼写错
-    /// （如 `verfy`）；本绑定使二者皆门红。carrier→文件 由 verify.rs `InternalCheck::carrier_file` 穷举
-    /// match 守（缺登记即编译失败）；gate 缺/错即 token 不含 lane 而红。anti-vacuity：断言至少校验过一个 carrier。
-    /// 注：audit lane 不在此绑定——`audit_plan` 无 in-process carrier 步（仅外部 deny/audit `Tool`），
-    /// gate 的 `audit` token 表「模块与 audit lane 相关」（如 verify.rs 自身），非精确 plan 成员，语义不同。
+    fn carrier_set_drift(
+        planned: &BTreeSet<String>,
+        declared: &BTreeSet<String>,
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
+        (
+            planned.difference(declared).cloned().collect(),
+            declared.difference(planned).cloned().collect(),
+        )
+    }
+
     #[test]
-    fn gate_strings_bound_to_verify_ci_plan_membership() {
-        let root = Path::new("/repo");
-        let gate_has_lane = |file: &str, lane: &str| -> bool {
-            xtask_gate(root, &root.join(file))
-                .unwrap_or_default()
-                .split(',')
-                .any(|tok| tok.trim() == lane)
+    fn gate_plan_binding_rejects_extra_stale_token_red() {
+        // Simulates deleting the coverage step from every plan while leaving its declaration.
+        let planned = BTreeSet::new();
+        let declared = BTreeSet::from(["xtask/src/coverage.rs".to_string()]);
+        let (missing, extra) = carrier_set_drift(&planned, &declared);
+        assert!(missing.is_empty());
+        assert_eq!(extra, BTreeSet::from(["xtask/src/coverage.rs".to_string()]));
+    }
+
+    #[test]
+    fn gate_declarations_are_enumerable_and_role_classified() {
+        let declarations = xtask_gate_declarations();
+        assert!(!declarations.is_empty());
+        let unique_paths: BTreeSet<_> = declarations
+            .iter()
+            .map(|declaration| declaration.path)
+            .collect();
+        assert_eq!(unique_paths.len(), declarations.len());
+        let role_for = |path: &str| {
+            declarations
+                .iter()
+                .find(|declaration| declaration.path == path)
+                .map(|declaration| declaration.role)
         };
-        let mut checked = 0usize;
-        for (plan, lane) in [
-            (crate::verify::full_plan(), "verify"),
-            (crate::verify::ci_plan(), "ci"),
-        ] {
-            for step in &plan {
-                let Some(file) = step.carrier_file() else {
-                    continue;
-                };
-                checked += 1;
-                assert!(
-                    gate_has_lane(file, lane),
-                    "{file} 在 `{lane}` plan 中，但其 xtask_gate 未声明 `{lane}` lane（gate↔plan 漂移或拼写错）"
-                );
-            }
+        assert_eq!(
+            role_for("xtask/src/verify.rs"),
+            Some(GateDeclarationRole::Orchestrator(
+                OrchestratorReason::PlanExecution
+            ))
+        );
+        assert_eq!(
+            role_for("xtask/src/ci_lanes.rs"),
+            Some(GateDeclarationRole::Orchestrator(
+                OrchestratorReason::RegistryAndPlanDerivation
+            ))
+        );
+        assert_eq!(
+            role_for("xtask/src/diffcov.rs"),
+            Some(GateDeclarationRole::Support(
+                SupportReason::SharedGateImplementation
+            ))
+        );
+        assert_eq!(
+            role_for("xtask/src/coverage.rs"),
+            Some(GateDeclarationRole::PlanStep)
+        );
+    }
+
+    /// INVARIANT: ARCHRULES-GATE-PLAN-BIND-01 { level = "Medium", exec = "verify", source = "code" }——
+    /// every real plan's in-process carrier set equals the files declaring that lane token. This
+    /// rejects both missing bindings and stale/extra tokens across aggregate and split lanes.
+    #[test]
+    fn gate_strings_bound_to_registry_plan_membership() {
+        let gate_has_lane =
+            |tokens: &str, lane: &str| tokens.split(',').any(|tok| tok.trim() == lane);
+        let plans = [
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::Verify),
+                "verify",
+            ),
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::CompatibilityCi),
+                "ci",
+            ),
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
+                    crate::ci_lanes::CiLane::Meta,
+                )),
+                "ci-meta",
+            ),
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
+                    crate::ci_lanes::CiLane::Coverage,
+                )),
+                "ci-coverage",
+            ),
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
+                    crate::ci_lanes::CiLane::Core,
+                )),
+                "ci-core",
+            ),
+            (
+                crate::verify::plan_for(crate::verify::PlanTarget::Lane(
+                    crate::ci_lanes::CiLane::Security,
+                )),
+                "ci-security",
+            ),
+        ];
+        let mut nonempty_lanes = 0usize;
+        for (plan, lane) in plans {
+            let planned: BTreeSet<String> = plan
+                .iter()
+                .filter_map(|step| step.carrier_file())
+                .map(str::to_string)
+                .collect();
+            let declared: BTreeSet<String> = xtask_gate_declarations()
+                .iter()
+                .filter(|declaration| declaration.role == GateDeclarationRole::PlanStep)
+                .filter(|declaration| gate_has_lane(declaration.tokens, lane))
+                .map(|declaration| declaration.path.to_string())
+                .collect();
+            let (missing, extra) = carrier_set_drift(&planned, &declared);
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "`{lane}` carrier binding drift: missing={missing:?}, stale/extra={extra:?}"
+            );
+            nonempty_lanes += usize::from(!planned.is_empty());
         }
         assert!(
-            checked > 0,
-            "未校验任何 carrier——plan 内省失效（anti-vacuity）"
+            nonempty_lanes >= 2,
+            "真实 carrier lane 未被校验（anti-vacuity）"
         );
     }
 
@@ -2852,6 +3351,140 @@ fn unrelated_green_accepted() { assert!(true); }
             findings.is_empty(),
             "显式绑定的真实测试应通过: {findings:?}"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ci_lane_invariants_use_record_granular_carriers() -> Result<()> {
+        let index = build_index(&crate::workspace_root()?)?;
+        let Some(registry) = index.records.iter().find(|record| {
+            record.id == "CI-LANE-REGISTRY-01" && record.source.contains("ci_lanes.rs")
+        }) else {
+            bail!("missing CI-LANE-REGISTRY-01")
+        };
+        assert_eq!(registry.carrier, "native-hard");
+        assert_eq!(registry.gate, "native-compile");
+
+        let Some(plan) = index
+            .records
+            .iter()
+            .find(|record| record.id == "CI-LANE-PLAN-01" && record.source.contains("ci_lanes.rs"))
+        else {
+            bail!("missing CI-LANE-PLAN-01")
+        };
+        assert_eq!(plan.carrier, "xtask");
+        assert_eq!(plan.gate, "verify,ci,ci-core,ci-coverage");
+        assert!(!plan.gate.contains("ci-security"));
+        assert!(!plan.gate.contains("integration"));
+
+        let source = crate::workspace_root()?.join("xtask/src/ci_lanes.rs");
+        let found = extract_invariants(&crate::workspace_root()?, &source)?;
+        let Some(plan_rule) = found
+            .iter()
+            .flat_map(|invariant| &invariant.rules)
+            .find(|rule| rule.id == "CI-LANE-PLAN-01")
+        else {
+            bail!("missing CI-LANE-PLAN-01 source declaration")
+        };
+        let invalid = InvariantCarrierBinding {
+            carrier: "native-hard",
+            ..CI_LANE_INVARIANT_BINDINGS[1]
+        };
+        assert!(invalid.matches(plan_rule));
+        assert!(
+            !invalid.accepts(plan_rule),
+            "Medium synthetic-red invariant must not masquerade as native-hard"
+        );
+        let invalid_bindings = [CI_LANE_INVARIANT_BINDINGS[0], invalid];
+        let mut invalid_index = Index::default();
+        validate_closed_invariant_bindings(&mut invalid_index, &source, &found, &invalid_bindings);
+        assert!(invalid_index.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch
+                && finding.detail.contains("metadata 不兼容")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn ci_lane_invariant_binding_rejects_unregistered_source_record_red() -> Result<()> {
+        let root = unique_tmp("archrules-ci-lane-binding-closed-set");
+        let fixture = [
+            "//! INVAR",
+            "IANT: CI-LANE-REGISTRY-01 { level = \"Hard\", exec = \"native-compile\", source = \"code\", native = \"closed enum\" }\n",
+            "//! INVAR",
+            "IANT: CI-LANE-PLAN-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+            "//! INVAR",
+            "IANT: CI-LANE-UNREGISTERED-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+        ]
+        .concat();
+        write(&root.join("xtask/src/ci_lanes.rs"), &fixture)?;
+        let mut index = Index::default();
+        scan_xtask(&root, &mut index)?;
+        assert!(
+            index
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingInvariant),
+            "unregistered source invariant must fail closed: {:?}",
+            index.findings
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ci_lane_invariant_binding_closed_set_rejects_missing_duplicate_and_orphan_red() -> Result<()>
+    {
+        let root = unique_tmp("archrules-ci-lane-binding-drift");
+        let path = root.join("xtask/src/ci_lanes.rs");
+        let fixture = [
+            "//! INVAR",
+            "IANT: CI-LANE-REGISTRY-01 { level = \"Hard\", exec = \"native-compile\", source = \"code\", native = \"closed enum\" }\n",
+            "//! INVAR",
+            "IANT: CI-LANE-PLAN-01 { level = \"Medium\", exec = \"verify\", source = \"code\" }\n",
+        ]
+        .concat();
+        write(&path, &fixture)?;
+        let found = extract_invariants(&root, &path)?;
+
+        let mut missing = Index::default();
+        validate_closed_invariant_bindings(
+            &mut missing,
+            &path,
+            &found,
+            &CI_LANE_INVARIANT_BINDINGS[..1],
+        );
+        assert!(missing.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant && finding.detail.contains("缺 carrier binding")
+        }));
+
+        let duplicate_bindings = [
+            CI_LANE_INVARIANT_BINDINGS[0],
+            CI_LANE_INVARIANT_BINDINGS[0],
+            CI_LANE_INVARIANT_BINDINGS[1],
+        ];
+        let mut duplicate = Index::default();
+        validate_closed_invariant_bindings(&mut duplicate, &path, &found, &duplicate_bindings);
+        assert!(duplicate.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch && finding.detail.contains("重复 2 次")
+        }));
+
+        let orphan_binding = InvariantCarrierBinding {
+            id: "CI-LANE-ORPHAN-01",
+            ..CI_LANE_INVARIANT_BINDINGS[1]
+        };
+        let orphan_bindings = [
+            CI_LANE_INVARIANT_BINDINGS[0],
+            CI_LANE_INVARIANT_BINDINGS[1],
+            orphan_binding,
+        ];
+        let mut orphan = Index::default();
+        validate_closed_invariant_bindings(&mut orphan, &path, &found, &orphan_bindings);
+        assert!(orphan.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant && finding.detail.contains("缺源码 invariant")
+        }));
+
         fs::remove_dir_all(root)?;
         Ok(())
     }

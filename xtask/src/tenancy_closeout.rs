@@ -555,11 +555,11 @@ fn projection_field_count() -> usize {
 }
 
 fn check_verify_ci_membership() -> Vec<Finding> {
-    let full_labels: Vec<_> = crate::verify::full_plan()
+    let full_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanTarget::Verify)
         .iter()
         .map(crate::verify::Step::label)
         .collect();
-    let ci_labels: Vec<_> = crate::verify::ci_plan()
+    let ci_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanTarget::CompatibilityCi)
         .iter()
         .map(crate::verify::Step::label)
         .collect();
