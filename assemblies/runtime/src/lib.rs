@@ -1,12 +1,12 @@
 //! runtime — RSS 生产组合根（Root 层，#1309 抽离自 bins 双写）：从配置构造生产验签 provider，按 listener 装配
 //! `finalize_routes → finalize_auth → .layer(verify_bridge)` 的认证接线接缝，并驱动运行时入口
-//! （tokio 运行时 + per-listener socket bind + `axum::serve` + 信号优雅关停 + wire_X call-site，#1320）。
+//! （tokio 运行时 + per-listener socket bind + `axum::serve` + 信号优雅关停 + generated domain wiring，#1320）。
 //!
-//! 运行时入口（[`run`]，#1320 Join）：`compose` 域 → `PgStore::connect` + migrations → `wire_settings`
-//! → F8 接线（`PgDbReadiness` 采样 worker + `configs_ready` probe 注册）→ `assemble_authed_routers`
+//! 运行时入口（[`run`]，#1320 Join）：构造 provider bundle → generated domains → `compose_bindings`
+//! → 聚合 `DomainModuleResult` → `assemble_authed_routers`
 //! → 组合根挂 Health listener（healthz/readyz）→ 逐 listener bind socket + serve（经 `httpd::HttpServer`
-//! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。各域业务 handler ↔ service 接线 = #1309
-//!   及后续域 PR（本 PR 仅打通 async runtime、wire_X call-site 与 readiness probe）。JWT 验签 key 经本地
+//! + `bootstrap::ShutdownStack`）→ SIGTERM/SIGINT 优雅 drain。各域 typed handle 经 Registry 的 route/subscriber
+//!   funnel 一次性交接，不进入共享依赖或生命周期输出。JWT 验签 key 经本地
 //!   JWKS 文件源 + 外部 agent 轮转注入；Internal listener 默认走 SPIFFE/mTLS，service-token 仅保留 loopback
 //!   本地测试路径。
 //!
@@ -23,21 +23,21 @@
 
 pub mod auth_bridge;
 pub mod distributed_runtime;
-pub mod domains;
+mod domains;
 pub mod event_transport;
 pub mod infra;
 pub(crate) mod launch;
 pub mod listeners;
 pub mod module;
+#[path = "generated/modules_gen.rs"]
+mod modules_gen;
 pub mod phase;
 pub mod plan;
 pub mod routes;
 pub mod saga_runtime;
 
 pub use distributed_runtime::{DistributedRuntimeDeps, wire_distributed};
-pub use domains::audit::wire_audit;
-pub use domains::identity::{wire_identity, wire_identity_with};
-pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe, wire_settings};
+pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 pub use infra::oidc::{build_provider, provider_from_b64};
 pub use infra::pg::{build_pg_audit_admin_config, build_pg_config, build_pg_migrator_config};
 pub use infra::redis::build_redis_runtime_deps;
@@ -46,6 +46,31 @@ pub use infra::vault::{
     KEYPROVIDER_READY_PROBE_NAME, build_settings_config_value_key_name_from,
     build_vault_runtime_deps, is_oidc_jwks_export_command, run_oidc_jwks_export_command,
 };
+
+/// Explicit integration-only seams for exercising typed domain wiring with hermetic providers.
+///
+/// Production callers cannot reach the concrete domain constructors; live assembly always enters
+/// through the committed generated module list.
+#[cfg(feature = "integration")]
+pub mod test_support {
+    use super::SharedRuntimeDeps;
+
+    /// Builds the settings domain and its module output for container-backed integration tests.
+    pub async fn wire_settings(
+        deps: &SharedRuntimeDeps,
+    ) -> anyhow::Result<(settings::SettingsDomain, bootstrap::DomainModuleResult)> {
+        crate::domains::settings::wire_settings(deps).await
+    }
+
+    /// Builds the identity domain with a hermetic configuration source for integration tests.
+    pub fn wire_identity_with(
+        deps: &SharedRuntimeDeps,
+        get: impl Fn(&str) -> Option<String>,
+        vault_allow_http: bool,
+    ) -> anyhow::Result<identity::IdentityDomain<vault::VaultSigner>> {
+        crate::domains::identity::wire_identity_with(deps, get, vault_allow_http)
+    }
+}
 pub use module::SharedRuntimeDeps;
 
 use bootstrap::DomainModuleResult;
@@ -3416,7 +3441,7 @@ pub async fn shutdown_trace_export(trace_export: Option<otel::OtelExporter>) -> 
 }
 
 struct RuntimeModuleAssemblyInputs {
-    settings_module: DomainModuleResult,
+    domains_module: DomainModuleResult,
     session_sweeper_module: DomainModuleResult,
     s3_canary_module: DomainModuleResult,
     redis_resources: Vec<Box<DynManagedResource<'static>>>,
@@ -3430,7 +3455,7 @@ struct RuntimeModuleAssemblyInputs {
 
 fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> DomainModuleResult {
     let mut module = DomainModuleResult::default();
-    module.merge(inputs.settings_module);
+    module.merge(inputs.domains_module);
     module.merge(inputs.session_sweeper_module);
     module.merge(inputs.s3_canary_module);
     module.resources.extend(inputs.redis_resources);
@@ -3443,14 +3468,14 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
     module
 }
 
-/// 生产组合根入口（运行时入口 Join #1320）：compose 域 → connect pg + migrations → wire_settings
-/// → F8 接线（`PgDbReadiness` 采样 worker + `configs_ready` probe）→ 装配认证接线 → 挂 Health listener
+/// 生产组合根入口：构造共享基础设施 → generated domains → `compose_bindings`
+/// → 聚合 readiness/lifecycle outputs → 装配认证接线 → 挂 Health listener
 /// → bind + serve + 信号优雅关停。
 ///
 /// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
-/// = #1309 及后续域 PR；本 fn 仅打通 async runtime + ≥1 个 wire_X call-site + readiness probe。
+/// 由 manifest-derived domain list 驱动，禁止回退为手写 per-domain wiring。
 /// tracing subscriber 由 [`init_tracing`] 在 `main` 中先于本 fn 装配。
-// reason: 组合根入口顺序编排（pg setup〔connect+migrations〕 → wire_settings → F8 probe → serve）
+// reason: 组合根入口顺序编排（provider setup → generated domains → compose → finalize → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
 #[allow(clippy::cognitive_complexity)]
 pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()> {
@@ -3581,146 +3606,133 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     )?;
 
     // WireDomains phase: domain roots, registry/module outputs, probes, workers, and event transport.
-    let (
-        mut registry,
-        identity_domain,
-        pg_readiness_period,
-        event_infra_guards,
-        domain_resources,
-        domain_workers,
-    ) = phase_result(
-        RuntimePhase::WireDomains,
-        async {
-            // wire_audit（#1230）：env 链 key fail-fast → RustCrypto hasher → PgAuditRepo → 独立 read/write wrappers → AuditDomain。
-            // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本接线只收窄 request/subscriber capability。
-            let audit_domain = wire_audit(&deps).context("wire audit")?;
-            let identity_domain = wire_identity(&deps).context("wire identity")?;
-            // settings durable module（#1430 PERSIST-009）：domain 实例持 config 服务 + secret 仓储端口（挂 config-publish /
-            // secret-publish 业务路由）；module 携 configs_ready 探针。
-            let (settings_domain, settings_module) =
-                wire_settings(&deps).await.context("wire settings")?;
+    let (mut registry, pg_readiness_period, event_infra_guards, domain_resources, domain_workers) =
+        phase_result(
+            RuntimePhase::WireDomains,
+            async {
+                // assembly.toml 的 domain 顺序经 committed generated glue 成为 live 单源；typed route/subscriber
+                // handles 已由各 Domain::init 捕获进 Registry，不经 SharedRuntimeDeps/DomainModuleResult service bag。
+                // bootstrap 启动 tail-verify（跨租户全量巡检）defer 到 Part B；本接线仍只收窄 request/subscriber capability。
+                let mut domain_bindings = modules_gen::wire_domains(&deps)
+                    .await
+                    .context("wire generated domains")?;
+                let (mut registry, domains_module) =
+                    bootstrap::compose_bindings(&mut domain_bindings)
+                        .context("compose generated domains")?;
 
-            // settings/identity/audit domain 实例注册（声明 routes/subscribers/probes）。
-            let settings_config_service = settings_domain.config_service();
-            let mut registry =
-                bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])
-                    .context("compose domains")?;
+                let session_sweeper_module =
+                    wire_session_sweeper(&pg).context("wire session sweeper")?;
+                let s3_canary_module =
+                    wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
+                // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
+                // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
+                let redis_resources = deps.redis.runtime_resources();
+                let s3_resources = deps.s3.runtime_resources();
+                let vault_resources = deps.vault.runtime_resources();
+                let oidc_resource = runtime_oidc.managed_resource();
+                let pg_readiness_period = build_readiness_interval();
+                let redis_readiness_period = build_redis_readiness_interval();
 
-            let session_sweeper_module =
-                wire_session_sweeper(&pg).context("wire session sweeper")?;
-            let s3_canary_module =
-                wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
-            // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
-            // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
-            let redis_resources = deps.redis.runtime_resources();
-            let s3_resources = deps.s3.runtime_resources();
-            let vault_resources = deps.vault.runtime_resources();
-            let oidc_resource = runtime_oidc.managed_resource();
-            let pg_readiness_period = build_readiness_interval();
-            let redis_readiness_period = build_redis_readiness_interval();
-
-            // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
-            // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
-            let rls_probe_name =
-                ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
-            registry
-                .probe(
-                    rls_probe_name,
-                    Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
-                )
-                .context("register rls_ready probe")?;
-            let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let redis_probe_name =
-                ProbeName::parse(REDIS_READY_PROBE_NAME).context("parse redis_ready probe name")?;
-            registry
-                .probe(
-                    redis_probe_name,
-                    Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
-                )
-                .context("register redis_ready probe")?;
-            let oidc_jwks_probe_name = ProbeName::parse(OIDC_JWKS_READY_PROBE_NAME)
-                .context("parse oidc_jwks_ready probe name")?;
-            registry
-                .probe(
-                    oidc_jwks_probe_name,
-                    Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
-                )
-                .context("register oidc_jwks_ready probe")?;
-
-            // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
-            // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
-            let domain_transport_module = domain_transport
-                .module_result()
-                .context("wire outbound domain transport module")?;
-            let distributed = wire_distributed(&deps).context("wire distributed")?;
-            let event_subscribers =
-                event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
-                    .context("bridge generated event subscriptions")?;
-            let event_runtime = event_transport::wire_event_transport(
-                &pg,
-                distributed,
-                event_subscribers,
-                event_cfg,
-                settings_config_service,
-            )
-            .await
-            .context("wire event transport")?;
-            let event_infra_guards = event_runtime.infra_guards;
-
-            // 聚合各域 module result / provider capability guards / event transport outputs。
-            let redis_for_sampler = deps.redis.clone();
-            let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
-                DynManagedResource::new_box(spawn_redis_readiness_sampler(
-                    redis_for_sampler.clone(),
-                    redis_readiness_period,
-                    token,
-                    Arc::clone(&redis_ready),
-                ))
-            });
-            let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
-                settings_module,
-                session_sweeper_module,
-                s3_canary_module,
-                redis_resources,
-                s3_resources,
-                vault_resources,
-                oidc_resource,
-                domain_transport_module,
-                event_module: event_runtime.module,
-                redis_readiness_worker,
-            });
-
-            // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
-            for (name, probe) in module.probes {
-                let probe_label = name.as_str().to_owned();
+                // 框架归属 RLS 能力门 readyz 兜底探针（须先于 take_health_reporter）：把启动期 verify_rls_capability
+                // 的结果显式暴露到 readyz（启动已 fail-fast，故进程在跑时恒 ready；运维可见 + 周期再核验接线点）。
+                let rls_probe_name =
+                    ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
                 registry
-                    .probe(name, probe)
-                    .with_context(|| format!("register module probe '{probe_label}'"))?;
+                    .probe(
+                        rls_probe_name,
+                        Box::new(RlsReadyProbe::new(pg.rls_ready_handle())),
+                    )
+                    .context("register rls_ready probe")?;
+                let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let redis_probe_name = ProbeName::parse(REDIS_READY_PROBE_NAME)
+                    .context("parse redis_ready probe name")?;
+                registry
+                    .probe(
+                        redis_probe_name,
+                        Box::new(RedisReadyProbe::new(Arc::clone(&redis_ready))),
+                    )
+                    .context("register redis_ready probe")?;
+                let oidc_jwks_probe_name = ProbeName::parse(OIDC_JWKS_READY_PROBE_NAME)
+                    .context("parse oidc_jwks_ready probe name")?;
+                registry
+                    .probe(
+                        oidc_jwks_probe_name,
+                        Box::new(OidcJwksReadyProbe::new(runtime_oidc.jwks_readiness())),
+                    )
+                    .context("register oidc_jwks_ready probe")?;
+
+                // 事件传输接线（#1251）：topology-gated durable AMQP/Redis + outbox relay + consumer workers。
+                // Demo 拓扑已在构造 SharedRuntimeDeps 前 fail-fast；production runtime 不走 in-memory path。
+                let domain_transport_module = domain_transport
+                    .module_result()
+                    .context("wire outbound domain transport module")?;
+                let distributed = wire_distributed(&deps).context("wire distributed")?;
+                let event_subscribers =
+                    event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
+                        .context("bridge generated event subscriptions")?;
+                let event_runtime = event_transport::wire_event_transport(
+                    &pg,
+                    distributed,
+                    event_subscribers,
+                    event_cfg,
+                )
+                .await
+                .context("wire event transport")?;
+                let event_infra_guards = event_runtime.infra_guards;
+
+                // 聚合各域 module result / provider capability guards / event transport outputs。
+                let redis_for_sampler = deps.redis.clone();
+                let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
+                    DynManagedResource::new_box(spawn_redis_readiness_sampler(
+                        redis_for_sampler.clone(),
+                        redis_readiness_period,
+                        token,
+                        Arc::clone(&redis_ready),
+                    ))
+                });
+                let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+                    domains_module,
+                    session_sweeper_module,
+                    s3_canary_module,
+                    redis_resources,
+                    s3_resources,
+                    vault_resources,
+                    oidc_resource,
+                    domain_transport_module,
+                    event_module: event_runtime.module,
+                    redis_readiness_worker,
+                });
+
+                // 排空 module 探针进 registry（须先于 take_health_reporter，readyz 才聚合域 + event worker probes）。
+                for (name, probe) in module.probes {
+                    let probe_label = name.as_str().to_owned();
+                    registry
+                        .probe(name, probe)
+                        .with_context(|| format!("register module probe '{probe_label}'"))?;
+                }
+
+                // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
+                let domain_resources = module.resources;
+                let domain_workers = module.workers;
+                tracing::info!(
+                    sample_interval_secs = pg_readiness_period.as_secs(),
+                    "pg readiness sampler interval configured"
+                );
+                tracing::info!(
+                    sample_interval_secs = redis_readiness_period.as_secs(),
+                    "redis readiness sampler interval configured"
+                );
+
+                Ok::<_, anyhow::Error>((
+                    registry,
+                    pg_readiness_period,
+                    event_infra_guards,
+                    domain_resources,
+                    domain_workers,
+                ))
             }
-
-            // module detached 资源 / 后台 worker（域 + event transport 统一出口）——移出供 serve 闭包排空。
-            let domain_resources = module.resources;
-            let domain_workers = module.workers;
-            tracing::info!(
-                sample_interval_secs = pg_readiness_period.as_secs(),
-                "pg readiness sampler interval configured"
-            );
-            tracing::info!(
-                sample_interval_secs = redis_readiness_period.as_secs(),
-                "redis readiness sampler interval configured"
-            );
-
-            Ok::<_, anyhow::Error>((
-                registry,
-                identity_domain,
-                pg_readiness_period,
-                event_infra_guards,
-                domain_resources,
-                domain_workers,
-            ))
-        }
-        .await,
-    )?;
+            .await,
+        )?;
 
     // Finalize phase: authenticated routers and the dedicated health listener.
     let listeners = phase_result(
@@ -3734,14 +3746,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             let auth_audit_sink =
                 httpserve::AuditSinkHandle::new(pg.for_domain::<caps::Audit>().auth_audit_sink());
             let auth_audit_clock: Arc<dyn diport::Clock> = Arc::new(SystemClock);
-            let mut listeners = assemble_authed_routers(
-                &mut registry,
-                provider,
-                auth_audit_sink,
-                auth_audit_clock,
-                identity_domain.primary_authorizer(),
-            )
-            .context("assemble authed routers")?;
+            let mut listeners =
+                assemble_authed_routers(&mut registry, provider, auth_audit_sink, auth_audit_clock)
+                    .context("assemble authed routers")?;
 
             // Health listener（框架归属）：readyz 经 Arc<HealthReporter>（Send+Sync）每请求聚合探针。registry 路由组
             // 已 drain，探针经 take_health_reporter 移出（整体非 Sync 的 Registry 无法进 axum handler 闭包）。
@@ -3868,7 +3875,7 @@ mod tests {
 
     fn runtime_module_output_harness() -> DomainModuleResult {
         assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
-            settings_module: harness_module(
+            domains_module: harness_module(
                 &[CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME],
                 &[],
                 &["keyprovider-readiness-sampler"],
@@ -4694,7 +4701,6 @@ mod tests {
             runtime_test_provider(),
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             Arc::new(SystemClock),
-            identity_domain.primary_authorizer(),
         )?)?;
 
         let scoped_response = app

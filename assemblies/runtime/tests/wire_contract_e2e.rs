@@ -22,9 +22,10 @@ use base64::Engine as _;
 use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode};
 use runtime::infra::vault::KEYPROVIDER_READY_PROBE_NAME;
+use runtime::test_support::wire_settings;
 use runtime::{
     CONFIGS_READY_PROBE_NAME, SharedRuntimeDeps, build_redis_runtime_deps,
-    build_s3_runtime_deps_from, wire_settings,
+    build_s3_runtime_deps_from,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};

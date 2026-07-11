@@ -1,6 +1,6 @@
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
+domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
 
 [[listeners]]

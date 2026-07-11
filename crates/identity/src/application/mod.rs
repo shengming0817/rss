@@ -2623,14 +2623,12 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             authorizer,
         }
     }
-
-    pub fn primary_authorizer(&self) -> Arc<dyn RouteAuthorizer> {
-        self.authorizer.clone()
-    }
 }
 
 impl<S: diport::Signer + Send + Sync + 'static> Domain for IdentityDomain<S> {
     fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
+        let primary_authorizer: Arc<dyn RouteAuthorizer> = self.authorizer.clone();
+        reg.register_primary_authorizer(primary_authorizer)?;
         let login = Arc::clone(&self.login);
         let refresh = Arc::clone(&self.refresh);
         let rbac_assign = RbacHandlerState {
@@ -4053,12 +4051,32 @@ mod tests {
         );
     }
 
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_domain_registers_primary_authorizer_once() {
+        let domain = seed_domain(CapturingSessionLifecycle::default(), 1_000, 3_600);
+        let mut registry = bootstrap::Registry::new();
+
+        domain.init(&mut registry).expect("first init succeeds");
+        assert!(registry.take_primary_authorizer().is_ok());
+
+        domain
+            .init(&mut registry)
+            .expect("init after authorizer take succeeds once");
+        assert!(matches!(
+            domain.init(&mut registry),
+            Err(KernelError::Invariant)
+        ));
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn identity_http_route_specs_match_nested_v1_contracts_and_mounted_router() {
         let domain = seed_domain(CapturingSessionLifecycle::default(), 1_000, 3_600);
-        let authorizer = domain.primary_authorizer();
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let authorizer = registry
+            .take_primary_authorizer()
+            .expect("identity registers Primary authorizer");
         let mut finalized = registry
             .finalize_routes()
             .expect("finalize identity routes");

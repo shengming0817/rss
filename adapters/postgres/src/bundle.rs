@@ -715,9 +715,9 @@ impl PgDomainDeps<caps::Settings> {
     #[must_use]
     pub fn config_version_changed_consumer_tx(
         &self,
-        service: Arc<settings::SettingsService>,
+        effect: bootstrap::SubscriberEffect,
     ) -> PgSettingsConsumerTx {
-        PgSettingsConsumerTx::config_version_changed(&self.store, service)
+        PgSettingsConsumerTx::config_version_changed(&self.store, effect)
     }
 }
 

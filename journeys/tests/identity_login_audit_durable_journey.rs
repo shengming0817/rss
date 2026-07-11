@@ -27,6 +27,7 @@ use audit::ports::{
     AuditEventKind, AuditWriteRepo as _, DynAuditWriteRepo, TenantRepoScope,
     audit_record_from_event_message,
 };
+use bootstrap::SubscriberExecution;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
     SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
@@ -291,24 +292,24 @@ async fn login_audit_durable_topology() -> Result<()> {
     let identity_domain = identity_domain(login_identity, refresh_identity);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
     let binding = session_created_subscription(registry)?;
-    anyhow::ensure!(binding.topic == SESSION_CREATED_TOPIC);
-    let event_domain = binding.topic.split('.').next().unwrap_or(binding.topic);
-    let event_contract_id = binding.contract_id;
-    let event_topic = binding.topic;
+    anyhow::ensure!(binding.topic() == SESSION_CREATED_TOPIC);
+    let (event_contract_id, event_topic, _, group, execution) = binding.into_parts();
+    anyhow::ensure!(matches!(execution, SubscriberExecution::AdapterNative));
+    let event_domain = event_topic.split('.').next().unwrap_or(event_topic);
 
     // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
     let claimer = Arc::new(deps.infra().inbox());
     let token = CancellationToken::new();
     let stream = bus
         .subscriber()
-        .subscribe(Topic::new(binding.topic), token.clone())
+        .subscribe(Topic::new(event_topic), token.clone())
         .await?;
     let meta = ConsumerMeta::new(
         "audit",
-        binding.topic.split('.').next().unwrap_or(binding.topic),
-        binding.contract_id,
-        binding.topic,
-        binding.group.as_str(),
+        event_topic.split('.').next().unwrap_or(event_topic),
+        event_contract_id,
+        event_topic,
+        group.as_str(),
         Arc::clone(&durable_authority),
     );
     // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。

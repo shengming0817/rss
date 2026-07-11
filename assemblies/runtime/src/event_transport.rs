@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use base64::Engine as _;
-use bootstrap::{DomainModuleResult, SubscriberBinding, WorkerSpec};
+use bootstrap::{DomainModuleResult, SubscriberBinding, SubscriberExecution, WorkerSpec};
 use consistency::{ConsumerGroup, RetentionSweeper};
 use crypto::RustCryptoMacVerifier;
 use diport::{
@@ -41,7 +41,6 @@ use eventexec::{
 use generated::event::{EventSpec, SubscriberReadiness, SubscriptionSpec};
 use postgres::{AuditConsumerTxEffect as _, DlxPayloadProtector, PgRuntimeDeps, caps};
 use primitives::{HealthCheck, MacKey, ProbeName};
-use settings::SettingsService;
 use vault::VaultKeyProvider;
 
 use crate::SystemClock;
@@ -207,6 +206,7 @@ pub struct BridgedSubscription {
     event: EventSpec,
     subscription: SubscriptionSpec,
     group: ConsumerGroup,
+    consumer_tx: ConsumerTxPlan,
 }
 
 impl BridgedSubscription {
@@ -324,27 +324,28 @@ fn bridge_subscriptions_with_events(
     let mut bridged = Vec::with_capacity(bindings.len());
     let mut matched_specs = vec![false; specs.len()];
     for binding in bindings {
+        let (contract_id, topic, consumer, binding_group, execution) = binding.into_parts();
         let mut matches = specs.iter().enumerate().filter(|(_, (event, spec))| {
-            event.contract_id() == binding.contract_id
-                && event.topic() == binding.topic
-                && spec.consumer() == binding.consumer
+            event.contract_id() == contract_id
+                && event.topic() == topic
+                && spec.consumer() == consumer
         });
         let Some((matched_index, (event, spec))) = matches.next() else {
             anyhow::bail!(
                 "subscriber binding has no generated topology spec: contract={} topic={} consumer={} group={}",
-                binding.contract_id,
-                binding.topic,
-                binding.consumer,
-                binding.group.as_str()
+                contract_id,
+                topic,
+                consumer,
+                binding_group.as_str()
             );
         };
         if matches.next().is_some() {
             anyhow::bail!(
                 "subscriber binding matches duplicate generated topology specs: contract={} topic={} consumer={} group={}",
-                binding.contract_id,
-                binding.topic,
-                binding.consumer,
-                binding.group.as_str()
+                contract_id,
+                topic,
+                consumer,
+                binding_group.as_str()
             );
         }
         let event = *event;
@@ -358,7 +359,7 @@ fn bridge_subscriptions_with_events(
             )
         })?;
         anyhow::ensure!(
-            group == binding.group,
+            group == binding_group,
             "subscriber group drift after generated topology parse: contract={} consumer={} group={}",
             event.contract_id(),
             spec.consumer(),
@@ -372,11 +373,13 @@ fn bridge_subscriptions_with_events(
             spec.consumer(),
             spec.group()
         );
+        let consumer_tx = resolve_consumer_tx_plan(event, spec, &group, execution)?;
         matched_specs[matched_index] = true;
         bridged.push(BridgedSubscription {
             event,
             subscription: spec,
             group,
+            consumer_tx,
         });
     }
     for ((event, spec), matched) in specs.iter().zip(matched_specs) {
@@ -433,7 +436,6 @@ pub async fn wire_event_transport(
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
-    settings_service: Arc<SettingsService>,
 ) -> anyhow::Result<EventRuntime> {
     let required = required_domains(&subscribers);
     let required_refs: Vec<&str> = required.iter().map(String::as_str).collect();
@@ -458,16 +460,7 @@ pub async fn wire_event_transport(
         }
         EventDecision::Durable { per_domain } => {
             let security = security.context("durable event security config missing")?;
-            wire_durable(
-                pg,
-                distributed,
-                subscribers,
-                per_domain,
-                timing,
-                security,
-                settings_service,
-            )
-            .await
+            wire_durable(pg, distributed, subscribers, per_domain, timing, security).await
         }
     }
 }
@@ -605,7 +598,6 @@ async fn wire_durable(
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
     timing: RelayTiming,
     security: EventSecurity,
-    settings_service: Arc<SettingsService>,
 ) -> anyhow::Result<EventRuntime> {
     // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
 
@@ -649,15 +641,7 @@ async fn wire_durable(
     wire_outbox_maintenance(pg, distributed, &security, &timing, &mut module)?;
 
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
-    wire_consumer_resource_bundle(
-        pg,
-        subscribers,
-        &amqp_map,
-        &security,
-        &timing,
-        &settings_service,
-        &mut module,
-    )?;
+    wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &security, &timing, &mut module)?;
 
     Ok(EventRuntime {
         infra_guards,
@@ -889,7 +873,6 @@ fn wire_consumer_resource_bundle(
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     security: &EventSecurity,
     timing: &RelayTiming,
-    settings_service: &Arc<SettingsService>,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
@@ -916,7 +899,7 @@ fn wire_consumer_resource_bundle(
                 .dead_letter(security.dlx_payload_protector.clone()),
         );
         let worker_name = format!("event-consumer:{consumer}:{topic_name}");
-        let handler = consumer_tx_handler_for_subscription(pg, &subscription, settings_service)?;
+        let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
         tracing::info!(
             consumer,
             contract_id,
@@ -951,82 +934,107 @@ fn wire_consumer_resource_bundle(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConsumerTxKind {
+enum ConsumerTxPlan {
     AuditSessionCreated,
     AuditRoleAssigned,
     AuditRoleRevoked,
     AuditPolicyUpdated,
-    SettingsConfigVersionChanged,
-}
-
-fn consumer_tx_kind_for_subscription(subscription: &BridgedSubscription) -> Option<ConsumerTxKind> {
-    consumer_tx_kind_for_parts(
-        subscription.consumer(),
-        subscription.contract_id(),
-        subscription.topic(),
-        subscription.group().as_str(),
-    )
+    SettingsConfigVersionChanged(bootstrap::SubscriberEffect),
 }
 
 #[cfg(test)]
-fn consumer_tx_kind_for_spec(event: EventSpec, spec: SubscriptionSpec) -> Option<ConsumerTxKind> {
-    consumer_tx_kind_for_parts(
+fn consumer_tx_plan_for_spec(
+    event: EventSpec,
+    spec: SubscriptionSpec,
+) -> anyhow::Result<ConsumerTxPlan> {
+    let execution = match spec.consumer() {
+        "settings" => SubscriberExecution::DomainEffect(Arc::new(|_, _| {
+            Box::pin(async { consistency::HandleResult::ack() })
+        })),
+        _ => SubscriberExecution::AdapterNative,
+    };
+    let group = ConsumerGroup::parse(spec.group()).context("parse generated test group")?;
+    resolve_consumer_tx_plan(event, spec, &group, execution)
+}
+
+fn resolve_consumer_tx_plan(
+    event: EventSpec,
+    spec: SubscriptionSpec,
+    group: &ConsumerGroup,
+    execution: SubscriberExecution,
+) -> anyhow::Result<ConsumerTxPlan> {
+    match (
         spec.consumer(),
         event.contract_id(),
         event.topic(),
-        spec.group(),
-    )
-}
-
-fn consumer_tx_kind_for_parts(
-    consumer: &str,
-    contract_id: &str,
-    topic: &str,
-    group: &str,
-) -> Option<ConsumerTxKind> {
-    match (consumer, contract_id, topic, group) {
+        group.as_str(),
+        execution,
+    ) {
         (
             "audit",
             generated::event::identity_v1::session_created::CONTRACT_ID,
             generated::event::identity_v1::session_created::TOPIC,
             "audit.session-created",
-        ) => Some(ConsumerTxKind::AuditSessionCreated),
+            SubscriberExecution::AdapterNative,
+        ) => Ok(ConsumerTxPlan::AuditSessionCreated),
         (
             "audit",
             generated::event::identity_v1::role_assigned::CONTRACT_ID,
             generated::event::identity_v1::role_assigned::TOPIC,
             "audit.role-assigned",
-        ) => Some(ConsumerTxKind::AuditRoleAssigned),
+            SubscriberExecution::AdapterNative,
+        ) => Ok(ConsumerTxPlan::AuditRoleAssigned),
         (
             "audit",
             generated::event::identity_v1::role_revoked::CONTRACT_ID,
             generated::event::identity_v1::role_revoked::TOPIC,
             "audit.role-revoked",
-        ) => Some(ConsumerTxKind::AuditRoleRevoked),
+            SubscriberExecution::AdapterNative,
+        ) => Ok(ConsumerTxPlan::AuditRoleRevoked),
         (
             "audit",
             generated::event::identity_v1::policy_updated::CONTRACT_ID,
             generated::event::identity_v1::policy_updated::TOPIC,
             "audit.policy-updated",
-        ) => Some(ConsumerTxKind::AuditPolicyUpdated),
+            SubscriberExecution::AdapterNative,
+        ) => Ok(ConsumerTxPlan::AuditPolicyUpdated),
         (
             "settings",
             generated::event::settings_v1::CONTRACT_ID,
             generated::event::settings_v1::TOPIC,
             "settings.config-version-changed",
-        ) => Some(ConsumerTxKind::SettingsConfigVersionChanged),
-        _ => None,
+            SubscriberExecution::DomainEffect(effect),
+        ) => Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect)),
+        ("settings", _, _, _, SubscriberExecution::AdapterNative) => anyhow::bail!(
+            "generated settings subscription requires domain effect: contract={} topic={} consumer={} group={}",
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            group.as_str()
+        ),
+        ("audit", _, _, _, SubscriberExecution::DomainEffect(_)) => anyhow::bail!(
+            "generated audit subscription requires adapter-native execution: contract={} topic={} consumer={} group={}",
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            group.as_str()
+        ),
+        _ => anyhow::bail!(
+            "generated subscription has no ConsumerTx plan: contract={} topic={} consumer={} group={}",
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            group.as_str()
+        ),
     }
 }
 
 fn consumer_tx_handler_for_subscription(
     pg: &PgRuntimeDeps,
     subscription: &BridgedSubscription,
-    settings_service: &Arc<SettingsService>,
 ) -> anyhow::Result<ConsumerTxHandlerFn> {
-    match consumer_tx_kind_for_subscription(subscription) {
-        Some(ConsumerTxKind::AuditSessionCreated) => {
+    match &subscription.consumer_tx {
+        ConsumerTxPlan::AuditSessionCreated => {
             let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit session-created consumer tx chain key")?;
             Ok(pg
@@ -1034,7 +1042,7 @@ fn consumer_tx_handler_for_subscription(
                 .session_created_consumer_tx(hasher)
                 .into_handler())
         }
-        Some(ConsumerTxKind::AuditRoleAssigned) => {
+        ConsumerTxPlan::AuditRoleAssigned => {
             let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit role-assigned consumer tx chain key")?;
             Ok(pg
@@ -1042,7 +1050,7 @@ fn consumer_tx_handler_for_subscription(
                 .role_assigned_consumer_tx(hasher)
                 .into_handler())
         }
-        Some(ConsumerTxKind::AuditRoleRevoked) => {
+        ConsumerTxPlan::AuditRoleRevoked => {
             let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit role-revoked consumer tx chain key")?;
             Ok(pg
@@ -1050,7 +1058,7 @@ fn consumer_tx_handler_for_subscription(
                 .role_revoked_consumer_tx(hasher)
                 .into_handler())
         }
-        Some(ConsumerTxKind::AuditPolicyUpdated) => {
+        ConsumerTxPlan::AuditPolicyUpdated => {
             let hasher = crate::domains::audit::build_audit_hasher(|name| std::env::var(name).ok())
                 .context("audit policy-updated consumer tx chain key")?;
             Ok(pg
@@ -1058,17 +1066,10 @@ fn consumer_tx_handler_for_subscription(
                 .policy_updated_consumer_tx(hasher)
                 .into_handler())
         }
-        Some(ConsumerTxKind::SettingsConfigVersionChanged) => Ok(pg
+        ConsumerTxPlan::SettingsConfigVersionChanged(effect) => Ok(pg
             .for_domain::<caps::Settings>()
-            .config_version_changed_consumer_tx(Arc::clone(settings_service))
+            .config_version_changed_consumer_tx(Arc::clone(effect))
             .into_handler()),
-        None => anyhow::bail!(
-            "generated subscription has no ConsumerTx handler mapping: contract={} topic={} consumer={} group={}",
-            subscription.contract_id(),
-            subscription.topic(),
-            subscription.consumer(),
-            subscription.group().as_str()
-        ),
     }
 }
 
@@ -1305,12 +1306,35 @@ mod tests {
         consumer: &'static str,
         group: &'static str,
     ) -> SubscriberBinding {
-        SubscriberBinding {
-            contract_id,
-            topic,
-            consumer,
-            group: consistency::ConsumerGroup::parse(group).unwrap(),
-        }
+        let execution = if consumer == "settings" {
+            SubscriberExecution::DomainEffect(Arc::new(|_, _| {
+                Box::pin(async { consistency::HandleResult::ack() })
+            }))
+        } else {
+            SubscriberExecution::AdapterNative
+        };
+        test_binding_with_execution(contract_id, topic, consumer, group, execution)
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn test_binding_with_execution(
+        contract_id: &'static str,
+        topic: &'static str,
+        consumer: &'static str,
+        group: &'static str,
+        execution: SubscriberExecution,
+    ) -> SubscriberBinding {
+        let mut registry = bootstrap::Registry::new();
+        registry
+            .subscriber(
+                contract_id,
+                topic,
+                consumer,
+                consistency::ConsumerGroup::parse(group).unwrap(),
+                execution,
+            )
+            .unwrap();
+        registry.drain_subscribers().pop().unwrap()
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1406,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_subscriptions_all_have_consumer_tx_kind_mapping() {
+    fn generated_subscriptions_all_resolve_to_consumer_tx_plans() {
         let missing: Vec<String> = generated::event::EVENTS
             .iter()
             .flat_map(|event| {
@@ -1415,7 +1439,7 @@ mod tests {
                     .iter()
                     .map(move |spec| (*event, *spec))
             })
-            .filter(|(event, spec)| consumer_tx_kind_for_spec(*event, *spec).is_none())
+            .filter(|(event, spec)| consumer_tx_plan_for_spec(*event, *spec).is_err())
             .map(|(event, spec)| {
                 format!(
                     "{}:{}:{}:{}",
@@ -1462,6 +1486,50 @@ mod tests {
         assert!(result.is_err(), "expected group mismatch error");
         let err = result.err().unwrap();
         assert!(err.to_string().contains("subscriber group drift"));
+    }
+
+    #[allow(clippy::unwrap_used)]
+    // reason: preceding assertion proves the fail-closed result is Err.
+    #[test]
+    fn bridge_generated_subscriptions_rejects_settings_without_domain_effect() {
+        let event = generated::event::settings_v1::SPEC;
+        let spec = event.subscriptions()[0];
+        let binding = test_binding_with_execution(
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            spec.group(),
+            SubscriberExecution::AdapterNative,
+        );
+
+        let result = bridge_subscriptions_with_events(vec![binding], &[event]);
+        assert!(result.is_err(), "binding must fail closed");
+        let error = result.err().unwrap();
+
+        assert!(error.to_string().contains("requires domain effect"));
+    }
+
+    #[allow(clippy::unwrap_used)]
+    // reason: preceding assertion proves the fail-closed result is Err.
+    #[test]
+    fn bridge_generated_subscriptions_rejects_audit_domain_effect() {
+        let event = generated::event::identity_v1::session_created::SPEC;
+        let spec = event.subscriptions()[0];
+        let binding = test_binding_with_execution(
+            event.contract_id(),
+            event.topic(),
+            spec.consumer(),
+            spec.group(),
+            SubscriberExecution::DomainEffect(Arc::new(|_, _| {
+                Box::pin(async { consistency::HandleResult::ack() })
+            })),
+        );
+
+        let result = bridge_subscriptions_with_events(vec![binding], &[event]);
+        assert!(result.is_err(), "binding must fail closed");
+        let error = result.err().unwrap();
+
+        assert!(error.to_string().contains("requires adapter-native"));
     }
 
     #[allow(clippy::unwrap_used)]

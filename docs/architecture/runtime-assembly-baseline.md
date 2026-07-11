@@ -33,12 +33,10 @@ The current production runtime assembly has these phases:
    - outbound domain transport from event topology
 2. Build `SharedRuntimeDeps` from infrastructure-only inputs.
 3. Wire domain roots:
-   - `wire_audit(&deps)`
-   - `wire_identity(&deps)`
-   - `wire_settings(&deps)`
-4. Compose domain route/subscriber/probe registry with `bootstrap::compose`.
-5. Merge module results:
-   - settings module
+   - `modules_gen::wire_domains(&deps)`
+4. Compose the generated bindings and lifecycle output with `bootstrap::compose_bindings`.
+5. Merge module results, with generated domain output first:
+   - generated domain output
    - session sweeper
    - S3 canary
    - provider runtime resources for Redis, S3, and Vault

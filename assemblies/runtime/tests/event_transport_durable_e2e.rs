@@ -725,14 +725,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         domain_transport: noop_domain_transport(),
     };
     let distributed = wire_distributed(&deps)?;
-    let event_runtime = wire_event_transport(
-        &pg,
-        distributed,
-        subscribers,
-        cfg,
-        Arc::clone(&subscriber_settings_service),
-    )
-    .await?;
+    let event_runtime = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
     assert!(
         event_runtime.module.resources.is_empty(),
         "event transport workers must drain through DomainModuleResult::workers"

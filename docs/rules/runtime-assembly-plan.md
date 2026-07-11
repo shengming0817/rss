@@ -28,7 +28,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - `assembly.toml` must declare static assembly intent through required `name`, `profile`, `domains`, `topology`, `listeners`, and `diportProviders` fields.
 - `domains`, `topology`, and `listeners` are declaration and validation inputs only. They do not replace contracts, Cargo dependencies, env/secrets, listener bind config, or Rust constructor wiring.
 - Manifest intent validation is carried by `ASSEMBLY-MANIFEST-INTENT-01` in `xtask/src/assembly.rs` and runs through `cargo xtask assembly validate`, `cargo xtask verify`, and CI.
-- Domain required capability validation is carried by `ASSEMBLY-REQUIRED-CAPABILITY-01` in `xtask/src/assembly.rs`: declared domains/topology must have the minimum provider/dependency facts needed by the current handwritten runtime composition.
+- Domain required capability validation is carried by `ASSEMBLY-REQUIRED-CAPABILITY-01` in `xtask/src/assembly.rs`: declared domains/topology must have the minimum provider/dependency facts needed by generated live composition.
 - This phase must not make runtime read `assembly.toml` to decide topology, route mounting, auth scheme, provider construction, or live readiness.
 
 ### Phase 4
@@ -38,9 +38,9 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - `DomainModuleResult` remains the sole probes/resources/workers output. Merge/extend preserves manifest order and each domain's internal order, including duplicates; generators must not lexically sort domains.
 - Domain services and routes remain typed and are captured by the domain/route funnel; they must not enter `SharedRuntimeDeps` or `DomainModuleResult`.
 - `cargo xtask assembly generate-modules` derives each assembly's committed `src/generated/modules_gen.rs` from the manifest domain order. `ASSEMBLY-MODULES-CODEGEN-01` is the Hard codegen/golden carrier; `--check` runs in verify/CI and fails on missing, changed, hand-edited, or owned orphan outputs.
-- The generated file contains only ordered async `domains::<name>::module(deps)` calls. It does not derive providers, environment access, features, compose/merge behavior, or a typed-handle sidecar.
+- The generated file contains the ordered async `domains::<name>::module(deps)` calls plus a `#[cfg(test)]` hermetic factory emitted by the same loop to exercise that exact order. It does not derive providers, environment access, features, compose/merge behavior, or a typed-handle sidecar; the test factory also returns ordinary `DomainBinding` values.
 - Defining the binding/output shape does not itself change live `runtime::run()` behavior. Moving wire functions, generating the module list, and switching the live path remain separate dependent changes with baseline verification.
-- The generated artifact is not a live-runtime carrier until the dependent cutover resolves the single-instance `SettingsService` / `RouteAuthorizer` ownership and the current handwritten-vs-manifest initialization order; the codegen Hard claim covers artifact freshness only.
+- The generated artifact is the live domain-order carrier. `RUNTIME-GENERATED-DOMAINS-LIVE-01` rejects handwritten fallback and requires `compose_bindings` plus output merge; typed route/subscriber declaration funnels preserve the single `RouteAuthorizer` / `SettingsService` instances without a service bag.
 
 ## PR Size Planning Budget
 

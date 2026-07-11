@@ -25,7 +25,7 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use bootstrap::{Domain, KernelError, Registry};
+use bootstrap::{Domain, KernelError, Registry, SubscriberExecution};
 use consistency::ConsumerGroup;
 use diport::Message;
 use generated::event::EventSpec;
@@ -812,7 +812,13 @@ fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(),
         .find(|s| s.consumer() == AUDIT_DOMAIN)
         .ok_or(KernelError::Subscriber)?;
     let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
-    reg.subscriber(event.contract_id(), event.topic(), spec.consumer(), group)
+    reg.subscriber(
+        event.contract_id(),
+        event.topic(),
+        spec.consumer(),
+        group,
+        SubscriberExecution::AdapterNative,
+    )
 }
 
 /// audit 域 bootstrap 生命周期：声明 durable 订阅元数据 + admin 读路由组。
@@ -1753,7 +1759,11 @@ mod tests {
             AUDIT_TENANT_ENTRIES_PATH
         );
         assert_eq!(AUDIT_LIST_TENANT_HTTP_SPEC.route.method(), "GET");
-        let subs = reg.drain_subscribers();
+        let subs: Vec<_> = reg
+            .drain_subscribers()
+            .into_iter()
+            .map(bootstrap::SubscriberBinding::into_parts)
+            .collect();
         let expected: Vec<_> = [
             SESSION_CREATED_SPEC,
             ROLE_ASSIGNED_SPEC,
@@ -1774,10 +1784,14 @@ mod tests {
         for (event, spec) in expected {
             assert_eq!(spec.consumer(), AUDIT_DOMAIN);
             assert!(
-                subs.iter().any(|sub| sub.contract_id == event.contract_id()
-                    && sub.topic == event.topic()
-                    && sub.consumer == spec.consumer()
-                    && sub.group.as_str() == spec.group()),
+                subs.iter()
+                    .any(|(contract_id, topic, consumer, group, execution)| {
+                        *contract_id == event.contract_id()
+                            && *topic == event.topic()
+                            && *consumer == spec.consumer()
+                            && group.as_str() == spec.group()
+                            && matches!(execution, SubscriberExecution::AdapterNative)
+                    }),
                 "missing subscriber binding for {}",
                 event.contract_id()
             );

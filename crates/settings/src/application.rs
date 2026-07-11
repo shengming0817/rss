@@ -28,10 +28,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use axum::routing::{get, post};
-use bootstrap::{Domain, KernelError, Registry};
+use bootstrap::{Domain, KernelError, Registry, SubscriberEffect, SubscriberExecution};
 use consistency::{
     ConsumerGroup, EngineError, EngineErrorKind, EventEntry, EventTopic, HandleResult, IdemKey,
-    OutboxPayload,
+    OutboxPayload, PermanentError, PermanentErrorKind,
 };
 use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
 use generated::event::settings_v1::{
@@ -939,11 +939,19 @@ impl SettingsDomain {
             secret_repo,
         }
     }
+}
 
-    #[must_use]
-    pub fn config_service(&self) -> Arc<SettingsService> {
-        Arc::clone(&self.config)
-    }
+fn log_config_version_tenant_mismatch(
+    message_id: &str,
+    payload_tenant: &TenantId,
+    authenticated_tenant: &TenantId,
+) {
+    tracing::warn!(
+        message_id,
+        payload_tenant = %payload_tenant,
+        authenticated_tenant = %authenticated_tenant,
+        "settings config-version tenant mismatch rejected"
+    );
 }
 
 impl Domain for SettingsDomain {
@@ -954,11 +962,42 @@ impl Domain for SettingsDomain {
             .find(|s| s.consumer() == SETTINGS_DOMAIN)
             .ok_or(KernelError::Subscriber)?;
         let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
+        let effect_config = Arc::clone(&self.config);
+        let effect: SubscriberEffect = Arc::new(move |message, authenticated_tenant| {
+            let config = Arc::clone(&effect_config);
+            Box::pin(async move {
+                let event = match config_version_changed_event_from_message(&message) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        tracing::warn!(
+                            message_id = message.id.as_str(),
+                            error = %secure::redact_error(&error),
+                            "settings config-version payload rejected"
+                        );
+                        return HandleResult::reject(PermanentError::new(
+                            PermanentErrorKind::Permanent,
+                        ));
+                    }
+                };
+                if event.tenant() != authenticated_tenant {
+                    log_config_version_tenant_mismatch(
+                        message.id.as_str(),
+                        &event.tenant(),
+                        &authenticated_tenant,
+                    );
+                    return HandleResult::reject(PermanentError::new(
+                        PermanentErrorKind::Invariant,
+                    ));
+                }
+                config.handle_config_version_changed_event(event).await
+            })
+        });
         reg.subscriber(
             VERSION_CHANGED_SPEC.contract_id(),
             VERSION_CHANGED_SPEC.topic(),
             spec.consumer(),
             group,
+            SubscriberExecution::DomainEffect(effect),
         )?;
 
         let config = Arc::clone(&self.config);
@@ -1003,7 +1042,7 @@ mod tests {
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
     // 测试 helper：解析已知合法常量 —— expect item-level carve-out（error-handling.md §Carve-out）。
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, clippy::panic)]
     fn tenant() -> TenantId {
         TenantId::parse(TENANT).expect("canonical uuid")
     }
@@ -1303,6 +1342,21 @@ mod tests {
         )
     }
 
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn subscriber_effect_for(service: Arc<SettingsService>) -> SubscriberEffect {
+        let domain = SettingsDomain::new(service, secret_repo_arc());
+        let mut registry = bootstrap::compose(&[&domain]).expect("settings domain composes");
+        let binding = registry
+            .drain_subscribers()
+            .pop()
+            .expect("settings subscription exists");
+        let (_, _, _, _, execution) = binding.into_parts();
+        match execution {
+            SubscriberExecution::DomainEffect(effect) => effect,
+            SubscriberExecution::AdapterNative => panic!("settings subscription must be effect"),
+        }
+    }
+
     /// post-authz 授权证据（Primary route gate 注入）。
     fn user_evidence(t: TenantId) -> AuthorizedSubject {
         AuthorizedSubject::for_test(t, PrincipalKind::User, "test-subject", None)
@@ -1363,14 +1417,17 @@ mod tests {
     fn settings_domain_declares_config_version_changed_subscriber() {
         let domain = settings_domain_for_test();
         let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
-        let subs = reg.drain_subscribers();
+        let mut subs = reg.drain_subscribers().into_iter();
         let spec = VERSION_CHANGED_SPEC.subscriptions()[0];
         assert_eq!(spec.consumer(), SETTINGS_DOMAIN);
-        assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].contract_id, VERSION_CHANGED_SPEC.contract_id());
-        assert_eq!(subs[0].topic, VERSION_CHANGED_SPEC.topic());
-        assert_eq!(subs[0].consumer, spec.consumer());
-        assert_eq!(subs[0].group.as_str(), spec.group());
+        let (contract_id, topic, consumer, group, execution) =
+            subs.next().expect("settings subscriber").into_parts();
+        assert!(subs.next().is_none());
+        assert_eq!(contract_id, VERSION_CHANGED_SPEC.contract_id());
+        assert_eq!(topic, VERSION_CHANGED_SPEC.topic());
+        assert_eq!(consumer, spec.consumer());
+        assert_eq!(group.as_str(), spec.group());
+        assert!(matches!(execution, SubscriberExecution::DomainEffect(_)));
     }
 
     #[allow(clippy::expect_used)]
@@ -1486,6 +1543,179 @@ mod tests {
             .find(tenant(), &key)
             .expect("ConsumerTx refresh method refreshed cache");
         assert_eq!(cached.value(), "enabled");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn subscriber_effect_refreshes_the_route_service_cache_instance() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        service
+            .publish_config(tenant(), actor(), publish_req("app.feature", "enabled"))
+            .await
+            .expect("publish config");
+        let key = SettingKey::parse("app.feature").expect("valid key");
+        service.cache.remove(tenant(), &key);
+        let effect = subscriber_effect_for(Arc::clone(&service));
+
+        let result = effect(
+            Message::new("m-settings-effect", version_changed_payload(TENANT)),
+            tenant(),
+        )
+        .await;
+
+        assert_eq!(result.disposition(), consistency::Disposition::Ack);
+        assert_eq!(
+            service
+                .cache
+                .find(tenant(), &key)
+                .expect("shared service cache refreshed")
+                .value(),
+            "enabled"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn subscriber_effect_rejects_invalid_payload_and_tenant_mismatch() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let effect = subscriber_effect_for(service);
+        let other_tenant = TenantId::parse("11111111-2222-4333-8444-555555555555")
+            .expect("canonical other tenant");
+
+        let invalid = effect(Message::new("m-invalid", b"not-json".to_vec()), tenant()).await;
+        let mismatch = effect(
+            Message::new("m-mismatch", version_changed_payload(TENANT)),
+            other_tenant,
+        )
+        .await;
+
+        assert_eq!(invalid.disposition(), consistency::Disposition::Reject);
+        assert_eq!(
+            invalid.error_summary(),
+            Some(PermanentErrorKind::Permanent.message())
+        );
+        assert_eq!(mismatch.disposition(), consistency::Disposition::Reject);
+        assert_eq!(
+            mismatch.error_summary(),
+            Some(PermanentErrorKind::Invariant.message())
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn config_version_tenant_mismatch_log_carries_both_tenants() {
+        use std::collections::HashMap;
+        use tracing::field::{Field, Visit};
+        use tracing::subscriber::Interest;
+        use tracing::{Event, Id, Metadata, span};
+
+        struct FieldVisitor {
+            fields: HashMap<String, String>,
+        }
+
+        impl Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.fields
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+        }
+
+        struct CaptureSubscriber {
+            events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        }
+
+        impl tracing::Subscriber for CaptureSubscriber {
+            fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+                Interest::always()
+            }
+
+            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                true
+            }
+
+            fn new_span(&self, _span: &span::Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &span::Record<'_>) {}
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+            fn enter(&self, _span: &Id) {}
+            fn exit(&self, _span: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                if *event.metadata().level() != tracing::Level::WARN {
+                    return;
+                }
+                let mut visitor = FieldVisitor {
+                    fields: HashMap::new(),
+                };
+                event.record(&mut visitor);
+                self.events.lock().unwrap().push(visitor.fields);
+            }
+        }
+
+        let payload_tenant = tenant();
+        let authenticated_tenant = TenantId::parse("11111111-2222-4333-8444-555555555555")
+            .expect("canonical other tenant");
+        let authenticated_tenant_text = authenticated_tenant.to_string();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(
+            CaptureSubscriber {
+                events: Arc::clone(&events),
+            },
+            || {
+                log_config_version_tenant_mismatch(
+                    "m-mismatch-log",
+                    &payload_tenant,
+                    &authenticated_tenant,
+                );
+            },
+        );
+
+        let events = events.lock().unwrap();
+        let event = events.first().expect("tenant mismatch warning captured");
+        assert!(
+            event
+                .get("payload_tenant")
+                .is_some_and(|value| value.contains(TENANT))
+        );
+        assert!(
+            event
+                .get("authenticated_tenant")
+                .is_some_and(|value| value.contains(&authenticated_tenant_text))
+        );
+        assert!(!event.contains_key("payload"));
+        assert!(!event.contains_key("value"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn subscriber_effect_preserves_transient_refresh_as_requeue() {
+        let capture = CapturingEmitter::default();
+        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let effect = subscriber_effect_for(service);
+
+        let result = effect(
+            Message::new(
+                "m-future-version",
+                version_changed_payload_for(TENANT, "app.feature", 2),
+            ),
+            tenant(),
+        )
+        .await;
+
+        assert_eq!(result.disposition(), consistency::Disposition::Requeue);
+        assert_eq!(
+            result.error_summary(),
+            Some(EngineErrorKind::Transient.message())
+        );
     }
 
     #[tokio::test]

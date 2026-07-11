@@ -749,12 +749,14 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                         field.ident.as_ref().map(|ident| (ident.to_string(), field))
                     })
                     .collect();
-                shape.bridged_private_shape =
-                    ["event", "subscription", "group"].iter().all(|name| {
+                shape.bridged_private_shape = ["event", "subscription", "group", "consumer_tx"]
+                    .iter()
+                    .all(|name| {
                         fields
                             .get(*name)
                             .is_some_and(|field| matches!(field.vis, syn::Visibility::Inherited))
-                    }) && !fields.contains_key("handler");
+                    })
+                    && !fields.contains_key("handler");
             }
             syn::Item::Fn(item) if item.sig.ident == "bridge_generated_subscriptions" => {
                 let body = normalized_tokens(&item.block);
@@ -773,7 +775,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     "pg.infra().inbox()",
                     "LeaseConfig::from_ttl(inbox.lease_ttl())",
                     "dead_letter(security.dlx_payload_protector.clone())",
-                    "consumer_tx_handler_for_subscription(pg,&subscription,settings_service)",
+                    "consumer_tx_handler_for_subscription(pg,&subscription)",
                     "spawn_consumer_ackable_tx_subscriber(",
                     "matchsubscription.readiness()",
                     "SubscriberReadiness::Required=>",
@@ -784,8 +786,8 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 .iter()
                 .all(|required| body.contains(required));
             }
-            syn::Item::Fn(item) if item.sig.ident == "consumer_tx_kind_for_subscription" => {
-                shape.handler_mapping = true;
+            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan" => {
+                shape.handler_mapping = consumer_tx_plan_resolver_is_closed(item);
             }
             _ => {}
         }
@@ -794,7 +796,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     [
         (
             shape.bridged_private_shape,
-            "BridgedSubscription 必须只以私有 event/subscription/group 身份字段封装 generated topology，不得恢复 legacy handler",
+            "BridgedSubscription 必须以私有 event/subscription/group/consumer_tx 字段封装 generated topology 与已解析闭执行计划，不得恢复 legacy handler",
         ),
         (
             shape.generated_events_bridge,
@@ -810,7 +812,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         ),
         (
             shape.handler_mapping,
-            "runtime 必须保留 generated subscription → ConsumerTx handler 的 fail-closed mapping",
+            "runtime 必须以单一 resolver 保留 generated subscription + execution → ConsumerTx plan 的 fail-closed mapping",
         ),
     ]
     .into_iter()
@@ -823,6 +825,69 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         )
     })
     .collect()
+}
+
+fn consumer_tx_plan_resolver_is_closed(item: &syn::ItemFn) -> bool {
+    let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) = item.block.stmts.last() else {
+        return false;
+    };
+    if normalized_tokens(&mapping.expr)
+        != "(spec.consumer(),event.contract_id(),event.topic(),group.as_str(),execution,)"
+        || mapping.arms.len() != 8
+        || mapping.arms.iter().any(|arm| arm.guard.is_some())
+    {
+        return false;
+    }
+
+    let expected_mappings = [
+        (
+            "(\"audit\",generated::event::identity_v1::session_created::CONTRACT_ID,generated::event::identity_v1::session_created::TOPIC,\"audit.session-created\",SubscriberExecution::AdapterNative,)",
+            "Ok(ConsumerTxPlan::AuditSessionCreated)",
+        ),
+        (
+            "(\"audit\",generated::event::identity_v1::role_assigned::CONTRACT_ID,generated::event::identity_v1::role_assigned::TOPIC,\"audit.role-assigned\",SubscriberExecution::AdapterNative,)",
+            "Ok(ConsumerTxPlan::AuditRoleAssigned)",
+        ),
+        (
+            "(\"audit\",generated::event::identity_v1::role_revoked::CONTRACT_ID,generated::event::identity_v1::role_revoked::TOPIC,\"audit.role-revoked\",SubscriberExecution::AdapterNative,)",
+            "Ok(ConsumerTxPlan::AuditRoleRevoked)",
+        ),
+        (
+            "(\"audit\",generated::event::identity_v1::policy_updated::CONTRACT_ID,generated::event::identity_v1::policy_updated::TOPIC,\"audit.policy-updated\",SubscriberExecution::AdapterNative,)",
+            "Ok(ConsumerTxPlan::AuditPolicyUpdated)",
+        ),
+        (
+            "(\"settings\",generated::event::settings_v1::CONTRACT_ID,generated::event::settings_v1::TOPIC,\"settings.config-version-changed\",SubscriberExecution::DomainEffect(effect),)",
+            "Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect))",
+        ),
+    ];
+    if !expected_mappings.iter().all(|(pat, body)| {
+        mapping
+            .arms
+            .iter()
+            .any(|arm| normalized_tokens(&arm.pat) == *pat && normalized_tokens(&arm.body) == *body)
+    }) {
+        return false;
+    }
+
+    let expected_fail_closed = [
+        "(\"settings\",_,_,_,SubscriberExecution::AdapterNative)",
+        "(\"audit\",_,_,_,SubscriberExecution::DomainEffect(_))",
+        "_",
+    ];
+    expected_fail_closed.iter().all(|pat| {
+        mapping
+            .arms
+            .iter()
+            .any(|arm| normalized_tokens(&arm.pat) == *pat && expr_is_anyhow_bail(&arm.body))
+    }) && mapping
+        .arms
+        .last()
+        .is_some_and(|arm| normalized_tokens(&arm.pat) == "_" && expr_is_anyhow_bail(&arm.body))
+}
+
+fn expr_is_anyhow_bail(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Macro(expr) if normalized_tokens(&expr.mac.path) == "anyhow::bail")
 }
 
 fn normalized_tokens(tokens: &impl ToTokens) -> String {
@@ -1470,6 +1535,7 @@ mod tests {
                 event: EventSpec,
                 subscription: SubscriptionSpec,
                 group: ConsumerGroup,
+                consumer_tx: ConsumerTxPlan,
             }
             pub fn bridge_generated_subscriptions(bindings: Vec<SubscriberBinding>) {
                 bridge_subscriptions_with_events(bindings, generated::event::EVENTS)
@@ -1483,9 +1549,7 @@ mod tests {
                     pg.infra()
                         .dead_letter(security.dlx_payload_protector.clone()),
                 );
-                let handler = consumer_tx_handler_for_subscription(
-                    pg, &subscription, settings_service
-                )?;
+                let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
                 let worker = spawn_consumer_ackable_tx_subscriber();
                 let consumer_probe = probe();
                 match subscription.readiness() {
@@ -1496,10 +1560,157 @@ mod tests {
                 }
                 wire_inbox_sweeper(pg, timing, module)?;
             }
-            fn consumer_tx_kind_for_subscription() {}
+            fn resolve_consumer_tx_plan(
+                event: EventSpec,
+                spec: SubscriptionSpec,
+                group: &ConsumerGroup,
+                execution: SubscriberExecution,
+            ) -> anyhow::Result<ConsumerTxPlan> {
+                match (
+                    spec.consumer(),
+                    event.contract_id(),
+                    event.topic(),
+                    group.as_str(),
+                    execution,
+                ) {
+                    (
+                        "audit",
+                        generated::event::identity_v1::session_created::CONTRACT_ID,
+                        generated::event::identity_v1::session_created::TOPIC,
+                        "audit.session-created",
+                        SubscriberExecution::AdapterNative,
+                    ) => Ok(ConsumerTxPlan::AuditSessionCreated),
+                    (
+                        "audit",
+                        generated::event::identity_v1::role_assigned::CONTRACT_ID,
+                        generated::event::identity_v1::role_assigned::TOPIC,
+                        "audit.role-assigned",
+                        SubscriberExecution::AdapterNative,
+                    ) => Ok(ConsumerTxPlan::AuditRoleAssigned),
+                    (
+                        "audit",
+                        generated::event::identity_v1::role_revoked::CONTRACT_ID,
+                        generated::event::identity_v1::role_revoked::TOPIC,
+                        "audit.role-revoked",
+                        SubscriberExecution::AdapterNative,
+                    ) => Ok(ConsumerTxPlan::AuditRoleRevoked),
+                    (
+                        "audit",
+                        generated::event::identity_v1::policy_updated::CONTRACT_ID,
+                        generated::event::identity_v1::policy_updated::TOPIC,
+                        "audit.policy-updated",
+                        SubscriberExecution::AdapterNative,
+                    ) => Ok(ConsumerTxPlan::AuditPolicyUpdated),
+                    (
+                        "settings",
+                        generated::event::settings_v1::CONTRACT_ID,
+                        generated::event::settings_v1::TOPIC,
+                        "settings.config-version-changed",
+                        SubscriberExecution::DomainEffect(effect),
+                    ) => Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect)),
+                    ("settings", _, _, _, SubscriberExecution::AdapterNative) =>
+                        anyhow::bail!("settings requires effect"),
+                    ("audit", _, _, _, SubscriberExecution::DomainEffect(_)) =>
+                        anyhow::bail!("audit requires native"),
+                    _ => anyhow::bail!("no plan"),
+                }
+            }
             "#,
         );
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn scan_content_rejects_symbol_only_consumer_tx_plan_resolver() {
+        let findings = scan_runtime_content(
+            Path::new(TARGET),
+            r#"
+            pub struct BridgedSubscription {
+                event: EventSpec,
+                subscription: SubscriptionSpec,
+                group: ConsumerGroup,
+                consumer_tx: ConsumerTxPlan,
+            }
+            pub fn bridge_generated_subscriptions(bindings: Vec<SubscriberBinding>) {
+                bridge_subscriptions_with_events(bindings, generated::event::EVENTS)
+            }
+            fn wire_event_transport(subscribers: Vec<BridgedSubscription>) {}
+            fn wire_consumer_resource_bundle(pg: Pg, module: &mut Module) {
+                let group = subscription.group().clone();
+                let inbox = pg.infra().inbox();
+                let lease_cfg = LeaseConfig::from_ttl(inbox.lease_ttl());
+                let dlx = DynDeadLetterStore::new_box(
+                    pg.infra().dead_letter(security.dlx_payload_protector.clone()),
+                );
+                let handler = consumer_tx_handler_for_subscription(pg, &subscription)?;
+                let worker = spawn_consumer_ackable_tx_subscriber();
+                let consumer_probe = probe();
+                match subscription.readiness() {
+                    SubscriberReadiness::Required => {
+                        module.workers.push(worker);
+                        module.probes.push(consumer_probe);
+                    }
+                }
+                wire_inbox_sweeper(pg, timing, module)?;
+            }
+            fn resolve_consumer_tx_plan() {
+                if false {
+                    SubscriberExecution::AdapterNative;
+                    SubscriberExecution::DomainEffect;
+                    ConsumerTxPlan::AuditSessionCreated;
+                    ConsumerTxPlan::AuditRoleAssigned;
+                    ConsumerTxPlan::AuditRoleRevoked;
+                    ConsumerTxPlan::AuditPolicyUpdated;
+                    ConsumerTxPlan::SettingsConfigVersionChanged;
+                }
+            }
+            "#,
+        );
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::MissingBundleFragment && finding.detail.contains("单一 resolver")
+        }));
+    }
+
+    #[allow(clippy::expect_used)]
+    fn workspace_consumer_tx_plan_resolver() -> syn::ItemFn {
+        syn::parse_file(include_str!(
+            "../../assemblies/runtime/src/event_transport.rs"
+        ))
+        .expect("runtime event transport parses")
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "resolve_consumer_tx_plan" => Some(item),
+            _ => None,
+        })
+        .expect("runtime resolver exists")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn consumer_tx_plan_resolver_rejects_fail_open_wildcard() {
+        let mut resolver = workspace_consumer_tx_plan_resolver();
+        let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) =
+            resolver.block.stmts.last_mut()
+        else {
+            panic!("resolver must end in match");
+        };
+        *mapping.arms.last_mut().expect("wildcard arm").body =
+            syn::parse_quote!(Ok(ConsumerTxPlan::AuditSessionCreated));
+        assert!(!consumer_tx_plan_resolver_is_closed(&resolver));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn consumer_tx_plan_resolver_rejects_missing_topology_arm() {
+        let mut resolver = workspace_consumer_tx_plan_resolver();
+        let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) =
+            resolver.block.stmts.last_mut()
+        else {
+            panic!("resolver must end in match");
+        };
+        mapping.arms.remove(0);
+        assert!(!consumer_tx_plan_resolver_is_closed(&resolver));
     }
 
     #[test]

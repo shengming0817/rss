@@ -178,15 +178,16 @@ ConsumerTx outcome 使用 typed constructor 收口：`handler_transient` 可在�
 broker `Requeue`，不写 app DLX、不提交 inbox `done`、不 `Ack`；`commit_unknown` / `LeaseLost` 立即 broker
 `Requeue`；只有永久 `Reject` 可写 app DLX、提交 inbox `done` 后 broker `Ack`。
 
-durable runtime 对 generated subscription fail closed：新增订阅如果没有 ConsumerTx kind mapping，测试与启动都失败。
-`Domain::init` 的 Registry 只声明 generated subscription identity（contract/topic/consumer/group），不携带
-handler；runtime 唯一执行路径是按该 identity 选择 `ConsumerTx`。payload decode / wire DTO 归属域 crate
-（域可依赖 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter 维护第二套
-event schema。
+durable runtime 对 generated subscription fail closed：每条订阅由 Registry 声明 generated subscription identity
+（contract/topic/consumer/group）和闭枚举 execution policy。`AdapterNative` 按该 identity 选择 `ConsumerTx`；
+`DomainEffect` 仅用于必须捕获域内 singleton 的 settings cache refresh，并由 generated topology 的穷举 resolver
+限制在 `settings.config-version-changed`。新增订阅、execution 缺失或 identity/execution 错配时，测试与启动均失败；
+不得增加默认分支、通用 handler registry 或 fallback。payload decode / wire DTO 归属域 crate（域可依赖
+`generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter 维护第二套 event schema。
 
-`settings.config-version-changed` 的 ConsumerTx 成功路径必须先刷新同一 `SettingsService` cache，再提交 inbox
-`done`；refresh transient 不提交 inbox、走 `Requeue`，permanent payload 错误走 `Reject`。否则 inbox done
-后的重复投递会被 Duplicate 直接 Ack，无法修复 stale cache。
+`settings.config-version-changed` 的 `DomainEffect` 捕获 HTTP routes 使用的同一 `SettingsService`；成功路径必须
+先刷新该 singleton cache，再由 ConsumerTx 提交 inbox `done`。refresh transient 不提交 inbox、走 `Requeue`，
+permanent payload 错误走 `Reject`。否则 inbox done 后的重复投递会被 Duplicate 直接 Ack，无法修复 stale cache。
 
 ### 租约续租 + leaseLost hard-fence（#1213）
 

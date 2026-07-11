@@ -10,6 +10,7 @@ use audit::ports::{
     AuditChainHasher, AuditEventKind, AuditEventRecordError, AuditRecord,
     audit_record_from_event_message,
 };
+use bootstrap::SubscriberEffect;
 use consistency::idempotency::LeaseOutcome;
 use consistency::{
     Disposition, EngineErrorKind, HandleResult, IdemKey, InboxReceiptContext, LeaseToken,
@@ -175,17 +176,14 @@ where
 /// Postgres-backed ConsumerTx handler for settings config-version-changed.
 pub struct PgSettingsConsumerTx {
     pool: PgTenantPool,
-    service: Arc<settings::SettingsService>,
+    effect: SubscriberEffect,
 }
 
 impl PgSettingsConsumerTx {
-    pub(crate) fn config_version_changed(
-        store: &PgStore,
-        service: Arc<settings::SettingsService>,
-    ) -> Self {
+    pub(crate) fn config_version_changed(store: &PgStore, effect: SubscriberEffect) -> Self {
         Self {
             pool: PgTenantPool::new(store),
-            service,
+            effect,
         }
     }
 
@@ -205,19 +203,11 @@ impl PgSettingsConsumerTx {
         key: IdemKey,
         lease: LeaseToken,
     ) -> ConsumerTxOutcome {
-        let event = match settings::config_version_changed_event_from_message(&message) {
-            Ok(event) => event,
-            Err(error) => return reject_settings_event(&message, &error),
-        };
-        if event.tenant() != ctx.tenant_id() {
-            return reject_settings_tenant_mismatch(&message, event.tenant(), &ctx);
-        }
-        if let Err(outcome) = settings_refresh_outcome(
-            &message,
-            self.service
-                .handle_config_version_changed_event(event)
-                .await,
-        ) {
+        let message_id = message.id.as_str().to_string();
+        let tenant = ctx.tenant_id();
+        if let Err(outcome) =
+            settings_refresh_outcome(&message_id, (self.effect)(message, tenant).await)
+        {
             return outcome;
         }
         pg_consumer_tx_outcome("settings", self.mark_done_only(ctx, key, lease).await)
@@ -301,7 +291,7 @@ fn reject_audit_tenant_mismatch(
 }
 
 fn settings_refresh_outcome(
-    message: &diport::Message,
+    message_id: &str,
     result: HandleResult,
 ) -> Result<(), ConsumerTxOutcome> {
     match result.disposition() {
@@ -318,43 +308,13 @@ fn settings_refresh_outcome(
         }),
         _ => {
             tracing::warn!(
-                message_id = message.id.as_str(),
+                message_id,
                 "consumer-tx: settings refresh returned unknown disposition"
             );
             Err(ConsumerTxOutcome::handler_transient(
                 EngineErrorKind::Invariant.message(),
             ))
         }
-    }
-}
-
-fn reject_settings_event(
-    message: &diport::Message,
-    error: &settings::ConfigVersionChangedEventError,
-) -> ConsumerTxOutcome {
-    tracing::warn!(
-        message_id = message.id.as_str(),
-        error = %secure::redact_error(error),
-        "consumer-tx: settings payload rejected"
-    );
-    ConsumerTxOutcome::Reject {
-        summary: consistency::PermanentErrorKind::Permanent.message(),
-    }
-}
-
-fn reject_settings_tenant_mismatch(
-    message: &diport::Message,
-    tenant: vocab::TenantId,
-    ctx: &InboxReceiptContext,
-) -> ConsumerTxOutcome {
-    tracing::warn!(
-        message_id = message.id.as_str(),
-        payload_tenant = %tenant,
-        receipt_tenant = %ctx.tenant_id(),
-        "consumer-tx: settings payload tenant does not match verified envelope tenant"
-    );
-    ConsumerTxOutcome::Reject {
-        summary: consistency::PermanentErrorKind::Invariant.message(),
     }
 }
 

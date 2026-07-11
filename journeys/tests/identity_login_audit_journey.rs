@@ -44,7 +44,7 @@ use audit::ports::{
 };
 use bootstrap::replaydeps::resolve;
 use bootstrap::shutdown::ShutdownStack;
-use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberBinding, Topology};
+use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberExecution, Topology};
 use common::{
     CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
     audit_domain, identity_domain, memory_tenant_signer, session_created_subscription,
@@ -299,13 +299,9 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
 
     // #1171：经受监督 ConsumerWorker（专用线程驱动 run_consumer）+ ShutdownStack 驱动订阅消费。
     let binding = session_created_subscription(registry)?;
-    assert_eq!(binding.topic, SESSION_CREATED_TOPIC);
-    let SubscriberBinding {
-        contract_id,
-        topic,
-        consumer: _,
-        group,
-    } = binding;
+    assert_eq!(binding.topic(), SESSION_CREATED_TOPIC);
+    let (contract_id, topic, _, group, execution) = binding.into_parts();
+    assert!(matches!(execution, SubscriberExecution::AdapterNative));
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
@@ -392,12 +388,9 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let (audit_domain, audit, audit_repo) = audit_domain();
     let registry = bootstrap::compose(&[&audit_domain])?;
 
-    let SubscriberBinding {
-        contract_id,
-        topic,
-        consumer: _,
-        group,
-    } = session_created_subscription(registry)?;
+    let (contract_id, topic, _, group, execution) =
+        session_created_subscription(registry)?.into_parts();
+    assert!(matches!(execution, SubscriberExecution::AdapterNative));
 
     // anti-vacuity（acc #2）：计数器包装 handler，证明内层 handler 恰调用一次——ConsumerBase 幂等短路
     // 第二条投递（不执行 handler），而非 sink 自身去重。
@@ -511,12 +504,9 @@ async fn rejected_login_does_not_audit() -> Result<()> {
     let identity_domain = identity_domain(login, refresh);
     let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
 
-    let SubscriberBinding {
-        contract_id,
-        topic,
-        consumer: _,
-        group,
-    } = session_created_subscription(registry)?;
+    let (contract_id, topic, _, group, execution) =
+        session_created_subscription(registry)?.into_parts();
+    assert!(matches!(execution, SubscriberExecution::AdapterNative));
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
     let consumer_group = group.clone();
@@ -566,12 +556,9 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     let (audit_domain, _audit, _audit_repo) = audit_domain();
     let registry = bootstrap::compose(&[&audit_domain])?;
 
-    let SubscriberBinding {
-        contract_id,
-        topic,
-        consumer: _,
-        group,
-    } = session_created_subscription(registry)?;
+    let (contract_id, topic, _, group, execution) =
+        session_created_subscription(registry)?.into_parts();
+    assert!(matches!(execution, SubscriberExecution::AdapterNative));
 
     // 永久失败 handler（绕过真实 audit handler）：恒 reject → ConsumerBase 写 DLX。
     let erroring = move |_msg: Message| -> BoxFuture<'static, HandleResult> {

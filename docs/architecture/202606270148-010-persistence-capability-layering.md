@@ -1,6 +1,6 @@
 # ADR-010：持久化能力分层 — domain binding / module result / capability bundle 单源
 
-- **状态**：Accepted，2026-07-09 经 #1669 amendment（`DomainBinding` + `DomainModuleResult` 已落；live runtime 切换仍按 runtime assembly Phase 4 推进）
+- **状态**：Accepted，2026-07-11 经 #1672 amendment（`DomainBinding` + `DomainModuleResult` + generated live composition 已落）
 - **日期**：2026-06-27
 - **关联**：issue #1425 [PERSIST-004] · Parent Feature #1419 [PERSIST-FEA-A] · Parent Epic #1418 [PERSIST-EPIC] · 同批 #1432（defer gate 落地）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发）· **ADR-005**（域形 repo/UoW port 归属 + category line，本 ADR 复用其归属判据不重证）· **ADR-009**（typed route funnel）
@@ -35,7 +35,7 @@ postgres adapter 已有 `PgConfigRepo`/`PgSecretRepo`/`ConfigUnitOfWork`、`asse
 ### 2.2 DomainBinding + DomainModuleResult — 单一所有权装配出口
 
 Phase 4 的 settings/identity/audit `module()` 已返回 `DomainBinding::new(name, Box<dyn Domain>, DomainModuleResult)`；
-统一 module funnel 尚未接入 live runtime（#1672）。`DomainBinding` 把已构造的域实例与其生命周期输出绑定在同一 owner 下且字段私有；
+统一 module funnel 已由 #1672 接入 live runtime。`DomainBinding` 把已构造的域实例与其生命周期输出绑定在同一 owner 下且字段私有；
 组合根把 bindings 交给 `compose_bindings`，它先按顺序临时借出 `Vec<&dyn Domain>` 执行 fail-fast compose，只有成功后
 才排空 bindings 并返回聚合 output。compose 失败时 bindings 与 outputs 原样保留。
 
@@ -43,7 +43,7 @@ Phase 4 的 settings/identity/audit `module()` 已返回 `DomainBinding::new(nam
 
 - `merge` 与 `Extend<DomainModuleResult>` 逐字段直接 `Vec::extend`，严格保留 binding 输入顺序与域内顺序；空输出为 identity，重复项原样保留。
 - `name` / `domain` 只属于 `DomainBinding` 且不提供 output getter；domain service / routes 不进入 result 或其它 generic service bag。service 留在 typed domain 内，由 `Domain::init` 捕获并注册 typed route。
-- 必填依赖（pool / clock / publisher …）由现有具体 domain 的 **typed 构造器必填位置参**注入（ADR-005 C5），缺失即编译错误（Hard）；settings/identity/audit 的 `module() -> DomainBinding` funnel 已存在，live generated handoff 仍由 #1672 完成。
+- 必填依赖（pool / clock / publisher …）由具体 domain 的 **typed 构造器必填位置参**注入（ADR-005 C5），缺失即编译错误（Hard）；settings/identity/audit 的 `module() -> DomainBinding` 经 generated list 进入 live runtime，跨阶段句柄只经 typed Registry funnel 交接。
 - `Domain: Send + Sync`；binding 与 output 可跨线程转移（`Send`），但包含单 owner resource / `FnOnce` worker 的完整 output 不承诺 `Sync`、`Clone` 或重复消费。
 - 对标：omicron 组合根（`bins`/`nexus`）手工注入具体 impl + 聚合（见 §对标证据）。
 
@@ -174,7 +174,7 @@ impl PgRuntimeDeps {
 
 ## 8. Follow-up（落地同步点 + 后续 issue）
 
-- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）；settings/identity/audit `module()`：**已落**（#1670）。live runtime bindings、typed-handle handoff 与生成列表由 #1672 继续切换。
+- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）；settings/identity/audit `module()`：**已落**（#1670）；live bindings、typed-handle funnel 与生成列表：**已落**（#1672）。
 - settings durable 第一条闭环（routes / probes / resources / journey）：**#1421**。
 - defer gate ratchet 扩域（自由词散文 + 代码注释 `crates/*`、`xtask/*` + 历史约 6700 baseline 冻结轨道）：登记为 #1447（不阻塞本 PR）。
 - 各域 repo/UoW conformance（CAS / rollback / tenant / co-tx）：W 阶段逐域。

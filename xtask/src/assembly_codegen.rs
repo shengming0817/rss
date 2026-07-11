@@ -220,12 +220,19 @@ fn render_modules(
 ) -> Result<String> {
     let hash = sha256(source);
     let mut code = format!(
-        "{OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-SHA256: {hash}\n\nuse bootstrap::DomainBinding;\n\nuse crate::SharedRuntimeDeps;\n\npub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>> {{\n    Ok(vec![\n"
+        "{OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-SHA256: {hash}\n\nuse anyhow::Context as _;\nuse bootstrap::DomainBinding;\n\nuse crate::SharedRuntimeDeps;\n\npub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>> {{\n    Ok(vec![\n"
     );
     for domain in &manifest.domains {
         let module = module_name(*domain)?;
         code.push_str(&format!(
-            "        crate::domains::{module}::module(deps).await?,\n"
+            "        crate::domains::{module}::module(deps)\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
+        ));
+    }
+    code.push_str("    ])\n}\n\n#[cfg(test)]\npub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\n    Ok(vec![\n");
+    for domain in &manifest.domains {
+        let module = module_name(*domain)?;
+        code.push_str(&format!(
+            "        crate::domains::{module}::tests::test_binding()\n            .await\n            .context(\"wire test domain '{module}'\")?,\n"
         ));
     }
     code.push_str("    ])\n}\n");
@@ -346,7 +353,7 @@ purpose = "test"
 
     #[test]
     fn render_modules_golden_preserves_manifest_order() -> Result<()> {
-        let source = manifest(r#""identity", "settings", "audit""#);
+        let source = manifest(r#""settings", "identity", "audit""#);
         let parsed = AssemblyManifest::from_toml_str(&source)?;
         let rendered = render_modules(
             &parsed,
@@ -356,7 +363,10 @@ purpose = "test"
         assert!(rendered.starts_with(OWNERSHIP_MARKER));
         assert!(rendered.contains("// Source: assemblies/runtime/assembly.toml"));
         assert!(rendered.contains("// Source-SHA256: sha256:"));
-        assert_eq!(rendered.matches("::module(deps).await?").count(), 3);
+        assert_eq!(rendered.matches("::module(deps)").count(), 3);
+        assert_eq!(rendered.matches(".context(\"wire domain '").count(), 3);
+        assert!(rendered.contains("pub(crate) async fn wire_test_domains"));
+        assert_eq!(rendered.matches("::tests::test_binding()").count(), 3);
         let identity = rendered
             .find("domains::identity")
             .ok_or_else(|| anyhow::anyhow!("missing identity call"))?;
@@ -366,7 +376,17 @@ purpose = "test"
         let audit = rendered
             .find("domains::audit")
             .ok_or_else(|| anyhow::anyhow!("missing audit call"))?;
-        assert!(identity < settings && settings < audit);
+        assert!(settings < identity && identity < audit);
+        let test_settings = rendered
+            .find("domains::settings::tests::test_binding")
+            .ok_or_else(|| anyhow::anyhow!("missing settings test call"))?;
+        let test_identity = rendered
+            .find("domains::identity::tests::test_binding")
+            .ok_or_else(|| anyhow::anyhow!("missing identity test call"))?;
+        let test_audit = rendered
+            .find("domains::audit::tests::test_binding")
+            .ok_or_else(|| anyhow::anyhow!("missing audit test call"))?;
+        assert!(test_settings < test_identity && test_identity < test_audit);
         assert!(!rendered.contains("provider"));
         assert!(!rendered.contains("std::env"));
         syn::parse_file(&rendered)?;
@@ -376,7 +396,7 @@ purpose = "test"
     #[test]
     fn generated_runtime_modules_are_non_empty_and_check_clean() -> Result<()> {
         let root = test_root("assembly-modules-green")?;
-        write_manifest(&root, r#""identity", "settings", "audit""#)?;
+        write_manifest(&root, r#""settings", "identity", "audit""#)?;
         generate_root(&root, false)?;
         generate_root(&root, true)?;
         let first = fs::read(output(&root))?;
@@ -384,8 +404,8 @@ purpose = "test"
         assert_eq!(fs::read(output(&root))?, first);
         assert!(
             first
-                .windows(b"domains::identity".len())
-                .any(|w| w == b"domains::identity")
+                .windows(b"domains::settings".len())
+                .any(|w| w == b"domains::settings")
         );
         fs::remove_dir_all(root)?;
         Ok(())

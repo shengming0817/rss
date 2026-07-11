@@ -180,7 +180,7 @@ type marker + rustdoc 约定守约束。在 Rust 里很多约束**编译期免�
 - **组合根 / `module()`**：当前 `bootstrap` 已落私有字段 `DomainBinding`、`DomainBinding::new` 与受控
   `compose_bindings(&mut Vec<DomainBinding>)`；只有 compose 成功才返回只含 probes/resources/workers 的聚合 output，
   失败保持 bindings/outputs 原样。runtime 的 settings/identity/audit 已有返回 `DomainBinding` 的 `module()`；live
-  generated list 与 `compose_bindings` 切换由 #1672 继续完成，当前 live 仍由 typed `wire_X` 手工接线。adapter↔域绑定在 `bins/server` /
+  generated list 与 `compose_bindings` 已由 #1672 接入 live runtime；typed route/subscriber capability 在 `Registry` 中一次性交接。adapter↔域绑定在 `bins/server` /
   assembly 用构造器注入完成（无独立 cellmodules 层）。GoCell 的 `cellmodules/{eventtransport,replaydeps,sagaprojectiondeps}`
   等 topology-gated resolver 内联为 `bootstrap` 子模块（按 `Topology` 单源选型 eventbus / claimer / nonce / saga 投影依赖）。
 - **Init fail-fast**：`fn init(&self, reg: &mut Registry) -> Result<(), KernelError>`；必填依赖走构造器必填参数

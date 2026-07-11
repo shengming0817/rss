@@ -3994,6 +3994,7 @@ dependencies = [
  "audit",
  "authn",
  "base64",
+ "bootstrap",
  "consistency",
  "diagctx",
  "diport",

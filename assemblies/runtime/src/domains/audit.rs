@@ -81,19 +81,6 @@ pub(crate) fn build_audit_hasher(
     })
 }
 
-/// Wire the typed audit domain using the postgres audit capability projection.
-///
-/// The domain receives only `PgDomainDeps<caps::Audit>`-derived repositories, so it cannot obtain
-/// identity/settings repositories or a raw pool. Both scoped and optional admin repositories use
-/// independently constructed hashers from the same required chain-key configuration.
-///
-/// # Errors
-///
-/// Returns an error when the audit chain key is missing, malformed, or weaker than 32 bytes.
-pub fn wire_audit(deps: &SharedRuntimeDeps) -> anyhow::Result<AuditDomain<PgAuthAuditSink>> {
-    wire_audit_from(deps.pg.for_domain(), |name| std::env::var(name).ok())
-}
-
 fn wire_audit_from(
     audit_deps: PgDomainDeps<caps::Audit>,
     get: impl Fn(&str) -> Option<String>,
@@ -117,7 +104,7 @@ fn wire_audit_from(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use bootstrap::compose_bindings;
 
@@ -138,7 +125,7 @@ pub(super) mod tests {
         }
     }
 
-    pub(in crate::domains) async fn test_binding() -> anyhow::Result<DomainBinding> {
+    pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
         let source = TestModuleSource {
             pg: postgres::PgRuntimeDeps::for_module_test(),
             encoded_key: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]),

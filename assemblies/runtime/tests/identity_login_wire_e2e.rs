@@ -31,9 +31,8 @@ use identity::ports::{Role, RoleRepo as _, TenantId, TenantRepoScope};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, caps};
 use primitives::ListenerKind;
-use runtime::{
-    SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, wire_identity_with, wire_settings,
-};
+use runtime::test_support::{wire_identity_with, wire_settings};
+use runtime::{SharedRuntimeDeps, SystemClock, TracingAuthAuditSink};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
@@ -453,7 +452,6 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
-        identity_domain.primary_authorizer(),
     )? {
         let (listener, routes) = assembled.into_parts();
         if listener == ListenerKind::Primary {
@@ -690,7 +688,6 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         Arc::new(test_provider()),
         httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         Arc::new(SystemClock),
-        identity_domain.primary_authorizer(),
     )? {
         let (listener, routes) = assembled.into_parts();
         if listener == ListenerKind::Primary {

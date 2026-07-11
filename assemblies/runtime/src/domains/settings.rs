@@ -152,7 +152,8 @@ pub async fn module(source: &impl SettingsModuleSource) -> anyhow::Result<Domain
 /// # Errors
 ///
 /// Returns an error when key-provider readiness fails or stable probe names cannot be constructed.
-pub async fn wire_settings(
+#[cfg(any(test, feature = "integration"))]
+pub(crate) async fn wire_settings(
     deps: &SharedRuntimeDeps,
 ) -> anyhow::Result<(SettingsDomain, DomainModuleResult)> {
     wire_settings_from(deps).await
@@ -216,7 +217,7 @@ fn settings_module_result(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::Engine as _;
     use bootstrap::compose_bindings;
@@ -355,7 +356,7 @@ pub(super) mod tests {
         }
     }
 
-    pub(in crate::domains) async fn test_binding() -> anyhow::Result<DomainBinding> {
+    pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
         let source = TestModuleSource {
             pg: postgres::PgRuntimeDeps::for_module_test(),
         };

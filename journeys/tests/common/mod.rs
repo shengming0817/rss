@@ -488,9 +488,9 @@ pub fn session_created_subscription(
         .drain_subscribers()
         .into_iter()
         .find(|sub| {
-            sub.contract_id == session_created::CONTRACT_ID
-                && sub.topic == session_created::TOPIC
-                && sub.consumer == "audit"
+            sub.contract_id() == session_created::CONTRACT_ID
+                && sub.topic() == session_created::TOPIC
+                && sub.consumer() == "audit"
         })
         .ok_or_else(|| anyhow::anyhow!("session-created 订阅缺失"))
 }

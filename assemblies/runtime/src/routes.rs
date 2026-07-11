@@ -210,7 +210,8 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 auth finalizer + 外层验签桥
 /// + rate-limit 中间件（组合根叠加点，INVARIANT RATELIMIT-BEFORE-AUTH-01）。
 ///
-/// Primary listener：`finalize_primary_auth_with_audit(routes, plan, ..., primary_authorizer)` 注入
+/// Primary listener：从 Registry 一次性取得 authorizer，再由
+/// `finalize_primary_auth_with_audit(routes, plan, ..., primary_authorizer)` 注入
 /// `RouteAuthorizer`；Admin listener 也注入同一 Authorizer 供 field projection 消费；其它非 Primary
 /// listener：`finalize_auth_with_audit(routes, plan, ...)`。三者均消费
 /// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
@@ -226,7 +227,7 @@ fn default_rate_quota() -> ratelimit::QuotaConfig {
 /// Health listener 由 [`health_listener`] 单独构造、**不经本函数、不叠限流**——探针不限速（k8s
 /// liveness/readiness 在高负载下不应被限流触发级联重启），有意设计。
 ///
-/// 借 `&mut Registry`（仅 drain `finalize_routes`，**不**消费）：registry 的探针在此后仍存活，组合根经
+/// 借 `&mut Registry`，一次性消费 Primary authorizer 并 drain `finalize_routes`；registry 的探针在此后仍存活，组合根经
 /// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
 /// Health listener 的 readyz handler（每请求 `report`，[`health_listener`]）；整体非 `Sync` 的 `Registry`
 /// 无法进 axum handler 闭包。
@@ -235,16 +236,10 @@ pub fn assemble_authed_routers(
     provider: Arc<OidcProvider>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
-    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
 ) -> anyhow::Result<Vec<AssembledListener>> {
-    assemble_authed_routers_from(
-        registry,
-        provider,
-        audit_sink,
-        audit_clock,
-        primary_authorizer,
-        |name| std::env::var(name).ok(),
-    )
+    assemble_authed_routers_from(registry, provider, audit_sink, audit_clock, |name| {
+        std::env::var(name).ok()
+    })
 }
 
 pub(crate) fn assemble_authed_routers_from(
@@ -252,9 +247,11 @@ pub(crate) fn assemble_authed_routers_from(
     provider: Arc<OidcProvider>,
     audit_sink: httpserve::AuditSinkHandle,
     audit_clock: Arc<dyn diport::Clock>,
-    primary_authorizer: Arc<dyn httpserve::RouteAuthorizer>,
     get: impl Fn(&str) -> Option<String> + Copy,
 ) -> anyhow::Result<Vec<AssembledListener>> {
+    let primary_authorizer = registry
+        .take_primary_authorizer()
+        .context("take Primary route authorizer")?;
     // 默认限流配额（owner=组合根，可调）：10 req/s，burst 20。peer-IP keyed（见 #1106 / RealIP follow-up）。
     // 共享跨所有 listener——统一 per-IP 预算，避免分散 listener 各自独立 bucket 使 burst 预算 N 倍膨胀。
     //
@@ -632,7 +629,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn assemble_empty_registry_yields_no_routers() {
+    fn assemble_without_primary_authorizer_fails_closed() {
         let secret = B64.encode([7u8; 32]);
         let provider = Arc::new(
             provider_from_b64(
@@ -647,15 +644,18 @@ mod tests {
             .expect("provider"),
         );
         let mut registry = bootstrap::compose(&[]).expect("compose empty");
-        let routers = assemble_authed_routers(
+        let error = assemble_authed_routers(
             &mut registry,
             provider,
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             Arc::new(SystemClock),
-            allow_authorizer(),
         )
-        .expect("assemble ok");
-        assert!(routers.is_empty(), "空域图 ⇒ 无 per-listener router");
+        .err()
+        .expect("missing Primary authorizer must fail closed");
+        assert!(
+            error.to_string().contains("take Primary route authorizer"),
+            "error preserves safe assembly context: {error}"
+        );
     }
 
     #[tokio::test]
@@ -702,13 +702,15 @@ mod tests {
                 )?)
             })
             .expect("internal route group");
+        registry
+            .register_primary_authorizer(allow_authorizer())
+            .expect("Primary authorizer registered");
 
         let listeners = assemble_authed_routers_from(
             &mut registry,
             runtime_test_provider(),
             httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             Arc::new(SystemClock),
-            allow_authorizer(),
             |name| {
                 (name == INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV)
                     .then(|| "spiffe://example.org/ns/rss/sa/internal".to_string())

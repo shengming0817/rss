@@ -24,6 +24,8 @@ primitives = { path = "../../crates/primitives" }
 tracewire = { path = "../../crates/tracewire" }
 # 实现 diport 已冻 DI port trait（ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
+# Durable settings ConsumerTx 接受 domain 注册的窄型 effect，不接 concrete SettingsService。
+bootstrap = { path = "../../crates/bootstrap" }
 # Implements eventexec's DLQ inspection/replay service port (#1214).
 eventexec = { path = "../../crates/eventexec" }
 # Consumes authn-owned sealed projection maintenance receipts at adapter I/O boundaries.

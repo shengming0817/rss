@@ -199,7 +199,7 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   `compose_bindings(&mut Vec<DomainBinding>)`;该受控出口只在 compose 成功后返回聚合 `DomainModuleResult`,失败保持
   bindings/outputs 原样。runtime 的 settings/identity/audit 已有统一 async `module(&impl XModuleSource) ->
   Future<Result<DomainBinding>>`；各 source trait sealed，生产实现仅 `SharedRuntimeDeps`，测试实现仅注入同域 provider。
-  generated list 与 live `compose_bindings` 切换由 #1672 继续完成，当前 live 仍由 typed `wire_X` 手工接线。
+  generated list 已由 #1672 接入 live `compose_bindings`；`assembly.toml` 顺序是唯一域构造、声明注册与生命周期输出聚合顺序。
   adapter↔域绑定在 `bins/server` / assembly 用构造器注入完成(无独立组合层)。
   topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。

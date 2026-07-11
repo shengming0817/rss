@@ -11,6 +11,7 @@
 use crate::domain::KernelError;
 use httpserve::{Listener, ListenerRouter, UnfinalizedRoutes};
 use primitives::ListenerKind;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 /// 路由组注册的延迟闭包类型（listener-typed，#1103）。
 ///
@@ -34,29 +35,100 @@ pub(crate) struct RouteGroupDecl {
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
 ///
-/// contract_id、topic、consumer domain、consumer group 四元组；经 [`Registry::drain_subscribers`]
-/// 转为 [`SubscriberBinding`] 交组合根接 eventexec 分发驱动。
+/// contract_id、topic、consumer domain、consumer group 与闭枚举 execution policy 五元绑定；经
+/// [`Registry::drain_subscribers`] 转为 [`SubscriberBinding`]，由组合根一次解析为封闭执行计划。
 pub(crate) struct SubscriberDecl {
     pub(crate) contract_id: &'static str,
     pub(crate) topic: &'static str,
     pub(crate) consumer: &'static str,
     pub(crate) group: consistency::ConsumerGroup,
+    pub(crate) execution: SubscriberExecution,
+}
+
+/// 域事件 effect 的 framework-neutral 执行接缝。
+///
+/// 输入 provider-neutral [`diport::Message`] 与已认证 [`vocab::TenantId`]；返回一致性引擎的
+/// [`consistency::HandleResult`]，由唯一 consumer transaction funnel 决定 ack/requeue/reject。
+/// `Arc` 使同一域实例捕获的 effect 可在声明、bridge 与 durable consumer 间共享，而不暴露 concrete service。
+pub type SubscriberEffect = Arc<
+    dyn Fn(
+            diport::Message,
+            vocab::TenantId,
+        ) -> Pin<Box<dyn Future<Output = consistency::HandleResult> + Send + 'static>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// 订阅的唯一执行模式。
+///
+/// 闭枚举使每条声明必须显式选择 adapter-native durable handler 或域 effect；不存在 `None`/默认回退。
+///
+/// INVARIANT: DOMAIN-TYPED-HANDOFF-01 { level = "Hard", exec = "native-compile", source = "code", native = "closed enum plus private binding fields" }—— domain service 不经 generic bag 外泄：execution 模式穷尽，binding 字段私有，route authorizer 只经专用 typed slot 交接。
+pub enum SubscriberExecution {
+    /// durable handler 由 adapter 的唯一 `ConsumerTx` registry 提供。
+    AdapterNative,
+    /// durable handler 调用域注册的窄型 effect。
+    DomainEffect(SubscriberEffect),
 }
 
 /// finalize 后交组合根的订阅绑定（从 [`SubscriberDecl`] 展开）。
 ///
 /// 组合根据此校验 generated topology identity：`topic` 用于 broker 订阅；
 /// `consumer` 用于 ConsumerMeta/DLX/metrics 归因；`group` 传 ConsumerBase；`contract_id` 提供契约来源（审计/追踪）；
-/// durable 执行由组合根唯一的 `ConsumerTx` registry 提供，不在声明层携带第二套 handler。
+/// `execution` 显式区分 adapter-native `ConsumerTx` 与域 effect，并随 topology identity 一起受控消费。
 pub struct SubscriberBinding {
     /// 契约 ID（对应 `generated` 中的 `CONTRACT_ID` 常量）。
-    pub contract_id: &'static str,
+    contract_id: &'static str,
     /// broker topic（对应 `generated` 中的 `TOPIC` 常量）。
-    pub topic: &'static str,
+    topic: &'static str,
     /// 消费者域 DomainId（对应 generated `EventSpec::subscriptions()` 中的 typed consumer）。
-    pub consumer: &'static str,
+    consumer: &'static str,
     /// 消费者组（稳定标识，幂等去重 PK 的第二维度）。
-    pub group: consistency::ConsumerGroup,
+    group: consistency::ConsumerGroup,
+    /// 订阅的显式执行模式。
+    execution: SubscriberExecution,
+}
+
+impl SubscriberBinding {
+    /// 契约 ID。
+    pub fn contract_id(&self) -> &'static str {
+        self.contract_id
+    }
+
+    /// broker topic。
+    pub fn topic(&self) -> &'static str {
+        self.topic
+    }
+
+    /// 消费者域。
+    pub fn consumer(&self) -> &'static str {
+        self.consumer
+    }
+
+    /// 消费者组。
+    pub fn group(&self) -> &consistency::ConsumerGroup {
+        &self.group
+    }
+
+    /// 一次性拆出完整绑定；execution 与 topology identity 不可被遗忘地分离消费。
+    pub fn into_parts(
+        self,
+    ) -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        consistency::ConsumerGroup,
+        SubscriberExecution,
+    ) {
+        (
+            self.contract_id,
+            self.topic,
+            self.consumer,
+            self.group,
+            self.execution,
+        )
+    }
 }
 
 /// 健康探针声明（由 [`Registry::probe`] 收集）。
@@ -136,6 +208,7 @@ pub struct Registry {
     route_groups: Vec<RouteGroupDecl>,
     subscribers: Vec<SubscriberDecl>,
     probes: Vec<ProbeDecl>,
+    primary_authorizer: Option<Arc<dyn httpserve::RouteAuthorizer>>,
 }
 
 impl Registry {
@@ -145,6 +218,7 @@ impl Registry {
             route_groups: Vec::new(),
             subscribers: Vec::new(),
             probes: Vec::new(),
+            primary_authorizer: None,
         }
     }
 
@@ -180,7 +254,7 @@ impl Registry {
         Ok(())
     }
 
-    /// 声明事件订阅（generated topology identity 四元组）。
+    /// 声明事件订阅（generated topology identity + execution policy 五元绑定）。
     ///
     /// - `contract_id`：契约 ID，取自 `generated::event::<domain_v1>::CONTRACT_ID`。
     /// - `topic`：broker routing key，取自 `generated::event::<domain_v1>::TOPIC`。
@@ -189,9 +263,12 @@ impl Registry {
     /// - `group`：消费者组（[`consistency::ConsumerGroup`]），幂等去重 PK 的第二维度；
     ///   取自消费域 const，经 `ConsumerGroup::parse(...)` 构造——失败须冒泡为 [`KernelError::Subscriber`]，
     ///   不得在 init 内 `unwrap`/`expect`。
+    /// - `execution`：闭枚举执行策略。`AdapterNative` 由 adapter 的 typed `ConsumerTx`
+    ///   构造 handler；`DomainEffect` 捕获域内同一 service 实例并经窄型 effect 执行。
     ///
     /// 组合根 finalize 经 [`Registry::drain_subscribers`] 取出 [`SubscriberBinding`] 校验 generated topology，
-    /// durable handler 唯一由 `ConsumerTx` registry 派发。
+    /// durable bridge 必须把 topology identity 与 execution 同批解析为唯一封闭执行计划；缺失或错配
+    /// 一律 fail-closed，不得默认、fallback 或另建 handler registry。
     /// DomainId = 注册域，由注册时机隐式记录（不作为参数，避免与 contract owner 语义冲突）。
     pub fn subscriber(
         &mut self,
@@ -199,14 +276,41 @@ impl Registry {
         topic: &'static str,
         consumer: &'static str,
         group: consistency::ConsumerGroup,
+        execution: SubscriberExecution,
     ) -> Result<(), KernelError> {
         self.subscribers.push(SubscriberDecl {
             contract_id,
             topic,
             consumer,
             group,
+            execution,
         });
         Ok(())
+    }
+
+    /// 注册 Primary listener 的唯一 authorizer。
+    ///
+    /// 重复注册拒绝且保留原实例，避免域路由与 auth finalize 静默使用不同 authorizer。
+    pub fn register_primary_authorizer(
+        &mut self,
+        authorizer: Arc<dyn httpserve::RouteAuthorizer>,
+    ) -> Result<(), KernelError> {
+        if self.primary_authorizer.is_some() {
+            return Err(KernelError::Invariant);
+        }
+        self.primary_authorizer = Some(authorizer);
+        Ok(())
+    }
+
+    /// 一次性取出 Primary listener authorizer。
+    ///
+    /// 缺失（包括二次 take）fail-closed，拒绝在没有授权器时完成 Primary routes。
+    pub fn take_primary_authorizer(
+        &mut self,
+    ) -> Result<Arc<dyn httpserve::RouteAuthorizer>, KernelError> {
+        self.primary_authorizer
+            .take()
+            .ok_or(KernelError::MissingDependency)
     }
 
     /// 声明健康探针。
@@ -360,6 +464,7 @@ impl Registry {
                 topic: d.topic,
                 consumer: d.consumer,
                 group: d.group,
+                execution: d.execution,
             })
             .collect()
     }
@@ -426,7 +531,7 @@ mod smoke {
 mod collect {
     //! Registry 声明收集 + 取出（RW-G1 已写实）：route_group / subscriber 收集，
     //! route_groups() / drain_subscribers() 取出，compose 跨域聚合。
-    use super::Registry;
+    use super::{Registry, SubscriberExecution};
     use crate::domain::{Domain, KernelError, compose};
     use httpserve::Primary;
     use primitives::ListenerKind;
@@ -445,6 +550,7 @@ mod collect {
             "identity.session-created",
             "audit",
             group,
+            SubscriberExecution::AdapterNative,
         )
         .expect("subscriber declared");
 
@@ -454,12 +560,15 @@ mod collect {
         assert_eq!(groups[0].1, "/api/v1/identity");
         assert_eq!(reg.probe_count(), 0);
 
-        let subs = reg.drain_subscribers();
-        assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].contract_id, "identity.session-created");
-        assert_eq!(subs[0].topic, "identity.session-created");
-        assert_eq!(subs[0].consumer, "audit");
-        assert_eq!(subs[0].group.as_str(), "audit.session-created");
+        let mut subs = reg.drain_subscribers().into_iter();
+        let (contract_id, topic, consumer, group, execution) =
+            subs.next().expect("subscriber binding").into_parts();
+        assert!(subs.next().is_none());
+        assert_eq!(contract_id, "identity.session-created");
+        assert_eq!(topic, "identity.session-created");
+        assert_eq!(consumer, "audit");
+        assert_eq!(group.as_str(), "audit.session-created");
+        assert!(matches!(execution, SubscriberExecution::AdapterNative));
     }
 
     struct TwoGroupDomain;
@@ -468,7 +577,13 @@ mod collect {
             let group = consistency::ConsumerGroup::parse("domain-a.topic-a")
                 .map_err(|_| KernelError::Subscriber)?;
             reg.route_group::<Primary>("/api/v1/a", Ok)?;
-            reg.subscriber("contract.topic-a", "topic.a", "domain-a", group)?;
+            reg.subscriber(
+                "contract.topic-a",
+                "topic.a",
+                "domain-a",
+                group,
+                SubscriberExecution::AdapterNative,
+            )?;
             Ok(())
         }
     }
@@ -477,7 +592,13 @@ mod collect {
         fn init(&self, reg: &mut Registry) -> Result<(), KernelError> {
             let group = consistency::ConsumerGroup::parse("domain-b.topic-b")
                 .map_err(|_| KernelError::Subscriber)?;
-            reg.subscriber("contract.topic-b", "topic.b", "domain-b", group)?;
+            reg.subscriber(
+                "contract.topic-b",
+                "topic.b",
+                "domain-b",
+                group,
+                SubscriberExecution::AdapterNative,
+            )?;
             Ok(())
         }
     }
@@ -489,12 +610,12 @@ mod collect {
         assert_eq!(reg.route_groups().len(), 1);
         let subs = reg.drain_subscribers();
         assert_eq!(subs.len(), 2);
-        assert_eq!(subs[0].topic, "topic.a");
-        assert_eq!(subs[0].contract_id, "contract.topic-a");
-        assert_eq!(subs[0].group.as_str(), "domain-a.topic-a");
-        assert_eq!(subs[1].topic, "topic.b");
-        assert_eq!(subs[1].contract_id, "contract.topic-b");
-        assert_eq!(subs[1].group.as_str(), "domain-b.topic-b");
+        assert_eq!(subs[0].topic(), "topic.a");
+        assert_eq!(subs[0].contract_id(), "contract.topic-a");
+        assert_eq!(subs[0].group().as_str(), "domain-a.topic-a");
+        assert_eq!(subs[1].topic(), "topic.b");
+        assert_eq!(subs[1].contract_id(), "contract.topic-b");
+        assert_eq!(subs[1].group().as_str(), "domain-b.topic-b");
     }
 
     struct FailingDomain;
@@ -512,12 +633,121 @@ mod collect {
 }
 
 #[cfg(test)]
+mod typed_handoff {
+    use super::{Registry, SubscriberEffect, SubscriberExecution};
+    use crate::domain::KernelError;
+    use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer};
+    use std::{future::Future, pin::Pin, sync::Arc};
+
+    struct AllowAuthorizer;
+
+    impl RouteAuthorizer for AllowAuthorizer {
+        fn authorize<'a>(
+            &'a self,
+            _request: RouteAuthorizationRequest,
+        ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
+            Box::pin(async { RouteAuthorizationDecision::Allow })
+        }
+    }
+
+    fn authorizer() -> Arc<dyn RouteAuthorizer> {
+        Arc::new(AllowAuthorizer)
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn primary_authorizer_missing_and_take_is_one_shot() {
+        let mut reg = Registry::new();
+        assert!(matches!(
+            reg.take_primary_authorizer(),
+            Err(KernelError::MissingDependency)
+        ));
+
+        let expected = authorizer();
+        reg.register_primary_authorizer(Arc::clone(&expected))
+            .expect("first authorizer registration succeeds");
+        let taken = reg
+            .take_primary_authorizer()
+            .expect("registered authorizer can be taken");
+        assert!(Arc::ptr_eq(&expected, &taken));
+        assert!(matches!(
+            reg.take_primary_authorizer(),
+            Err(KernelError::MissingDependency)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn duplicate_primary_authorizer_is_rejected_without_replacement() {
+        let mut reg = Registry::new();
+        let expected = authorizer();
+        reg.register_primary_authorizer(Arc::clone(&expected))
+            .expect("first authorizer registration succeeds");
+
+        assert!(matches!(
+            reg.register_primary_authorizer(authorizer()),
+            Err(KernelError::Invariant)
+        ));
+        let taken = reg
+            .take_primary_authorizer()
+            .expect("original authorizer remains registered");
+        assert!(Arc::ptr_eq(&expected, &taken));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn subscriber_execution_is_ordered_and_consumed_with_identity() {
+        let group_a =
+            consistency::ConsumerGroup::parse("audit.native").expect("valid consumer group");
+        let group_b =
+            consistency::ConsumerGroup::parse("settings.effect").expect("valid consumer group");
+        let effect: SubscriberEffect =
+            Arc::new(|_message, _tenant_id| Box::pin(async { consistency::HandleResult::ack() }));
+        let mut reg = Registry::new();
+        reg.subscriber(
+            "audit.native",
+            "audit.native",
+            "audit",
+            group_a,
+            SubscriberExecution::AdapterNative,
+        )
+        .expect("native subscriber declared");
+        reg.subscriber(
+            "settings.effect",
+            "settings.effect",
+            "settings",
+            group_b,
+            SubscriberExecution::DomainEffect(Arc::clone(&effect)),
+        )
+        .expect("effect subscriber declared");
+
+        let mut bindings = reg.drain_subscribers().into_iter();
+        let (contract_id, topic, consumer, group, execution) =
+            bindings.next().expect("first binding").into_parts();
+        assert_eq!(contract_id, "audit.native");
+        assert_eq!(topic, "audit.native");
+        assert_eq!(consumer, "audit");
+        assert_eq!(group.as_str(), "audit.native");
+        assert!(matches!(execution, SubscriberExecution::AdapterNative));
+
+        let (contract_id, _, _, _, execution) =
+            bindings.next().expect("second binding").into_parts();
+        assert_eq!(contract_id, "settings.effect");
+        let SubscriberExecution::DomainEffect(actual) = execution else {
+            panic!("settings binding must carry domain effect");
+        };
+        assert!(Arc::ptr_eq(&effect, &actual));
+        assert!(bindings.next().is_none());
+    }
+}
+
+#[cfg(test)]
 mod finalize {
     //! W 阶段 finalize driver：`readyz_report`（探针 worst-of 聚合）+ `finalize_routes`
     //! （按 listener 分组折叠 typed register 闭包为 per-listener `UnfinalizedRoutes`）。前者复用
     //! `primitives::HealthReport::aggregate`；后者经 typed `route_group::<L>` 守 listener 隔离
     //! （ROUTE-LISTENER-TYPED-01 类型层，#1103 Medium→Hard）+ ROUTE-AUTH-FUNNEL-01（无 bindable 出口）。
-    use super::{HealthProbe, HealthReporter, Registry};
+    use super::{HealthProbe, HealthReporter, Registry, SubscriberExecution};
     use crate::domain::KernelError;
     use httpserve::{Internal, Primary};
     use primitives::{HealthCheck, HealthStatus, ListenerKind, ProbeName};
@@ -564,15 +794,21 @@ mod finalize {
         let group =
             consistency::ConsumerGroup::parse("test.drain-group").expect("valid consumer group");
         let mut reg = Registry::new();
-        reg.subscriber("test.drain-topic", "drain.topic", "test-consumer", group)
-            .expect("subscriber declared");
+        reg.subscriber(
+            "test.drain-topic",
+            "drain.topic",
+            "test-consumer",
+            group,
+            SubscriberExecution::AdapterNative,
+        )
+        .expect("subscriber declared");
 
         let bindings = reg.drain_subscribers();
         assert_eq!(bindings.len(), 1, "drain 取出一个绑定");
-        assert_eq!(bindings[0].contract_id, "test.drain-topic");
-        assert_eq!(bindings[0].topic, "drain.topic");
-        assert_eq!(bindings[0].consumer, "test-consumer");
-        assert_eq!(bindings[0].group.as_str(), "test.drain-group");
+        assert_eq!(bindings[0].contract_id(), "test.drain-topic");
+        assert_eq!(bindings[0].topic(), "drain.topic");
+        assert_eq!(bindings[0].consumer(), "test-consumer");
+        assert_eq!(bindings[0].group().as_str(), "test.drain-group");
 
         // 二次 drain 幂等返回空（subscribers 已被 std::mem::take 清空）。
         let second = reg.drain_subscribers();

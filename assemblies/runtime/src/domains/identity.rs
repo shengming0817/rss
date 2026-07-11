@@ -144,32 +144,20 @@ fn build_jwt_issuer_config(
     })
 }
 
-/// Wire the production typed identity domain with an HTTPS-only Vault signer.
-///
-/// Reads JWT, Vault, session, and refresh settings from the process environment. Plaintext Vault
-/// transport is never accepted on this production path.
-///
-/// # Errors
-///
-/// Returns an error when required configuration is absent or invalid, TTL bounds are violated, or
-/// the Vault signer or JWT issuer cannot be constructed.
-pub fn wire_identity(deps: &SharedRuntimeDeps) -> anyhow::Result<IdentityDomain<VaultSigner>> {
-    wire_identity_with(deps, |name| std::env::var(name).ok(), false)
-}
-
-/// Wire the typed identity domain with injectable configuration and Vault HTTP policy.
+/// Integration-only typed identity constructor with injectable configuration and Vault HTTP policy.
 ///
 /// `get` supplies `RSS_VAULT_ADDR`, `RSS_VAULT_TOKEN`, `RSS_VAULT_TRANSIT_MOUNT`,
 /// `RSS_JWT_ISSUER`, `RSS_JWT_AUDIENCE`, `RSS_JWT_ES256_KEY_ID`, and
 /// `RSS_JWT_ACCESS_TTL_SECS`; session and refresh TTL variables are optional and bounded.
 /// `vault_allow_http` exists only for hermetic tests with a loopback mock Vault. Production callers
-/// use [`wire_identity`], which is HTTPS-only.
+/// production generated module path is HTTPS-only.
 ///
 /// # Errors
 ///
 /// Returns an error when required configuration is absent or invalid, TTL bounds are violated, or
 /// the Vault signer or JWT issuer cannot be constructed.
-pub fn wire_identity_with(
+#[cfg(feature = "integration")]
+pub(crate) fn wire_identity_with(
     deps: &SharedRuntimeDeps,
     get: impl Fn(&str) -> Option<String>,
     vault_allow_http: bool,
@@ -253,7 +241,7 @@ fn wire_identity_from(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use bootstrap::compose_bindings;
 
@@ -291,7 +279,7 @@ pub(super) mod tests {
         }
     }
 
-    pub(in crate::domains) async fn test_binding() -> anyhow::Result<DomainBinding> {
+    pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
         let source = TestModuleSource {
             pg: postgres::PgRuntimeDeps::for_module_test(),
         };

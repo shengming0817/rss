@@ -2,9 +2,8 @@
 //!
 //! Each module keeps its typed `wire_*` entrypoint and exposes one async Phase 4 ownership funnel
 //! that returns `anyhow::Result<DomainBinding>`. Production passes `SharedRuntimeDeps`; sealed,
-//! per-domain provider traits let default tests execute the same public entrypoints hermetically
-//! without introducing a generic service bag. The live runtime still uses the typed entrypoints
-//! until #1672 completes typed-handle handoff and generated binding composition.
+//! per-domain provider traits let generated tests execute the same entrypoints hermetically without
+//! introducing a generic service bag. The live runtime consumes the manifest-derived binding list.
 
 pub mod audit;
 pub mod identity;
@@ -13,29 +12,23 @@ pub mod settings;
 #[cfg(test)]
 mod tests {
     use bootstrap::compose_bindings;
+    use diport::ManagedResource as _;
+    use tokio_util::sync::CancellationToken;
 
-    use super::{audit, identity, settings};
+    use super::settings;
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn hermetic_modules_compose_in_manifest_order_with_stable_outputs() {
-        let mut bindings = vec![
-            identity::tests::test_binding()
-                .await
-                .expect("identity module builds"),
-            settings::tests::test_binding()
-                .await
-                .expect("settings module builds"),
-            audit::tests::test_binding()
-                .await
-                .expect("audit module builds"),
-        ];
+    async fn generated_modules_compose_in_manifest_order_with_stable_outputs() {
+        let mut bindings = crate::modules_gen::wire_test_domains()
+            .await
+            .expect("generated test domains build");
         assert_eq!(
             bindings
                 .iter()
                 .map(bootstrap::DomainBinding::name)
                 .collect::<Vec<_>>(),
-            ["identity", "settings", "audit"]
+            ["settings", "identity", "audit"]
         );
 
         let (_, output) = compose_bindings(&mut bindings).expect("domain modules compose");
@@ -49,7 +42,17 @@ mod tests {
             output.probes[1].0.as_str(),
             crate::infra::vault::KEYPROVIDER_READY_PROBE_NAME
         );
-        assert!(output.resources.is_empty());
-        assert_eq!(output.workers.len(), 1);
+        let resource_names = output
+            .resources
+            .iter()
+            .map(|resource| resource.name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(resource_names, Vec::<String>::new());
+        let worker_names = output
+            .workers
+            .into_iter()
+            .map(|worker| worker(CancellationToken::new()).name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(worker_names, ["settings-test-worker"]);
     }
 }

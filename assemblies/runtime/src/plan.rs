@@ -284,7 +284,7 @@ kind = "internal"
         assert_eq!(summary.name(), "runtime");
         assert_eq!(summary.profile(), "demo");
         assert_eq!(summary.topology(), "durable-shared");
-        assert_eq!(summary.domains(), ["identity", "settings", "audit"]);
+        assert_eq!(summary.domains(), ["settings", "identity", "audit"]);
         assert_eq!(
             summary.listeners(),
             ["primary", "internal", "admin", "health"]

@@ -9,6 +9,8 @@
 //! compares the generated runtime assembly baseline with the committed `runtime-baseline/runtime.txt`
 //! and fails on missing baseline, content drift, empty dependency/provider inventories, or missing
 //! required wiring anchors. Synthetic red/green tests cover every failure class.
+//!
+//! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
@@ -16,7 +18,8 @@ use anyhow::{Context, Result};
 use assembly_schema::AssemblyManifest;
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use syn::visit::Visit;
 
 const BASELINE_PATH: &str = "runtime-baseline/runtime.txt";
 const RUNTIME_CARGO_PATH: &str = "assemblies/runtime/Cargo.toml";
@@ -24,6 +27,8 @@ const ASSEMBLY_MANIFEST_PATH: &str = "assemblies/runtime/assembly.toml";
 const SHARED_RUNTIME_DEPS_PATH: &str = "assemblies/runtime/src/module.rs";
 const BOOTSTRAP_MODULE_PATH: &str = "crates/bootstrap/src/module.rs";
 const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
+const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
+const GENERATED_MODULES_PATH: &str = "assemblies/runtime/src/generated/modules_gen.rs";
 const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +38,7 @@ pub(crate) enum Rule {
     EmptyDependencies,
     EmptyDiportProviders,
     MissingAnchor,
+    ForbiddenWiring,
 }
 
 pub(crate) struct RuntimeBaseline;
@@ -175,6 +181,7 @@ fn collect_report(root: &Path) -> Result<Report> {
             ));
         }
     }
+    findings.extend(generated_domains_live_findings(root)?);
 
     Ok(Report {
         rendered: render_baseline(
@@ -192,6 +199,341 @@ fn collect_report(root: &Path) -> Result<Report> {
         anchors: anchors.len(),
         findings,
     })
+}
+
+fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let path = root.join(RUNTIME_LIB_PATH);
+    let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+    let run =
+        extract_braced_body_at(&text, 0, "pub async fn run(").unwrap_or_else(|| empty_scope(&text));
+    let masked_run = mask_comments_and_strings(run.body);
+    let mut findings = Vec::new();
+    for forbidden in [
+        "wire_audit",
+        "wire_identity",
+        "wire_settings",
+        "bootstrap::compose(&[",
+        "domains::audit::module",
+        "domains::identity::module",
+        "domains::settings::module",
+        "let mut domain_bindings = vec!",
+        "DomainBinding::new",
+    ] {
+        if masked_run.contains(forbidden) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                RUNTIME_LIB_PATH,
+                format!("run() 禁止恢复手写 domain wiring: `{forbidden}`"),
+            ));
+        }
+    }
+    if masked_run
+        .matches("modules_gen::wire_domains(&deps)")
+        .count()
+        != 1
+        || !masked_run.contains("let mut domain_bindings = modules_gen::wire_domains(&deps)")
+        || masked_run
+            .matches("bootstrap::compose_bindings(&mut domain_bindings)")
+            .count()
+            != 1
+    {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_LIB_PATH,
+            "run() 必须将唯一 generated domain 结果直接交给 compose_bindings",
+        ));
+    }
+    let assembly = extract_braced_body_at(&text, 0, "fn assemble_runtime_module_outputs(")
+        .unwrap_or_else(|| empty_scope(&text));
+    let masked_assembly = mask_comments_and_strings(assembly.body);
+    if !masked_assembly.contains("module.merge(inputs.domains_module)") {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_LIB_PATH,
+            "generated domains output 未进入 RuntimeModuleAssemblyInputs merge 路径",
+        ));
+    }
+    let masked_file = mask_comments_and_strings(&text);
+    for forbidden_export in [
+        "pub use domains::audit::wire_audit",
+        "pub use domains::identity::{wire_identity",
+        "pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe, wire_settings",
+    ] {
+        if masked_file.contains(forbidden_export) {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                RUNTIME_LIB_PATH,
+                format!("生产 runtime root 禁止重新导出 legacy wiring: `{forbidden_export}`"),
+            ));
+        }
+    }
+    let mut runtime_sources = Vec::new();
+    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut runtime_sources)?;
+    for source_path in runtime_sources {
+        let relative = source_path.strip_prefix(root).unwrap_or(&source_path);
+        if relative == Path::new(GENERATED_MODULES_PATH) {
+            continue;
+        }
+        let source = fs::read_to_string(&source_path)
+            .with_context(|| format!("读 {} 失败", source_path.display()))?;
+        let file = match syn::parse_file(&source) {
+            Ok(file) => file,
+            Err(_) => {
+                // Baseline fixtures intentionally contain isolated, non-compiling anchor
+                // fragments. Keep a narrow canonical-path fallback for those fixtures; real
+                // workspace syntax is independently compile-gated before verify.
+                let masked = mask_comments_and_strings(&source);
+                if [
+                    "crate::domains::settings::module",
+                    "crate::domains::identity::module",
+                    "crate::domains::audit::module",
+                ]
+                .iter()
+                .any(|factory| masked.contains(factory))
+                {
+                    findings.push(finding(
+                        Rule::ForbiddenWiring,
+                        relative.display().to_string(),
+                        "generated artifact 外禁止引用 canonical domain module factory".to_string(),
+                    ));
+                }
+                continue;
+            }
+        };
+        if let Some(factory) =
+            forbidden_domain_factory_usage(&file, relative == Path::new(RUNTIME_LIB_PATH))
+        {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                relative.display().to_string(),
+                format!("generated artifact 外禁止引用 domain module factory: `{factory}`"),
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+#[derive(Default)]
+struct DomainFactoryImports {
+    aliases: BTreeMap<String, Vec<String>>,
+    forbidden: Option<String>,
+}
+
+impl DomainFactoryImports {
+    fn collect_use_tree(
+        &mut self,
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        crate_root: bool,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                self.collect_use_tree(&path.tree, prefix, crate_root);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                let mut path = prefix.clone();
+                let alias = name.ident.to_string();
+                if alias != "self" {
+                    path.push(alias.clone());
+                }
+                self.record_import(alias, path, crate_root);
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut path = prefix.clone();
+                if rename.ident != "self" {
+                    path.push(rename.ident.to_string());
+                }
+                self.record_import(rename.rename.to_string(), path, crate_root);
+            }
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    self.collect_use_tree(tree, prefix, crate_root);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if canonical_domain_module_path(prefix, crate_root).is_some() {
+                    self.forbidden = Some(format!("{}::*", prefix.join("::")));
+                }
+            }
+        }
+    }
+
+    fn record_import(&mut self, alias: String, path: Vec<String>, crate_root: bool) {
+        let resolved = resolve_import_alias(&path, &self.aliases);
+        if canonical_domain_factory_path(&resolved, crate_root).is_some() {
+            self.forbidden = Some(resolved.join("::"));
+        }
+        self.aliases.insert(alias, resolved);
+    }
+}
+
+struct DomainFactoryImportVisitor {
+    imports: DomainFactoryImports,
+    crate_root: bool,
+}
+
+impl<'ast> Visit<'ast> for DomainFactoryImportVisitor {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_cfg_test(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !is_cfg_test(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        let mut prefix = Vec::new();
+        self.imports
+            .collect_use_tree(&item.tree, &mut prefix, self.crate_root);
+    }
+}
+
+struct DomainFactoryPathVisitor<'a> {
+    aliases: &'a BTreeMap<String, Vec<String>>,
+    crate_root: bool,
+    forbidden: Option<String>,
+}
+
+impl<'ast> Visit<'ast> for DomainFactoryPathVisitor<'_> {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_cfg_test(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !is_cfg_test(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+        let raw = expr
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let resolved = resolve_import_alias(&raw, self.aliases);
+        if canonical_domain_factory_path(&resolved, self.crate_root).is_some() {
+            self.forbidden = Some(resolved.join("::"));
+        }
+        syn::visit::visit_expr_path(self, expr);
+    }
+}
+
+fn forbidden_domain_factory_usage(file: &syn::File, crate_root: bool) -> Option<String> {
+    let mut imports = DomainFactoryImportVisitor {
+        imports: DomainFactoryImports::default(),
+        crate_root,
+    };
+    imports.visit_file(file);
+    if imports.imports.forbidden.is_some() {
+        return imports.imports.forbidden;
+    }
+    let mut paths = DomainFactoryPathVisitor {
+        aliases: &imports.imports.aliases,
+        crate_root,
+        forbidden: None,
+    };
+    paths.visit_file(file);
+    paths.forbidden
+}
+
+fn resolve_import_alias(raw: &[String], aliases: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let mut resolved = raw.to_vec();
+    for _ in 0..=aliases.len() {
+        let Some((first, tail)) = resolved.split_first() else {
+            break;
+        };
+        let Some(prefix) = aliases.get(first) else {
+            break;
+        };
+        let next = prefix
+            .iter()
+            .cloned()
+            .chain(tail.iter().cloned())
+            .collect::<Vec<_>>();
+        if next == resolved {
+            break;
+        }
+        resolved = next;
+    }
+    resolved
+}
+
+fn canonical_domain_factory_path(path: &[String], crate_root: bool) -> Option<&str> {
+    let path = canonical_runtime_path(path, crate_root)?;
+    match path {
+        [domains, domain, module]
+            if domains == "domains"
+                && matches!(domain.as_str(), "settings" | "identity" | "audit")
+                && module == "module" =>
+        {
+            Some(domain)
+        }
+        _ => None,
+    }
+}
+
+fn canonical_domain_module_path(path: &[String], crate_root: bool) -> Option<&str> {
+    let path = canonical_runtime_path(path, crate_root)?;
+    match path {
+        [domains, domain]
+            if domains == "domains"
+                && matches!(domain.as_str(), "settings" | "identity" | "audit") =>
+        {
+            Some(domain)
+        }
+        _ => None,
+    }
+}
+
+fn canonical_runtime_path(path: &[String], crate_root: bool) -> Option<&[String]> {
+    match path {
+        [root, tail @ ..] if root == "crate" => Some(tail),
+        _ if crate_root => Some(path),
+        _ => None,
+    }
+}
+
+fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let syn::Meta::List(meta) = &attr.meta else {
+            return false;
+        };
+        if !meta.path.is_ident("cfg") {
+            return false;
+        }
+        let cfg = meta.tokens.to_string().replace(' ', "");
+        cfg == "test" || cfg.starts_with("any(test,") || cfg.contains(",test")
+    })
+}
+
+fn collect_rust_sources(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).with_context(|| format!("读目录 {} 失败", dir.display()))? {
+        let entry = entry.with_context(|| format!("读取 {} 目录项失败", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取 {} 类型失败", path.display()))?;
+        if file_type.is_dir() {
+            collect_rust_sources(&path, paths)?;
+        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,29 +852,19 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let deps = SharedRuntimeDeps {",
     },
     AnchorSpec {
-        id: "run.wire.audit",
+        id: "run.wire.generated-domains",
         path: RUNTIME_LIB_PATH,
-        pattern: "wire_audit(&deps)",
+        pattern: "modules_gen::wire_domains(&deps)",
     },
     AnchorSpec {
-        id: "run.wire.identity",
+        id: "run.module.input.domains",
         path: RUNTIME_LIB_PATH,
-        pattern: "wire_identity(&deps)",
+        pattern: "let (mut registry, domains_module) =",
     },
     AnchorSpec {
-        id: "run.module.input.settings",
+        id: "run.compose.generated-domains",
         path: RUNTIME_LIB_PATH,
-        pattern: "let (settings_domain, settings_module)",
-    },
-    AnchorSpec {
-        id: "run.wire.settings",
-        path: RUNTIME_LIB_PATH,
-        pattern: "wire_settings(&deps)",
-    },
-    AnchorSpec {
-        id: "run.compose",
-        path: RUNTIME_LIB_PATH,
-        pattern: "bootstrap::compose(&[&settings_domain, &identity_domain, &audit_domain])",
+        pattern: "bootstrap::compose_bindings(&mut domain_bindings)",
     },
     AnchorSpec {
         id: "run.module.input.session-sweeper",
@@ -1100,7 +1432,7 @@ serde = { workspace = true, features = ["derive"] }
             r#"
 name = "runtime"
 profile = "demo"
-domains = ["identity", "settings", "audit"]
+domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
 
 [[listeners]]
@@ -1164,7 +1496,7 @@ impl DomainModuleResult {
 
     fn runtime_lib_fixture(omit: Option<&str>) -> String {
         format!(
-            "pub async fn run() {{\n{}\n}}\n",
+            "pub async fn run() {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\n}}\n",
             runtime_anchor_lines(omit)
         )
     }
@@ -1178,7 +1510,11 @@ impl DomainModuleResult {
             if omit == Some(anchor.id) {
                 continue;
             }
-            lines.push(anchor.pattern);
+            if anchor.id == "run.wire.generated-domains" {
+                lines.push("let mut domain_bindings = modules_gen::wire_domains(&deps)");
+            } else {
+                lines.push(anchor.pattern);
+            }
             if anchor.id == "run.shared-deps" {
                 lines.push("}");
             }
@@ -1301,7 +1637,7 @@ serde = workspace=true; features=[derive]
         assert!(
             report
                 .rendered
-                .contains("domains = [identity,settings,audit]")
+                .contains("domains = [settings,identity,audit]")
         );
         assert!(
             report
@@ -1316,8 +1652,8 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("36 | launch.register-plan"));
-        assert!(report.rendered.contains("37 | launch.listeners"));
+        assert!(report.rendered.contains("34 | launch.register-plan"));
+        assert!(report.rendered.contains("35 | launch.listeners"));
         Ok(())
     }
 
@@ -1392,14 +1728,149 @@ kind = "health"
         let root = fixture_root("runtime-baseline-missing-anchor")?;
         write(
             &root.join(RUNTIME_LIB_PATH),
-            &runtime_lib_fixture(Some("run.wire.identity")),
+            &runtime_lib_fixture(Some("run.wire.generated-domains")),
+        )?;
+        let report = collect_report(&root)?;
+        assert!(report.findings.iter().any(|f| {
+            f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.generated-domains")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge() -> Result<()> {
+        let root = fixture_root("runtime-generated-domains-red")?;
+        let extra_source = root.join("assemblies/runtime/src/handwritten.rs");
+        let handwritten = runtime_lib_fixture(None).replace(
+            "modules_gen::wire_domains(&deps)",
+            "modules_gen::wire_domains(&deps)\nwire_settings(&deps)",
+        );
+        write(&root.join(RUNTIME_LIB_PATH), &handwritten)?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
+        );
+
+        let qualified = runtime_lib_fixture(None).replace(
+            "modules_gen::wire_domains(&deps)",
+            "modules_gen::wire_domains(&deps)\ncrate::wire_settings(&deps)",
+        );
+        write(&root.join(RUNTIME_LIB_PATH), &qualified)?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
+        );
+
+        let helper_bypass = runtime_lib_fixture(None)
+            + "\nfn handwritten_helper(deps: &SharedRuntimeDeps) {\ncrate::domains::settings::module(deps);\n}\n";
+        write(&root.join(RUNTIME_LIB_PATH), &helper_bypass)?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
+        );
+
+        write(&root.join(RUNTIME_LIB_PATH), &runtime_lib_fixture(None))?;
+        write(
+            &extra_source,
+            "use crate::domains::settings::module as build_settings;\nfn handwritten_alias_helper(deps: &SharedRuntimeDeps) { build_settings(deps); }\n",
         )?;
         let report = collect_report(&root)?;
         assert!(
-            report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
-            })
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
         );
+        fs::remove_file(&extra_source)?;
+
+        write(
+            &extra_source,
+            "pub use crate::domains::settings::module as build_settings;\n",
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
+        );
+        fs::remove_file(&extra_source)?;
+
+        write(
+            &extra_source,
+            "use crate::domains::settings as settings_domain;\nfn handwritten_module_alias(deps: &SharedRuntimeDeps) { settings_domain::module(deps); }\n",
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
+        );
+        fs::remove_file(&extra_source)?;
+
+        write(
+            &extra_source,
+            "fn handwritten_local_alias(deps: &SharedRuntimeDeps) { let build = crate::domains::settings::module; build(deps); }\n",
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring)
+        );
+        fs::remove_file(&extra_source)?;
+
+        write(
+            &extra_source,
+            "mod settings { pub fn module(_: &SharedRuntimeDeps) {} }\nfn local_helper(deps: &SharedRuntimeDeps) { settings::module(deps); }\n",
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.rule != Rule::ForbiddenWiring),
+            "local same-name module has no domain factory provenance: {:?}",
+            report.findings
+        );
+        fs::remove_file(&extra_source)?;
+
+        write(
+            &extra_source,
+            "#[cfg(test)] mod tests { fn generated_test_helper(deps: &SharedRuntimeDeps) { crate::domains::settings::module(deps); } }\n",
+        )?;
+        let report = collect_report(&root)?;
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.rule != Rule::ForbiddenWiring),
+            "cfg(test) factory seam is outside the production live-path gate: {:?}",
+            report.findings
+        );
+        fs::remove_file(&extra_source)?;
+
+        let missing_merge = runtime_lib_fixture(None).replace(
+            "module.merge(inputs.domains_module);",
+            "let _ = inputs.domains_module;",
+        ) + "\nfn dead_merge_bait(inputs: RuntimeModuleAssemblyInputs) {\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\n}\n";
+        write(&root.join(RUNTIME_LIB_PATH), &missing_merge)?;
+        let report = collect_report(&root)?;
+        assert!(report.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingAnchor
+                && finding.detail.contains("generated domains output")
+        }));
         Ok(())
     }
 
@@ -1615,14 +2086,14 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
             &root.join(RUNTIME_LIB_PATH),
             &format!(
                 "{}\n#[cfg(test)]\nmod tests {{ fn false_positive() {{ {} }} }}\n",
-                runtime_lib_fixture(Some("run.wire.identity")),
-                "wire_identity(&deps);"
+                runtime_lib_fixture(Some("run.wire.generated-domains")),
+                "modules_gen::wire_domains(&deps);"
             ),
         )?;
         let report = collect_report(&root)?;
         assert!(
             report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.generated-domains")
             }),
             "anchor outside run() body must not satisfy runtime wiring baseline"
         );
@@ -1636,15 +2107,15 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
             &root.join(RUNTIME_LIB_PATH),
             &format!(
                 "pub async fn run() {{\n{}\n// {}\nlet _ = {:?};\n}}\n",
-                runtime_anchor_lines(Some("run.wire.identity")),
-                "wire_identity(&deps);",
-                "wire_identity(&deps);"
+                runtime_anchor_lines(Some("run.wire.generated-domains")),
+                "modules_gen::wire_domains(&deps);",
+                "modules_gen::wire_domains(&deps);"
             ),
         )?;
         let report = collect_report(&root)?;
         assert!(
             report.findings.iter().any(|f| {
-                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.identity")
+                f.rule == Rule::MissingAnchor && f.detail.contains("run.wire.generated-domains")
             }),
             "comment/string anchor must not satisfy runtime wiring baseline"
         );

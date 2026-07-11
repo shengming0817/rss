@@ -54,7 +54,9 @@ pub use domaintransport::{
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use module::{DomainBinding, DomainModuleResult, WorkerSpec, compose_bindings};
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
-pub use registry::{HealthProbe, HealthReporter, Registry, SubscriberBinding};
+pub use registry::{
+    HealthProbe, HealthReporter, Registry, SubscriberBinding, SubscriberEffect, SubscriberExecution,
+};
 pub use replaydeps::{IdempotencyConfig, IdempotencyResolveError, RedisUrl, ResolvedIdempotency};
 pub use sagaprojectiondeps::{
     PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError,
