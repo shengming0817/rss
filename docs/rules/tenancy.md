@@ -100,7 +100,7 @@ PG tenant scope 使用 `SET LOCAL` 注入当前事务。tenant-scoped repository
 `sqlx::PgPool`，只持有 opaque `PgTenantPool`；普通 repo 入口只能接收各域本地
 `TenantRepoScope` / `RowRepoScope`，不能接收裸 `TenantId`、`RowVisibility`、`RowScope` 或
 `ScopedTenant`。`PgTenantPool::{read, read_map, write, retry_write, co_tx_with_outbox,
-retry_co_tx_with_outbox}` 同样只接收 sealed scope handle，并且只在 `cotx.rs` 内 lower 成
+retry_co_tx_with_outbox}` 同样只接收 sealed scope handle，并且只在 `cotx` 内 lower 成
 `TenantId` 后执行 `SET LOCAL`。`PgTenantPool` 不暴露 `begin`、`acquire`、raw `PgPool` 或
 `Executor`，因此 tenant 表路径在类型层先被收口到 scoped transaction funnel。绕过该类型入口直接借连接或
 走 global transaction 必须 fail-fast。
@@ -157,7 +157,7 @@ partition liveness 语义。
 **作用域来源**：`TenantId`（`vocab`，fail-closed 解析，空值 / nil / 非 canonical UUID 非法）
 从声明过的认证/预认证通道（JWT tenant claim 或 `X-Tenant-ID` populate-only header，见 §Tenant source）
 流入；域内从已认证/授权证据派生本地 `TenantRepoScope`，repo / `PgTenantPool` 只接收该 sealed handle。
-`adapters/postgres/src/cotx.rs` 是唯一 lower 点：从 scope handle 取 `TenantId`，经
+`adapters/postgres/src/cotx/mod.rs` 是唯一 lower 点：从 scope handle 取 `TenantId`，经
 `set_local_tenant` / `tenant_scoped_read` / `co_tx_with_outbox` 注入当前 PG 事务；永不从 HTTP request body 读取。
 
 **缺失 SET LOCAL 的行为（预期 default-deny）**：若 `SET LOCAL rss.tenant_id` 未注入，
@@ -165,10 +165,10 @@ partition liveness 语义。
 所有 tenant 表**行不可见、写操作被拒**。这是设计预期的 fail-closed 默认拒绝，不是故障；
 无隐式 fallback 或 anonymous 租户。
 
-**单 funnel 强制**：postgres 生产路径所有 `SET LOCAL rss.tenant_id` 注入只经 `cotx.rs`
+**单 funnel 强制**：postgres 生产路径所有 `SET LOCAL rss.tenant_id` 注入只经 `cotx`
 helper 进行；`INVARIANT TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`，Medium
 内容扫描）机器强制：字面量 `set_config('rss.tenant_id'` 仅允许出现在
-`adapters/postgres/src/cotx.rs`（测试代码豁免）。tenant repository 的 Hard 载体是
+`adapters/postgres/src/cotx/mod.rs`（测试代码豁免）。tenant repository 的 Hard 载体是
 各域 `TenantRepoScope` / `RowRepoScope` + `PgTenantPool`：外部代码不能从裸 `TenantId` 构造 scope，
 普通 repo / `PgTenantPool` 也不能用裸 tenant 或 row visibility 调用；tenant repo 无法直接调用 raw pool
 transaction / connection API。

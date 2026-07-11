@@ -1,14 +1,14 @@
 //! `setlocal-funnel` —— tenant-scope SET-LOCAL 单漏斗守卫（AI-robust **Medium** 内容扫描门）。
 //!
 //! 扫 `adapters/postgres/src/` 下全部生产 Rust 源文件，断言 tenant-scope GUC 写入仅出现在
-//! `adapters/postgres/src/cotx.rs`（单 typed 漏斗函数 `set_local_tenant`）。把「租户 scope 注入只经一处」
+//! `adapters/postgres/src/cotx/mod.rs`（单 typed 漏斗函数 `set_local_tenant`）。把「租户 scope 注入只经一处」
 //! 从注释约定升为机器可判定门。检测经**归一化**（去空白 + 小写）匹配 [`FUNNEL_NEEDLES`]——覆盖
 //! `set_config('rss.tenant_id'` 的空白变体与裸 `SET LOCAL rss.tenant_id =/to` 赋值式（不止裸字面量，F4）；
-//! 放行做**路径精确**匹配（相对 src 根的 `cotx.rs`，嵌套同名 `sub/cotx.rs` 不放行，F4）。
+//! 放行做**路径精确**匹配（相对 src 根的 `cotx/mod.rs`，嵌套同名 `sub/cotx.rs` 不放行，F4）。
 //!
 //! INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "verify", source = "code" }—— `set_config('rss.tenant_id'` 字面量在
-//!   生产 postgres adapter 源中只能出现在 `cotx.rs`；任何其他生产文件含此串
-//!   → [`Rule::FunnelEscape`] finding（违反单漏斗）；`cotx.rs` 若完全不含该串
+//!   生产 postgres adapter 源中只能出现在 `cotx/mod.rs`；任何其他生产文件含此串
+//!   → [`Rule::FunnelEscape`] finding（违反单漏斗）；`cotx/mod.rs` 若完全不含该串
 //!   → [`Rule::FunnelAbsent`] finding（守卫真空化——漏斗被移除或重命名）。
 //!
 //! **评级**：Medium（内容扫描门，接入 `cargo xtask verify`，no-compile meta 步）。
@@ -31,10 +31,10 @@ pub(crate) type Finding = diagnostic::Finding<Rule>;
 /// 被违反的规则（供测试精确断言）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
-    /// TENANCY-SETLOCAL-FUNNEL-01：`set_config('rss.tenant_id'` 出现在 `cotx.rs`
+    /// TENANCY-SETLOCAL-FUNNEL-01：`set_config('rss.tenant_id'` 出现在 `cotx/mod.rs`
     /// 以外的生产文件（单漏斗逃逸）。
     FunnelEscape,
-    /// TENANCY-SETLOCAL-FUNNEL-01：`cotx.rs` 完全不含 `set_config('rss.tenant_id'`——
+    /// TENANCY-SETLOCAL-FUNNEL-01：`cotx/mod.rs` 完全不含 `set_config('rss.tenant_id'`——
     /// 漏斗被移除或重命名，守卫真空化（反真空检测）。
     FunnelAbsent,
 }
@@ -43,8 +43,8 @@ pub(crate) enum Rule {
 const FUNNEL_LITERAL: &str = "set_config('rss.tenant_id'";
 
 /// 唯一允许含 funnel 写入的生产文件（**相对 `adapters/postgres/src` 的路径**，路径精确——
-/// 嵌套同名 `sub/cotx.rs` 不放行）。
-const ALLOWED_FILE: &str = "cotx.rs";
+/// 嵌套同名 `sub/cotx.rs` / 历史 `cotx.rs` 单文件形态不放行）。
+const ALLOWED_FILE: &str = "cotx/mod.rs";
 
 /// 归一化（去全部空白 + 小写）后的 tenant-scope GUC **写入**特征。归一化使空白变体（`set_config ( '…`）
 /// 与裸 `SET LOCAL` 赋值式均被覆盖（F4：不止裸字面量）。SET-LOCAL 特征锚定赋值号 `=` / `to`，避开散文注释
@@ -99,7 +99,7 @@ fn load_prod_files(dir: &Path) -> Result<Vec<(String, String)>> {
         if is_test_file(&path) {
             continue;
         }
-        // 相对 src 根的路径（forward-slash 归一），用于路径精确放行 `cotx.rs`（仅 src 根直属）。
+        // 相对 src 根的路径（forward-slash 归一），用于路径精确放行 `cotx/mod.rs`。
         let rel = path
             .strip_prefix(dir)
             .unwrap_or(&path)
@@ -151,8 +151,8 @@ fn is_test_file(path: &Path) -> bool {
 
 /// 主扫描纯函数：输入已过滤的生产文件列表，返回 `(摘要, findings)`。
 ///
-/// - 若任意非 `cotx.rs` 文件含 [`FUNNEL_LITERAL`] → [`Rule::FunnelEscape`]。
-/// - 若 `cotx.rs` 不含 [`FUNNEL_LITERAL`] → [`Rule::FunnelAbsent`]（反真空）。
+/// - 若任意非 `cotx/mod.rs` 文件含 [`FUNNEL_LITERAL`] → [`Rule::FunnelEscape`]。
+/// - 若 `cotx/mod.rs` 不含 [`FUNNEL_LITERAL`] → [`Rule::FunnelAbsent`]（反真空）。
 pub(crate) fn scan_funnel(files: &[(String, String)]) -> (String, Vec<Finding>) {
     let mut findings = Vec::new();
     let mut cotx_has_literal = false;
@@ -185,7 +185,7 @@ pub(crate) fn scan_funnel(files: &[(String, String)]) -> (String, Vec<Finding>) 
     (summary, findings)
 }
 
-/// 判断相对路径是否为允许的漏斗文件（路径精确 `cotx.rs`——src 根直属，嵌套同名不放行）。
+/// 判断相对路径是否为允许的漏斗文件（路径精确 `cotx/mod.rs`——嵌套同名不放行）。
 fn is_cotx_path(rel_path: &str) -> bool {
     rel_path == ALLOWED_FILE
 }
@@ -201,13 +201,13 @@ mod tests {
             .collect()
     }
 
-    // ---- green：仅 cotx.rs 含字面量 → 0 findings ----
+    // ---- green：仅 cotx/mod.rs 含字面量 → 0 findings ----
 
     #[test]
     fn green_only_cotx_has_literal() {
         let fs = files(&[
             (
-                "cotx.rs",
+                "cotx/mod.rs",
                 "pub fn set_local_tenant() { \
                  let _ = sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\"); }",
             ),
@@ -217,17 +217,17 @@ mod tests {
         let (_, findings) = scan_funnel(&fs);
         assert!(
             findings.is_empty(),
-            "仅 cotx.rs 含字面量不应有 findings: {findings:?}"
+            "仅 cotx/mod.rs 含字面量不应有 findings: {findings:?}"
         );
     }
 
-    // ---- red：非 cotx.rs 文件含字面量 → FunnelEscape ----
+    // ---- red：非 cotx/mod.rs 文件含字面量 → FunnelEscape ----
 
     #[test]
     fn red_funnel_escape_non_cotx_file() {
         let fs = files(&[
             (
-                "cotx.rs",
+                "cotx/mod.rs",
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
             (
@@ -245,13 +245,13 @@ mod tests {
         assert_eq!(findings[0].subject, "session_lifecycle.rs");
     }
 
-    // ---- red：多个非 cotx.rs 文件含字面量 → 多条 FunnelEscape ----
+    // ---- red：多个非 cotx/mod.rs 文件含字面量 → 多条 FunnelEscape ----
 
     #[test]
     fn red_multiple_escapes() {
         let fs = files(&[
             (
-                "cotx.rs",
+                "cotx/mod.rs",
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
             (
@@ -275,25 +275,25 @@ mod tests {
         );
     }
 
-    // ---- anti-vacuity：cotx.rs 不含字面量 → FunnelAbsent ----
+    // ---- anti-vacuity：cotx/mod.rs 不含字面量 → FunnelAbsent ----
 
     #[test]
     fn anti_vacuity_funnel_absent_cotx_lacks_literal() {
         let fs = files(&[
-            ("cotx.rs", "pub fn set_local_tenant() {}"),
+            ("cotx/mod.rs", "pub fn set_local_tenant() {}"),
             ("other.rs", "pub fn foo() {}"),
         ]);
         let (_, findings) = scan_funnel(&fs);
         assert_eq!(
             findings.len(),
             1,
-            "cotx.rs 不含字面量应报 FunnelAbsent: {findings:?}"
+            "cotx/mod.rs 不含字面量应报 FunnelAbsent: {findings:?}"
         );
         assert_eq!(findings[0].rule, Rule::FunnelAbsent);
         assert_eq!(findings[0].subject, ALLOWED_FILE);
     }
 
-    // ---- anti-vacuity：无 cotx.rs 文件时 → FunnelAbsent ----
+    // ---- anti-vacuity：无 cotx/mod.rs 文件时 → FunnelAbsent ----
 
     #[test]
     fn anti_vacuity_funnel_absent_no_cotx_file() {
@@ -301,7 +301,7 @@ mod tests {
         let (_, findings) = scan_funnel(&fs);
         assert!(
             findings.iter().any(|f| f.rule == Rule::FunnelAbsent),
-            "无 cotx.rs 应报 FunnelAbsent: {findings:?}"
+            "无 cotx/mod.rs 应报 FunnelAbsent: {findings:?}"
         );
     }
 
@@ -360,7 +360,8 @@ mod tests {
 
     #[test]
     fn is_cotx_path_exact_only() {
-        assert!(is_cotx_path("cotx.rs"));
+        assert!(is_cotx_path("cotx/mod.rs"));
+        assert!(!is_cotx_path("cotx.rs"));
         assert!(!is_cotx_path("cotx2.rs"));
         assert!(!is_cotx_path("session_lifecycle.rs"));
         // 嵌套同名不放行（路径精确，防基名绕过）。
@@ -374,7 +375,7 @@ mod tests {
     fn red_nested_cotx_path_not_allowed() {
         let fs = files(&[
             (
-                "cotx.rs",
+                "cotx/mod.rs",
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
             (
@@ -399,7 +400,7 @@ mod tests {
         // 空白变体的 set_config + 裸 SET LOCAL 赋值，分处两个非 cotx 文件，均应被捕获。
         let fs = files(&[
             (
-                "cotx.rs",
+                "cotx/mod.rs",
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
             (
@@ -429,7 +430,7 @@ mod tests {
     fn green_prose_setlocal_mention_not_flagged() {
         let fs = files(&[
             (
-                "cotx.rs",
+                "cotx/mod.rs",
                 "sqlx::query(\"SELECT set_config('rss.tenant_id', $1, true)\")",
             ),
             (

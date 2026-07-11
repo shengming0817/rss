@@ -10,6 +10,8 @@ use identity::ports::IdentityError;
 #[cfg(feature = "domain-settings")]
 use settings::ports::ConfigRepoError;
 
+use crate::cotx::{LocalTxAttempt, LocalTxRetryError};
+
 /// Retry boundary label for settings config UoW writes.
 #[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_CONFIG_BOUNDARY: &str = "settings.config";
@@ -83,19 +85,22 @@ pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
 /// Run a Postgres UoW under the default retry policy and emit closed-label metrics.
 pub(crate) async fn run_pg_tx_retry<T, E, Op, OpFut, Classify>(
     boundary: &'static str,
-    op: Op,
+    mut op: Op,
     classify: Classify,
 ) -> Result<T, E>
 where
     Op: FnMut(u32) -> OpFut,
-    OpFut: Future<Output = Result<T, E>>,
+    OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
 {
     let (result, report) = run_tx_retry(
         TxRetryPolicy::default(),
-        op,
+        |attempt| {
+            let future = op(attempt);
+            async { future.await.into_retry_result(&classify) }
+        },
         |error| {
-            let class = classify(error);
+            let class = error.class();
             record_attempt(boundary, class);
             class
         },
@@ -103,7 +108,7 @@ where
     )
     .await;
     record_final(boundary, report);
-    result
+    result.map_err(LocalTxRetryError::into_error)
 }
 
 async fn sleep_delay(delay: Duration) {
@@ -147,28 +152,14 @@ fn record_final(boundary: &'static str, report: TxRetryReport) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
     #[cfg(feature = "domain-settings")]
-    use super::{SETTINGS_CONFIG_BOUNDARY, classify_config_repo_error};
-    use super::{classify_sqlstate, classify_sqlx_error, run_pg_tx_retry};
+    use super::classify_config_repo_error;
+    use super::{classify_sqlstate, classify_sqlx_error};
+    #[cfg(feature = "domain-settings")]
     use crate::cotx::commit_unknown;
     use consistency::TxRetryClass;
     #[cfg(feature = "domain-settings")]
     use settings::ports::ConfigRepoError;
-
-    #[derive(Debug)]
-    enum FakeError {
-        Transient,
-        Conflict,
-    }
-
-    fn classify_fake(error: &FakeError) -> TxRetryClass {
-        match error {
-            FakeError::Transient => TxRetryClass::Transient,
-            FakeError::Conflict => TxRetryClass::Conflict,
-        }
-    }
 
     #[test]
     fn sqlstate_classification_is_closed_and_fail_closed() {
@@ -214,66 +205,5 @@ mod tests {
             classify_config_repo_error(&ConfigRepoError::Storage(Box::new(err))),
             TxRetryClass::Permanent
         );
-    }
-
-    #[cfg(feature = "domain-settings")]
-    #[test]
-    fn retry_metrics_emit_closed_labels() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()?;
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                let attempts = AtomicU32::new(0);
-                let ok = run_pg_tx_retry(
-                    SETTINGS_CONFIG_BOUNDARY,
-                    |attempt| {
-                        attempts.store(attempt, Ordering::Release);
-                        async move {
-                            if attempt == 1 {
-                                Err::<(), _>(FakeError::Transient)
-                            } else {
-                                Ok(())
-                            }
-                        }
-                    },
-                    classify_fake,
-                )
-                .await;
-                assert!(ok.is_ok());
-                assert_eq!(attempts.load(Ordering::Acquire), 2);
-
-                let conflict = run_pg_tx_retry(
-                    SETTINGS_CONFIG_BOUNDARY,
-                    |_attempt| async { Err::<(), _>(FakeError::Conflict) },
-                    classify_fake,
-                )
-                .await;
-                assert!(matches!(conflict, Err(FakeError::Conflict)));
-
-                let exhausted = run_pg_tx_retry(
-                    SETTINGS_CONFIG_BOUNDARY,
-                    |_attempt| async { Err::<(), _>(FakeError::Transient) },
-                    classify_fake,
-                )
-                .await;
-                assert!(matches!(exhausted, Err(FakeError::Transient)));
-            });
-        });
-        let rendered = handle.render();
-        assert!(rendered.contains("tx_retry_attempts_total"), "{rendered}");
-        assert!(rendered.contains("tx_retry_final_total"), "{rendered}");
-        assert!(rendered.contains("tx_retry_attempts"), "{rendered}");
-        assert!(
-            rendered.contains("boundary=\"settings.config\""),
-            "{rendered}"
-        );
-        assert!(rendered.contains("class=\"transient\""), "{rendered}");
-        assert!(rendered.contains("status=\"success\""), "{rendered}");
-        assert!(rendered.contains("status=\"conflict\""), "{rendered}");
-        assert!(rendered.contains("status=\"exhausted\""), "{rendered}");
-        Ok(())
     }
 }

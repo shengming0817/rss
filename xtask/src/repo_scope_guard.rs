@@ -361,7 +361,7 @@ fn infra_tenant_scope_call_allowed(rel: &str, call: &InfraTenantScopeCall) -> bo
                 .any(|(file, allowed_function)| *file == rel && *allowed_function == function)
         }),
         InfraTenantScopeCallee::Constructor => {
-            rel == "adapters/postgres/src/cotx.rs"
+            rel == "adapters/postgres/src/cotx/mod.rs"
                 && call.function.as_deref() == Some("infra_tenant_scope")
         }
     }

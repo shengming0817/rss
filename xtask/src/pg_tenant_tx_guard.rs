@@ -2,11 +2,11 @@
 //!
 //! INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_core_file_exception_does_not_mask_raw_tenant_access", anti_vacuity = "tests::green_scoped_tenant_and_global_tables_pass" } —
 //! tenant-table production paths must go through
-//! `PgTenantPool::{read,write,co_tx_with_outbox}` or the lower-level `cotx.rs` funnel. Raw
+//! `PgTenantPool::{read,write,co_tx_with_outbox}` or the lower-level `cotx` funnel. Raw
 //! `sqlx::PgPool` / direct connection / global transaction paths are allowed only for explicitly
 //! named global infrastructure or maintenance exceptions.
 //!
-//! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx.rs`
+//! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
 //! INVARIANT: OUTBOX-FACT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_outbox_log_insert_outside_cdc_funnel", anti_vacuity = "tests::green_outbox_log_insert_is_owned_by_cdc_funnel" } —
@@ -774,8 +774,15 @@ fn enclosing_function_name(content: &str, target: usize) -> Option<&str> {
     None
 }
 
+fn is_cotx_funnel(rel: &str) -> bool {
+    matches!(rel, "cotx.rs" | "cotx/mod.rs") || rel.starts_with("cotx/")
+}
+
 fn outbox_append_bypass_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
-    if matches!(rel, "cotx.rs" | "outbox.rs" | "tx.rs") || !content.contains("append_outbox(") {
+    if is_cotx_funnel(rel)
+        || matches!(rel, "outbox.rs" | "tx.rs")
+        || !content.contains("append_outbox(")
+    {
         return Vec::new();
     }
     ["pool.begin().await", "run_global_transaction"]
@@ -792,7 +799,7 @@ fn outbox_append_bypass_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> 
 }
 
 fn tx_capability_mint_sites(rel: &str, content: &str) -> Vec<RawOutboxAccess> {
-    if matches!(rel, "cotx.rs" | "tx.rs") {
+    if is_cotx_funnel(rel) || rel == "tx.rs" {
         return Vec::new();
     }
     content

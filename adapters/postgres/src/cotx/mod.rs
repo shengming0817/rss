@@ -30,6 +30,14 @@ use crate::PgStore;
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
 use crate::projection_events::ProjectionWriteRegistry;
 
+mod settlement;
+
+use settlement::rollback_failed;
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
+#[cfg(not(any(feature = "domain-settings", feature = "domain-identity")))]
+pub(crate) use settlement::{LocalTxAttempt, commit_unknown};
+
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
 
 pub(crate) trait TenantScopeHandle: Copy + Send {
@@ -83,27 +91,6 @@ impl TenantScopeHandle for audit::ports::TenantRepoScope {
     fn tenant(self) -> TenantId {
         audit::ports::TenantRepoScope::tenant(&self)
     }
-}
-
-/// Commit returned an error after the server may already have accepted the transaction.
-///
-/// Callers must not treat this like a pre-commit transient error: retrying the same UoW can turn
-/// "committed but response lost" into a false CAS conflict or duplicate side effect.
-#[derive(Debug, thiserror::Error)]
-#[error("postgres transaction commit result is unknown")]
-pub(crate) struct PgTxCommitError {
-    #[source]
-    source: sqlx::Error,
-}
-
-impl PgTxCommitError {
-    fn new(source: sqlx::Error) -> Self {
-        Self { source }
-    }
-}
-
-pub(crate) fn commit_unknown(source: sqlx::Error) -> sqlx::Error {
-    sqlx::Error::AnyDriverError(Box::new(PgTxCommitError::new(source)))
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -227,11 +214,13 @@ impl PgTenantPool {
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
-        E: Send,
+        E: std::error::Error + Send + Sync + 'static,
         T: Send,
     {
         let tenant = scope.tenant();
-        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, false).await
+        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, false)
+            .await
+            .into_result()
     }
 
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
@@ -241,11 +230,11 @@ impl PgTenantPool {
         scope: S,
         write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
-    ) -> Result<T, E>
+    ) -> LocalTxAttempt<T, E>
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
-        E: Send,
+        E: std::error::Error + Send + Sync + 'static,
         T: Send,
     {
         let tenant = scope.tenant();
@@ -265,7 +254,7 @@ impl PgTenantPool {
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-        E: MapOutboxAppendError + Send,
+        E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
     {
         let tenant = scope.tenant();
         co_tx_with_outbox(
@@ -289,11 +278,11 @@ impl PgTenantPool {
         env: &OutboxEnvelope,
         business_write: F,
         map_storage: impl Fn(sqlx::Error) -> E + Send,
-    ) -> Result<(), E>
+    ) -> LocalTxAttempt<(), E>
     where
         S: TenantScopeHandle,
         F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-        E: MapOutboxAppendError + Send,
+        E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
     {
         let tenant = scope.tenant();
         co_tx_with_outbox_inner(
@@ -438,67 +427,39 @@ async fn tenant_scoped_write_inner<T, F, E>(
     write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
     bound_lock_wait: bool,
-) -> Result<T, E>
+) -> LocalTxAttempt<T, E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
-    E: Send,
+    E: std::error::Error + Send + Sync + 'static,
     T: Send,
 {
-    let mut tx = begin_tenant_scoped_write(pool, tenant, &map_storage, bound_lock_wait).await?;
-    let result = {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
+    };
+    let result = async {
+        set_local_tenant(&mut tx, tenant)
+            .await
+            .map_err(&map_storage)?;
+        if bound_lock_wait {
+            set_local_retry_lock_timeout(&mut tx)
+                .await
+                .map_err(&map_storage)?;
+        }
         let mut tx_cap = TxCapability::from_transaction(&mut tx);
         write(&mut tx_cap).await
-    };
-    match result {
-        Ok(v) => {
-            tx.commit().await.map_err(|e| {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = %tenant,
-                    error = %secure::redact_error(&e),
-                    "tenant_scoped_write: commit failed"
-                );
-                map_storage(commit_unknown(e))
-            })?;
-            Ok(v)
-        }
-        Err(e) => {
-            if let Err(rb) = tx.rollback().await {
-                tracing::warn!(
-                    target: "postgres",
-                    tenant_id = %tenant,
-                    error = %secure::redact_error(&rb),
-                    "tenant_scoped_write: rollback failed after write error"
-                );
-            }
-            Err(e)
-        }
     }
-}
-
-async fn begin_tenant_scoped_write<'p, E>(
-    pool: &'p PgPool,
-    tenant: TenantId,
-    map_storage: &(impl Fn(sqlx::Error) -> E + Send),
-    bound_lock_wait: bool,
-) -> Result<Transaction<'p, Postgres>, E> {
-    let mut tx = pool.begin().await.map_err(map_storage)?;
-    set_local_tenant(&mut tx, tenant)
-        .await
-        .map_err(map_storage)?;
-    if bound_lock_wait {
-        set_local_retry_lock_timeout(&mut tx)
-            .await
-            .map_err(map_storage)?;
-    }
-    Ok(tx)
+    .await;
+    finish_local_tx(tx, result, map_storage, "tenant-scoped-write", tenant).await
 }
 
 /// 在单事务内：注入 tenant scope（SET LOCAL）→ 业务写闭包 → `append_outbox` → 单 commit。
 ///
 /// `business_write(&mut TxCapability) -> Result<(), E>`：在同一事务内执行业务写（如 CAS INSERT），可返回业务
 /// 错误 `E`（如 `VersionConflict`）使整事务回滚。骨架自身 sqlx 错误经 `map_storage` 映射为 `E`。任一步 Err ⇒
-/// rollback（失败仅 warn，不覆盖原错误）。`tenant` 为类型化租户标识（funnel 内 stringify + SET LOCAL 绑定）。
+/// 显式 rollback：成功则保留原错误为 `RolledBack`；rollback 本身失败则经 `map_storage` 收口为独立
+/// settlement Storage 错误（保留 primary+rollback 因果链），不再把可重试领域冲突冒泡到 HTTP。
+/// `tenant` 为类型化租户标识（funnel 内 stringify + SET LOCAL 绑定）。
 ///
 /// # Examples
 ///
@@ -527,7 +488,7 @@ async fn co_tx_with_outbox<F, E>(
 ) -> Result<(), E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-    E: MapOutboxAppendError + Send,
+    E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
 {
     co_tx_with_outbox_inner(
         pool,
@@ -538,6 +499,7 @@ where
         false,
     )
     .await
+    .into_result()
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -548,13 +510,16 @@ async fn co_tx_with_outbox_inner<F, E>(
     business_write: F,
     map_storage: impl Fn(sqlx::Error) -> E + Send,
     bound_lock_wait: bool,
-) -> Result<(), E>
+) -> LocalTxAttempt<(), E>
 where
     F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<(), E>> + Send,
-    E: MapOutboxAppendError + Send,
+    E: MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
 {
-    let mut tx = pool.begin().await.map_err(&map_storage)?;
-    match write_in_tx(
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return LocalTxAttempt::unsettled(map_storage(error)),
+    };
+    let result = match write_in_tx(
         &mut tx,
         projection_registry,
         write.tenant,
@@ -565,28 +530,85 @@ where
     )
     .await
     {
-        Ok(()) => tx.commit().await.map_err(|e| {
-            tracing::warn!(
-                target: "postgres",
-                event_id = write.entry.idem_key().as_str(),
-                domain = write.env.domain(),
-                topic = write.entry.topic().as_str(),
-                error = %secure::redact_error(&e),
-                "co-tx: commit failed"
-            );
-            map_storage(commit_unknown(e))
-        }),
+        Ok(()) => Ok(()),
         Err(e) => {
             log_cotx_write_error(write.entry, write.env, &e);
-            // rollback 失败是运维高价值事件；不输出 fact identity 原材料。
-            if let Err(rb) = tx.rollback().await {
-                tracing::warn!(
-                    target: "postgres",
-                    error = %secure::redact_error(&rb),
-                    "co-tx: rollback failed after write error"
-                );
-            }
             Err(e.into_domain(&map_storage))
+        }
+    };
+    finish_local_tx(tx, result, map_storage, "co-tx-with-outbox", write.tenant).await
+}
+
+/// Settle one LocalTx attempt through the only commit/explicit-rollback branch.
+async fn finish_local_tx<T, E>(
+    tx: Transaction<'_, Postgres>,
+    result: Result<T, E>,
+    map_storage: impl Fn(sqlx::Error) -> E,
+    operation: &'static str,
+    tenant: TenantId,
+) -> LocalTxAttempt<T, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match result {
+        Ok(value) => {
+            finish_local_tx_commit_result(tx.commit().await, value, map_storage, operation, tenant)
+        }
+        Err(error) => finish_local_tx_rollback_result(
+            tx.rollback().await,
+            error,
+            map_storage,
+            operation,
+            tenant,
+        ),
+    }
+}
+
+fn finish_local_tx_commit_result<T, E>(
+    result: Result<(), sqlx::Error>,
+    value: T,
+    map_storage: impl FnOnce(sqlx::Error) -> E,
+    operation: &'static str,
+    tenant: TenantId,
+) -> LocalTxAttempt<T, E> {
+    match result {
+        Ok(()) => LocalTxAttempt::committed(value),
+        Err(error) => {
+            let redacted_error = secure::redact_error(&error);
+            tracing::warn!(
+                target: "postgres",
+                operation,
+                tenant_id = %tenant,
+                error = %redacted_error,
+                "local transaction commit result is unknown"
+            );
+            LocalTxAttempt::commit_unknown(map_storage(commit_unknown(error)))
+        }
+    }
+}
+
+fn finish_local_tx_rollback_result<T, E>(
+    result: Result<(), sqlx::Error>,
+    error: E,
+    map_storage: impl FnOnce(sqlx::Error) -> E,
+    operation: &'static str,
+    tenant: TenantId,
+) -> LocalTxAttempt<T, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match result {
+        Ok(()) => LocalTxAttempt::rolled_back(error),
+        Err(rollback_error) => {
+            let redacted_error = secure::redact_error(&rollback_error);
+            tracing::warn!(
+                target: "postgres",
+                operation,
+                tenant_id = %tenant,
+                error = %redacted_error,
+                "local transaction rollback failed"
+            );
+            LocalTxAttempt::rollback_failed(map_storage(rollback_failed(error, rollback_error)))
         }
     }
 }
@@ -773,7 +795,14 @@ fn log_cotx_domain_error(entry: &EventEntry, env: &OutboxEnvelope, stage: &'stat
 
 #[cfg(test)]
 mod tx_capability_tests {
-    use super::{Postgres, Transaction, TxCapability};
+    use consistency::LocalTxFinalStatus;
+
+    use super::{Postgres, Transaction, TxCapability, finish_local_tx_commit_result};
+
+    fn tenant() -> Result<vocab::TenantId, String> {
+        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")
+            .map_err(|error| format!("invalid tenant fixture: {error:?}"))
+    }
 
     #[test]
     fn tx_capability_mint_signature_is_crate_private() {
@@ -784,5 +813,339 @@ mod tx_capability_tests {
         }
 
         let _ = mint_from_sqlx_transaction;
+    }
+
+    #[test]
+    fn commit_result_is_mapped_to_committed_or_unknown() -> Result<(), String> {
+        let committed = finish_local_tx_commit_result::<_, sqlx::Error>(
+            Ok(()),
+            7,
+            core::convert::identity,
+            "test",
+            tenant()?,
+        );
+        assert_eq!(committed.settlement(), Some(LocalTxFinalStatus::Committed));
+        assert!(matches!(committed.into_result(), Ok(7)));
+
+        let unknown = finish_local_tx_commit_result(
+            Err(sqlx::Error::PoolTimedOut),
+            (),
+            core::convert::identity,
+            "test",
+            tenant()?,
+        );
+        assert_eq!(
+            unknown.settlement(),
+            Some(LocalTxFinalStatus::CommitUnknown)
+        );
+        assert!(unknown.into_result().is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "domain-settings")]
+    #[test]
+    fn rollback_result_preserves_primary_on_success_and_settlement_error_on_failure()
+    -> Result<(), String> {
+        use settings::ports::ConfigRepoError;
+
+        use super::finish_local_tx_rollback_result;
+
+        let rolled_back = finish_local_tx_rollback_result::<(), _>(
+            Ok(()),
+            ConfigRepoError::VersionConflict,
+            |error| ConfigRepoError::Storage(Box::new(error)),
+            "test",
+            tenant()?,
+        );
+        assert_eq!(
+            rolled_back.settlement(),
+            Some(LocalTxFinalStatus::RolledBack)
+        );
+        assert!(matches!(
+            rolled_back.into_result(),
+            Err(ConfigRepoError::VersionConflict)
+        ));
+
+        let failed = finish_local_tx_rollback_result::<(), _>(
+            Err(sqlx::Error::PoolTimedOut),
+            ConfigRepoError::VersionConflict,
+            |error| ConfigRepoError::Storage(Box::new(error)),
+            "test",
+            tenant()?,
+        );
+        assert_eq!(
+            failed.settlement(),
+            Some(LocalTxFinalStatus::RollbackFailed)
+        );
+        let err = match failed.into_result() {
+            Err(error) => error,
+            Ok(_) => return Err("rollback-failed must err".into()),
+        };
+        assert!(
+            matches!(err, ConfigRepoError::Storage(_)),
+            "rollback-failed must surface storage settlement error, got {err:?}"
+        );
+        assert!(
+            !matches!(err, ConfigRepoError::VersionConflict),
+            "rollback-failed must not resurface retryable VersionConflict"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "domain-settings")]
+    #[tokio::test]
+    async fn begin_failure_is_unsettled_for_all_write_adapters() -> Result<(), String> {
+        use settings::ports::ConfigRepoError;
+        use sqlx::postgres::PgPoolOptions;
+
+        use super::PgTenantPool;
+        use crate::outbox::{OutboxEnvelope, OutboxMetadata};
+        use crate::projection_events::ProjectionWriteRegistry;
+
+        let tenant = tenant()?;
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(core::time::Duration::from_millis(10))
+            .connect_lazy("postgres://127.0.0.1:1/rss")
+            .map_err(|error| error.to_string())?;
+        let scoped = PgTenantPool {
+            pool,
+            projection_registry: ProjectionWriteRegistry::empty(),
+        };
+        let map_storage = |error: sqlx::Error| ConfigRepoError::Storage(Box::new(error));
+
+        let plain = scoped
+            .write(
+                settings::ports::TenantRepoScope::for_test(tenant),
+                |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                map_storage,
+            )
+            .await;
+        assert!(plain.is_err());
+
+        let retry = scoped
+            .retry_write(
+                settings::ports::TenantRepoScope::for_test(tenant),
+                |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                map_storage,
+            )
+            .await;
+        assert_eq!(retry.settlement(), None);
+
+        let contract = vocab::ContractBinding::from_static(
+            "settings",
+            "settings.config-updated",
+            "v1",
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let entry = consistency::EventEntry::new(
+            consistency::EventTopic::parse("settings.config-updated")
+                .map_err(|error| format!("event topic: {error:?}"))?,
+            consistency::IdemKey::parse("localtx-begin-failure")
+                .map_err(|error| format!("idem key: {error:?}"))?,
+            consistency::OutboxPayload::from_reviewed_event_bytes(Vec::new()),
+        );
+        let env = OutboxEnvelope::new(
+            "settings".to_string(),
+            "settings.config-updated".to_string(),
+            OutboxMetadata::new(0, tenant, contract),
+        );
+
+        let co_tx = scoped
+            .co_tx_with_outbox(
+                settings::ports::TenantRepoScope::for_test(tenant),
+                &entry,
+                &env,
+                |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                map_storage,
+            )
+            .await;
+        assert!(co_tx.is_err());
+
+        let retry_co_tx = scoped
+            .retry_co_tx_with_outbox(
+                settings::ports::TenantRepoScope::for_test(tenant),
+                &entry,
+                &env,
+                |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                map_storage,
+            )
+            .await;
+        assert_eq!(retry_co_tx.settlement(), None);
+        Ok(())
+    }
+
+    #[cfg(feature = "domain-settings")]
+    #[test]
+    fn rollback_failed_is_non_retryable_internal_not_conflict() -> Result<(), String> {
+        use settings::ports::ConfigRepoError;
+
+        use super::finish_local_tx_rollback_result;
+
+        let failed = finish_local_tx_rollback_result::<(), _>(
+            Err(sqlx::Error::PoolTimedOut),
+            ConfigRepoError::VersionConflict,
+            |error| ConfigRepoError::Storage(Box::new(error)),
+            "test",
+            tenant()?,
+        );
+        let err = match failed.into_result() {
+            Err(error) => error,
+            Ok(_) => return Err("rollback-failed must err".into()),
+        };
+        let kind = match err {
+            ConfigRepoError::VersionConflict => vocab::CoreErrorKind::VersionConflict,
+            ConfigRepoError::Storage(_) => vocab::CoreErrorKind::Internal,
+            other => {
+                return Err(format!("unexpected error: {other:?}"));
+            }
+        };
+        assert_eq!(kind, vocab::CoreErrorKind::Internal);
+        assert!(
+            !kind.retryable(),
+            "rollback-failed must fail-closed as non-retryable"
+        );
+        assert_eq!(
+            crate::tx_retry::classify_config_repo_error(&err),
+            consistency::TxRetryClass::Permanent
+        );
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "domain-settings"))]
+mod retry_settlement_tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use consistency::TxRetryClass;
+
+    use super::LocalTxAttempt;
+    use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, run_pg_tx_retry};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+    enum FakeError {
+        #[error("transient")]
+        Transient,
+        #[error("conflict")]
+        Conflict,
+        #[error("permanent")]
+        Permanent,
+        #[error("ownership lost")]
+        OwnershipLost,
+    }
+
+    fn classify_fake(error: &FakeError) -> TxRetryClass {
+        match error {
+            FakeError::Transient => TxRetryClass::Transient,
+            FakeError::Conflict => TxRetryClass::Conflict,
+            FakeError::Permanent => TxRetryClass::Permanent,
+            FakeError::OwnershipLost => TxRetryClass::OwnershipLost,
+        }
+    }
+
+    #[test]
+    fn retry_metrics_emit_closed_labels() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let attempts = AtomicU32::new(0);
+                let ok = run_pg_tx_retry(
+                    SETTINGS_CONFIG_BOUNDARY,
+                    |attempt| {
+                        attempts.store(attempt, Ordering::Release);
+                        async move {
+                            if attempt == 1 {
+                                LocalTxAttempt::rolled_back(FakeError::Transient)
+                            } else {
+                                LocalTxAttempt::committed(())
+                            }
+                        }
+                    },
+                    classify_fake,
+                )
+                .await;
+                assert!(ok.is_ok());
+                assert_eq!(attempts.load(Ordering::Acquire), 2);
+
+                let conflict = run_pg_tx_retry(
+                    SETTINGS_CONFIG_BOUNDARY,
+                    |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Conflict) },
+                    classify_fake,
+                )
+                .await;
+                assert!(matches!(conflict, Err(FakeError::Conflict)));
+
+                let exhausted = run_pg_tx_retry(
+                    SETTINGS_CONFIG_BOUNDARY,
+                    |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient) },
+                    classify_fake,
+                )
+                .await;
+                assert!(matches!(exhausted, Err(FakeError::Transient)));
+            });
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains("tx_retry_attempts_total"), "{rendered}");
+        assert!(rendered.contains("tx_retry_final_total"), "{rendered}");
+        assert!(rendered.contains("tx_retry_attempts"), "{rendered}");
+        assert!(
+            rendered.contains("boundary=\"settings.config\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("class=\"transient\""), "{rendered}");
+        assert!(rendered.contains("status=\"success\""), "{rendered}");
+        assert!(rendered.contains("status=\"conflict\""), "{rendered}");
+        assert!(rendered.contains("status=\"exhausted\""), "{rendered}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settlement_safety_controls_retry() {
+        let attempts = AtomicU32::new(0);
+        let unsettled = run_pg_tx_retry(
+            SETTINGS_CONFIG_BOUNDARY,
+            |attempt| {
+                attempts.store(attempt, Ordering::Release);
+                async move {
+                    if attempt == 1 {
+                        LocalTxAttempt::unsettled(FakeError::Transient)
+                    } else {
+                        LocalTxAttempt::committed(())
+                    }
+                }
+            },
+            classify_fake,
+        )
+        .await;
+        assert_eq!(unsettled, Ok(()));
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+
+        for terminal in [
+            LocalTxAttempt::<(), _>::rollback_failed(FakeError::Transient),
+            LocalTxAttempt::commit_unknown(FakeError::Transient),
+            LocalTxAttempt::rolled_back(FakeError::Conflict),
+            LocalTxAttempt::rolled_back(FakeError::Permanent),
+            LocalTxAttempt::rolled_back(FakeError::OwnershipLost),
+        ] {
+            let attempts = AtomicU32::new(0);
+            let mut terminal = Some(terminal);
+            let result = run_pg_tx_retry(
+                SETTINGS_CONFIG_BOUNDARY,
+                |attempt| {
+                    attempts.store(attempt, Ordering::Release);
+                    core::future::ready(match terminal.take() {
+                        Some(attempt) => attempt,
+                        None => LocalTxAttempt::committed(()),
+                    })
+                },
+                classify_fake,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(attempts.load(Ordering::Acquire), 1);
+        }
     }
 }

@@ -1,0 +1,5 @@
+error[E0433]: cannot find `LocalTxAttempt` in `postgres`
+ --> tests/ui/localtx_attempt_external_mint_fail.rs:3:27
+  |
+3 |     let _mint = postgres::LocalTxAttempt::<(), ()>::committed;
+  |                           ^^^^^^^^^^^^^^ could not find `LocalTxAttempt` in `postgres`

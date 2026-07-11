@@ -112,7 +112,7 @@ const CODE_FOLLOWUPS: &[CodeFollowup] = &[
     CodeFollowup {
         id: "current:cotx.rs:#1579",
         anchor: Some(SourceAnchor {
-            path: "adapters/postgres/src/cotx.rs",
+            path: "adapters/postgres/src/cotx/mod.rs",
             needle: "rss_app（dual-pool follow-up）后 DB 层 RLS 方强制生效",
         }),
     },

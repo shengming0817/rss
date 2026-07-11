@@ -36,6 +36,7 @@ raw 拉取 URL 形态：`https://raw.githubusercontent.com/{owner}/{repo}/{branc
 |-------------------|-------|----------------------------------|-----------|
 | reconcile L4 控制环 | `consistency`（引擎）· `deviceloop`（设备 L4 消费者） | `kube-rs/kube`（`kube-runtime/src/controller/mod.rs`） | `oxidecomputer/omicron` |
 | saga L3 编排 | `consistency` / `eventexec` | `oxidecomputer/steno`（`src/lib.rs`） | `temporalio/sdk-rust`（`crates/sdk-core/src/lib.rs`） |
+| Postgres LocalTx transaction runner | `adapters/postgres` | `launchbadge/sqlx`（`sqlx-core/src/transaction.rs`，消费式 commit/rollback + Drop rollback safety net） | `launchbadge/sqlx`（`sqlx-postgres/src/transaction.rs`，Postgres BEGIN/COMMIT/ROLLBACK manager） |
 | 分布式锁 / fencing / 共识 | `distributed` | `tikv/tikv`（`Cargo.toml`，raft / fencing） | `databendlabs/openraft`（`openraft/src/lib.rs`）· `tikv/raft-rs`（`src/raft.rs`） |
 | 证书 / PKI L4 | `deviceloop` | `rustls/rcgen`（`rcgen/src/lib.rs`）· `djc/instant-acme`（`src/lib.rs`） | `maxlambrecht/rust-spiffe`（`spiffe/src/lib.rs`）· cert-manager（概念，provider-agnostic 范式） |
 | 可观测性 | `observ` | tokio `tracing` · `vectordotdev/vector`（`src/lib.rs`，管道范式） | `open-telemetry/opentelemetry-rust`（`opentelemetry/src/lib.rs`） |

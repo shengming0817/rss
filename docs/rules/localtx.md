@@ -1,7 +1,7 @@
 # LocalTx 规则
 
 本文件记录 L1/LocalTx 的当前声明边界。机器真源是 `xtask` 的 typed manifest、R22 校验、
-`vocab::LocalTx*` 闭值类型与 `::generated::http::LOCAL_TX_SPECS`；后续可执行覆盖率、runner、metrics 与 journey 见
+`vocab::LocalTx*` 闭值类型与 `::generated::http::LOCAL_TX_SPECS`；后续 metrics 与 journey 见
 `docs/spec/006-l0-l1-consistency-hardening/` 的 #1697+ 分解。
 
 ## Contract evidence
@@ -44,7 +44,19 @@ append+read 序列。
 `commitUnknown = "not-retryable"` 的含义是：当提交结果未知时，不允许按普通 transient path 自动重放整个副作用序列。
 `consistency::LocalTxFinalStatus` 将一次 UoW 的结算闭合为 `committed` / `rolled_back` / `rollback_failed` /
 `commit_unknown`。只有显式 rollback 成功才能报告 `rolled_back`；retry class/final status 与事务结算正交，不能据
-`TxRetryFinalStatus` 猜测 rollback 或 commit outcome。#1699 负责接入 runner，#1705 负责发射 metrics/trace。
+`TxRetryFinalStatus` 猜测 rollback 或 commit outcome。
+
+Postgres runner 以 `cotx::settlement` 私有模块持有的 crate-private `LocalTxAttempt<T, E>` opaque 和式
+状态承载 `Committed` / `Unsettled` / `RolledBack` / `RollbackFailed` / `CommitUnknown`，非法的
+result/status 组合在类型层不可表达（Hard）。生产 mint 构造器为 `pub(super)`，仅 `cotx` settlement
+funnel 可铸造；兄弟模块与 `tx_retry` 只能消费。`PgTenantPool` 仍是 tenant scope 与 transaction
+capability 的唯一入口；`cotx` 在每次 attempt 内重新 begin、注入 `SET LOCAL`，并经单一 settlement
+funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
+错误（保留 primary+rollback 因果链），不再把可重试领域冲突（如 `VersionConflict`）冒泡到 HTTP。
+`run_pg_tx_retry` 的 operation 签名只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为
+transient 时有界重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。retry engine 与两个准入 UoW
+的放置继续由 `pg-tenant-tx-guard`（Medium）守住。#1705 在该 closed carrier 上补 metrics/trace，不改变
+settlement 语义。
 
 ## Static coverage gate
 
@@ -107,5 +119,5 @@ rollback、conflict 或 backend conformance 已兑现。
   原样传播；`local_tx` 继续只表达 L1 专属 transaction capability，不复制 route proof。
 - 不做 LocalTx runner、coverage gate、metrics label 或 domain proof。
 
-#1697 建立上述 LocalTx coverage gate；#1698 以共享类型身份收口 LocalTx vocabulary/closed labels；#1699 以后接 Postgres runner，
-#1700+ 再补真实域路径、rollback/conflict 与 conformance 证明。
+#1697 建立上述 LocalTx coverage gate；#1698 以共享类型身份收口 LocalTx vocabulary/closed labels；#1699 已接入
+Postgres runner；#1700+ 再补真实域路径、rollback/conflict 与 conformance 证明。
