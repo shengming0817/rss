@@ -4,10 +4,11 @@
 //! use every consistency enum variant, but `generated::http::SPECS` stays
 //! active-only.
 
-use generated::http::{
-    self, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, LocalTxSpec,
+use generated::http::{self, LocalTxSpec};
+use vocab::{
+    HttpConsistencyLevel, HttpEffectKind, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
+    LocalTxRetry,
 };
-use vocab::{HttpConsistencyLevel, HttpEffectKind};
 
 const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("audit.list-entries", HttpConsistencyLevel::LocalOnly),

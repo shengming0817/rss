@@ -30,6 +30,7 @@ pub mod command_journal;
 pub mod error;
 pub mod idempotency;
 pub mod inbox;
+pub mod localtx;
 pub mod outbox;
 pub mod projection;
 pub mod reconcile;
@@ -49,6 +50,9 @@ pub use inbox::{
     INBOX_RECEIPT_CORRELATION_MAX_LEN, INBOX_RECEIPT_TRACE_MAX_LEN, InboxBacklog,
     InboxBacklogScope, InboxClaim, InboxLeaseFreshness, InboxReceiptContext,
     InboxReceiptContextError, InboxState, InboxStatus, InboxStatusError, InboxStore,
+};
+pub use localtx::{
+    LocalTxBoundary, LocalTxCommitUnknown, LocalTxFinalStatus, LocalTxModel, LocalTxRetry,
 };
 pub use outbox::{
     BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
@@ -79,6 +83,26 @@ pub use tx_retry::{
     TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError, TxRetryReport,
     run_tx_retry,
 };
+
+#[cfg(test)]
+mod localtx_public_api_smoke {
+    use super::{
+        LocalTxBoundary, LocalTxCommitUnknown, LocalTxFinalStatus, LocalTxModel, LocalTxRetry,
+    };
+
+    const _: vocab::LocalTxBoundary = LocalTxBoundary::SingleDomain;
+    const _: vocab::LocalTxModel = LocalTxModel::TenantScopedUow;
+    const _: vocab::LocalTxRetry = LocalTxRetry::BoundedTransient;
+    const _: vocab::LocalTxCommitUnknown = LocalTxCommitUnknown::NotRetryable;
+
+    #[test]
+    fn final_status_is_available_from_the_crate_root() {
+        assert_eq!(
+            LocalTxFinalStatus::CommitUnknown.as_label(),
+            "commit_unknown"
+        );
+    }
+}
 
 #[cfg(test)]
 mod static_dispatch_smoke {

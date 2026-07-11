@@ -1,7 +1,7 @@
 # LocalTx 规则
 
-本文件记录 L1/LocalTx 的当前声明边界。机器真源仍是 `xtask` 的 typed manifest、R22 校验与
-`::generated::http::LOCAL_TX_SPECS`；后续可执行覆盖率、runner、metrics 与 journey 见
+本文件记录 L1/LocalTx 的当前声明边界。机器真源是 `xtask` 的 typed manifest、R22 校验、
+`vocab::LocalTx*` 闭值类型与 `::generated::http::LOCAL_TX_SPECS`；后续可执行覆盖率、runner、metrics 与 journey 见
 `docs/spec/006-l0-l1-consistency-hardening/` 的 #1697+ 分解。
 
 ## Contract evidence
@@ -27,6 +27,11 @@ commitUnknown = "not-retryable"
 `serde` typed struct + closed enum + `deny_unknown_fields` 负责 Hard 化缺字段、未知字段和未知枚举；R22 负责
 Medium 条件门：只有 L1 允许 localTx block，且 L1 必须声明上述完整证据。
 
+运行期 evidence 的四个闭值只在基础层 `vocab` 定义一次；`generated::http::LocalTxSpec` 直接持有这些类型，
+`consistency::localtx` 也复用同一类型身份，不各自维护镜像 enum。变体、完整 `ALL` 集合和低基数 label 由同一个
+私有宏声明生成（`single_domain` / `tenant_scoped_uow` / `bounded_transient` / `not_retryable`），新增或改名必须
+同时通过 Rust 穷举编译、codegen committed golden 与 public-api 门。
+
 ## Runtime meaning
 
 LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写。它不表示跨域事务，不表示 outbox 发布已兑现，
@@ -37,7 +42,9 @@ LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写�
 append+read 序列。
 
 `commitUnknown = "not-retryable"` 的含义是：当提交结果未知时，不允许按普通 transient path 自动重放整个副作用序列。
-后续 runtime/status/metrics 可以把该状态细分，但默认治理语义必须 fail-closed。
+`consistency::LocalTxFinalStatus` 将一次 UoW 的结算闭合为 `committed` / `rolled_back` / `rollback_failed` /
+`commit_unknown`。只有显式 rollback 成功才能报告 `rolled_back`；retry class/final status 与事务结算正交，不能据
+`TxRetryFinalStatus` 猜测 rollback 或 commit outcome。#1699 负责接入 runner，#1705 负责发射 metrics/trace。
 
 ## Static coverage gate
 
@@ -91,14 +98,14 @@ rollback、conflict 或 backend conformance 已兑现。
 - 迁移真实 L1 HTTP `contract.toml`。
 - R22 守住 L1 完整证据与 stray capability。
 
-#1688 的边界是 generated metadata：
+#1688 的边界是 generated metadata；#1698 将其中 LocalTx evidence enum 上移为共享 vocab 类型：
 
-- `::generated::http` 暴露 `LocalTxSpec` 与 LocalTx 闭枚举。
+- `::generated::http` 暴露 `LocalTxSpec`，四个字段直接使用 `vocab::LocalTx*`，不保留 generated 镜像 enum。
 - LocalTx active HTTP `SPEC` 必填 `local_tx: Some(...)`，非 LocalTx 为 `None`。
 - `LOCAL_TX_SPECS` active-only 派生当前 L1 HTTP contract 子集。
 - consistency/effect/auth/path/method 已由 #1690 收进 `SPEC.route: HttpRouteEvidence` 并随 endpoint/RouteMeta
   原样传播；`local_tx` 继续只表达 L1 专属 transaction capability，不复制 route proof。
 - 不做 LocalTx runner、coverage gate、metrics label 或 domain proof。
 
-#1697 建立上述 LocalTx coverage gate；#1698 收口 LocalTx vocabulary/closed labels；#1699 以后接 Postgres runner，
+#1697 建立上述 LocalTx coverage gate；#1698 以共享类型身份收口 LocalTx vocabulary/closed labels；#1699 以后接 Postgres runner，
 #1700+ 再补真实域路径、rollback/conflict 与 conformance 证明。

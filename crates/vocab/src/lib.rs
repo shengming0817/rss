@@ -36,7 +36,7 @@ pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use http::{
     HttpConsistencyLevel, HttpEffectKind, HttpEffectProfile, HttpRouteAuth, HttpRouteBinding,
-    HttpRouteEvidence,
+    HttpRouteEvidence, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry,
 };
 pub use principal::PrincipalKind;
 pub use projection::{

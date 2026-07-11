@@ -4284,78 +4284,6 @@ impl core::marker::Unpin for generated::http::HttpResourceSharingMode
 impl core::marker::UnsafeUnpin for generated::http::HttpResourceSharingMode
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpResourceSharingMode
 impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpResourceSharingMode
-pub enum generated::http::LocalTxBoundary
-pub generated::http::LocalTxBoundary::SingleDomain
-impl core::clone::Clone for generated::http::LocalTxBoundary
-pub fn generated::http::LocalTxBoundary::clone(&self) -> generated::http::LocalTxBoundary
-impl core::cmp::Eq for generated::http::LocalTxBoundary
-impl core::cmp::PartialEq for generated::http::LocalTxBoundary
-pub fn generated::http::LocalTxBoundary::eq(&self, &generated::http::LocalTxBoundary) -> bool
-impl core::fmt::Debug for generated::http::LocalTxBoundary
-pub fn generated::http::LocalTxBoundary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::LocalTxBoundary
-impl core::marker::StructuralPartialEq for generated::http::LocalTxBoundary
-impl core::marker::Freeze for generated::http::LocalTxBoundary
-impl core::marker::Send for generated::http::LocalTxBoundary
-impl core::marker::Sync for generated::http::LocalTxBoundary
-impl core::marker::Unpin for generated::http::LocalTxBoundary
-impl core::marker::UnsafeUnpin for generated::http::LocalTxBoundary
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxBoundary
-impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxBoundary
-pub enum generated::http::LocalTxCommitUnknown
-pub generated::http::LocalTxCommitUnknown::NotRetryable
-impl core::clone::Clone for generated::http::LocalTxCommitUnknown
-pub fn generated::http::LocalTxCommitUnknown::clone(&self) -> generated::http::LocalTxCommitUnknown
-impl core::cmp::Eq for generated::http::LocalTxCommitUnknown
-impl core::cmp::PartialEq for generated::http::LocalTxCommitUnknown
-pub fn generated::http::LocalTxCommitUnknown::eq(&self, &generated::http::LocalTxCommitUnknown) -> bool
-impl core::fmt::Debug for generated::http::LocalTxCommitUnknown
-pub fn generated::http::LocalTxCommitUnknown::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::LocalTxCommitUnknown
-impl core::marker::StructuralPartialEq for generated::http::LocalTxCommitUnknown
-impl core::marker::Freeze for generated::http::LocalTxCommitUnknown
-impl core::marker::Send for generated::http::LocalTxCommitUnknown
-impl core::marker::Sync for generated::http::LocalTxCommitUnknown
-impl core::marker::Unpin for generated::http::LocalTxCommitUnknown
-impl core::marker::UnsafeUnpin for generated::http::LocalTxCommitUnknown
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxCommitUnknown
-impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxCommitUnknown
-pub enum generated::http::LocalTxModel
-pub generated::http::LocalTxModel::TenantScopedUow
-impl core::clone::Clone for generated::http::LocalTxModel
-pub fn generated::http::LocalTxModel::clone(&self) -> generated::http::LocalTxModel
-impl core::cmp::Eq for generated::http::LocalTxModel
-impl core::cmp::PartialEq for generated::http::LocalTxModel
-pub fn generated::http::LocalTxModel::eq(&self, &generated::http::LocalTxModel) -> bool
-impl core::fmt::Debug for generated::http::LocalTxModel
-pub fn generated::http::LocalTxModel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::LocalTxModel
-impl core::marker::StructuralPartialEq for generated::http::LocalTxModel
-impl core::marker::Freeze for generated::http::LocalTxModel
-impl core::marker::Send for generated::http::LocalTxModel
-impl core::marker::Sync for generated::http::LocalTxModel
-impl core::marker::Unpin for generated::http::LocalTxModel
-impl core::marker::UnsafeUnpin for generated::http::LocalTxModel
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxModel
-impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxModel
-pub enum generated::http::LocalTxRetry
-pub generated::http::LocalTxRetry::BoundedTransient
-impl core::clone::Clone for generated::http::LocalTxRetry
-pub fn generated::http::LocalTxRetry::clone(&self) -> generated::http::LocalTxRetry
-impl core::cmp::Eq for generated::http::LocalTxRetry
-impl core::cmp::PartialEq for generated::http::LocalTxRetry
-pub fn generated::http::LocalTxRetry::eq(&self, &generated::http::LocalTxRetry) -> bool
-impl core::fmt::Debug for generated::http::LocalTxRetry
-pub fn generated::http::LocalTxRetry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for generated::http::LocalTxRetry
-impl core::marker::StructuralPartialEq for generated::http::LocalTxRetry
-impl core::marker::Freeze for generated::http::LocalTxRetry
-impl core::marker::Send for generated::http::LocalTxRetry
-impl core::marker::Sync for generated::http::LocalTxRetry
-impl core::marker::Unpin for generated::http::LocalTxRetry
-impl core::marker::UnsafeUnpin for generated::http::LocalTxRetry
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::LocalTxRetry
-impl core::panic::unwind_safe::UnwindSafe for generated::http::LocalTxRetry
 pub struct generated::http::HttpHeaderSpec
 pub generated::http::HttpHeaderSpec::mode: generated::http::HttpHeaderMode
 pub generated::http::HttpHeaderSpec::name: &'static str
@@ -4438,10 +4366,10 @@ impl core::marker::UnsafeUnpin for generated::http::HttpSpec
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::HttpSpec
 impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpSpec
 pub struct generated::http::LocalTxSpec
-pub generated::http::LocalTxSpec::boundary: generated::http::LocalTxBoundary
-pub generated::http::LocalTxSpec::commit_unknown: generated::http::LocalTxCommitUnknown
-pub generated::http::LocalTxSpec::retry: generated::http::LocalTxRetry
-pub generated::http::LocalTxSpec::tx_model: generated::http::LocalTxModel
+pub generated::http::LocalTxSpec::boundary: vocab::http::LocalTxBoundary
+pub generated::http::LocalTxSpec::commit_unknown: vocab::http::LocalTxCommitUnknown
+pub generated::http::LocalTxSpec::retry: vocab::http::LocalTxRetry
+pub generated::http::LocalTxSpec::tx_model: vocab::http::LocalTxModel
 impl core::clone::Clone for generated::http::LocalTxSpec
 pub fn generated::http::LocalTxSpec::clone(&self) -> generated::http::LocalTxSpec
 impl core::cmp::Eq for generated::http::LocalTxSpec

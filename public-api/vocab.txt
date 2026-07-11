@@ -525,6 +525,90 @@ impl core::marker::Unpin for vocab::http::HttpRouteAuth
 impl core::marker::UnsafeUnpin for vocab::http::HttpRouteAuth
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpRouteAuth
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpRouteAuth
+pub enum vocab::http::LocalTxBoundary
+pub vocab::http::LocalTxBoundary::SingleDomain
+impl vocab::http::LocalTxBoundary
+pub const vocab::http::LocalTxBoundary::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxBoundary::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxBoundary
+pub fn vocab::http::LocalTxBoundary::clone(&self) -> vocab::http::LocalTxBoundary
+impl core::cmp::Eq for vocab::http::LocalTxBoundary
+impl core::cmp::PartialEq for vocab::http::LocalTxBoundary
+pub fn vocab::http::LocalTxBoundary::eq(&self, &vocab::http::LocalTxBoundary) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxBoundary
+pub fn vocab::http::LocalTxBoundary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxBoundary
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxBoundary
+impl core::marker::Freeze for vocab::http::LocalTxBoundary
+impl core::marker::Send for vocab::http::LocalTxBoundary
+impl core::marker::Sync for vocab::http::LocalTxBoundary
+impl core::marker::Unpin for vocab::http::LocalTxBoundary
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxBoundary
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxBoundary
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxBoundary
+pub enum vocab::http::LocalTxCommitUnknown
+pub vocab::http::LocalTxCommitUnknown::NotRetryable
+impl vocab::http::LocalTxCommitUnknown
+pub const vocab::http::LocalTxCommitUnknown::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxCommitUnknown::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxCommitUnknown
+pub fn vocab::http::LocalTxCommitUnknown::clone(&self) -> vocab::http::LocalTxCommitUnknown
+impl core::cmp::Eq for vocab::http::LocalTxCommitUnknown
+impl core::cmp::PartialEq for vocab::http::LocalTxCommitUnknown
+pub fn vocab::http::LocalTxCommitUnknown::eq(&self, &vocab::http::LocalTxCommitUnknown) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxCommitUnknown
+pub fn vocab::http::LocalTxCommitUnknown::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxCommitUnknown
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxCommitUnknown
+impl core::marker::Freeze for vocab::http::LocalTxCommitUnknown
+impl core::marker::Send for vocab::http::LocalTxCommitUnknown
+impl core::marker::Sync for vocab::http::LocalTxCommitUnknown
+impl core::marker::Unpin for vocab::http::LocalTxCommitUnknown
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxCommitUnknown
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxCommitUnknown
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxCommitUnknown
+pub enum vocab::http::LocalTxModel
+pub vocab::http::LocalTxModel::TenantScopedUow
+impl vocab::http::LocalTxModel
+pub const vocab::http::LocalTxModel::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxModel::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxModel
+pub fn vocab::http::LocalTxModel::clone(&self) -> vocab::http::LocalTxModel
+impl core::cmp::Eq for vocab::http::LocalTxModel
+impl core::cmp::PartialEq for vocab::http::LocalTxModel
+pub fn vocab::http::LocalTxModel::eq(&self, &vocab::http::LocalTxModel) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxModel
+pub fn vocab::http::LocalTxModel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxModel
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxModel
+impl core::marker::Freeze for vocab::http::LocalTxModel
+impl core::marker::Send for vocab::http::LocalTxModel
+impl core::marker::Sync for vocab::http::LocalTxModel
+impl core::marker::Unpin for vocab::http::LocalTxModel
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxModel
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxModel
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxModel
+pub enum vocab::http::LocalTxRetry
+pub vocab::http::LocalTxRetry::BoundedTransient
+impl vocab::http::LocalTxRetry
+pub const vocab::http::LocalTxRetry::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxRetry::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxRetry
+pub fn vocab::http::LocalTxRetry::clone(&self) -> vocab::http::LocalTxRetry
+impl core::cmp::Eq for vocab::http::LocalTxRetry
+impl core::cmp::PartialEq for vocab::http::LocalTxRetry
+pub fn vocab::http::LocalTxRetry::eq(&self, &vocab::http::LocalTxRetry) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxRetry
+pub fn vocab::http::LocalTxRetry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxRetry
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxRetry
+impl core::marker::Freeze for vocab::http::LocalTxRetry
+impl core::marker::Send for vocab::http::LocalTxRetry
+impl core::marker::Sync for vocab::http::LocalTxRetry
+impl core::marker::Unpin for vocab::http::LocalTxRetry
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxRetry
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxRetry
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxRetry
 pub struct vocab::http::DeviceLatent
 impl core::clone::Clone for vocab::http::DeviceLatent
 pub fn vocab::http::DeviceLatent::clone(&self) -> vocab::http::DeviceLatent
@@ -1190,6 +1274,90 @@ impl core::marker::Unpin for vocab::query::LimitError
 impl core::marker::UnsafeUnpin for vocab::query::LimitError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::query::LimitError
 impl core::panic::unwind_safe::UnwindSafe for vocab::query::LimitError
+pub enum vocab::LocalTxBoundary
+pub vocab::LocalTxBoundary::SingleDomain
+impl vocab::http::LocalTxBoundary
+pub const vocab::http::LocalTxBoundary::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxBoundary::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxBoundary
+pub fn vocab::http::LocalTxBoundary::clone(&self) -> vocab::http::LocalTxBoundary
+impl core::cmp::Eq for vocab::http::LocalTxBoundary
+impl core::cmp::PartialEq for vocab::http::LocalTxBoundary
+pub fn vocab::http::LocalTxBoundary::eq(&self, &vocab::http::LocalTxBoundary) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxBoundary
+pub fn vocab::http::LocalTxBoundary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxBoundary
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxBoundary
+impl core::marker::Freeze for vocab::http::LocalTxBoundary
+impl core::marker::Send for vocab::http::LocalTxBoundary
+impl core::marker::Sync for vocab::http::LocalTxBoundary
+impl core::marker::Unpin for vocab::http::LocalTxBoundary
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxBoundary
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxBoundary
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxBoundary
+pub enum vocab::LocalTxCommitUnknown
+pub vocab::LocalTxCommitUnknown::NotRetryable
+impl vocab::http::LocalTxCommitUnknown
+pub const vocab::http::LocalTxCommitUnknown::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxCommitUnknown::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxCommitUnknown
+pub fn vocab::http::LocalTxCommitUnknown::clone(&self) -> vocab::http::LocalTxCommitUnknown
+impl core::cmp::Eq for vocab::http::LocalTxCommitUnknown
+impl core::cmp::PartialEq for vocab::http::LocalTxCommitUnknown
+pub fn vocab::http::LocalTxCommitUnknown::eq(&self, &vocab::http::LocalTxCommitUnknown) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxCommitUnknown
+pub fn vocab::http::LocalTxCommitUnknown::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxCommitUnknown
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxCommitUnknown
+impl core::marker::Freeze for vocab::http::LocalTxCommitUnknown
+impl core::marker::Send for vocab::http::LocalTxCommitUnknown
+impl core::marker::Sync for vocab::http::LocalTxCommitUnknown
+impl core::marker::Unpin for vocab::http::LocalTxCommitUnknown
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxCommitUnknown
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxCommitUnknown
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxCommitUnknown
+pub enum vocab::LocalTxModel
+pub vocab::LocalTxModel::TenantScopedUow
+impl vocab::http::LocalTxModel
+pub const vocab::http::LocalTxModel::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxModel::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxModel
+pub fn vocab::http::LocalTxModel::clone(&self) -> vocab::http::LocalTxModel
+impl core::cmp::Eq for vocab::http::LocalTxModel
+impl core::cmp::PartialEq for vocab::http::LocalTxModel
+pub fn vocab::http::LocalTxModel::eq(&self, &vocab::http::LocalTxModel) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxModel
+pub fn vocab::http::LocalTxModel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxModel
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxModel
+impl core::marker::Freeze for vocab::http::LocalTxModel
+impl core::marker::Send for vocab::http::LocalTxModel
+impl core::marker::Sync for vocab::http::LocalTxModel
+impl core::marker::Unpin for vocab::http::LocalTxModel
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxModel
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxModel
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxModel
+pub enum vocab::LocalTxRetry
+pub vocab::LocalTxRetry::BoundedTransient
+impl vocab::http::LocalTxRetry
+pub const vocab::http::LocalTxRetry::ALL: &'static [Self]
+pub const fn vocab::http::LocalTxRetry::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::http::LocalTxRetry
+pub fn vocab::http::LocalTxRetry::clone(&self) -> vocab::http::LocalTxRetry
+impl core::cmp::Eq for vocab::http::LocalTxRetry
+impl core::cmp::PartialEq for vocab::http::LocalTxRetry
+pub fn vocab::http::LocalTxRetry::eq(&self, &vocab::http::LocalTxRetry) -> bool
+impl core::fmt::Debug for vocab::http::LocalTxRetry
+pub fn vocab::http::LocalTxRetry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::LocalTxRetry
+impl core::marker::StructuralPartialEq for vocab::http::LocalTxRetry
+impl core::marker::Freeze for vocab::http::LocalTxRetry
+impl core::marker::Send for vocab::http::LocalTxRetry
+impl core::marker::Sync for vocab::http::LocalTxRetry
+impl core::marker::Unpin for vocab::http::LocalTxRetry
+impl core::marker::UnsafeUnpin for vocab::http::LocalTxRetry
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxRetry
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxRetry
 #[non_exhaustive] pub enum vocab::PermissionParseError
 pub vocab::PermissionParseError::Unknown
 impl core::clone::Clone for vocab::authz::PermissionParseError

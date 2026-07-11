@@ -11,56 +11,79 @@
 use std::future::Future;
 use std::time::Duration;
 
-/// Closed transaction retry classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TxRetryClass {
+// One repetition owns every class fact and expands both closed sets. Adding a class therefore also
+// adds its final-status payload; there is no second list for a maintainer or agent to synchronize.
+macro_rules! closed_tx_retry_vocabulary {
+    (
+        $(
+            $(#[$class_meta:meta])*
+            $class:ident => ($class_label:literal, $final_label:literal)
+        ),+ $(,)?
+    ) => {
+        /// Closed transaction retry classification.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum TxRetryClass {
+            $(
+                $(#[$class_meta])*
+                $class,
+            )+
+        }
+
+        impl TxRetryClass {
+            /// Complete closed retry-class set in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$class),+];
+
+            /// Stable low-cardinality metrics/log label.
+            #[must_use]
+            pub const fn as_label(self) -> &'static str {
+                match self {
+                    $(Self::$class => $class_label),+
+                }
+            }
+        }
+
+        /// Final retry loop status.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum TxRetryFinalStatus {
+            /// The UoW completed successfully.
+            Success,
+            /// Retry budget was exhausted on transient errors.
+            Exhausted,
+            /// The loop stopped immediately on a non-retryable class.
+            NotRetryable(TxRetryClass),
+        }
+
+        impl TxRetryFinalStatus {
+            /// Complete closed final-status set: fixed outcomes, then every retry class in
+            /// declaration order.
+            pub const ALL: &'static [Self] = &[
+                Self::Success,
+                Self::Exhausted,
+                $(Self::NotRetryable(TxRetryClass::$class)),+
+            ];
+
+            /// Stable low-cardinality metrics/log label.
+            #[must_use]
+            pub const fn as_label(self) -> &'static str {
+                match self {
+                    Self::Success => "success",
+                    Self::Exhausted => "exhausted",
+                    $(Self::NotRetryable(TxRetryClass::$class) => $final_label),+
+                }
+            }
+        }
+    };
+}
+
+closed_tx_retry_vocabulary! {
     /// Temporary storage/backend failure; retrying the whole UoW is allowed while budget remains.
-    Transient,
+    Transient => ("transient", "transient_not_retried"),
     /// CAS/version conflict; callers must refetch/recompute explicitly above the UoW.
-    Conflict,
+    Conflict => ("conflict", "conflict"),
     /// Permanent failure; retrying the same UoW cannot make progress.
-    Permanent,
+    Permanent => ("permanent", "permanent"),
     /// Fencing/lease/ownership was lost; retrying the same side effect risks double execution.
-    OwnershipLost,
-}
-
-impl TxRetryClass {
-    /// Stable low-cardinality metrics/log label.
-    pub fn as_label(self) -> &'static str {
-        match self {
-            TxRetryClass::Transient => "transient",
-            TxRetryClass::Conflict => "conflict",
-            TxRetryClass::Permanent => "permanent",
-            TxRetryClass::OwnershipLost => "ownership_lost",
-        }
-    }
-}
-
-/// Final retry loop status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TxRetryFinalStatus {
-    /// The UoW completed successfully.
-    Success,
-    /// Retry budget was exhausted on transient errors.
-    Exhausted,
-    /// The loop stopped immediately on a non-retryable class.
-    NotRetryable(TxRetryClass),
-}
-
-impl TxRetryFinalStatus {
-    /// Stable low-cardinality metrics/log label.
-    pub fn as_label(self) -> &'static str {
-        match self {
-            TxRetryFinalStatus::Success => "success",
-            TxRetryFinalStatus::Exhausted => "exhausted",
-            TxRetryFinalStatus::NotRetryable(TxRetryClass::Conflict) => "conflict",
-            TxRetryFinalStatus::NotRetryable(TxRetryClass::Permanent) => "permanent",
-            TxRetryFinalStatus::NotRetryable(TxRetryClass::OwnershipLost) => "ownership_lost",
-            TxRetryFinalStatus::NotRetryable(TxRetryClass::Transient) => "transient_not_retried",
-        }
-    }
+    OwnershipLost => ("ownership_lost", "ownership_lost"),
 }
 
 /// Bounded retry policy.
@@ -242,12 +265,10 @@ mod tests {
 
     #[test]
     fn retry_class_labels_are_stable_and_distinct() {
-        let labels = [
-            TxRetryClass::Transient.as_label(),
-            TxRetryClass::Conflict.as_label(),
-            TxRetryClass::Permanent.as_label(),
-            TxRetryClass::OwnershipLost.as_label(),
-        ];
+        let labels: Vec<_> = TxRetryClass::ALL
+            .iter()
+            .map(|class| class.as_label())
+            .collect();
         assert_eq!(
             labels,
             ["transient", "conflict", "permanent", "ownership_lost"]
@@ -261,28 +282,65 @@ mod tests {
 
     #[test]
     fn final_status_labels_are_stable() {
-        let cases = [
-            (TxRetryFinalStatus::Success, "success"),
-            (TxRetryFinalStatus::Exhausted, "exhausted"),
-            (
-                TxRetryFinalStatus::NotRetryable(TxRetryClass::Conflict),
-                "conflict",
-            ),
-            (
-                TxRetryFinalStatus::NotRetryable(TxRetryClass::Permanent),
-                "permanent",
-            ),
-            (
-                TxRetryFinalStatus::NotRetryable(TxRetryClass::OwnershipLost),
-                "ownership_lost",
-            ),
-            (
-                TxRetryFinalStatus::NotRetryable(TxRetryClass::Transient),
+        let labels: Vec<_> = TxRetryFinalStatus::ALL
+            .iter()
+            .map(|status| status.as_label())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "success",
+                "exhausted",
                 "transient_not_retried",
-            ),
-        ];
-        for (status, expected) in cases {
-            assert_eq!(status.as_label(), expected);
+                "conflict",
+                "permanent",
+                "ownership_lost",
+            ]
+        );
+        for (index, label) in labels.iter().enumerate() {
+            assert!(
+                !labels[(index + 1)..].contains(label),
+                "duplicate final status label: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn final_status_payloads_cover_retry_classes_in_declaration_order() {
+        let payloads = &TxRetryFinalStatus::ALL[2..];
+        assert_eq!(payloads.len(), TxRetryClass::ALL.len());
+        for (status, class) in payloads.iter().zip(TxRetryClass::ALL) {
+            assert_eq!(*status, TxRetryFinalStatus::NotRetryable(*class));
+        }
+    }
+
+    mod synthetic_added_class_compile_proof {
+        closed_tx_retry_vocabulary! {
+            /// Baseline synthetic class.
+            Baseline => ("baseline", "baseline_not_retried"),
+            /// A newly added class that must expand into both closed sets.
+            Added => ("added", "added_not_retried"),
+        }
+
+        // Removing either generated payload makes this native compile-time equality fail.
+        const _: [(); TxRetryClass::ALL.len()] = [(); TxRetryFinalStatus::ALL.len() - 2];
+
+        #[test]
+        fn added_class_is_present_in_the_generated_final_set() {
+            assert_eq!(
+                TxRetryFinalStatus::ALL,
+                [
+                    TxRetryFinalStatus::Success,
+                    TxRetryFinalStatus::Exhausted,
+                    TxRetryFinalStatus::NotRetryable(TxRetryClass::Baseline),
+                    TxRetryFinalStatus::NotRetryable(TxRetryClass::Added),
+                ]
+            );
+            assert_eq!(TxRetryClass::Added.as_label(), "added");
+            assert_eq!(
+                TxRetryFinalStatus::NotRetryable(TxRetryClass::Added).as_label(),
+                "added_not_retried"
+            );
         }
     }
 

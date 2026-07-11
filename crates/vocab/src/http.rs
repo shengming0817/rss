@@ -4,9 +4,76 @@
 //! inspect that proof, but cannot split it into independently writable route-registration fields.
 //!
 //! INVARIANT: ROUTE-EVIDENCE-NONEMPTY-01 { level = "Hard", exec = "native-compile", source = "code", native = "const evaluation rejects empty or duplicate profiles; trybuild locks E0080" }
+//! INVARIANT: LOCALTX-EVIDENCE-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "generated and consistency consume one closed vocab type identity; the macro emits variants, ALL, and exhaustive labels from one declaration" }
 
 use crate::{ContractBinding, RoutePermissionId};
 use core::marker::PhantomData;
+
+macro_rules! closed_label_enum {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $label:literal
+            ),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )+
+        }
+
+        impl $name {
+            /// Complete closed value set in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// Stable low-cardinality metrics/log label.
+            #[must_use]
+            pub const fn as_label(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label),+
+                }
+            }
+        }
+    };
+}
+
+closed_label_enum! {
+    /// LocalTx ownership boundary declared by a contract.
+    pub enum LocalTxBoundary {
+        /// One transaction may cover persistence owned by one bounded context only.
+        SingleDomain => "single_domain",
+    }
+}
+
+closed_label_enum! {
+    /// LocalTx unit-of-work model declared by a contract.
+    pub enum LocalTxModel {
+        /// Tenant scope is injected before opening the unit of work.
+        TenantScopedUow => "tenant_scoped_uow",
+    }
+}
+
+closed_label_enum! {
+    /// LocalTx retry mode declared by a contract.
+    pub enum LocalTxRetry {
+        /// Only bounded retries of failures classified as transient are allowed.
+        BoundedTransient => "bounded_transient",
+    }
+}
+
+closed_label_enum! {
+    /// LocalTx policy for an unknown commit outcome.
+    pub enum LocalTxCommitUnknown {
+        /// An unknown commit outcome must not replay the entire unit of work.
+        NotRetryable => "not_retryable",
+    }
+}
 
 mod consistency_sealed {
     pub trait HttpConsistencyClass {}
@@ -438,5 +505,47 @@ mod tests {
             HttpConsistencyLevel::LocalOnly,
             PROFILE,
         );
+    }
+
+    #[test]
+    fn local_tx_evidence_labels_are_closed_stable_and_distinct() {
+        fn assert_labels<T: Copy>(values: &[T], label: fn(T) -> &'static str, expected: &[&str]) {
+            let labels: Vec<_> = values.iter().copied().map(label).collect();
+            assert_eq!(labels, expected);
+        }
+
+        assert_labels(
+            LocalTxBoundary::ALL,
+            LocalTxBoundary::as_label,
+            &["single_domain"],
+        );
+        assert_labels(
+            LocalTxModel::ALL,
+            LocalTxModel::as_label,
+            &["tenant_scoped_uow"],
+        );
+        assert_labels(
+            LocalTxRetry::ALL,
+            LocalTxRetry::as_label,
+            &["bounded_transient"],
+        );
+        assert_labels(
+            LocalTxCommitUnknown::ALL,
+            LocalTxCommitUnknown::as_label,
+            &["not_retryable"],
+        );
+
+        let labels = [
+            LocalTxBoundary::SingleDomain.as_label(),
+            LocalTxModel::TenantScopedUow.as_label(),
+            LocalTxRetry::BoundedTransient.as_label(),
+            LocalTxCommitUnknown::NotRetryable.as_label(),
+        ];
+        for (index, label) in labels.iter().enumerate() {
+            assert!(
+                !labels[(index + 1)..].contains(label),
+                "duplicate LocalTx evidence label: {label}"
+            );
+        }
     }
 }

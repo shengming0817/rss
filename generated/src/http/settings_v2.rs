@@ -211,10 +211,10 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> 
 pub const SPEC: super::HttpSpec = super::HttpSpec {
     route: ROUTE.evidence(),
     local_tx: Some(super::LocalTxSpec {
-        boundary: super::LocalTxBoundary::SingleDomain,
-        tx_model: super::LocalTxModel::TenantScopedUow,
-        retry: super::LocalTxRetry::BoundedTransient,
-        commit_unknown: super::LocalTxCommitUnknown::NotRetryable,
+        boundary: ::vocab::LocalTxBoundary::SingleDomain,
+        tx_model: ::vocab::LocalTxModel::TenantScopedUow,
+        retry: ::vocab::LocalTxRetry::BoundedTransient,
+        commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
     }),
     resource_sharing: super::HttpResourceSharingSpec {
         mode: super::HttpResourceSharingMode::TenantScoped,

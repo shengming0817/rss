@@ -800,7 +800,7 @@ fn render_http_local_tx(c: &DiscoveredContract, sup: &str) -> Result<String> {
         .as_ref()
         .context("LocalTx http 契约缺 [capabilities.localTx]（codegen fail-closed）")?;
     let spec = format!(
-        "{sup}LocalTxSpec {{ boundary: {sup}LocalTxBoundary::{}, tx_model: {sup}LocalTxModel::{}, retry: {sup}LocalTxRetry::{}, commit_unknown: {sup}LocalTxCommitUnknown::{} }}",
+        "{sup}LocalTxSpec {{ boundary: ::vocab::LocalTxBoundary::{}, tx_model: ::vocab::LocalTxModel::{}, retry: ::vocab::LocalTxRetry::{}, commit_unknown: ::vocab::LocalTxCommitUnknown::{} }}",
         render_local_tx_boundary(local_tx.boundary),
         render_local_tx_model(local_tx.tx_model),
         render_local_tx_retry(local_tx.retry),
@@ -1533,30 +1533,10 @@ pub struct HttpSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalTxSpec {
-    pub boundary: LocalTxBoundary,
-    pub tx_model: LocalTxModel,
-    pub retry: LocalTxRetry,
-    pub commit_unknown: LocalTxCommitUnknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxBoundary {
-    SingleDomain,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxModel {
-    TenantScopedUow,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxRetry {
-    BoundedTransient,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxCommitUnknown {
-    NotRetryable,
+    pub boundary: ::vocab::LocalTxBoundary,
+    pub tx_model: ::vocab::LocalTxModel,
+    pub retry: ::vocab::LocalTxRetry,
+    pub commit_unknown: ::vocab::LocalTxCommitUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3130,6 +3110,17 @@ mod tests {
             "pub struct LocalTxSpec",
             "HTTP root module should expose generated LocalTx metadata",
         );
+        for forbidden in [
+            "pub enum LocalTxBoundary",
+            "pub enum LocalTxModel",
+            "pub enum LocalTxRetry",
+            "pub enum LocalTxCommitUnknown",
+        ] {
+            assert!(
+                !root_mod.contains(forbidden),
+                "HTTP root module must consume the canonical vocab type instead of generating a duplicate: {forbidden}"
+            );
+        }
         assert_generated_contains(
             &root_mod,
             "pub const LOCAL_TX_SPECS: &[HttpSpec]",
@@ -3146,10 +3137,10 @@ mod tests {
             "LocalTx endpoint SPEC should carry LocalTx evidence",
         );
         for needle in [
-            "boundary: super::LocalTxBoundary::SingleDomain",
-            "tx_model: super::LocalTxModel::TenantScopedUow",
-            "retry: super::LocalTxRetry::BoundedTransient",
-            "commit_unknown: super::LocalTxCommitUnknown::NotRetryable",
+            "boundary: ::vocab::LocalTxBoundary::SingleDomain",
+            "tx_model: ::vocab::LocalTxModel::TenantScopedUow",
+            "retry: ::vocab::LocalTxRetry::BoundedTransient",
+            "commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable",
         ] {
             assert_generated_contains(
                 &rendered,

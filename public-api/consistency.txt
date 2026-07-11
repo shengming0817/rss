@@ -1,4 +1,8 @@
 pub mod consistency
+pub use consistency::LocalTxBoundary
+pub use consistency::LocalTxCommitUnknown
+pub use consistency::LocalTxModel
+pub use consistency::LocalTxRetry
 pub mod consistency::command_journal
 #[non_exhaustive] pub enum consistency::command_journal::CommandAttemptError
 pub consistency::command_journal::CommandAttemptError::Zero
@@ -577,6 +581,35 @@ pub async fn consistency::inbox::InboxStore::commit(&self, &consistency::inbox::
 pub async fn consistency::inbox::InboxStore::extend(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::inbox::InboxStore::release(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<(), consistency::error::EngineError>
 pub async fn consistency::inbox::InboxStore::try_claim(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
+pub mod consistency::localtx
+pub use consistency::localtx::LocalTxBoundary
+pub use consistency::localtx::LocalTxCommitUnknown
+pub use consistency::localtx::LocalTxModel
+pub use consistency::localtx::LocalTxRetry
+pub enum consistency::localtx::LocalTxFinalStatus
+pub consistency::localtx::LocalTxFinalStatus::CommitUnknown
+pub consistency::localtx::LocalTxFinalStatus::Committed
+pub consistency::localtx::LocalTxFinalStatus::RollbackFailed
+pub consistency::localtx::LocalTxFinalStatus::RolledBack
+impl consistency::localtx::LocalTxFinalStatus
+pub const consistency::localtx::LocalTxFinalStatus::ALL: &'static [Self]
+pub const fn consistency::localtx::LocalTxFinalStatus::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::localtx::LocalTxFinalStatus
+pub fn consistency::localtx::LocalTxFinalStatus::clone(&self) -> consistency::localtx::LocalTxFinalStatus
+impl core::cmp::Eq for consistency::localtx::LocalTxFinalStatus
+impl core::cmp::PartialEq for consistency::localtx::LocalTxFinalStatus
+pub fn consistency::localtx::LocalTxFinalStatus::eq(&self, &consistency::localtx::LocalTxFinalStatus) -> bool
+impl core::fmt::Debug for consistency::localtx::LocalTxFinalStatus
+pub fn consistency::localtx::LocalTxFinalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxFinalStatus
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Freeze for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Send for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Sync for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Unpin for consistency::localtx::LocalTxFinalStatus
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxFinalStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxFinalStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxFinalStatus
 pub mod consistency::outbox
 #[non_exhaustive] pub enum consistency::outbox::Disposition
 pub consistency::outbox::Disposition::Ack
@@ -2063,13 +2096,14 @@ pub const consistency::saga::SagaStep::BINDING: vocab::contract::binding::SagaSt
 pub fn consistency::saga::SagaStep::compensate(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::CompensationOutcome, consistency::error::EngineError>> + core::marker::Send
 pub fn consistency::saga::SagaStep::execute(&self, consistency::saga::SagaStepCtx) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, consistency::error::EngineError>> + core::marker::Send
 pub mod consistency::tx_retry
-#[non_exhaustive] pub enum consistency::tx_retry::TxRetryClass
+pub enum consistency::tx_retry::TxRetryClass
 pub consistency::tx_retry::TxRetryClass::Conflict
 pub consistency::tx_retry::TxRetryClass::OwnershipLost
 pub consistency::tx_retry::TxRetryClass::Permanent
 pub consistency::tx_retry::TxRetryClass::Transient
 impl consistency::tx_retry::TxRetryClass
-pub fn consistency::tx_retry::TxRetryClass::as_label(self) -> &'static str
+pub const consistency::tx_retry::TxRetryClass::ALL: &'static [Self]
+pub const fn consistency::tx_retry::TxRetryClass::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::tx_retry::TxRetryClass
 pub fn consistency::tx_retry::TxRetryClass::clone(&self) -> consistency::tx_retry::TxRetryClass
 impl core::cmp::Eq for consistency::tx_retry::TxRetryClass
@@ -2086,12 +2120,13 @@ impl core::marker::Unpin for consistency::tx_retry::TxRetryClass
 impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryClass
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryClass
 impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryClass
-#[non_exhaustive] pub enum consistency::tx_retry::TxRetryFinalStatus
+pub enum consistency::tx_retry::TxRetryFinalStatus
 pub consistency::tx_retry::TxRetryFinalStatus::Exhausted
 pub consistency::tx_retry::TxRetryFinalStatus::NotRetryable(consistency::tx_retry::TxRetryClass)
 pub consistency::tx_retry::TxRetryFinalStatus::Success
 impl consistency::tx_retry::TxRetryFinalStatus
-pub fn consistency::tx_retry::TxRetryFinalStatus::as_label(self) -> &'static str
+pub const consistency::tx_retry::TxRetryFinalStatus::ALL: &'static [Self]
+pub const fn consistency::tx_retry::TxRetryFinalStatus::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::tx_retry::TxRetryFinalStatus
 pub fn consistency::tx_retry::TxRetryFinalStatus::clone(&self) -> consistency::tx_retry::TxRetryFinalStatus
 impl core::cmp::Eq for consistency::tx_retry::TxRetryFinalStatus
@@ -2594,6 +2629,30 @@ impl core::marker::Unpin for consistency::idempotency::LeaseOutcome
 impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseOutcome
+pub enum consistency::LocalTxFinalStatus
+pub consistency::LocalTxFinalStatus::CommitUnknown
+pub consistency::LocalTxFinalStatus::Committed
+pub consistency::LocalTxFinalStatus::RollbackFailed
+pub consistency::LocalTxFinalStatus::RolledBack
+impl consistency::localtx::LocalTxFinalStatus
+pub const consistency::localtx::LocalTxFinalStatus::ALL: &'static [Self]
+pub const fn consistency::localtx::LocalTxFinalStatus::as_label(self) -> &'static str
+impl core::clone::Clone for consistency::localtx::LocalTxFinalStatus
+pub fn consistency::localtx::LocalTxFinalStatus::clone(&self) -> consistency::localtx::LocalTxFinalStatus
+impl core::cmp::Eq for consistency::localtx::LocalTxFinalStatus
+impl core::cmp::PartialEq for consistency::localtx::LocalTxFinalStatus
+pub fn consistency::localtx::LocalTxFinalStatus::eq(&self, &consistency::localtx::LocalTxFinalStatus) -> bool
+impl core::fmt::Debug for consistency::localtx::LocalTxFinalStatus
+pub fn consistency::localtx::LocalTxFinalStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::localtx::LocalTxFinalStatus
+impl core::marker::StructuralPartialEq for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Freeze for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Send for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Sync for consistency::localtx::LocalTxFinalStatus
+impl core::marker::Unpin for consistency::localtx::LocalTxFinalStatus
+impl core::marker::UnsafeUnpin for consistency::localtx::LocalTxFinalStatus
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::localtx::LocalTxFinalStatus
+impl core::panic::unwind_safe::UnwindSafe for consistency::localtx::LocalTxFinalStatus
 pub enum consistency::OutboxAppendOutcome
 pub consistency::OutboxAppendOutcome::Inserted
 pub consistency::OutboxAppendOutcome::SameFact
@@ -3105,13 +3164,14 @@ impl core::marker::Unpin for consistency::outbox::StoredOutboxEntryError
 impl core::marker::UnsafeUnpin for consistency::outbox::StoredOutboxEntryError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::StoredOutboxEntryError
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::StoredOutboxEntryError
-#[non_exhaustive] pub enum consistency::TxRetryClass
+pub enum consistency::TxRetryClass
 pub consistency::TxRetryClass::Conflict
 pub consistency::TxRetryClass::OwnershipLost
 pub consistency::TxRetryClass::Permanent
 pub consistency::TxRetryClass::Transient
 impl consistency::tx_retry::TxRetryClass
-pub fn consistency::tx_retry::TxRetryClass::as_label(self) -> &'static str
+pub const consistency::tx_retry::TxRetryClass::ALL: &'static [Self]
+pub const fn consistency::tx_retry::TxRetryClass::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::tx_retry::TxRetryClass
 pub fn consistency::tx_retry::TxRetryClass::clone(&self) -> consistency::tx_retry::TxRetryClass
 impl core::cmp::Eq for consistency::tx_retry::TxRetryClass
@@ -3128,12 +3188,13 @@ impl core::marker::Unpin for consistency::tx_retry::TxRetryClass
 impl core::marker::UnsafeUnpin for consistency::tx_retry::TxRetryClass
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryClass
 impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryClass
-#[non_exhaustive] pub enum consistency::TxRetryFinalStatus
+pub enum consistency::TxRetryFinalStatus
 pub consistency::TxRetryFinalStatus::Exhausted
 pub consistency::TxRetryFinalStatus::NotRetryable(consistency::tx_retry::TxRetryClass)
 pub consistency::TxRetryFinalStatus::Success
 impl consistency::tx_retry::TxRetryFinalStatus
-pub fn consistency::tx_retry::TxRetryFinalStatus::as_label(self) -> &'static str
+pub const consistency::tx_retry::TxRetryFinalStatus::ALL: &'static [Self]
+pub const fn consistency::tx_retry::TxRetryFinalStatus::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::tx_retry::TxRetryFinalStatus
 pub fn consistency::tx_retry::TxRetryFinalStatus::clone(&self) -> consistency::tx_retry::TxRetryFinalStatus
 impl core::cmp::Eq for consistency::tx_retry::TxRetryFinalStatus

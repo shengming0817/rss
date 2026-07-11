@@ -12,30 +12,10 @@ pub struct HttpSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalTxSpec {
-    pub boundary: LocalTxBoundary,
-    pub tx_model: LocalTxModel,
-    pub retry: LocalTxRetry,
-    pub commit_unknown: LocalTxCommitUnknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxBoundary {
-    SingleDomain,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxModel {
-    TenantScopedUow,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxRetry {
-    BoundedTransient,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTxCommitUnknown {
-    NotRetryable,
+    pub boundary: ::vocab::LocalTxBoundary,
+    pub tx_model: ::vocab::LocalTxModel,
+    pub retry: ::vocab::LocalTxRetry,
+    pub commit_unknown: ::vocab::LocalTxCommitUnknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

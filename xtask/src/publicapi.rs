@@ -417,18 +417,10 @@ mod tests {
             "pub enum generated::http::settings_v4::RouteMarker",
             "pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>",
             "pub struct generated::http::LocalTxSpec",
-            "pub generated::http::LocalTxSpec::boundary: generated::http::LocalTxBoundary",
-            "pub generated::http::LocalTxSpec::tx_model: generated::http::LocalTxModel",
-            "pub generated::http::LocalTxSpec::retry: generated::http::LocalTxRetry",
-            "pub generated::http::LocalTxSpec::commit_unknown: generated::http::LocalTxCommitUnknown",
-            "pub enum generated::http::LocalTxBoundary",
-            "pub generated::http::LocalTxBoundary::SingleDomain",
-            "pub enum generated::http::LocalTxModel",
-            "pub generated::http::LocalTxModel::TenantScopedUow",
-            "pub enum generated::http::LocalTxRetry",
-            "pub generated::http::LocalTxRetry::BoundedTransient",
-            "pub enum generated::http::LocalTxCommitUnknown",
-            "pub generated::http::LocalTxCommitUnknown::NotRetryable",
+            "pub generated::http::LocalTxSpec::boundary: vocab::http::LocalTxBoundary",
+            "pub generated::http::LocalTxSpec::tx_model: vocab::http::LocalTxModel",
+            "pub generated::http::LocalTxSpec::retry: vocab::http::LocalTxRetry",
+            "pub generated::http::LocalTxSpec::commit_unknown: vocab::http::LocalTxCommitUnknown",
             "pub const generated::http::LOCAL_TX_SPECS: &[generated::http::HttpSpec]",
             "pub struct generated::command::CommandSpec",
             "pub trait generated::command::CommandJournal",
@@ -476,6 +468,10 @@ mod tests {
             "pub generated::http::HttpSpec::self_scoped:",
             "pub generated::http::HttpSpec::consistency_level:",
             "pub generated::http::HttpSpec::effect_profile:",
+            "generated::http::LocalTxBoundary",
+            "generated::http::LocalTxModel",
+            "generated::http::LocalTxRetry",
+            "generated::http::LocalTxCommitUnknown",
         ] {
             assert!(
                 !baseline.lines().any(|line| line.contains(forbidden)),
@@ -503,6 +499,12 @@ mod tests {
             "pub struct vocab::http::HttpRouteEvidence",
             "pub const fn vocab::http::HttpRouteEvidence::from_static",
             "pub const fn vocab::http::HttpRouteEvidence::effect_profile",
+            "pub enum vocab::http::LocalTxBoundary",
+            "pub const vocab::http::LocalTxBoundary::ALL: &'static [Self]",
+            "pub const fn vocab::http::LocalTxBoundary::as_label",
+            "pub enum vocab::http::LocalTxModel",
+            "pub enum vocab::http::LocalTxRetry",
+            "pub enum vocab::http::LocalTxCommitUnknown",
         ] {
             assert!(
                 baseline.contains(required),
@@ -524,6 +526,32 @@ mod tests {
             assert!(
                 !baseline.contains(forbidden),
                 "vocab HTTP evidence 必须保持私有字段且无 Default: {forbidden}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn consistency_public_api_golden_exposes_closed_local_tx_vocabulary() -> anyhow::Result<()> {
+        let baseline = std::fs::read_to_string(baseline_dir()?.join("consistency.txt"))?;
+        for required in [
+            "pub use consistency::localtx::LocalTxBoundary",
+            "pub use consistency::localtx::LocalTxCommitUnknown",
+            "pub use consistency::localtx::LocalTxModel",
+            "pub use consistency::localtx::LocalTxRetry",
+            "pub enum consistency::localtx::LocalTxFinalStatus",
+            "pub consistency::localtx::LocalTxFinalStatus::Committed",
+            "pub consistency::localtx::LocalTxFinalStatus::RolledBack",
+            "pub consistency::localtx::LocalTxFinalStatus::RollbackFailed",
+            "pub consistency::localtx::LocalTxFinalStatus::CommitUnknown",
+            "pub const consistency::localtx::LocalTxFinalStatus::ALL: &'static [Self]",
+            "pub const fn consistency::localtx::LocalTxFinalStatus::as_label",
+            "pub const consistency::tx_retry::TxRetryClass::ALL: &'static [Self]",
+            "pub const consistency::tx_retry::TxRetryFinalStatus::ALL: &'static [Self]",
+        ] {
+            assert!(
+                baseline.contains(required),
+                "consistency public-api golden 缺少闭合 LocalTx API: {required}"
             );
         }
         Ok(())
