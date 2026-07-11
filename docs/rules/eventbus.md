@@ -76,6 +76,14 @@ outbox relay/subscriber rehydrate 的受控路径调用 `insert_wire_pair`。
 
 PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback / 双写兼容：
 
+### Outbox relay 投递语义（at-least-once）
+
+Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/message ID 发布；publish 成功、settle 前崩溃允许 broker duplicate，broker confirm 的 ambiguous outcome 也必须按可能已发布处理并重试，不能换 ID 或假定消息尚未到达。
+
+`acquire_lease` / settle CAS 只围栏当前 lease holder 与 stale writer 的状态写回，不提供 broker exactly-once，也不能撤销已经成功的 publish。duplicate 由 tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用：业务写、outgoing outbox 与 receipt done 在同一事务提交，提交成功后才 broker Ack。
+
+稳定 event ID 是幂等锚，不是 exactly-once 保证。MDM 变更、设备命令、外部 API 等事务外副作用仍须透传稳定 idempotency key，或由 reconcile 闭环收敛；不得因 relay CAS 或 Inbox receipt 省略外部系统自己的幂等边界。
+
 **事实同一性（OUTBOX-FACT-FUNNEL-01）**：mutable 与 CDC 模式共用
 `rss-outbox-fact-v1` canonical identity。首次写入返回 `Inserted`；同 `event_id` 且稳定事实
 完全相同返回 `SameFact`；任一稳定字段不同返回 typed `FactConflict`并在 commit

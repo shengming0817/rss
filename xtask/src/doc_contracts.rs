@@ -5,6 +5,8 @@
 //! actorless 旧片段，也不得引用已删除的 event topology / entry symbols。
 //! 该门只锁已知高风险签名片段，避免宽泛词扫描误伤历史散文；同时从冻结来源机器派生
 //! carry-over 全集，以闭值状态、审计 PBI registry、仓内证据与 proof registry 守住唯一现行迁移索引。
+//!
+//! INVARIANT: OUTBOX-DELIVERY-SEMANTICS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::scan_content_rejects_false_outbox_delivery_guarantees", anti_vacuity = "tests::scan_content_accepts_correct_and_scoped_delivery_semantics" }—— Outbox relay transport 只承诺 at-least-once；规则/spec、crash-matrix 说明与生产 rustdoc 不得把 CAS/lease fencing 误写成 broker at-most-once/exactly-once。负向扫描与 canonical 三 facet 完整性共同防止错误语义被 AI 复制或整段删除。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -21,13 +23,32 @@ const CONTENT_ROOTS: &[(&str, &str)] = &[
     ("contracts", "toml"),
     ("journeys", "toml"),
 ];
-const SOURCE_DOC_FILES: &[&str] = &[
-    "crates/consistency/src/outbox.rs",
-    "crates/diport/src/outbox_emitter.rs",
-    "adapters/postgres/src/outbox.rs",
-    "crates/eventexec/src/relay_config.rs",
-    "journeys/tests/identity_login_audit_journey.rs",
-    "journeys/tests/identity_login_audit_durable_journey.rs",
+const SEMANTIC_DOC_FILES: &[&str] =
+    &["docs/architecture/202607111257-1673-l2-outbox-crash-matrix.md"];
+const RUSTDOC_ROOTS: &[&str] = &[
+    "crates",
+    "adapters",
+    "assemblies",
+    "bins",
+    "generated",
+    "journeys",
+    "journeys-fault-matrix",
+    "examples",
+];
+const OUTBOX_CANONICAL_FILE: &str = "docs/rules/eventbus.md";
+const OUTBOX_CANONICAL_FACETS: &[(&str, &str)] = &[
+    (
+        "transport-at-least-once",
+        "relay transport 是 **at-least-once**",
+    ),
+    (
+        "publish-before-settle-duplicate",
+        "publish 成功、settle 前崩溃允许 broker duplicate",
+    ),
+    (
+        "consumer-transactional-dedupe",
+        "tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用",
+    ),
 ];
 const CARRYOVER_DOC_FILE: &str =
     "docs/migration-from-gocell/202607101035-1444-persistence-migration-carry-over.md";
@@ -735,6 +756,7 @@ pub(crate) enum Rule {
     ProducerSignature,
     OutboxTenantScope,
     SagaTenantScope,
+    OutboxDeliverySemantics,
     MigrationCarryover,
 }
 
@@ -780,10 +802,10 @@ fn scan_docs(root: &Path) -> Result<(usize, String, Vec<Finding>)> {
         }
         files.append(&mut found);
     }
-    for rel in SOURCE_DOC_FILES {
+    for rel in SEMANTIC_DOC_FILES {
         let path = root.join(rel);
         if !path.is_file() {
-            bail!("doc-contracts: source rustdoc 文件 {rel} 缺失，fail-closed");
+            bail!("doc-contracts: semantic 文档 {rel} 缺失，fail-closed");
         }
         files.push(path);
     }
@@ -795,10 +817,29 @@ fn scan_docs(root: &Path) -> Result<(usize, String, Vec<Finding>)> {
             .map_err(|e| anyhow::anyhow!("doc-contracts: 读 {} 失败: {e}", path.display()))?;
         let rel = path.strip_prefix(root).unwrap_or(path);
         findings.extend(scan_content(rel, &content));
+        if rel == Path::new(OUTBOX_CANONICAL_FILE) {
+            findings.extend(scan_outbox_canonical_semantics(&content));
+        }
+    }
+    let mut rustdoc_files = Vec::new();
+    for dir in RUSTDOC_ROOTS {
+        rustdoc_files.extend(content_files(&root.join(dir), "rs")?);
+    }
+    rustdoc_files.sort();
+    rustdoc_files.dedup();
+    for path in &rustdoc_files {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("doc-contracts: 读 {} 失败: {e}", path.display()))?;
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        findings.extend(scan_false_outbox_delivery_guarantees(rel, &content));
     }
     let (carryover_summary, carryover_findings) = scan_carryover(root)?;
     findings.extend(carryover_findings);
-    Ok((files.len() + 1, carryover_summary, findings))
+    Ok((
+        files.len() + rustdoc_files.len() + 1,
+        carryover_summary,
+        findings,
+    ))
 }
 
 // INVARIANT: MIGRATION-CARRYOVER-COVERAGE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::carryover_rejects_missing_source_and_duplicate_key", anti_vacuity = "tests::carryover_accepts_complete_typed_ledger" }
@@ -2700,7 +2741,576 @@ fn scan_content(path: &Path, content: &str) -> Vec<Finding> {
             }
         }
     }
+    findings.extend(scan_false_outbox_delivery_guarantees(path, content));
     findings
+}
+
+fn scan_outbox_canonical_semantics(content: &str) -> Vec<Finding> {
+    let visible = visible_outbox_canonical_section(content);
+    OUTBOX_CANONICAL_FACETS
+        .iter()
+        .filter(|(_, needle)| {
+            let normalized_needle = normalize_semantic_text(needle);
+            !visible.lines().any(|line| {
+                let normalized_line = normalize_semantic_text(line);
+                normalized_line.contains(&normalized_needle)
+                    && !guarantee_is_denied(&normalized_line, &normalized_needle)
+            })
+        })
+        .map(|(facet, needle)| {
+            finding(
+                Rule::OutboxDeliverySemantics,
+                OUTBOX_CANONICAL_FILE,
+                format!("canonical Outbox delivery semantics 缺少 {facet} facet: {needle:?}"),
+            )
+        })
+        .collect()
+}
+
+fn visible_outbox_canonical_section(content: &str) -> String {
+    const HEADING: &str = "Outbox relay 投递语义";
+    let mut in_section = false;
+    let mut section_level = 0;
+    let mut in_fence = false;
+    let mut fence_marker = None;
+    let mut in_comment = false;
+    let mut visible = String::new();
+
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if !in_section {
+            let level = trimmed
+                .chars()
+                .take_while(|character| *character == '#')
+                .count();
+            let title = trimmed[level..].trim_start();
+            in_section = level > 0 && title.starts_with(HEADING);
+            if in_section {
+                section_level = level;
+            }
+            continue;
+        }
+        let heading_level = trimmed
+            .chars()
+            .take_while(|character| *character == '#')
+            .count();
+        if heading_level > 0 && heading_level <= section_level {
+            break;
+        }
+        if let Some(marker) = fence_open_marker(trimmed) {
+            if in_fence {
+                if fence_marker == Some(marker) {
+                    in_fence = false;
+                    fence_marker = None;
+                }
+            } else {
+                in_fence = true;
+                fence_marker = Some(marker);
+            }
+            continue;
+        }
+        // CommonMark indented code + any open fence stay invisible (unclosed = fail-closed).
+        if in_fence || trimmed.starts_with('>') || is_indented_code_line(raw) {
+            continue;
+        }
+        let mut remainder = raw;
+        loop {
+            if in_comment {
+                let Some((_, after)) = remainder.split_once("-->") else {
+                    break;
+                };
+                in_comment = false;
+                remainder = after;
+                continue;
+            }
+            let Some((before, after)) = remainder.split_once("<!--") else {
+                visible.push_str(remainder);
+                visible.push('\n');
+                break;
+            };
+            visible.push_str(before);
+            if let Some((_, tail)) = after.split_once("-->") {
+                remainder = tail;
+            } else {
+                in_comment = true;
+                break;
+            }
+        }
+    }
+    visible
+}
+
+fn fence_open_marker(trimmed: &str) -> Option<char> {
+    let mut chars = trimmed.chars();
+    let marker = chars.next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let run = 1 + chars.take_while(|character| *character == marker).count();
+    (run >= 3).then_some(marker)
+}
+
+fn is_indented_code_line(raw: &str) -> bool {
+    raw.starts_with("    ") || raw.starts_with('\t')
+}
+
+#[derive(Debug)]
+struct ProseClause {
+    line: usize,
+    text: String,
+    fragments: Vec<(usize, String)>,
+    starts_paragraph: bool,
+}
+
+fn scan_false_outbox_delivery_guarantees(path: &Path, content: &str) -> Vec<Finding> {
+    let mut paragraph_context = false;
+    semantic_clauses(path, content)
+        .into_iter()
+        .filter_map(|clause| {
+            let normalized = normalize_semantic_text(&clause.text);
+            if clause.starts_paragraph {
+                paragraph_context = false;
+            }
+            let local_context = has_outbox_delivery_context(path, &normalized);
+            if local_context {
+                paragraph_context = true;
+            }
+            if !paragraph_context {
+                return None;
+            }
+            let guarantee = false_delivery_guarantees(&normalized)
+                .find(|guarantee| !guarantee_is_denied(&normalized, guarantee))?;
+            let line = guarantee_line(&clause, guarantee);
+            Some(finding(
+                Rule::OutboxDeliverySemantics,
+                format!("{}:{line}", path.display()),
+                "Outbox CAS/lease 只围栏状态写回；transport 必须表述为 at-least-once，publish-before-settle 允许 duplicate",
+            ))
+        })
+        .collect()
+}
+
+fn semantic_clauses(path: &Path, content: &str) -> Vec<ProseClause> {
+    let rustdoc_only = path.extension().is_some_and(|extension| extension == "rs");
+    let mut clauses = Vec::new();
+    let mut pending = String::new();
+    let mut pending_fragments = Vec::new();
+    let mut pending_line = 0;
+    let mut next_starts_paragraph = true;
+
+    let prose_lines = if rustdoc_only {
+        rustdoc_prose_lines(content)
+    } else {
+        content
+            .lines()
+            .enumerate()
+            .map(|(index, raw)| (index + 1, raw.to_owned()))
+            .collect()
+    };
+
+    for (line, raw) in prose_lines {
+        let prose = raw.trim();
+        if prose.is_empty() {
+            flush_clause(
+                &mut clauses,
+                &mut pending,
+                &mut pending_fragments,
+                pending_line,
+                next_starts_paragraph,
+            );
+            pending_line = 0;
+            next_starts_paragraph = true;
+            continue;
+        }
+
+        let structural = prose.starts_with('#')
+            || prose.starts_with('|')
+            || fence_open_marker(prose).is_some()
+            || prose.starts_with("- ");
+        if structural {
+            flush_clause(
+                &mut clauses,
+                &mut pending,
+                &mut pending_fragments,
+                pending_line,
+                next_starts_paragraph,
+            );
+            pending_line = 0;
+            next_starts_paragraph = true;
+        }
+
+        for fragment in prose.split_inclusive(['。', '；', ';', '！', '!', '？', '?', '.']) {
+            if pending.is_empty() {
+                pending_line = line;
+            } else {
+                pending.push(' ');
+            }
+            pending.push_str(fragment.trim());
+            pending_fragments.push((line, fragment.trim().to_owned()));
+            if fragment
+                .chars()
+                .last()
+                .is_some_and(|character| "。；;！!？?.".contains(character))
+            {
+                let started = next_starts_paragraph;
+                flush_clause(
+                    &mut clauses,
+                    &mut pending,
+                    &mut pending_fragments,
+                    pending_line,
+                    started,
+                );
+                pending_line = 0;
+                next_starts_paragraph = false;
+            }
+        }
+        if structural {
+            flush_clause(
+                &mut clauses,
+                &mut pending,
+                &mut pending_fragments,
+                pending_line,
+                next_starts_paragraph,
+            );
+            pending_line = 0;
+            next_starts_paragraph = true;
+        }
+    }
+    flush_clause(
+        &mut clauses,
+        &mut pending,
+        &mut pending_fragments,
+        pending_line,
+        next_starts_paragraph,
+    );
+    clauses
+}
+
+/// Extract rustdoc prose for every supported surface form: `///`/`//!`, `#[doc = "..."]`,
+/// `/** ... */`, and `/*! ... */`. A line/block lexer is used (not syn expansion) so
+/// docs inside unexpanded macro inputs remain visible to the gate.
+fn rustdoc_prose_lines(content: &str) -> Vec<(usize, String)> {
+    rustdoc_prose_lines_lexer(content)
+}
+
+fn rustdoc_prose_lines_lexer(content: &str) -> Vec<(usize, String)> {
+    let mut lines = Vec::new();
+    let mut block: Option<BlockDocKind> = None;
+    for (index, raw) in content.lines().enumerate() {
+        let line = index + 1;
+        let trimmed = raw.trim_start();
+        if let Some(kind) = block {
+            if let Some(prose) = block_doc_continuation(trimmed, kind) {
+                match prose {
+                    BlockDocPiece::Text(text) => lines.push((line, text)),
+                    BlockDocPiece::Closed { text } => {
+                        if !text.is_empty() {
+                            lines.push((line, text));
+                        }
+                        block = None;
+                    }
+                }
+            } else {
+                block = None;
+            }
+            continue;
+        }
+        if let Some((kind, first)) = open_block_doc(trimmed) {
+            match first {
+                BlockDocPiece::Text(text) => {
+                    lines.push((line, text));
+                    block = Some(kind);
+                }
+                BlockDocPiece::Closed { text, .. } => {
+                    if !text.is_empty() {
+                        lines.push((line, text));
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(prose) = trimmed
+            .strip_prefix("//!")
+            .or_else(|| trimmed.strip_prefix("///"))
+        {
+            lines.push((line, prose.to_owned()));
+            continue;
+        }
+        if let Some(prose) = parse_doc_attribute_line(trimmed) {
+            lines.push((line, prose));
+        }
+    }
+    lines
+}
+
+#[derive(Clone, Copy)]
+enum BlockDocKind {
+    Inner,
+    Outer,
+}
+
+enum BlockDocPiece {
+    Text(String),
+    Closed { text: String },
+}
+
+fn open_block_doc(trimmed: &str) -> Option<(BlockDocKind, BlockDocPiece)> {
+    let (kind, rest) = if let Some(rest) = trimmed.strip_prefix("/*!") {
+        (BlockDocKind::Inner, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("/**") {
+        // Avoid matching `/***`-style non-doc comments that aren't rustdoc outer docs.
+        if rest.starts_with('*') && !rest.starts_with("*/") {
+            return None;
+        }
+        (BlockDocKind::Outer, rest)
+    } else {
+        return None;
+    };
+    Some((kind, close_or_continue_block(rest)))
+}
+
+fn block_doc_continuation(trimmed: &str, kind: BlockDocKind) -> Option<BlockDocPiece> {
+    let _ = kind;
+    let rest = trimmed
+        .strip_prefix('*')
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    Some(close_or_continue_block(rest))
+}
+
+fn close_or_continue_block(rest: &str) -> BlockDocPiece {
+    if let Some(text) = rest.strip_suffix("*/") {
+        BlockDocPiece::Closed {
+            text: text.trim().to_owned(),
+        }
+    } else {
+        BlockDocPiece::Text(rest.trim().to_owned())
+    }
+}
+
+fn parse_doc_attribute_line(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix("#[doc")?;
+    let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+    let (literal, after) = split_rust_string_literal(rest)?;
+    let after = after.trim_start();
+    if after == "]" || after.starts_with(']') {
+        Some(literal)
+    } else {
+        None
+    }
+}
+
+fn split_rust_string_literal(input: &str) -> Option<(String, &str)> {
+    let mut rest = input;
+    let raw = if let Some(stripped) = rest.strip_prefix('r') {
+        let hashes = stripped
+            .chars()
+            .take_while(|character| *character == '#')
+            .count();
+        rest = &stripped[hashes..];
+        Some(hashes)
+    } else {
+        None
+    };
+    let rest = rest.strip_prefix('"')?;
+    if let Some(hashes) = raw {
+        let closer = format!("\"{}", "#".repeat(hashes));
+        let index = rest.find(&closer)?;
+        Some((rest[..index].to_owned(), &rest[index + closer.len()..]))
+    } else {
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(character) = chars.next() {
+            match character {
+                '\\' => {
+                    let escaped = chars.next()?;
+                    out.push(match escaped {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        '0' => '\0',
+                        '\\' | '\'' | '"' => escaped,
+                        character => character,
+                    });
+                }
+                '"' => return Some((out, chars.as_str())),
+                character => out.push(character),
+            }
+        }
+        None
+    }
+}
+
+fn flush_clause(
+    clauses: &mut Vec<ProseClause>,
+    pending: &mut String,
+    fragments: &mut Vec<(usize, String)>,
+    line: usize,
+    starts_paragraph: bool,
+) {
+    if !pending.trim().is_empty() {
+        clauses.push(ProseClause {
+            line,
+            text: std::mem::take(pending),
+            fragments: std::mem::take(fragments),
+            starts_paragraph,
+        });
+    }
+}
+
+fn normalize_semantic_text(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|character| match character {
+            '-' | '_' | '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}'
+            | '\u{2015}' | '\u{2212}' => ' ',
+            character => character,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn has_outbox_delivery_context(path: &Path, text: &str) -> bool {
+    ["outbox", "relay", "broker publish", "broker delivery"]
+        .iter()
+        .any(|context| text.contains(context))
+        || text.contains("acquire lease")
+        || (text.contains("settle") && text.contains("cas"))
+        || (is_outbox_source_path(path)
+            && ["lease", "settle", "cas"]
+                .iter()
+                .any(|context| text.contains(context)))
+}
+
+fn is_outbox_source_path(path: &Path) -> bool {
+    let display = path.to_string_lossy().to_lowercase();
+    path.extension().is_some_and(|extension| extension == "rs")
+        && (display.contains("outbox") || display.contains("relay"))
+        || SEMANTIC_DOC_FILES
+            .iter()
+            .any(|candidate| path == Path::new(candidate))
+}
+
+fn false_delivery_guarantees(text: &str) -> impl Iterator<Item = &'static str> + '_ {
+    const GUARANTEES: &[&str] = &[
+        "at most once",
+        "exactly once",
+        "至多 publish 一次",
+        "只 publish 一次",
+        "仅 publish 一次",
+        "恰好 publish 一次",
+        "至多发布一次",
+        "只发布一次",
+        "仅发布一次",
+        "恰好发布一次",
+        "至多投递一次",
+        "只投递一次",
+        "仅投递一次",
+        "只会投递一次",
+        "仅会投递一次",
+        "恰好投递一次",
+        "精确一次",
+    ];
+    GUARANTEES
+        .iter()
+        .copied()
+        .filter(move |guarantee| text.contains(guarantee))
+}
+
+fn guarantee_is_denied(text: &str, guarantee: &str) -> bool {
+    text.match_indices(guarantee).all(|(offset, _)| {
+        // Conjunctions like `and` are not claim boundaries: shared denials must
+        // cover coordinated guarantees (`does not guarantee X and exactly-once`).
+        const BOUNDARIES: &[&str] = &[
+            ",",
+            "，",
+            " but ",
+            " yet ",
+            " however ",
+            " while ",
+            " whereas ",
+            " although ",
+            "但",
+            "却",
+            "同时",
+            "而",
+        ];
+        let prefix = &text[..offset];
+        let claim_start = BOUNDARIES
+            .iter()
+            .filter_map(|boundary| prefix.rfind(boundary).map(|index| index + boundary.len()))
+            .max()
+            .unwrap_or(0);
+        let guarantee_end = offset + guarantee.len();
+        let claim_end = BOUNDARIES
+            .iter()
+            .filter_map(|boundary| {
+                text[guarantee_end..]
+                    .find(boundary)
+                    .map(|index| guarantee_end + index)
+            })
+            .min()
+            .unwrap_or(text.len());
+        let claim_prefix = &text[claim_start..guarantee_end];
+        let claim = &text[claim_start..claim_end];
+        let marked_quote = [
+            "错误表述",
+            "错误引用",
+            "误写",
+            "incorrect claim",
+            "false claim",
+        ]
+        .iter()
+        .any(|marker| claim_prefix.contains(marker));
+        let direct_denial = [
+            "不提供",
+            "不保证",
+            "不能保证",
+            "不得声称",
+            "并非",
+            "不是",
+            "不再声明",
+            "无运行时保证",
+            "does not guarantee",
+            "doesn't guarantee",
+            "is not",
+            "isn't",
+            "no guarantee",
+            "must not claim",
+            "cannot guarantee",
+            "can't guarantee",
+            "never guarantees",
+        ]
+        .iter()
+        .any(|denial| claim_prefix.contains(denial));
+        let no_guarantee_form = claim.contains(&format!("no {guarantee} guarantee"));
+        let trailing_denial = ["不成立", "is false", "is incorrect", "is unsupported"]
+            .iter()
+            .any(|denial| text[guarantee_end..claim_end].contains(denial));
+        marked_quote || direct_denial || no_guarantee_form || trailing_denial
+    })
+}
+
+fn guarantee_line(clause: &ProseClause, guarantee: &str) -> usize {
+    if let Some((line, _)) = clause
+        .fragments
+        .iter()
+        .find(|(_, fragment)| normalize_semantic_text(fragment).contains(guarantee))
+    {
+        return *line;
+    }
+    let anchor = guarantee
+        .split_whitespace()
+        .max_by_key(|word| word.len())
+        .unwrap_or(guarantee);
+    clause
+        .fragments
+        .iter()
+        .find(|(_, fragment)| normalize_semantic_text(fragment).contains(anchor))
+        .map(|(line, _)| *line)
+        .unwrap_or(clause.line)
 }
 
 #[cfg(test)]
@@ -3580,6 +4190,238 @@ eventexec::command::emit_async(emitter, dispatch_id, topic, contract, tenant, pa
 OutboxEnvelopeParts::new(CONTRACT, tenant, subject, actor)
 ";
         assert!(scan_content(Path::new("docs/rules/eventbus.md"), src).is_empty());
+    }
+
+    #[test]
+    fn scan_content_rejects_false_outbox_delivery_guarantees() {
+        let cases = [
+            "relay 幂等 CAS 保证即使重投也至多 publish 一次。",
+            "at-most-once 正确性由 acquire_lease CAS 保证。",
+            "Outbox transport guarantees at-most-once delivery.",
+            "Outbox broker publish guarantees exactly once.",
+            "Outbox relay guarantees\nexactly-once delivery.",
+            "Outbox lease 保证恰好发布一次。",
+            "Outbox relay guarantees exactly‑once delivery.",
+            "Outbox relay 确保消息只会投递一次。",
+            "Outbox relay 确保消息仅会投递一次。",
+            "Outbox relay 确保消息恰好投递一次。",
+            "Outbox relay must not lose messages and guarantees exactly-once delivery.",
+            "Outbox CAS 不保证 lease 永不失效，却保证 exactly-once broker delivery。",
+            "Outbox relay 不保证低延迟，同时保证 exactly-once delivery。",
+            "Outbox relay does not guarantee availability while guaranteeing exactly-once delivery.",
+        ];
+
+        for source in cases {
+            let findings = scan_content(Path::new("docs/rules/eventbus.md"), source);
+            assert_eq!(findings.len(), 1, "source should fail: {source:?}");
+        }
+    }
+
+    #[test]
+    fn scan_content_accepts_correct_and_scoped_delivery_semantics() {
+        let cases = [
+            "Outbox relay transport is at-least-once; publish 成功、settle 前允许 duplicate。",
+            "Outbox CAS 不提供 broker exactly-once。",
+            "Outbox transport is not exactly-once.",
+            "Outbox relay has no at-most-once guarantee.",
+            "不得声称 Outbox transport guarantees at-most-once delivery。",
+            "错误表述：relay 幂等 CAS 保证即使重投也至多 publish 一次。",
+            "任何依赖‘CAS 使 broker 至多 publish 一次’的假设都不成立。",
+            "Subscriber + MessageStream 是 at-most-once demo consumer。",
+            "并发两个有效 relay 中，publisher 在该 lease 窗口至多调用一次。",
+            "Saga lease CAS guarantees exactly-once compensation.",
+        ];
+
+        for source in cases {
+            assert!(
+                scan_content(Path::new("docs/rules/tenancy.md"), source).is_empty(),
+                "source should pass: {source:?}"
+            );
+        }
+        assert!(
+            scan_content(
+                Path::new("docs/rules/eventbus.md"),
+                "Saga lease CAS guarantees exactly-once compensation.",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn outbox_false_guarantee_reports_the_guarantee_line() {
+        let findings = scan_content(
+            Path::new("crates/eventexec/src/relay.rs"),
+            "/// Outbox relay guarantees\n/// exactly-once delivery.",
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].subject, "crates/eventexec/src/relay.rs:2");
+
+        let findings = scan_content(
+            Path::new("crates/eventexec/src/relay.rs"),
+            "/// Outbox relay is at-least-once but incorrectly claims\n/// at-most-once delivery.",
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].subject, "crates/eventexec/src/relay.rs:2");
+    }
+
+    #[test]
+    fn canonical_outbox_semantics_requires_every_faceted_statement() {
+        let canonical = "\
+## Outbox relay 投递语义（at-least-once）
+relay transport 是 **at-least-once**。
+publish 成功、settle 前崩溃允许 broker duplicate。
+tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用。
+";
+        assert!(scan_outbox_canonical_semantics(canonical).is_empty());
+
+        for required in [
+            "relay transport 是 **at-least-once**。\n",
+            "publish 成功、settle 前崩溃允许 broker duplicate。\n",
+            "tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用。\n",
+        ] {
+            let incomplete = canonical.replace(required, "");
+            assert_eq!(
+                scan_outbox_canonical_semantics(&incomplete).len(),
+                1,
+                "missing facet should fail: {required:?}"
+            );
+        }
+
+        let hidden_in_comment = format!(
+            "## Outbox relay 投递语义（at-least-once）\n<!--\n{}\n{}\n{}\n-->\n",
+            OUTBOX_CANONICAL_FACETS[0].1,
+            OUTBOX_CANONICAL_FACETS[1].1,
+            OUTBOX_CANONICAL_FACETS[2].1,
+        );
+        assert_eq!(scan_outbox_canonical_semantics(&hidden_in_comment).len(), 3);
+
+        let hidden_in_fence = format!(
+            "## Outbox relay 投递语义（at-least-once）\n```text\n{}\n{}\n{}\n```\n",
+            OUTBOX_CANONICAL_FACETS[0].1,
+            OUTBOX_CANONICAL_FACETS[1].1,
+            OUTBOX_CANONICAL_FACETS[2].1,
+        );
+        assert_eq!(scan_outbox_canonical_semantics(&hidden_in_fence).len(), 3);
+
+        let hidden_in_tilde_fence = format!(
+            "## Outbox relay 投递语义（at-least-once）\n~~~text\n{}\n{}\n{}\n~~~\n",
+            OUTBOX_CANONICAL_FACETS[0].1,
+            OUTBOX_CANONICAL_FACETS[1].1,
+            OUTBOX_CANONICAL_FACETS[2].1,
+        );
+        assert_eq!(
+            scan_outbox_canonical_semantics(&hidden_in_tilde_fence).len(),
+            3
+        );
+
+        let hidden_in_indented_code = format!(
+            "## Outbox relay 投递语义（at-least-once）\n\n    {}\n    {}\n    {}\n",
+            OUTBOX_CANONICAL_FACETS[0].1,
+            OUTBOX_CANONICAL_FACETS[1].1,
+            OUTBOX_CANONICAL_FACETS[2].1,
+        );
+        assert_eq!(
+            scan_outbox_canonical_semantics(&hidden_in_indented_code).len(),
+            3
+        );
+
+        let hidden_in_unclosed_fence = format!(
+            "## Outbox relay 投递语义（at-least-once）\n```text\n{}\n{}\n{}\n",
+            OUTBOX_CANONICAL_FACETS[0].1,
+            OUTBOX_CANONICAL_FACETS[1].1,
+            OUTBOX_CANONICAL_FACETS[2].1,
+        );
+        assert_eq!(
+            scan_outbox_canonical_semantics(&hidden_in_unclosed_fence).len(),
+            3
+        );
+
+        let denied = canonical.replacen(
+            OUTBOX_CANONICAL_FACETS[0].1,
+            &format!("不再声明 {}", OUTBOX_CANONICAL_FACETS[0].1),
+            1,
+        );
+        assert_eq!(scan_outbox_canonical_semantics(&denied).len(), 1);
+    }
+
+    #[test]
+    fn outbox_false_guarantee_keeps_paragraph_context_across_sentences() {
+        let findings = scan_content(
+            Path::new("docs/rules/eventbus.md"),
+            "Outbox relay uses CAS. This guarantees exactly-once delivery.",
+        );
+        assert_eq!(
+            findings.len(),
+            1,
+            "cross-sentence outbox context must stay in scope"
+        );
+    }
+
+    #[test]
+    fn outbox_shared_negation_with_and_is_not_a_false_positive() {
+        assert!(
+            scan_content(
+                Path::new("docs/rules/eventbus.md"),
+                "Outbox does not guarantee ordering and exactly-once delivery.",
+            )
+            .is_empty(),
+            "shared denial before `and` must cover the guarantee claim"
+        );
+    }
+
+    #[test]
+    fn outbox_false_guarantee_does_not_leak_across_paragraphs() {
+        assert!(
+            scan_content(
+                Path::new("docs/rules/eventbus.md"),
+                "Outbox relay uses CAS.\n\nUnrelated module guarantees exactly-once delivery.",
+            )
+            .is_empty(),
+            "outbox context must reset on paragraph break"
+        );
+    }
+
+    #[test]
+    fn outbox_false_guarantee_detects_doc_attribute_and_block_docs() {
+        let cases = [
+            "#[doc = \"Outbox relay guarantees exactly-once delivery.\"]\nfn sample() {}\n",
+            "/** Outbox relay guarantees exactly-once delivery. */\nfn sample() {}\n",
+            "/*! Outbox relay guarantees exactly-once delivery. */\n",
+        ];
+        for source in cases {
+            let findings = scan_content(Path::new("crates/eventexec/src/relay.rs"), source);
+            assert_eq!(
+                findings.len(),
+                1,
+                "rustdoc surface form should fail: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_rustdoc_discovery_covers_outbox_and_relay_sources() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let mut files = Vec::new();
+        for dir in RUSTDOC_ROOTS {
+            files.extend(content_files(&root.join(dir), "rs")?);
+        }
+        let relative = files
+            .iter()
+            .filter_map(|path| path.strip_prefix(&root).ok())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            Path::new("crates/eventexec/src/relay.rs"),
+            Path::new("crates/eventexec/src/relay_metrics.rs"),
+            Path::new("assemblies/runtime/src/event_transport.rs"),
+            Path::new("adapters/amqp/src/publisher.rs"),
+            Path::new("adapters/mqtt/src/publisher.rs"),
+        ] {
+            assert!(
+                relative.contains(expected),
+                "missing rustdoc source {expected:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
