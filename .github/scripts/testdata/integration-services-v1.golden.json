@@ -1,0 +1,46 @@
+{
+  "cleanup": {
+    "attemptedContainerIds": [
+      "owned-a",
+      "owned-b"
+    ],
+    "errors": [],
+    "removedContainerIds": [
+      "owned-a",
+      "owned-b"
+    ]
+  },
+  "collection": {
+    "archiveCreated": true,
+    "attemptedContainerIds": [
+      "owned-a",
+      "owned-b"
+    ],
+    "capturedContainerIds": [
+      "owned-a",
+      "owned-b"
+    ],
+    "degraded": false,
+    "errors": [],
+    "outcome": "failure",
+    "truncated": false
+  },
+  "context": {
+    "partition": "1/2",
+    "scope": "repo-42-3-integration-db-1of2",
+    "shard": "db"
+  },
+  "disk": {
+    "afterCleanupAvailableBytes": 0,
+    "afterCleanupStatus": "success",
+    "baselineAvailableBytes": 0,
+    "beforeCleanupAvailableBytes": 0,
+    "beforeCleanupStatus": "success"
+  },
+  "imageCleanup": "skipped-unprovable-ownership",
+  "preparation": {
+    "reason": null,
+    "status": "success"
+  },
+  "schemaVersion": 1
+}

@@ -173,11 +173,12 @@ pub(crate) enum CoreTestScope {
     VaultBackend,
     SettingsOnly,
     IdentityAudit,
+    TestkitContainers,
 }
 
 impl CoreTestScope {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Workspace,
         Self::S3Backend,
         Self::RedisBackend,
@@ -188,6 +189,7 @@ impl CoreTestScope {
         Self::VaultBackend,
         Self::SettingsOnly,
         Self::IdentityAudit,
+        Self::TestkitContainers,
     ];
 
     fn args(self, partitioned: bool) -> Vec<String> {
@@ -215,6 +217,9 @@ impl CoreTestScope {
                 }
                 args
             }
+            Self::TestkitContainers => ["-p", "testkit", "--features", "containers"]
+                .map(str::to_owned)
+                .to_vec(),
         }
     }
 }
@@ -1470,6 +1475,20 @@ mod tests {
             }
         );
         Ok(())
+    }
+
+    #[test]
+    fn testkit_container_scope_is_typed_and_fail_loud() {
+        let scope = CoreTestScope::TestkitContainers;
+        assert!(CoreTestScope::ALL.contains(&scope));
+        assert_eq!(
+            scope.args(false),
+            ["-p", "testkit", "--features", "containers"].map(str::to_owned)
+        );
+        assert!(
+            !scope.args(false).iter().any(|arg| arg == "--no-tests=pass"),
+            "feature-gated testkit scope must fail loudly if its test set becomes empty"
+        );
     }
 
     #[test]

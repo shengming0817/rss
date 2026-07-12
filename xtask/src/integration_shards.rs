@@ -191,6 +191,9 @@ integration_shard_catalog! {
         name: "consistency-fault",
         resources: [Postgres, Redis, Amqp],
         units: [
+            ("testkit", "testkit", Lib, Serial),
+            ("testkit", "crash_matrix", Test, Parallel),
+            ("testkit", "harness", Test, Parallel),
             ("redis-adapter", "redis", Lib, Parallel),
             ("redis-adapter", "integration_claimer", Test, Serial),
             ("journeys", "device_command_ack_timeout_journey", Test, Parallel),
@@ -310,6 +313,7 @@ const LEGACY_PACKAGES: &[&str] = &[
     "journeys",
     "runtime",
     "journeys-fault-matrix",
+    "testkit",
 ];
 
 pub(crate) const STANDALONE_EXCLUSIONS: &[(&str, &str, TargetKind, &str)] = &[(
@@ -561,6 +565,7 @@ mod tests {
             ("runtime", "identity_login_wire_e2e"),
             ("runtime", "wire_contract_e2e"),
             ("redis-adapter", "integration_claimer"),
+            ("testkit", "testkit"),
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
             ("runtime", "settings_config_publish_durable_e2e"),
         ]);
@@ -585,6 +590,25 @@ mod tests {
                     .any(|batch| batch.scheduling == Scheduling::Parallel)
             );
         }
+    }
+
+    #[test]
+    fn redis_shard_owns_one_real_testkit_container_lifecycle_target() {
+        let matches = IntegrationShard::ConsistencyFault
+            .spec()
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.package == "testkit"
+                    && unit.target == "testkit"
+                    && unit.kind == TargetKind::Lib
+                    && unit.scheduling == Scheduling::Serial
+            })
+            .count();
+        assert_eq!(
+            matches, 1,
+            "real Redis ownership/log/cleanup smoke must be registry-owned without copying adapter tests"
+        );
     }
 
     #[test]

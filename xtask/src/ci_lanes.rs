@@ -611,6 +611,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            TestkitContainerTests => (step_testkit_container_tests, None,
+                gate(
+                        GateId::TestkitContainerTests,
+                        "testkit-container-tests",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::Nextest,
+                        EvidenceKind::Test,
+                        BOTH_INCLUDED,
+                    )
+            ),
             Deny => (step_deny, None,
                 gate(
                         GateId::Deny,
@@ -990,6 +1001,18 @@ mod tests {
                     | EvidenceKind::PublicApi
             )
         )));
+        let testkit = REGISTRY
+            .iter()
+            .filter(|spec| spec.label() == "testkit-container-tests")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            testkit.len(),
+            1,
+            "feature-gated testkit container tests need one registry-owned CI gate"
+        );
+        assert_eq!(testkit[0].evidence(), EvidenceKind::Test);
+        assert!(testkit[0].belongs_to(CiLane::Core));
+        assert_eq!(testkit[0].verify_membership(), VerifyMembership::Included);
     }
 
     #[test]

@@ -53,6 +53,8 @@
 //! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须是闭合、无重复的 committed matrix。
 //! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
 //! INVARIANT: CI-INTEGRATION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_matrix_predicate_green_and_red", anti_vacuity = "github_integration_workflow_has_integration_shard_matrix" }—— Integration caller 必须是精确七行 typed matrix，逐 shard 委托 reusable workflow，不内联低层门。
+//! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
+//! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，四类 fixture、四个 context env、四种 service、五个 ownership label 与精确 partition 闭集须和 shell/workflow 同步。
 
 use crate::ci_lanes::{
     CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
@@ -664,6 +666,14 @@ fn step_settingsonly_tests() -> Step {
         env: &[],
     }
 }
+fn step_testkit_container_tests() -> Step {
+    Step {
+        id: GateId::TestkitContainerTests,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::TestkitContainers),
+        env: &[],
+    }
+}
 fn step_identityaudit_tests() -> Step {
     // identityaudit 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly
     // 只组合 identity + audit。非分片执行保持 0 选中 fail-loud；PR hash 分片允许某一半为空。
@@ -769,6 +779,7 @@ fn selected_for(target: PlanTarget, id: GateId) -> bool {
                 | GateId::GrpcBackendTests
                 | GateId::VaultBackendTests
                 | GateId::SettingsOnlyTests
+                | GateId::TestkitContainerTests
                 | GateId::IdentityAuditTests
         ),
         PlanTarget::Lane(lane) => spec.belongs_to(lane),
@@ -1307,7 +1318,7 @@ mod tests {
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
         assert_eq!(prerequisites.len(), 4);
-        assert_eq!(tests.len(), 10);
+        assert_eq!(tests.len(), 11);
         let prereq_ids = prerequisites
             .iter()
             .map(|step| step.id as usize)
@@ -1336,14 +1347,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_46_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_47_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 46);
+        assert_eq!(plan.len(), 47);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 46);
+        assert_eq!(ids.len(), 47);
     }
 
     #[test]
@@ -1404,6 +1415,7 @@ mod tests {
                 "vault-backend-tests",
                 "settingsonly-tests",
                 "identityaudit-tests",
+                "testkit-container-tests",
                 "deny",
                 "dylint",
             ]
@@ -1999,6 +2011,7 @@ mod tests {
                 "vault-backend-tests",
                 "settingsonly-tests",
                 "identityaudit-tests",
+                "testkit-container-tests",
                 "deny",
                 "audit",
                 "dylint",
@@ -2515,6 +2528,7 @@ mod tests {
         uses: Option<String>,
         if_expr: Option<String>,
         continue_on_error: Option<String>,
+        timeout_minutes: Option<String>,
         with: Vec<(String, Vec<String>)>,
         env: Vec<(String, Vec<String>)>,
         run: Vec<String>,
@@ -2614,6 +2628,7 @@ mod tests {
                 "uses" => step.uses = Some(value.to_owned()),
                 "if" => step.if_expr = Some(value.to_owned()),
                 "continue-on-error" => step.continue_on_error = Some(value.to_owned()),
+                "timeout-minutes" => step.timeout_minutes = Some(value.to_owned()),
                 "run" => {
                     if is_yaml_block_scalar_marker(value) {
                         let mut body = index + 1;
@@ -3079,6 +3094,37 @@ mod tests {
             "{} 须闭合 lane/writer 并保持 tool-before-xtask、build-after-xtask lifecycle",
             reusable_path.display()
         );
+        assert!(
+            integration_service_lifecycle_is_hardened(&reusable),
+            "{} 须保持 integration-only prepare/collect/cleanup 与 evidence 拓扑",
+            reusable_path.display()
+        );
+        let container_path = root.join("crates/testkit/src/containers.rs");
+        let container_source = std::fs::read_to_string(&container_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", container_path.display()))?;
+        let lifecycle_path = root.join(".github/scripts/integration-services.sh");
+        let lifecycle_source = std::fs::read_to_string(&lifecycle_path)
+            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", lifecycle_path.display()))?;
+        let (workspace_rust_sources, workspace_manifests) =
+            integration_container_workspace_inputs(&root)?;
+        let rust_refs = workspace_rust_sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let manifest_refs = workspace_manifests
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            integration_container_workspace_contract_is_hardened(
+                &container_source,
+                &lifecycle_source,
+                &reusable,
+                &rust_refs,
+                &manifest_refs,
+            ),
+            "testkit container funnel 须与 lifecycle shell/workflow 的 env、label、service、partition 契约闭合"
+        );
         let action_path = root.join(".github/actions/setup-rss-ci/action.yml");
         let action_yaml = std::fs::read_to_string(&action_path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", action_path.display()))?;
@@ -3137,6 +3183,26 @@ mod tests {
         .status()
         .map_err(|e| anyhow::anyhow!("启动 ci-cache-result shell selftest 失败: {e}"))?;
         assert!(status.success(), "ci-cache-result shell selftest 必须通过");
+        Ok(())
+    }
+
+    /// Docker facade selftest 进入 verify 执行面，锁定 exact-label discovery、re-inspect、
+    /// bounded failure archive、幂等与 partial-failure 语义。
+    #[test]
+    fn integration_service_lifecycle_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
+            &[".github/scripts/integration-services.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 integration-services shell selftest 失败: {e}"))?;
+        assert!(
+            status.success(),
+            "integration-services shell selftest 必须通过"
+        );
         Ok(())
     }
 
@@ -3800,6 +3866,699 @@ jobs:
             })
     }
 
+    type WorkspaceTextFiles = Vec<(String, String)>;
+
+    fn integration_container_workspace_inputs(
+        root: &Path,
+    ) -> anyhow::Result<(WorkspaceTextFiles, WorkspaceTextFiles)> {
+        fn collect_rust(
+            dir: &Path,
+            root: &Path,
+            output: &mut Vec<(String, String)>,
+        ) -> anyhow::Result<()> {
+            if !dir.is_dir() {
+                return Ok(());
+            }
+            let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let metadata = std::fs::symlink_metadata(&path)?;
+                if metadata.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "container ownership source tree contains symlink: {}",
+                        path.display()
+                    );
+                }
+                if metadata.is_dir() {
+                    collect_rust(&path, root, output)?;
+                } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                    output.push((
+                        path.strip_prefix(root)?
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        std::fs::read_to_string(&path)?,
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        let root_manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
+        let parsed: toml::Value = toml::from_str(&root_manifest)?;
+        let members = parsed
+            .get("workspace")
+            .and_then(|workspace| workspace.get("members"))
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("workspace.members missing"))?;
+        let mut member_roots = Vec::new();
+        for member in members {
+            let pattern = member
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("workspace member must be a string"))?;
+            if let Some(parent) = pattern.strip_suffix("/*") {
+                let mut entries =
+                    std::fs::read_dir(root.join(parent))?.collect::<std::io::Result<Vec<_>>>()?;
+                entries.sort_by_key(std::fs::DirEntry::file_name);
+                member_roots.extend(
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.join("Cargo.toml").is_file()),
+                );
+            } else {
+                member_roots.push(root.join(pattern));
+            }
+        }
+        member_roots.sort();
+        member_roots.dedup();
+
+        let mut rust_sources = Vec::new();
+        let mut manifests = vec![("Cargo.toml".to_string(), root_manifest)];
+        for member_root in member_roots {
+            let manifest = member_root.join("Cargo.toml");
+            manifests.push((
+                manifest
+                    .strip_prefix(root)?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read_to_string(&manifest)?,
+            ));
+            for source_dir in ["src", "tests", "benches", "examples"] {
+                collect_rust(&member_root.join(source_dir), root, &mut rust_sources)?;
+            }
+            let build = member_root.join("build.rs");
+            if build.is_file() {
+                rust_sources.push((
+                    build
+                        .strip_prefix(root)?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read_to_string(build)?,
+                ));
+            }
+        }
+        rust_sources.sort_by(|left, right| left.0.cmp(&right.0));
+        manifests.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok((rust_sources, manifests))
+    }
+
+    fn integration_container_workspace_contract_is_hardened(
+        rust: &str,
+        shell: &str,
+        workflow: &str,
+        workspace_rust_sources: &[(&str, &str)],
+        workspace_manifests: &[(&str, &str)],
+    ) -> bool {
+        use syn::visit::Visit;
+
+        fn use_mentions_async_runner(item: &syn::ItemUse) -> bool {
+            use quote::ToTokens as _;
+            let rendered = item.tree.to_token_stream().to_string().replace(' ', "");
+            rendered.contains("testcontainers::runners::AsyncRunner")
+                || rendered.contains("testcontainers::runners::{AsyncRunner")
+                || rendered.contains("testcontainers::runners::*")
+        }
+
+        fn async_runner_import_count(file: &syn::File) -> usize {
+            struct ImportVisitor(usize);
+            impl<'ast> Visit<'ast> for ImportVisitor {
+                fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+                    if use_mentions_async_runner(item) {
+                        self.0 += 1;
+                    }
+                    syn::visit::visit_item_use(self, item);
+                }
+            }
+            let mut visitor = ImportVisitor(0);
+            visitor.visit_file(file);
+            visitor.0
+        }
+
+        fn start_method_count(file: &syn::File) -> usize {
+            struct StartVisitor(usize);
+            impl<'ast> Visit<'ast> for StartVisitor {
+                fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                    if node.method == "start" {
+                        self.0 += 1;
+                    }
+                    syn::visit::visit_expr_method_call(self, node);
+                }
+            }
+            let mut visitor = StartVisitor(0);
+            visitor.visit_file(file);
+            visitor.0
+        }
+
+        #[derive(Default)]
+        struct OwnedStartVisitor {
+            starts: usize,
+            consumer_binding: usize,
+            complete_request_chain: usize,
+        }
+
+        fn expr_is_path(expr: &syn::Expr, expected: &str) -> bool {
+            matches!(expr, syn::Expr::Path(path)
+                if path.qself.is_none()
+                    && path.path.segments.len() == 1
+                    && path.path.segments[0].ident == expected)
+        }
+
+        fn pat_is_ident(pattern: &syn::Pat, expected: &str) -> bool {
+            match pattern {
+                syn::Pat::Ident(ident) => ident.ident == expected,
+                syn::Pat::Type(typed) => pat_is_ident(&typed.pat, expected),
+                _ => false,
+            }
+        }
+
+        fn expr_is_shared_ref_to(expr: &syn::Expr, expected: &str) -> bool {
+            matches!(expr, syn::Expr::Reference(reference)
+                if reference.mutability.is_none() && expr_is_path(&reference.expr, expected))
+        }
+
+        fn labels_call_is_exact(labels: &syn::ExprMethodCall) -> bool {
+            labels.method == "with_labels"
+                && labels.args.len() == 1
+                && labels.args.first().is_some_and(|argument| {
+                    matches!(argument, syn::Expr::MethodCall(call)
+                    if call.method == "labels"
+                        && expr_is_path(&call.receiver, "service")
+                        && call.args.len() == 1
+                        && call.args.first().is_some_and(|argument| {
+                            expr_is_shared_ref_to(argument, "context")
+                        }))
+                })
+                && matches!(labels.receiver.as_ref(), syn::Expr::MethodCall(into)
+                    if into.method == "into" && into.args.is_empty())
+        }
+
+        fn log_consumer_is_exact(argument: &syn::Expr) -> bool {
+            let syn::Expr::Closure(closure) = argument else {
+                return false;
+            };
+            if closure.capture.is_none()
+                || closure.inputs.len() != 1
+                || !closure
+                    .inputs
+                    .first()
+                    .is_some_and(|pattern| pat_is_ident(pattern, "frame"))
+            {
+                return false;
+            }
+
+            struct ConsumerCallVisitor(usize);
+            impl<'ast> Visit<'ast> for ConsumerCallVisitor {
+                fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                    if node.method == "write_frame"
+                        && expr_is_path(&node.receiver, "consumer")
+                        && node.args.len() == 1
+                        && node
+                            .args
+                            .first()
+                            .is_some_and(|argument| expr_is_path(argument, "frame"))
+                    {
+                        self.0 += 1;
+                    }
+                    syn::visit::visit_expr_method_call(self, node);
+                }
+            }
+            let mut visitor = ConsumerCallVisitor(0);
+            visitor.visit_expr(&closure.body);
+            visitor.0 == 1
+        }
+
+        fn consumer_binding_is_exact(local: &syn::Local) -> bool {
+            let Some(initializer) = &local.init else {
+                return false;
+            };
+            let syn::Expr::Try(try_expr) = initializer.expr.as_ref() else {
+                return false;
+            };
+            let syn::Expr::Call(call) = try_expr.expr.as_ref() else {
+                return false;
+            };
+            let constructor_is_exact = matches!(call.func.as_ref(), syn::Expr::Path(path)
+                if path.path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>()
+                    .ends_with(&["BoundedFileLogConsumer".to_string(), "new".to_string()]));
+            let log_dir_is_exact = call.args.first().is_some_and(|argument| {
+                matches!(argument, syn::Expr::Reference(reference)
+                    if reference.mutability.is_none()
+                        && matches!(reference.expr.as_ref(), syn::Expr::Field(field)
+                            if expr_is_path(&field.base, "context")
+                                && matches!(&field.member, syn::Member::Named(name) if name == "log_dir")))
+            });
+            pat_is_ident(&local.pat, "consumer")
+                && constructor_is_exact
+                && call.args.len() == 2
+                && log_dir_is_exact
+                && call
+                    .args
+                    .get(1)
+                    .is_some_and(|argument| expr_is_path(argument, "service"))
+        }
+
+        impl<'ast> Visit<'ast> for OwnedStartVisitor {
+            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+                if node.method == "start" {
+                    self.starts += 1;
+                }
+                if node.method == "with_log_consumer"
+                    && node.args.len() == 1
+                    && matches!(node.receiver.as_ref(), syn::Expr::MethodCall(labels)
+                        if labels_call_is_exact(labels))
+                    && node.args.first().is_some_and(log_consumer_is_exact)
+                {
+                    self.complete_request_chain += 1;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                if consumer_binding_is_exact(local) {
+                    self.consumer_binding += 1;
+                }
+                syn::visit::visit_local(self, local);
+            }
+        }
+
+        fn primary_ast_is_closed(source: &str) -> bool {
+            let Ok(file) = syn::parse_file(source) else {
+                return false;
+            };
+            if async_runner_import_count(&file) != 1 {
+                return false;
+            }
+            let owned = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Mod(item) if item.ident == "owned" => Some(item),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [owned] = owned.as_slice() else {
+                return false;
+            };
+            let Some((_, items)) = &owned.content else {
+                return false;
+            };
+            let imports = items
+                .iter()
+                .filter(
+                    |item| matches!(item, syn::Item::Use(item) if use_mentions_async_runner(item)),
+                )
+                .count();
+            let starts = items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == "start_with_context" => Some(item),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [start] = starts.as_slice() else {
+                return false;
+            };
+            let mut visitor = OwnedStartVisitor::default();
+            visitor.visit_block(&start.block);
+            imports == 1
+                && visitor.starts == 2
+                && start_method_count(&file) == visitor.starts
+                && visitor.consumer_binding == 1
+                && visitor.complete_request_chain == 1
+        }
+
+        fn manifests_are_confined(manifests: &[(&str, &str)]) -> bool {
+            fn references(
+                value: &toml::Value,
+                path: &mut Vec<String>,
+                output: &mut Vec<Vec<String>>,
+            ) {
+                if let toml::Value::Table(table) = value {
+                    for (key, value) in table {
+                        path.push(key.clone());
+                        if matches!(key.as_str(), "testcontainers" | "testcontainers-modules") {
+                            output.push(path.clone());
+                        }
+                        references(value, path, output);
+                        path.pop();
+                    }
+                }
+            }
+
+            manifests.iter().all(|(path, source)| {
+                let Ok(value) = toml::from_str::<toml::Value>(source) else {
+                    return false;
+                };
+                let mut refs = Vec::new();
+                references(&value, &mut Vec::new(), &mut refs);
+                refs.sort();
+                match *path {
+                    "Cargo.toml" => {
+                        refs == [
+                            ["workspace", "dependencies", "testcontainers"]
+                                .map(str::to_string)
+                                .to_vec(),
+                            ["workspace", "dependencies", "testcontainers-modules"]
+                                .map(str::to_string)
+                                .to_vec(),
+                        ]
+                    }
+                    "crates/testkit/Cargo.toml" => {
+                        let expected = [
+                            ["dependencies", "testcontainers"]
+                                .map(str::to_string)
+                                .to_vec(),
+                            ["dependencies", "testcontainers-modules"]
+                                .map(str::to_string)
+                                .to_vec(),
+                        ];
+                        refs == expected
+                            && expected.iter().all(|segments| {
+                                let dependency = &segments[1];
+                                value["dependencies"][dependency]["workspace"].as_bool()
+                                    == Some(true)
+                                    && value["dependencies"][dependency]["optional"].as_bool()
+                                        == Some(true)
+                            })
+                    }
+                    _ => refs.is_empty(),
+                }
+            })
+        }
+
+        let primary_count = workspace_rust_sources
+            .iter()
+            .filter(|(path, _)| *path == "crates/testkit/src/containers.rs")
+            .count();
+        let imports_are_confined = workspace_rust_sources.iter().all(|(path, source)| {
+            let Ok(file) = syn::parse_file(source) else {
+                return false;
+            };
+            if *path == "crates/testkit/src/containers.rs" {
+                true
+            } else {
+                async_runner_import_count(&file) == 0
+                    && (!path.starts_with("crates/testkit/") || start_method_count(&file) == 0)
+            }
+        });
+
+        integration_container_source_contract_is_hardened(rust, shell, workflow)
+            && primary_count == 1
+            && primary_ast_is_closed(rust)
+            && imports_are_confined
+            && manifests_are_confined(workspace_manifests)
+    }
+
+    fn integration_container_source_contract_is_hardened(
+        rust: &str,
+        shell: &str,
+        workflow: &str,
+    ) -> bool {
+        fn block<'a>(source: &'a str, start: &str, end: &str) -> Option<&'a str> {
+            source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
+        }
+
+        let exactly_once = |source: &str, needle: &str| source.matches(needle).count() == 1;
+
+        let Some(owned) = block(rust, "mod owned {", "\n}\n\n/// postgres") else {
+            return false;
+        };
+        let Some(service_enum) = block(
+            rust,
+            "enum ContainerService {",
+            "\n}\n\nimpl ContainerService",
+        ) else {
+            return false;
+        };
+        let Some(service_impl) = block(rust, "impl ContainerService {", "\n}\n\n#[derive(Clone)]")
+        else {
+            return false;
+        };
+        let Some(label_matcher) = block(shell, "labels_match() {", "\n\ndiscover_candidates()")
+        else {
+            return false;
+        };
+
+        let runner_is_confined = exactly_once(rust, "use testcontainers::runners::AsyncRunner;")
+            && owned.contains("use testcontainers::runners::AsyncRunner;")
+            && rust.matches(".start()").count() == 2
+            && owned.matches(".start()").count() == 2;
+        let fixtures_are_closed = [
+            "owned::start(image, ContainerService::Postgres).await?",
+            "owned::start(Redis::default(), ContainerService::Redis).await?",
+            "owned::start(RabbitMq::default(), ContainerService::RabbitMq).await?",
+            "owned::start(Mosquitto::default(), ContainerService::Mosquitto).await?",
+        ]
+        .iter()
+        .all(|call| exactly_once(rust, call));
+        let owned_request_chain_is_complete = exactly_once(
+            owned,
+            "BoundedFileLogConsumer::new(&context.log_dir, service)?",
+        ) && owned.contains(
+            ".into()\n            .with_labels(service.labels(&context))\n            .with_log_consumer(",
+        );
+        let services_are_closed = [
+            ("Postgres,", "Self::Postgres => \"postgres\""),
+            ("Redis,", "Self::Redis => \"redis\""),
+            ("RabbitMq,", "Self::RabbitMq => \"rabbitmq\""),
+            ("Mosquitto,", "Self::Mosquitto => \"mosquitto\""),
+        ]
+        .iter()
+        .all(|(variant, arm)| {
+            exactly_once(service_enum, variant) && exactly_once(service_impl, arm)
+        }) && service_enum
+            .lines()
+            .filter(|line| line.trim().ends_with(','))
+            .count()
+            == 4;
+        let context_env_is_closed = [
+            ("CI_SCOPE_ENV", "RSS_CI_CONTAINER_SCOPE"),
+            ("CI_SHARD_ENV", "RSS_CI_INTEGRATION_SHARD"),
+            ("CI_PARTITION_ENV", "RSS_CI_INTEGRATION_PARTITION"),
+            ("CI_LOG_DIR_ENV", "RSS_CI_CONTAINER_LOG_DIR"),
+        ]
+        .iter()
+        .all(|(constant, value)| {
+            exactly_once(rust, &format!("const {constant}: &str = \"{value}\";"))
+                && workflow.contains(&format!("echo \"{value}=$"))
+        }) && rust.contains(
+            "const CI_CONTEXT_KEYS: &[&str] = &[CI_SCOPE_ENV, CI_SHARD_ENV, CI_PARTITION_ENV, CI_LOG_DIR_ENV];",
+        );
+        let labels_are_closed = [
+            ("io.rss.integration.managed", 1),
+            ("io.rss.integration.scope", 1),
+            ("io.rss.integration.shard", 1),
+            ("io.rss.integration.partition", 1),
+            ("io.rss.integration.service", 4),
+        ]
+        .iter()
+        .all(|(label, shell_count)| {
+            exactly_once(service_impl, label)
+                && label_matcher.matches(label).count() == *shell_count
+        }) && ["postgres", "redis", "rabbitmq", "mosquitto"].iter().all(
+            |service| {
+                label_matcher.contains(&format!(
+                    ".[\"io.rss.integration.service\"] == \"{service}\""
+                ))
+            },
+        );
+        let partition_contract_is_closed = rust.contains(
+            "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
+        ) && shell.contains(
+            "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) die 'invalid partition' ;; esac",
+        ) && workflow.contains(
+            "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) exit 64 ;; esac",
+        );
+
+        runner_is_confined
+            && fixtures_are_closed
+            && owned_request_chain_is_complete
+            && services_are_closed
+            && context_env_is_closed
+            && labels_are_closed
+            && partition_contract_is_closed
+    }
+
+    /// Integration service lifecycle is intentionally modeled as a second, composable predicate:
+    /// cache policy changes cannot silently weaken Docker ownership or evidence semantics.
+    fn integration_service_lifecycle_is_hardened(yaml: &str) -> bool {
+        let steps = yaml_typed_steps(yaml);
+        let unique_index = |id: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.id.as_deref() == Some(id)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+        let unique_name_index = |name: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+
+        let prepare = unique_index("integration-services-prepare");
+        let xtask = unique_index("xtask");
+        let snapshot = unique_index("integration-services-snapshot");
+        let collect = unique_index("integration-services-collect");
+        let cleanup = unique_index("integration-services-cleanup");
+        let after_build = unique_name_index("Capture after-build evidence");
+        let stage = unique_name_index("Stage job evidence");
+        let upload = unique_name_index("Upload CI evidence");
+
+        let prepare_ok = prepare.is_some_and(|index| {
+            let step = &steps[index];
+            step.name.as_deref() == Some("Prepare integration service lifecycle")
+                && step.if_expr.as_deref()
+                    == Some("${{ always() && inputs.lane == 'integration' }}")
+                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
+                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
+                && step.env_exact("RSS_PARTITION_LABEL", &["${{ inputs.partition-label }}"])
+                && step.run_has_line("set -euo pipefail")
+                && [
+                    "case \"$GITHUB_REPOSITORY_ID\" in ''|*[!0-9]*) exit 64 ;; esac",
+                    "case \"$GITHUB_RUN_ID\" in ''|*[!0-9]*) exit 64 ;; esac",
+                    "case \"$GITHUB_RUN_ATTEMPT\" in ''|*[!0-9]*) exit 64 ;; esac",
+                    "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
+                    "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) exit 64 ;; esac",
+                ]
+                .iter()
+                .all(|line| step.run_has_line(line))
+                && step.run_has_line(
+                    "scope=\"${GITHUB_REPOSITORY_ID}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RSS_SHARD}-${RSS_PARTITION_LABEL}\"",
+                )
+                && step.run_has_line("if [ -z \"$partition\" ]; then partition=$RSS_PARTITION_LABEL; fi")
+                && [
+                    "echo \"RSS_CI_CONTAINER_SCOPE=$scope\"",
+                    "echo \"RSS_CI_INTEGRATION_SHARD=$RSS_SHARD\"",
+                    "echo \"RSS_CI_INTEGRATION_PARTITION=$partition\"",
+                    "echo \"RSS_CI_CONTAINER_LOG_DIR=$log_dir\"",
+                ]
+                .iter()
+                .all(|line| step.run_has_line(line))
+                && step.run_has_line(
+                    ".github/scripts/integration-services.sh bootstrap --scope \"$scope\" --shard \"$RSS_SHARD\" --partition \"$partition\" --log-dir \"$log_dir\" --evidence \"$evidence\"",
+                )
+                && step.run_has_line(
+                    ".github/scripts/integration-services.sh prepare --scope \"$scope\" --shard \"$RSS_SHARD\" --partition \"$partition\" --log-dir \"$log_dir\" --evidence \"$evidence\"",
+                )
+        });
+        let xtask_ok = xtask.is_some_and(|index| {
+            let step = &steps[index];
+            step.name.as_deref() == Some("Run closed xtask lane")
+                && step.timeout_minutes.as_deref() == Some("92")
+                && step.run_has_line(
+                    "timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"",
+                )
+        });
+        let snapshot_ok = snapshot.is_some_and(|index| {
+            let step = &steps[index];
+            step.name.as_deref() == Some("Snapshot integration service disk before cleanup")
+                && step.if_expr.as_deref()
+                    == Some("${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}")
+                && step.timeout_minutes.as_deref() == Some("2")
+                && step.run_has_line(
+                    "timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot --scope \"$RSS_CI_CONTAINER_SCOPE\" --shard \"$RSS_CI_INTEGRATION_SHARD\" --partition \"$RSS_CI_INTEGRATION_PARTITION\" --log-dir \"$RSS_CI_CONTAINER_LOG_DIR\" --evidence \"$RUNNER_TEMP/integration-lifecycle.json\"",
+                )
+        });
+        let collect_ok = collect.is_some_and(|index| {
+            let step = &steps[index];
+            step.name.as_deref() == Some("Finalize integration outcome and collect failure logs")
+                && step.if_expr.as_deref()
+                    == Some("${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}")
+                && step.timeout_minutes.as_deref() == Some("12")
+                && step.env_exact("RSS_XTASK_OUTCOME", &["${{ steps.xtask.outcome }}"])
+                && step.run_has_line(
+                    "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
+                )
+                && step.run_has_line(
+                    "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect --scope \"$RSS_CI_CONTAINER_SCOPE\" --shard \"$RSS_CI_INTEGRATION_SHARD\" --partition \"$RSS_CI_INTEGRATION_PARTITION\" --log-dir \"$RSS_CI_CONTAINER_LOG_DIR\" --evidence \"$RUNNER_TEMP/integration-lifecycle.json\" --outcome \"$RSS_XTASK_OUTCOME\" --archive \"$RUNNER_TEMP/integration-service-logs.tar.gz\"",
+                )
+        });
+        let cleanup_ok = cleanup.is_some_and(|index| {
+            let step = &steps[index];
+            step.name.as_deref() == Some("Cleanup integration services")
+                && step.if_expr.as_deref()
+                    == Some("${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}")
+                && step.timeout_minutes.as_deref() == Some("12")
+                && step.run_has_line(
+                    "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup --scope \"$RSS_CI_CONTAINER_SCOPE\" --shard \"$RSS_CI_INTEGRATION_SHARD\" --partition \"$RSS_CI_INTEGRATION_PARTITION\" --log-dir \"$RSS_CI_CONTAINER_LOG_DIR\" --evidence \"$RUNNER_TEMP/integration-lifecycle.json\"",
+                )
+        });
+        let stage_ok = stage.is_some_and(|index| {
+            let step = &steps[index];
+            step.if_expr.as_deref() == Some("${{ always() }}")
+                && step.run_has_line("if [ \"${{ inputs.lane }}\" = integration ]; then")
+                && step.run_has_line("test -f \"$RUNNER_TEMP/integration-lifecycle.json\"")
+                && step.run_has_line(
+                    "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"' \"$RUNNER_TEMP/integration-lifecycle.json\" >/dev/null",
+                )
+                && step.run_has_line("mkdir -p target/job-evidence/integration")
+                && step.run_has_line(
+                    "cp \"$RUNNER_TEMP/integration-lifecycle.json\" target/job-evidence/integration/lifecycle.json",
+                )
+                && step.run_has_line(
+                    "if [ -f \"$RUNNER_TEMP/integration-service-logs.tar.gz\" ]; then",
+                )
+                && step.run_has_line(
+                    "cp \"$RUNNER_TEMP/integration-service-logs.tar.gz\" target/job-evidence/integration/service-logs.tar.gz",
+                )
+        });
+        let no_global_prune = steps.iter().flat_map(|step| &step.run).all(|line| {
+            ![
+                "docker system prune",
+                "docker image prune",
+                "docker volume prune",
+            ]
+            .iter()
+            .any(|forbidden| line.contains(forbidden))
+        });
+        let lifecycle_command_owners = steps
+            .iter()
+            .filter(|step| {
+                step.run
+                    .iter()
+                    .any(|line| line.contains(".github/scripts/integration-services.sh"))
+            })
+            .filter_map(|step| step.id.as_deref())
+            .collect::<Vec<_>>();
+        let total_step_budget = steps.iter().try_fold(0_u64, |total, step| {
+            step.timeout_minutes
+                .as_deref()?
+                .parse::<u64>()
+                .ok()
+                .and_then(|budget| total.checked_add(budget))
+        });
+
+        prepare_ok
+            && yaml.matches("timeout-minutes: 240").count() == 1
+            && total_step_budget == Some(220)
+            && xtask_ok
+            && collect_ok
+            && snapshot_ok
+            && cleanup_ok
+            && stage_ok
+            && no_global_prune
+            && lifecycle_command_owners
+                == [
+                    "integration-services-prepare",
+                    "integration-services-collect",
+                    "integration-services-snapshot",
+                    "integration-services-cleanup",
+                ]
+            && matches!(
+                (prepare, xtask, collect, snapshot, cleanup, after_build, stage, upload),
+                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h))
+                    if a < b && c == b + 1 && d == c + 1 && e == d + 1 && e < f && f < g && g < h
+            )
+    }
+
     fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
         const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
         let lines = yaml_indented_code_lines(yaml);
@@ -3966,19 +4725,19 @@ jobs:
                 && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
                 && step.run_contains("case \"$RSS_LANE\" in")
                 && [
-                    "ci-meta) cargo run --locked -p xtask -- ci-meta ;;",
-                    "ci-core-prerequisites) cargo run --locked -p xtask -- ci-core-prerequisites ;;",
-                    "ci-core-tests) cargo run --locked -p xtask -- ci-core-tests --partition \"$RSS_PARTITION\" ;;",
-                    "ci-security) cargo run --locked -p xtask -- ci-security ;;",
-                    "ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;",
-                    "audit) cargo run --locked -p xtask -- audit ;;",
+                    "ci-meta) args=(ci-meta) ;;",
+                    "ci-core-prerequisites) args=(ci-core-prerequisites) ;;",
+                    "ci-core-tests) args=(ci-core-tests --partition \"$RSS_PARTITION\") ;;",
+                    "ci-security) args=(ci-security) ;;",
+                    "ci-coverage) args=(ci-coverage) ;;",
+                    "audit) args=(audit) ;;",
                 ]
                 .iter()
                 .all(|line| step.run_has_line(line))
                 && step.run_has_line("integration)")
                 && step.run_contains("args=(ci-integration --shard \"$RSS_SHARD\")")
                 && step.run_contains("args+=(--partition \"$RSS_PARTITION\")")
-                && step.run_contains("cargo run --locked -p xtask -- \"${args[@]}\"")
+                && step.run_has_line("timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"")
                 && step.run_has_line("*) exit 64 ;;")
         });
         let evidence_step = |name: &str, commands: &[&str]| {
@@ -4331,6 +5090,470 @@ jobs:
             assert!(
                 !reusable_rust_lane_is_hardened(&camouflage),
                 "camouflage {index}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn integration_container_source_contract_accepts_committed_sources() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
+        let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
+        let (workspace_rust_sources, workspace_manifests) =
+            integration_container_workspace_inputs(&root)?;
+        let rust_refs = workspace_rust_sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let manifest_refs = workspace_manifests
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            integration_container_workspace_contract_is_hardened(
+                &rust,
+                &shell,
+                &workflow,
+                &rust_refs,
+                &manifest_refs,
+            ),
+            "committed testkit/shell/workflow contract must exercise the source guard"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn integration_container_source_contract_synthetic_red() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
+        let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
+        let red_cases = [
+            (
+                rust.replacen(
+                    "use testcontainers::runners::AsyncRunner;",
+                    "use testcontainers::runners::AsyncRunner as Runner;",
+                    1,
+                ),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    "owned::start(Redis::default(), ContainerService::Redis).await?",
+                    "Redis::default().start().await?",
+                    1,
+                ),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen("    Mosquitto,", "    Nats,", 1),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    "const CI_LOG_DIR_ENV: &str = \"RSS_CI_CONTAINER_LOG_DIR\";",
+                    "const CI_LOG_DIR_ENV: &str = \"RSS_CI_LOG_DIRECTORY\";",
+                    1,
+                ),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen("io.rss.integration.service", "io.rss.integration.kind", 1),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    ".with_labels(service.labels(&context))",
+                    ".without_ownership_labels(service.labels(&context))",
+                    1,
+                ),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(".with_log_consumer(", ".without_log_consumer(", 1),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.replacen(
+                    "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
+                    "matches!(value, \"unpartitioned\" | \"1/3\" | \"2/3\" | \"3/3\")",
+                    1,
+                ),
+                shell.clone(),
+                workflow.clone(),
+            ),
+            (
+                rust.clone(),
+                shell.replacen(
+                    "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) die 'invalid partition' ;; esac",
+                    "case \"$partition\" in unpartitioned|1/3|2/3|3/3) ;; *) die 'invalid partition' ;; esac",
+                    1,
+                ),
+                workflow.clone(),
+            ),
+            (
+                rust.clone(),
+                shell.clone(),
+                workflow.replacen(
+                    "echo \"RSS_CI_INTEGRATION_SHARD=$RSS_SHARD\"",
+                    "echo \"RSS_CI_SHARD=$RSS_SHARD\"",
+                    1,
+                ),
+            ),
+        ];
+        for (index, (red_rust, red_shell, red_workflow)) in red_cases.into_iter().enumerate() {
+            assert!(
+                !integration_container_source_contract_is_hardened(
+                    &red_rust,
+                    &red_shell,
+                    &red_workflow,
+                ),
+                "container source contract synthetic red {index} must fail closed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn integration_container_guard_covers_cross_source_and_manifest_bypasses() -> anyhow::Result<()>
+    {
+        let root = workspace_root()?;
+        let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
+        let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
+        let (workspace_rust_sources, workspace_manifests) =
+            integration_container_workspace_inputs(&root)?;
+
+        let mut bypass_sources = workspace_rust_sources.clone();
+        bypass_sources.push((
+            "crates/testkit/src/raw_runner_bypass.rs".to_string(),
+            "use testcontainers::runners::AsyncRunner as RawRunner;\nasync fn bypass() { let _ = image.start().await; }\n".to_string(),
+        ));
+        let bypass_refs = bypass_sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let manifest_refs = workspace_manifests
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+
+        for (name, mutated) in [
+            (
+                "empty ownership labels",
+                rust.replacen("service.labels(&context)", "BTreeMap::new()", 1),
+            ),
+            (
+                "no-op log consumer",
+                rust.replacen(
+                    "if let Err(error) = consumer.write_frame(frame) {",
+                    "if let Err(error) = Ok::<(), anyhow::Error>(()) {",
+                    1,
+                ),
+            ),
+        ] {
+            let mut mutated_sources = workspace_rust_sources.clone();
+            let primary = mutated_sources
+                .iter_mut()
+                .find(|(path, _)| path == "crates/testkit/src/containers.rs")
+                .ok_or_else(|| anyhow::anyhow!("testkit containers source missing"))?;
+            primary.1 = mutated.clone();
+            let mutated_refs = mutated_sources
+                .iter()
+                .map(|(path, source)| (path.as_str(), source.as_str()))
+                .collect::<Vec<_>>();
+            assert!(
+                !integration_container_workspace_contract_is_hardened(
+                    &mutated,
+                    &shell,
+                    &workflow,
+                    &mutated_refs,
+                    &manifest_refs,
+                ),
+                "{name} must fail the AST ownership funnel"
+            );
+        }
+
+        assert!(
+            !integration_container_workspace_contract_is_hardened(
+                &rust,
+                &shell,
+                &workflow,
+                &bypass_refs,
+                &manifest_refs,
+            ),
+            "an AsyncRunner import in a second testkit source must fail closed"
+        );
+
+        let mut start_bypass_sources = workspace_rust_sources.clone();
+        start_bypass_sources.push((
+            "crates/testkit/src/preimported_runner_bypass.rs".to_string(),
+            "async fn bypass() { let _ = image.start().await; }\n".to_string(),
+        ));
+        let start_bypass_refs = start_bypass_sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            !integration_container_workspace_contract_is_hardened(
+                &rust,
+                &shell,
+                &workflow,
+                &start_bypass_refs,
+                &manifest_refs,
+            ),
+            "a pre-imported direct start in a second testkit source must fail closed"
+        );
+
+        let mut bypass_manifests = workspace_manifests;
+        bypass_manifests.push((
+            "crates/identity/Cargo.toml".to_string(),
+            "[package]\nname='bypass'\nversion='0.0.0'\n[dependencies]\ntestcontainers={ workspace=true }\n"
+                .to_string(),
+        ));
+        let rust_refs = workspace_rust_sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let bypass_manifest_refs = bypass_manifests
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            !integration_container_workspace_contract_is_hardened(
+                &rust,
+                &shell,
+                &workflow,
+                &rust_refs,
+                &bypass_manifest_refs,
+            ),
+            "a direct testcontainers dependency outside testkit must fail closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn core_test_plans_include_the_testkit_container_gate() {
+        for target in [
+            PlanTarget::Verify,
+            PlanTarget::CompatibilityCi,
+            PlanTarget::Core(CoreExecution::Tests),
+        ] {
+            let count = labels(&plan_for(target))
+                .into_iter()
+                .filter(|label| *label == "testkit-container-tests")
+                .count();
+            assert_eq!(
+                count, 1,
+                "{target:?} must execute the targeted testkit containers scope exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn integration_service_lifecycle_predicate_green_and_synthetic_red() -> anyhow::Result<()> {
+        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
+        let green = std::fs::read_to_string(path)?;
+        assert!(
+            integration_service_lifecycle_is_hardened(&green),
+            "committed reusable workflow must exercise the lifecycle predicate"
+        );
+
+        let reorder_cleanup_before_collect = green
+            .replacen(
+                "name: Finalize integration outcome and collect failure logs",
+                "name: TEMP",
+                1,
+            )
+            .replacen(
+                "name: Cleanup integration services",
+                "name: Finalize integration outcome and collect failure logs",
+                1,
+            )
+            .replacen("name: TEMP", "name: Cleanup integration services", 1);
+        let reorder_collect_before_snapshot = green
+            .replacen(
+                "name: Snapshot integration service disk before cleanup",
+                "name: TEMP",
+                1,
+            )
+            .replacen(
+                "name: Finalize integration outcome and collect failure logs",
+                "name: Snapshot integration service disk before cleanup",
+                1,
+            )
+            .replacen(
+                "name: TEMP",
+                "name: Finalize integration outcome and collect failure logs",
+                1,
+            );
+        let reds = [
+            green.replacen(
+                "      - name: Prepare integration service lifecycle",
+                "      - name: Disabled integration service lifecycle",
+                1,
+            ),
+            green.replacen(
+                "always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success'",
+                "always() && inputs.lane == 'integration'",
+                1,
+            ),
+            green.replacen(
+                "id: integration-services-cleanup\n        if: ${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}",
+                "id: integration-services-cleanup\n        if: ${{ inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}",
+                1,
+            ),
+            green.replacen(
+                "if: ${{ always() && inputs.lane == 'integration' }}",
+                "if: ${{ inputs.lane == 'integration' }}",
+                1,
+            ),
+            green.replacen(
+                ".github/scripts/integration-services.sh bootstrap --scope \"$scope\"",
+                ".github/scripts/integration-services.sh prepare-state --scope \"$scope\"",
+                1,
+            ),
+            green.replacen("--scope \"$RSS_CI_CONTAINER_SCOPE\"", "--scope integration", 1),
+            green.replacen(
+                "integration-services.sh cleanup",
+                "integration-services.sh cleanup && docker system prune -af",
+                1,
+            ),
+            green.replacen(
+                "test -f \"$RUNNER_TEMP/integration-lifecycle.json\"",
+                "true",
+                1,
+            ),
+            green.replacen(
+                "if [ -f \"$RUNNER_TEMP/integration-service-logs.tar.gz\" ]; then",
+                "if true; then",
+                1,
+            ),
+            green.replacen(
+                "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
+                "case \"$RSS_XTASK_OUTCOME\" in success|failure) ;; *) exit 64 ;; esac",
+                1,
+            ),
+            green.replacen(
+                "timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"",
+                "cargo run --locked -p xtask -- \"${args[@]}\"",
+                1,
+            ),
+            green.replacen(
+                "      - name: Checkout\n        timeout-minutes: 5",
+                "      - name: Checkout",
+                1,
+            ),
+            green.replacen("timeout-minutes: 240", "timeout-minutes: 219", 1),
+            green.replacen(
+                "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"'",
+                "jq -e .",
+                1,
+            ),
+            reorder_cleanup_before_collect,
+            reorder_collect_before_snapshot,
+        ];
+        for (index, red) in reds.into_iter().enumerate() {
+            assert!(
+                !integration_service_lifecycle_is_hardened(&red),
+                "lifecycle synthetic red {index} must fail closed"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn integration_finally_chain_has_terminal_outcomes_and_independent_budgets()
+    -> anyhow::Result<()> {
+        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
+        let workflow = std::fs::read_to_string(path)?;
+        let steps = yaml_typed_steps(&workflow);
+        let step_budgets = steps
+            .iter()
+            .map(|step| {
+                step.timeout_minutes
+                    .as_deref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "workflow step {:?} is outside the total timeout proof",
+                            step.name
+                        )
+                    })?
+                    .parse::<u64>()
+                    .map_err(Into::into)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let job_budget = 240_u64;
+        assert!(
+            workflow.contains("    timeout-minutes: 240"),
+            "job ceiling must reserve the closed sum of all step budgets"
+        );
+        assert!(
+            step_budgets.iter().sum::<u64>() <= job_budget,
+            "step timeout sum must fit inside the job ceiling"
+        );
+        let index = |id: &str| {
+            steps
+                .iter()
+                .position(|step| step.id.as_deref() == Some(id))
+                .unwrap_or(usize::MAX)
+        };
+        let xtask = index("xtask");
+        let collect = index("integration-services-collect");
+        let snapshot = index("integration-services-snapshot");
+        let cleanup = index("integration-services-cleanup");
+        assert_eq!(collect, xtask + 1, "collect must start the finally chain");
+        assert_eq!(
+            snapshot,
+            collect + 1,
+            "snapshot must follow collect directly"
+        );
+        assert_eq!(
+            cleanup,
+            snapshot + 1,
+            "cleanup must follow snapshot directly"
+        );
+
+        for contract in [
+            "timeout-minutes: 240",
+            "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
+            "id: xtask\n        timeout-minutes: 92",
+            "timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"",
+            "RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}",
+            "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
+            "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect",
+            "timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot",
+            "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup",
+            "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"'",
+        ] {
+            assert!(
+                workflow.contains(contract),
+                "integration terminal lifecycle is missing exact contract: {contract}"
+            );
+        }
+        assert_eq!(
+            workflow.matches("timeout-minutes: 12").count(),
+            2,
+            "collect and cleanup must each reserve a 12-minute step budget"
+        );
+        assert_eq!(
+            steps[snapshot].timeout_minutes.as_deref(),
+            Some("2"),
+            "snapshot must reserve its own two-minute step budget"
+        );
+        for outcome in ["success", "failure", "cancelled", "skipped"] {
+            assert!(
+                workflow.contains(outcome),
+                "xtask terminal outcome vocabulary is missing {outcome}"
             );
         }
         Ok(())

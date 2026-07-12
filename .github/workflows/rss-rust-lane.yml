@@ -37,14 +37,17 @@ jobs:
   lane:
     name: cargo xtask ${{ inputs.lane }}
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
       - name: Checkout
+        timeout-minutes: 5
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
 
       - name: Capture start evidence
+        timeout-minutes: 2
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -55,6 +58,7 @@ jobs:
 
       - name: Validate lane and derive closed policy
         id: policy
+        timeout-minutes: 2
         env:
           RSS_LANE: ${{ inputs.lane }}
           RSS_SHARD: ${{ inputs.shard }}
@@ -130,6 +134,7 @@ jobs:
 
       - name: Setup RSS Rust CI
         id: setup
+        timeout-minutes: 20
         uses: ./.github/actions/setup-rss-ci
         with:
           lane: ${{ inputs.lane }}
@@ -144,16 +149,19 @@ jobs:
 
       - name: Measure tool cache candidate
         id: measure-tools
+        timeout-minutes: 2
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}
         run: echo "bytes=$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/ci-tools/${{ steps.policy.outputs.profile }}")" >> "$GITHUB_OUTPUT"
 
       - name: Enforce pre-execution tool cache budget
         id: tools-budget
+        timeout-minutes: 2
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.measure-tools.outcome == 'success' }}
         run: .github/scripts/ci-disk-budget.sh --stage before-save --path "$GITHUB_WORKSPACE"
 
       - name: Save verified tool cache before repository execution
         id: save-tools
+        timeout-minutes: 10
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.measure-tools.outcome == 'success' && steps.tools-budget.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@v4
@@ -161,8 +169,38 @@ jobs:
           path: .cache/ci-tools/${{ steps.policy.outputs.profile }}
           key: ${{ steps.setup.outputs.tools-primary-key }}
 
+      - name: Prepare integration service lifecycle
+        id: integration-services-prepare
+        timeout-minutes: 2
+        if: ${{ always() && inputs.lane == 'integration' }}
+        env:
+          RSS_SHARD: ${{ inputs.shard }}
+          RSS_PARTITION: ${{ inputs.partition }}
+          RSS_PARTITION_LABEL: ${{ inputs.partition-label }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REPOSITORY_ID" in ''|*[!0-9]*) exit 64 ;; esac
+          case "$GITHUB_RUN_ID" in ''|*[!0-9]*) exit 64 ;; esac
+          case "$GITHUB_RUN_ATTEMPT" in ''|*[!0-9]*) exit 64 ;; esac
+          case "$RSS_SHARD:$RSS_PARTITION_LABEL" in :|*[!a-z0-9:-]*) exit 64 ;; esac
+          partition=$RSS_PARTITION
+          if [ -z "$partition" ]; then partition=$RSS_PARTITION_LABEL; fi
+          case "$partition" in unpartitioned|1/2|2/2) ;; *) exit 64 ;; esac
+          scope="${GITHUB_REPOSITORY_ID}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RSS_SHARD}-${RSS_PARTITION_LABEL}"
+          log_dir="$RUNNER_TEMP/integration-service-logs-$scope"
+          evidence="$RUNNER_TEMP/integration-lifecycle.json"
+          {
+            echo "RSS_CI_CONTAINER_SCOPE=$scope"
+            echo "RSS_CI_INTEGRATION_SHARD=$RSS_SHARD"
+            echo "RSS_CI_INTEGRATION_PARTITION=$partition"
+            echo "RSS_CI_CONTAINER_LOG_DIR=$log_dir"
+          } >> "$GITHUB_ENV"
+          .github/scripts/integration-services.sh bootstrap --scope "$scope" --shard "$RSS_SHARD" --partition "$partition" --log-dir "$log_dir" --evidence "$evidence"
+          .github/scripts/integration-services.sh prepare --scope "$scope" --shard "$RSS_SHARD" --partition "$partition" --log-dir "$log_dir" --evidence "$evidence"
+
       - name: Run closed xtask lane
         id: xtask
+        timeout-minutes: 92
         env:
           RSS_LANE: ${{ inputs.lane }}
           RSS_SHARD: ${{ inputs.shard }}
@@ -170,21 +208,45 @@ jobs:
         run: |
           set -euo pipefail
           case "$RSS_LANE" in
-            ci-meta) cargo run --locked -p xtask -- ci-meta ;;
-            ci-core-prerequisites) cargo run --locked -p xtask -- ci-core-prerequisites ;;
-            ci-core-tests) cargo run --locked -p xtask -- ci-core-tests --partition "$RSS_PARTITION" ;;
-            ci-security) cargo run --locked -p xtask -- ci-security ;;
-            ci-coverage) cargo run --locked -p xtask -- ci-coverage ;;
+            ci-meta) args=(ci-meta) ;;
+            ci-core-prerequisites) args=(ci-core-prerequisites) ;;
+            ci-core-tests) args=(ci-core-tests --partition "$RSS_PARTITION") ;;
+            ci-security) args=(ci-security) ;;
+            ci-coverage) args=(ci-coverage) ;;
             integration)
               args=(ci-integration --shard "$RSS_SHARD")
               if [ -n "$RSS_PARTITION" ]; then args+=(--partition "$RSS_PARTITION"); fi
-              cargo run --locked -p xtask -- "${args[@]}"
               ;;
-            audit) cargo run --locked -p xtask -- audit ;;
+            audit) args=(audit) ;;
             *) exit 64 ;;
           esac
+          timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- "${args[@]}"
+
+      - name: Finalize integration outcome and collect failure logs
+        id: integration-services-collect
+        if: ${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}
+        timeout-minutes: 12
+        env:
+          RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}
+        run: |
+          set -euo pipefail
+          case "$RSS_XTASK_OUTCOME" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac
+          timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json" --outcome "$RSS_XTASK_OUTCOME" --archive "$RUNNER_TEMP/integration-service-logs.tar.gz"
+
+      - name: Snapshot integration service disk before cleanup
+        id: integration-services-snapshot
+        if: ${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
+
+      - name: Cleanup integration services
+        id: integration-services-cleanup
+        if: ${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}
+        timeout-minutes: 12
+        run: timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
 
       - name: Capture after-build evidence
+        timeout-minutes: 3
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -196,11 +258,13 @@ jobs:
 
       - name: Clean build cache candidates
         id: cleanup
+        timeout-minutes: 10
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && (steps.setup.outputs.download-hit != 'true' || steps.setup.outputs.target-hit != 'true') }}
         run: .github/scripts/ci-cache-maintain.sh cleanup --workspace "$GITHUB_WORKSPACE" --target "$GITHUB_WORKSPACE/.cache/cargo-target"
 
       - name: Measure build cache candidates
         id: measure-build
+        timeout-minutes: 3
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' }}
         run: |
           set -euo pipefail
@@ -216,6 +280,7 @@ jobs:
 
       - name: Capture before-save evidence and enforce build budget
         id: before-save
+        timeout-minutes: 3
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -233,6 +298,7 @@ jobs:
 
       - name: Save Cargo download cache
         id: save-download
+        timeout-minutes: 10
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@v4
@@ -245,6 +311,7 @@ jobs:
 
       - name: Save Cargo target cache
         id: save-target
+        timeout-minutes: 10
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.target-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@v4
@@ -253,6 +320,7 @@ jobs:
           key: ${{ steps.setup.outputs.target-primary-key }}
 
       - name: Capture after-save evidence
+        timeout-minutes: 3
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -264,15 +332,26 @@ jobs:
           .github/scripts/ci-evidence.sh snapshot after-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome "$build_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
 
       - name: Stage job evidence
+        timeout-minutes: 5
         if: ${{ always() }}
         run: |
           set -euo pipefail
           rm -rf target/job-evidence
           mkdir -p target/job-evidence/ci
           cp "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" target/job-evidence/ci/ci-evidence.json
+          if [ "${{ inputs.lane }}" = integration ]; then
+            test -f "$RUNNER_TEMP/integration-lifecycle.json"
+            jq -e '.collection.outcome == "success" or .collection.outcome == "failure" or .collection.outcome == "cancelled" or .collection.outcome == "skipped"' "$RUNNER_TEMP/integration-lifecycle.json" >/dev/null
+            mkdir -p target/job-evidence/integration
+            cp "$RUNNER_TEMP/integration-lifecycle.json" target/job-evidence/integration/lifecycle.json
+            if [ -f "$RUNNER_TEMP/integration-service-logs.tar.gz" ]; then
+              cp "$RUNNER_TEMP/integration-service-logs.tar.gz" target/job-evidence/integration/service-logs.tar.gz
+            fi
+          fi
           cargo run --locked -p xtask -- nextest-evidence stage
 
       - name: Upload CI evidence
+        timeout-minutes: 10
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
