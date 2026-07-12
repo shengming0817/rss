@@ -1,9 +1,10 @@
 //! Runtime-owned domain wiring modules.
 //!
-//! Each module keeps its typed `wire_*` entrypoint and exposes one async Phase 4 ownership funnel
-//! that returns `anyhow::Result<DomainBinding>`. Production passes `SharedRuntimeDeps`; sealed,
-//! per-domain provider traits let generated tests execute the same entrypoints hermetically without
-//! introducing a generic service bag. The live runtime consumes the manifest-derived binding list.
+//! Each module exposes one async Phase 4 ownership funnel returning
+//! `anyhow::Result<DomainBinding>`. Production passes `SharedRuntimeDeps`; identity, audit, and
+//! settings delegate to their typed composition entrypoints, and generated tests reuse those same
+//! entrypoints hermetically without introducing a generic service bag. The live runtime consumes
+//! the manifest-derived binding list.
 
 pub mod audit;
 pub mod identity;

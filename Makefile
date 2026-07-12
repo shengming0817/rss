@@ -5,9 +5,10 @@
 #
 #   make verify       本地 stable-only 快门：fmt + meta + build + clippy + nextest + deny + dylint。
 #   make verify-fast  verify 的无编译子集（仅 fmt + meta + deny），供快速迭代（= cargo xtask verify --fast）。
-#   make ci           本地去重兼容聚合（非 GitHub job）：保留 43 个唯一 gate，Coverage 取代 Core 的
-#                     default-profile nextest；因此不与四个真实 check 的执行语义完全等价。复现真实 checks
-#                     须分别运行 cargo xtask ci-meta / ci-core / ci-security / ci-coverage。
+#   make ci           本地去重兼容聚合（非 GitHub job）：保留 46 个唯一 gate，Coverage 取代 Core 的
+#                     default-profile nextest；因此不与真实 checks 的执行语义完全等价。复现各 checks
+#                     须分别运行 cargo xtask ci-meta / ci-core-prerequisites /
+#                     cargo xtask ci-core-tests --partition 1/2（及 2/2）/ ci-security / ci-coverage。
 #                     需全套工具 + nightly。
 #   make audit        供应链漏洞刷新 lane（= GitHub Actions schedule 调的同一条 `cargo xtask audit`，
 #                     #1133）：advisory-scoped `deny check advisories` + cargo-audit（皆 no-compile、快）。

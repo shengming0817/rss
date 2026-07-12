@@ -1,0 +1,28 @@
+[package]
+name = "audit-composition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "audit_composition"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+audit = { path = "../../crates/audit" }
+bootstrap = { path = "../../crates/bootstrap" }
+diport = { path = "../../crates/diport" }
+postgres = { path = "../../adapters/postgres", features = ["domain-audit"] }
+primitives = { path = "../../crates/primitives" }
+
+[features]
+test-support = ["postgres/test-support"]
+
+[dev-dependencies]
+postgres = { path = "../../adapters/postgres", features = ["domain-audit", "test-support"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

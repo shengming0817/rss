@@ -386,6 +386,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "audit-composition"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "audit",
+ "bootstrap",
+ "diport",
+ "postgres",
+ "primitives",
+ "tokio",
+]
+
+[[package]]
 name = "authn"
 version = "0.0.0"
 dependencies = [
@@ -2906,6 +2919,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "identity-composition"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "authn",
+ "bootstrap",
+ "diport",
+ "identity",
+ "postgres",
+ "tokio",
+]
+
+[[package]]
+name = "identityaudit"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "audit",
+ "audit-composition",
+ "authn",
+ "bootstrap",
+ "crypto-adapter",
+ "diport",
+ "identity",
+ "identity-composition",
+ "oidc",
+ "postgres",
+ "primitives",
+ "tokio",
+ "vault",
+]
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4719,6 +4765,7 @@ dependencies = [
  "anyhow",
  "assembly-schema",
  "audit",
+ "audit-composition",
  "authn",
  "aws-sdk-s3",
  "aws-smithy-http-client",
@@ -4737,6 +4784,7 @@ dependencies = [
  "httpd",
  "httpserve",
  "identity",
+ "identity-composition",
  "ids",
  "oidc",
  "otel",

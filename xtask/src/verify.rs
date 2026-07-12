@@ -664,6 +664,16 @@ fn step_settingsonly_tests() -> Step {
         env: &[],
     }
 }
+fn step_identityaudit_tests() -> Step {
+    // identityaudit 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly
+    // 只组合 identity + audit。非分片执行保持 0 选中 fail-loud；PR hash 分片允许某一半为空。
+    Step {
+        id: GateId::IdentityAuditTests,
+        args: &[],
+        kind: StepKind::Nextest(crate::nextest::CoreTestScope::IdentityAudit),
+        env: &[],
+    }
+}
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
 // public-api --check（轴 A）。
@@ -759,6 +769,7 @@ fn selected_for(target: PlanTarget, id: GateId) -> bool {
                 | GateId::GrpcBackendTests
                 | GateId::VaultBackendTests
                 | GateId::SettingsOnlyTests
+                | GateId::IdentityAuditTests
         ),
         PlanTarget::Lane(lane) => spec.belongs_to(lane),
         PlanTarget::Verify => spec.verify_membership() == VerifyMembership::Included,
@@ -1251,9 +1262,11 @@ mod tests {
             vec!["coverage", "public-api"]
         );
         let core = labels(&plan_for(PlanTarget::Lane(CiLane::Core)));
-        assert_eq!(core.first(), Some(&"build"));
+        assert!(core.contains(&"build"));
+        assert_eq!(core.first(), Some(&"postgres-feature-matrix"));
         assert!(core.contains(&"default-test-runner"));
         assert!(core.contains(&"settingsonly-tests"));
+        assert!(core.contains(&"identityaudit-tests"));
         assert!(!core.contains(&"coverage"));
         assert!(!core.contains(&"integration-compile"));
 
@@ -1294,7 +1307,7 @@ mod tests {
         let prerequisites = plan_for(PlanTarget::Core(CoreExecution::Prerequisites));
         let tests = plan_for(PlanTarget::Core(CoreExecution::Tests));
         assert_eq!(prerequisites.len(), 4);
-        assert_eq!(tests.len(), 9);
+        assert_eq!(tests.len(), 10);
         let prereq_ids = prerequisites
             .iter()
             .map(|step| step.id as usize)
@@ -1323,14 +1336,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_45_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_46_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 45);
+        assert_eq!(plan.len(), 46);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 45);
+        assert_eq!(ids.len(), 46);
     }
 
     #[test]
@@ -1390,6 +1403,7 @@ mod tests {
                 "grpc-backend-tests",
                 "vault-backend-tests",
                 "settingsonly-tests",
+                "identityaudit-tests",
                 "deny",
                 "dylint",
             ]
@@ -1984,6 +1998,7 @@ mod tests {
                 "grpc-backend-tests",
                 "vault-backend-tests",
                 "settingsonly-tests",
+                "identityaudit-tests",
                 "deny",
                 "audit",
                 "dylint",

@@ -33,6 +33,8 @@ pub(crate) enum Rule {
     ActiveDomainDependency,
     /// 未声明 domain 不得进入 assembly normal dependency closure。
     InactiveDomainDependencyClosure,
+    /// identityaudit 必须保持 lib-only，且 normal closure 不得引入 runtime/settings/transport。
+    IdentityAuditBoundary,
     /// assembly manifest 必须声明至少一个 listener。
     EmptyListeners,
     /// assembly manifest 中 `listeners` 不得重复。
@@ -137,7 +139,26 @@ fn validate_target_domain_closure(
         .cloned()
         .collect();
     let closure_domains = cargo_tree_domains(root, assembly, metadata, None)?;
-    validate_domain_sets(assembly, direct_domains, closure_domains)
+    let mut findings = validate_domain_sets(assembly, direct_domains, closure_domains)?;
+    if assembly.manifest.name == "identityaudit" {
+        let closure_packages = cargo_tree_package_names(root, assembly)?;
+        let workspace_closure = metadata
+            .packages
+            .iter()
+            .filter(|package| closure_packages.contains(&package.name))
+            .filter_map(|package| {
+                workspace_package_layer(root, metadata, package)
+                    .map(|layer| (package.name.clone(), layer))
+            })
+            .collect::<Vec<_>>();
+        findings.extend(validate_identityaudit_boundary(
+            &assembly.manifest_label,
+            &assembly.cargo_label,
+            &package.targets,
+            &workspace_closure,
+        ));
+    }
+    Ok(findings)
 }
 
 fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
@@ -431,6 +452,7 @@ struct RequiredCapabilitySpec {
 enum RequiredCapabilityExpectation {
     CargoDependency {
         dependency: &'static str,
+        required_features: &'static [&'static str],
     },
     ActivePersistentProvider {
         port: DiportPort,
@@ -445,6 +467,7 @@ const IDENTITY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
         capability: "Pg",
         expectation: RequiredCapabilityExpectation::CargoDependency {
             dependency: "postgres",
+            required_features: &["domain-identity"],
         },
     },
     RequiredCapabilitySpec {
@@ -472,6 +495,7 @@ const SETTINGS_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
         capability: "Pg",
         expectation: RequiredCapabilityExpectation::CargoDependency {
             dependency: "postgres",
+            required_features: &["domain-settings"],
         },
     },
     RequiredCapabilitySpec {
@@ -490,12 +514,14 @@ const AUDIT_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
         capability: "Pg",
         expectation: RequiredCapabilityExpectation::CargoDependency {
             dependency: "postgres",
+            required_features: &["domain-audit"],
         },
     },
     RequiredCapabilitySpec {
         capability: "MacVerifier",
         expectation: RequiredCapabilityExpectation::CargoDependency {
             dependency: "crypto-adapter",
+            required_features: &[],
         },
     },
     RequiredCapabilitySpec {
@@ -616,17 +642,33 @@ fn validate_required_capability(
     findings: &mut Vec<Finding>,
 ) {
     match spec.expectation {
-        RequiredCapabilityExpectation::CargoDependency { dependency } => {
-            if dependency_features(&a.cargo_toml, dependency).is_none() {
+        RequiredCapabilityExpectation::CargoDependency {
+            dependency,
+            required_features,
+        } => match dependency_features(&a.cargo_toml, dependency) {
+            None => findings.push(finding(
+                Rule::RequiredCapability,
+                &a.cargo_label,
+                format!(
+                    "field=dependencies domain={domain} capability={} expected exact [dependencies].{dependency} in {}; actual=missing-dependency",
+                    spec.capability, a.cargo_label
+                ),
+            )),
+            Some(features)
+                if required_features
+                    .iter()
+                    .any(|required| !features.iter().any(|actual| actual == required)) =>
+            {
                 findings.push(finding(
                     Rule::RequiredCapability,
                     &a.cargo_label,
                     format!(
-                        "field=dependencies domain={domain} capability={} expected exact [dependencies].{dependency} in {}; actual=missing-dependency",
-                        spec.capability, a.cargo_label
+                        "field=dependencies domain={domain} capability={} expected [dependencies].{dependency} features {:?}; actual={features:?}",
+                        spec.capability, required_features
                     ),
                 ));
             }
+            Some(_) => {}
         }
         RequiredCapabilityExpectation::ActivePersistentProvider {
             port,
@@ -726,6 +768,14 @@ struct MetadataPackage {
     manifest_path: PathBuf,
     #[serde(default)]
     dependencies: Vec<MetadataDependency>,
+    #[serde(default)]
+    targets: Vec<MetadataTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataTarget {
+    #[serde(default)]
+    kind: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -779,12 +829,11 @@ fn cargo_metadata_args(manifest_arg: &str) -> [&str; 6] {
     ]
 }
 
-fn cargo_tree_domains(
+fn cargo_tree_stdout(
     root: &Path,
     assembly: &DiscoveredAssembly,
-    metadata: &CargoMetadata,
     depth: Option<usize>,
-) -> Result<BTreeSet<String>> {
+) -> Result<String> {
     let manifest = assembly.cargo_path.display().to_string();
     let depth_value = depth.map(|value| value.to_string());
     let mut args = vec![
@@ -820,8 +869,17 @@ fn cargo_tree_domains(
         );
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .with_context(|| format!("cargo tree 输出不是 UTF-8：{}", assembly.cargo_label))?;
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("cargo tree 输出不是 UTF-8：{}", assembly.cargo_label))
+}
+
+fn cargo_tree_domains(
+    root: &Path,
+    assembly: &DiscoveredAssembly,
+    metadata: &CargoMetadata,
+    depth: Option<usize>,
+) -> Result<BTreeSet<String>> {
+    let stdout = cargo_tree_stdout(root, assembly, depth)?;
     let mut domains = BTreeSet::new();
     for package in metadata
         .packages
@@ -839,6 +897,17 @@ fn cargo_tree_domains(
         }
     }
     Ok(domains)
+}
+
+fn cargo_tree_package_names(
+    root: &Path,
+    assembly: &DiscoveredAssembly,
+) -> Result<BTreeSet<String>> {
+    Ok(cargo_tree_stdout(root, assembly, None)?
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect())
 }
 
 fn package_by_manifest<'a>(
@@ -924,22 +993,72 @@ fn validate_domain_sets(
     Ok(findings)
 }
 
+fn validate_identityaudit_boundary(
+    manifest_label: &str,
+    cargo_label: &str,
+    targets: &[MetadataTarget],
+    closure_packages: &[(String, crate::layers::Layer)],
+) -> Vec<Finding> {
+    // identityaudit is a compile-time composition proof, not a launch assembly. Keep this boundary
+    // executable: Cargo target drift and transport/runtime dependencies must fail assembly validate.
+    let mut findings = Vec::new();
+    let lib_only = targets.len() == 1 && targets[0].kind.as_slice() == ["lib"];
+    if !lib_only {
+        findings.push(finding(
+            Rule::IdentityAuditBoundary,
+            manifest_label,
+            format!(
+                "field=package.targets {cargo_label} 必须保持唯一 lib target；identityaudit 不得新增 bin/example/launch target"
+            ),
+        ));
+    }
+
+    for (package, layer) in closure_packages {
+        if !identityaudit_package_allowed(package, *layer) {
+            findings.push(finding(
+                Rule::IdentityAuditBoundary,
+                manifest_label,
+                format!(
+                    "field=normal-dependency-closure {cargo_label} 禁止 {layer:?} package `{package}`；identityaudit 只允许 identity+audit composition proof 所需 domain/adapter/root"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+fn identityaudit_package_allowed(package: &str, layer: crate::layers::Layer) -> bool {
+    use crate::layers::Layer::{Adapter, Domain, Root};
+    match layer {
+        Domain => matches!(package, "identity" | "audit"),
+        Adapter => matches!(package, "postgres" | "vault" | "oidc" | "crypto-adapter"),
+        Root => matches!(
+            package,
+            "identityaudit" | "identity-composition" | "audit-composition"
+        ),
+        _ => true,
+    }
+}
+
 fn package_is_workspace_domain(
     root: &Path,
     metadata: &CargoMetadata,
     package: &MetadataPackage,
 ) -> bool {
+    workspace_package_layer(root, metadata, package) == Some(crate::layers::Layer::Domain)
+}
+
+fn workspace_package_layer(
+    root: &Path,
+    metadata: &CargoMetadata,
+    package: &MetadataPackage,
+) -> Option<crate::layers::Layer> {
     if !metadata.workspace_members.contains(&package.id) {
-        return false;
+        return None;
     }
-    let Some(package_dir) = package.manifest_path.parent() else {
-        return false;
-    };
-    let Ok(member_path) = package_dir.strip_prefix(root) else {
-        return false;
-    };
+    let package_dir = package.manifest_path.parent()?;
+    let member_path = package_dir.strip_prefix(root).ok()?;
     crate::layers::classify(&package.name, &member_path.display().to_string())
-        == Some(crate::layers::Layer::Domain)
 }
 
 struct CriticalProviderSpec {
@@ -1952,7 +2071,7 @@ name = "runtime"
 [dependencies]
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
 vault = { path = "../../adapters/vault", features = ["backend"] }
-postgres = { path = "../../adapters/postgres" }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-settings", "domain-audit"] }
 crypto-adapter = { path = "../../adapters/crypto" }
 redis = { path = "../../adapters/redis", features = ["backend"] }
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
@@ -2002,7 +2121,7 @@ kind = "health"
 name = "runtime"
 
 [dependencies]
-postgres = { path = "../../adapters/postgres" }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-settings", "domain-audit"] }
 crypto-adapter = { path = "../../adapters/crypto" }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
@@ -2050,6 +2169,12 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
 "#;
+
+    const IDENTITYAUDIT_MANIFEST: &str =
+        include_str!("../../assemblies/identityaudit/assembly.toml");
+    const IDENTITYAUDIT_CARGO: &str = include_str!("../../assemblies/identityaudit/Cargo.toml");
+    const SETTINGSONLY_MANIFEST: &str = include_str!("../../assemblies/settingsonly/assembly.toml");
+    const SETTINGSONLY_CARGO: &str = include_str!("../../assemblies/settingsonly/Cargo.toml");
 
     const CAPABILITY_EVENT_TRANSPORT_PROVIDERS: &str = r#"
 [[diportProviders]]
@@ -2140,6 +2265,76 @@ purpose = "distributed-state-cas"
     }
 
     #[test]
+    fn assembly_capabilities_identityaudit_closure_is_non_vacuous() -> anyhow::Result<()> {
+        let findings = required_capability_findings(IDENTITYAUDIT_MANIFEST, IDENTITYAUDIT_CARGO)?;
+        assert!(
+            findings.is_empty(),
+            "green identityaudit closure: {findings:?}"
+        );
+
+        for (cargo, manifest, domain, capability) in [
+            (
+                IDENTITYAUDIT_CARGO.replace(
+                    "postgres = { path = \"../../adapters/postgres\", features = [\"domain-identity\", \"domain-audit\"] }\n",
+                    "",
+                ),
+                IDENTITYAUDIT_MANIFEST.to_owned(),
+                "identity",
+                "Pg",
+            ),
+            (
+                IDENTITYAUDIT_CARGO.replace(
+                    "[\"domain-identity\", \"domain-audit\"]",
+                    "[\"domain-audit\"]",
+                ),
+                IDENTITYAUDIT_MANIFEST.to_owned(),
+                "identity",
+                "Pg",
+            ),
+            (
+                IDENTITYAUDIT_CARGO.replace(
+                    "[\"domain-identity\", \"domain-audit\"]",
+                    "[\"domain-identity\"]",
+                ),
+                IDENTITYAUDIT_MANIFEST.to_owned(),
+                "audit",
+                "Pg",
+            ),
+            (
+                IDENTITYAUDIT_CARGO.replace(
+                    "crypto-adapter = { path = \"../../adapters/crypto\" }\n",
+                    "",
+                ),
+                IDENTITYAUDIT_MANIFEST.to_owned(),
+                "audit",
+                "MacVerifier",
+            ),
+            (
+                IDENTITYAUDIT_CARGO.to_owned(),
+                IDENTITYAUDIT_MANIFEST.replace("provider = \"vault::VaultSigner\"", "provider = \"vault::MissingSigner\""),
+                "identity",
+                "Signer",
+            ),
+            (
+                IDENTITYAUDIT_CARGO.to_owned(),
+                IDENTITYAUDIT_MANIFEST.replace("provider = \"oidc::OidcProvider\"", "provider = \"oidc::MissingPdp\""),
+                "identity",
+                "Pdp",
+            ),
+            (
+                IDENTITYAUDIT_CARGO.to_owned(),
+                IDENTITYAUDIT_MANIFEST.replace("provider = \"postgres::PgAuthAuditSink\"", "provider = \"postgres::MissingAuditSink\""),
+                "audit",
+                "AuthAuditSink",
+            ),
+        ] {
+            let findings = required_capability_findings(&manifest, &cargo)?;
+            assert_required_capability(&findings, domain, capability);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn assembly_capabilities_settings_requires_vault_keyprovider() -> anyhow::Result<()> {
         let manifest = capability_manifest("demo", "demo", &["settings"], "");
         let findings = required_capability_findings(
@@ -2152,6 +2347,22 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
         assert_required_capability(&findings, "settings", "VaultKeyProvider");
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_capabilities_settings_requires_domain_feature() -> anyhow::Result<()> {
+        let findings = required_capability_findings(
+            SETTINGSONLY_MANIFEST,
+            &SETTINGSONLY_CARGO.replace("features = [\"domain-settings\"]", "features = []"),
+        )?;
+        assert_required_capability(&findings, "settings", "Pg");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("domain-settings")),
+            "missing domain-settings feature must be explicit: {findings:?}"
+        );
         Ok(())
     }
 
@@ -2907,7 +3118,7 @@ audit = { path = "../../crates/audit" }
                 .iter()
                 .map(|assembly| assembly.manifest.name.as_str())
                 .collect::<Vec<_>>(),
-            ["runtime", "settingsonly"]
+            ["identityaudit", "runtime", "settingsonly"]
         );
         for assembly in &assemblies {
             let findings = validate_target_domain_closure(&root, assembly, &metadata)?;
@@ -2917,6 +3128,56 @@ audit = { path = "../../crates/audit" }
                 assembly.manifest.name
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_boundary_rejects_launch_and_transport_closure() {
+        use crate::layers::Layer::{Adapter, Domain, Root};
+
+        let targets = ["lib", "bin"].map(|kind| MetadataTarget {
+            kind: vec![kind.to_owned()],
+        });
+        let forbidden = [
+            ("settings", Domain),
+            ("runtime", Root),
+            ("amqp", Adapter),
+            ("redis-adapter", Adapter),
+            ("mqtt", Adapter),
+            ("grpc", Adapter),
+            ("httpd", Adapter),
+        ];
+        let packages = forbidden
+            .map(|(package, layer)| (package.to_owned(), layer))
+            .to_vec();
+        let findings = validate_identityaudit_boundary(
+            "assemblies/identityaudit/assembly.toml",
+            "assemblies/identityaudit/Cargo.toml",
+            &targets,
+            &packages,
+        );
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::IdentityAuditBoundary
+                && finding.detail.contains("唯一 lib target")
+        }));
+        for (forbidden, _) in forbidden {
+            assert!(findings.iter().any(|finding| {
+                finding.rule == Rule::IdentityAuditBoundary
+                    && finding.detail.contains(&format!("`{forbidden}`"))
+            }));
+        }
+    }
+
+    #[test]
+    fn identityaudit_wire_domains_is_private() -> anyhow::Result<()> {
+        let path = crate::workspace_root()?.join("assemblies/identityaudit/src/lib.rs");
+        let syntax = syn::parse_file(&std::fs::read_to_string(path)?)?;
+        assert!(syntax.items.iter().any(|item| matches!(
+            item,
+            syn::Item::Fn(function)
+                if function.sig.ident == "wire_domains"
+                    && matches!(function.vis, syn::Visibility::Inherited)
+        )));
         Ok(())
     }
 

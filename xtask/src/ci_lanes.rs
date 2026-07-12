@@ -441,7 +441,7 @@ macro_rules! gate_catalog {
                         "postgres-feature-matrix",
                         CORE,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Check),
+                        ToolRequirement::InProcess,
                         EvidenceKind::Test,
                         BOTH_INCLUDED,
                     )
@@ -593,6 +593,17 @@ macro_rules! gate_catalog {
                 gate(
                         GateId::SettingsOnlyTests,
                         "settingsonly-tests",
+                        CORE,
+                        CompileKind::Workspace,
+                        ToolRequirement::Nextest,
+                        EvidenceKind::Test,
+                        BOTH_INCLUDED,
+                    )
+            ),
+            IdentityAuditTests => (step_identityaudit_tests, None,
+                gate(
+                        GateId::IdentityAuditTests,
+                        "identityaudit-tests",
                         CORE,
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
@@ -951,6 +962,7 @@ mod tests {
     #[test]
     fn ci_lane_registry_accepts_canonical_green() {
         assert!(validate_registry(REGISTRY).is_ok());
+        assert!(GateId::ALL.contains(&GateId::IdentityAuditTests));
         assert_eq!(REGISTRY.len(), GateId::COUNT);
         assert!(
             REGISTRY

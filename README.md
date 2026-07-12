@@ -19,7 +19,7 @@ make verify              # == cargo xtask verify（薄 alias）
 cargo xtask verify       # fmt + 契约/分层/codegen meta + build + clippy + nextest + deny + dylint，fail-fast
 cargo xtask verify --fast            # 只跑无需编译的步（fmt + meta + deny），快速迭代
 cargo xtask verify --allow-missing-tools   # 缺外部工具时显式宽限（默认 fail-closed）
-cargo xtask ci           # 本地去重兼容聚合：43 个唯一 gate；Coverage 取代 Core 的 default-nextest
+cargo xtask ci           # 本地去重兼容聚合：46 个唯一 gate；Coverage 取代 Core 的 default-nextest
 ```
 
 `cargo xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现六个真实 check 的完整执行语义：

@@ -72,7 +72,7 @@ Validation for T016: `cargo test -p runtime runtime_phase_harness`; `cargo test 
 - [x] T031 [US1] Add `cargo xtask assembly generate-modules` and commit generated module output.
 - [x] T032 [US1] Switch runtime assembly to generated module list.
 - [x] T033 [US1] Add settings-only assembly.
-- [ ] T034 [US1] Add identity-audit assembly.
+- [x] T034 [US1] Add identity-audit assembly.
 
 ## Phase 5: Provider Bundle Standardization
 

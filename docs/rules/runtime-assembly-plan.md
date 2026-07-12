@@ -43,6 +43,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - Defining the binding/output shape does not itself change live `runtime::run()` behavior. Moving wire functions, generating the module list, and switching the live path remain separate dependent changes with baseline verification.
 - The generated artifact is the live domain-order carrier. `RUNTIME-GENERATED-DOMAINS-LIVE-01` rejects handwritten fallback and requires `compose_bindings` plus output merge; typed route/subscriber declaration funnels preserve the single `RouteAuthorizer` / `SettingsService` instances without a service bag.
 - Reusable `composition/*` crates may own a domain's typed provider-to-`DomainBinding` construction when multiple assemblies consume it. They remain Root-layer code, use mandatory typed inputs, and must not introduce a DI container, generic bag, manifest reader, or launch entrypoint.
+- `identityaudit` is a demo/test assembly with `domains = ["identity", "audit"]` and `topology = "demo"`; it proves generated module, Cargo, and declared provider capability closure without claiming a launch path, authenticated listener finalization, or durable event transport.
 
 ## PR Size Planning Budget
 

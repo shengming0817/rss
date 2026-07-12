@@ -16,6 +16,8 @@ path = "src/lib.rs"
 
 [dependencies]
 settings-composition = { path = "../../composition/settings" }
+identity-composition = { path = "../../composition/identity" }
+audit-composition = { path = "../../composition/audit" }
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 httpserve = { path = "../../crates/httpserve" }

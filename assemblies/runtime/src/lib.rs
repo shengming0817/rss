@@ -63,12 +63,12 @@ pub mod test_support {
         crate::domains::settings::integration_binding(deps).await
     }
 
-    /// Builds the identity domain with a hermetic configuration source for integration tests.
+    /// Builds the identity binding with a hermetic configuration source for integration tests.
     pub fn wire_identity_with(
         deps: &SharedRuntimeDeps,
         get: impl Fn(&str) -> Option<String>,
         vault_allow_http: bool,
-    ) -> anyhow::Result<identity::IdentityDomain<vault::VaultSigner>> {
+    ) -> anyhow::Result<bootstrap::DomainBinding> {
         crate::domains::identity::wire_identity_with(deps, get, vault_allow_http)
     }
 }

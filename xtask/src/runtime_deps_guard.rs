@@ -18,6 +18,13 @@ use crate::diagnostic::{Finding, GovernanceCheck, finding};
 const CONFIG_PATH: &str = "xtask/runtime-deps-guard.toml";
 const STRUCT_NAME: &str = "SharedRuntimeDeps";
 const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
+const EXACT_OIDC_PROVIDER_ARC: &str = "Arc<oidc::OidcProvider>";
+const EXACT_VAULT_SIGNER_ARC: &str = "Arc<vault::VaultSigner>";
+const SUPPORTED_EXACT_EXCEPTIONS: &[&str] = &[
+    EXACT_DOMAIN_TRANSPORT_ARC,
+    EXACT_OIDC_PROVIDER_ARC,
+    EXACT_VAULT_SIGNER_ARC,
+];
 const FORBIDDEN_BROAD_ROOTS: &[&str] = &["std", "core", "alloc"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +210,7 @@ impl RuntimeDepsPolicy {
             if exception.trim() != exception || exception.is_empty() {
                 bail!("runtime-deps-guard: exact exception must not be empty or padded");
             }
-            if exception != EXACT_DOMAIN_TRANSPORT_ARC {
+            if !SUPPORTED_EXACT_EXCEPTIONS.contains(&exception.as_str()) {
                 bail!("runtime-deps-guard: unsupported exact exception `{exception}`");
             }
             if !exact_exceptions.insert(exception.clone()) {
@@ -231,6 +238,10 @@ impl RuntimeDepsPolicy {
 
     fn allows_domain_transport_arc(&self) -> bool {
         self.exact_exceptions.contains(EXACT_DOMAIN_TRANSPORT_ARC)
+    }
+
+    fn allows_exact_exception(&self, exception: &str) -> bool {
+        self.exact_exceptions.contains(exception)
     }
 }
 
@@ -378,10 +389,57 @@ fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDep
     {
         return true;
     }
+    if policy.allows_exact_exception(EXACT_OIDC_PROVIDER_ARC)
+        && is_exact_arc_of_path(ty, resolver, &["oidc", "OidcProvider"], &mut Vec::new())
+    {
+        return true;
+    }
+    if policy.allows_exact_exception(EXACT_VAULT_SIGNER_ARC)
+        && is_exact_arc_of_path(ty, resolver, &["vault", "VaultSigner"], &mut Vec::new())
+    {
+        return true;
+    }
     if contains_forbidden_runtime_dep_type(ty, resolver, &mut Vec::new()) {
         return false;
     }
     canonical_type_root(ty, resolver, &mut Vec::new()).is_some_and(|root| policy.allows_root(&root))
+}
+
+fn is_exact_arc_of_path(
+    ty: &Type,
+    resolver: &TypeResolver,
+    expected: &[&str],
+    alias_stack: &mut Vec<String>,
+) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    match resolver.type_alias_target(type_path, alias_stack) {
+        TypeAliasTarget::Found {
+            name,
+            ty: aliased_ty,
+        } => {
+            alias_stack.push(name);
+            let is_exact = is_exact_arc_of_path(aliased_ty, resolver, expected, alias_stack);
+            alias_stack.pop();
+            return is_exact;
+        }
+        TypeAliasTarget::Cycle => return false,
+        TypeAliasTarget::NotAlias => {}
+    }
+    if type_path.qself.is_some() || !path_is_std_arc(&type_path.path, resolver) {
+        return false;
+    }
+    let Some(last) = type_path.path.segments.last() else {
+        return false;
+    };
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    let Some(GenericArgument::Type(Type::Path(inner))) = args.args.first() else {
+        return false;
+    };
+    args.args.len() == 1 && canonical_path_segments(&inner.path, resolver) == expected
 }
 
 fn canonical_type_root(
@@ -681,6 +739,7 @@ mod tests {
             policy.allowed_roots(),
             [
                 "diport",
+                "oidc",
                 "postgres",
                 "primitives",
                 "redis",
@@ -692,7 +751,11 @@ mod tests {
         );
         assert_eq!(
             policy.exact_exceptions(),
-            ["Arc<dyn distributed::DomainTransport>"]
+            [
+                "Arc<dyn distributed::DomainTransport>",
+                "Arc<oidc::OidcProvider>",
+                "Arc<vault::VaultSigner>"
+            ]
         );
         Ok(())
     }
@@ -851,6 +914,12 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
                 .any(|path| path.ends_with("assemblies/settingsonly/src/lib.rs")),
             "settingsonly carrier missing: {labels:?}"
         );
+        assert!(
+            labels
+                .iter()
+                .any(|path| path.ends_with("assemblies/identityaudit/src/lib.rs")),
+            "identityaudit carrier missing: {labels:?}"
+        );
         let policy = RuntimeDepsPolicy::from_workspace(&root)?;
         for path in paths {
             let rel = path.strip_prefix(&root).unwrap_or(path.as_path());
@@ -869,6 +938,22 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::DisallowedFieldType);
         assert!(findings[0].detail.contains("settings::SettingsService"));
+        Ok(())
+    }
+
+    #[test]
+    fn oidc_provider_is_allowed_but_identity_service_is_rejected() -> Result<()> {
+        let accepted = findings_with_policy(
+            "pub struct SharedRuntimeDeps { pub pdp: std::sync::Arc<oidc::OidcProvider> }\n",
+        )?;
+        assert!(accepted.is_empty(), "{accepted:?}");
+
+        let rejected = findings(include_str!(
+            "../tests/fixtures/runtime_deps_guard/identityaudit_service_red.rs"
+        ))?;
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].rule, Rule::DisallowedFieldType);
+        assert!(rejected[0].detail.contains("identity::IdentityDomain"));
         Ok(())
     }
 

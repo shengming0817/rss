@@ -1,25 +1,16 @@
-//! Identity domain wiring.
+//! Runtime-specific identity configuration and composition delegation.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use bootstrap::{Domain, DomainBinding, DomainModuleResult};
-use identity::{
-    IdentityDomain, IdentityDomainDeps, LoginService, PolicyManageService, RbacAdminService,
-    RefreshService,
-    ports::{
-        DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRefreshTokenStore,
-        DynResourceAttributeRepo, DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle,
-    },
-};
+use bootstrap::DomainBinding;
+use identity_composition::IdentityModuleDeps;
 use postgres::{PgDomainDeps, caps};
-use vault::VaultSigner;
 
 use crate::infra::vault::build_vault_signer_with;
 use crate::{SharedRuntimeDeps, SystemClock};
 
-const DOMAIN_NAME: &str = "identity";
 const DEFAULT_IDENTITY_SESSION_TTL_SECS: u64 = 3_600;
 const MAX_IDENTITY_SESSION_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 const IDENTITY_SESSION_TTL_ENV: &str = "RSS_IDENTITY_SESSION_TTL_SECS";
@@ -32,58 +23,14 @@ const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_REFRESH_TTL_SECS: u64 = 365 * 24 * 60 * 60;
 const JWT_SIGNING_PURPOSE: &str = "auth.jwt.access";
 
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// Typed provider seam for the identity module factory.
-///
-/// The trait is sealed: production uses [`SharedRuntimeDeps`], while this crate's tests provide a
-/// hermetic source that exercises the same public [`module`] entrypoint without a live database or
-/// Vault service.
-#[doc(hidden)]
-pub trait IdentityModuleSource: sealed::Sealed {
-    fn identity_pg(&self) -> PgDomainDeps<caps::Identity>;
-    fn config(&self, name: &str) -> Option<String>;
-    fn vault_allow_http(&self) -> bool;
-}
-
-impl sealed::Sealed for SharedRuntimeDeps {}
-
-impl IdentityModuleSource for SharedRuntimeDeps {
-    fn identity_pg(&self) -> PgDomainDeps<caps::Identity> {
-        self.pg.for_domain()
-    }
-
-    fn config(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok()
-    }
-
-    fn vault_allow_http(&self) -> bool {
-        false
-    }
-}
-
-fn bind<D>(domain: D, output: DomainModuleResult) -> DomainBinding
-where
-    D: Domain,
-{
-    DomainBinding::new(DOMAIN_NAME, Box::new(domain), output)
-}
-
-/// Build the identity domain as a single-owned runtime binding.
+/// Build the identity binding from the runtime's production providers and process configuration.
 ///
 /// # Errors
 ///
 /// Returns an error when required JWT or Vault configuration is absent or invalid, session or
-/// refresh TTLs violate their bounds, or the typed identity providers cannot be constructed.
-pub async fn module(source: &impl IdentityModuleSource) -> anyhow::Result<DomainBinding> {
-    let domain = wire_identity_from(
-        source.identity_pg(),
-        |name| source.config(name),
-        source.vault_allow_http(),
-    )?;
-    Ok(bind(domain, DomainModuleResult::default()))
+/// refresh TTLs violate their bounds, or identity composition fails.
+pub async fn module(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainBinding> {
+    wire_configured(deps.pg.for_domain(), |name| std::env::var(name).ok(), false)
 }
 
 fn identity_session_ttl_secs(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<u64> {
@@ -144,126 +91,49 @@ fn build_jwt_issuer_config(
     })
 }
 
-/// Integration-only typed identity constructor with injectable configuration and Vault HTTP policy.
+fn wire_configured(
+    pg: PgDomainDeps<caps::Identity>,
+    get: impl Fn(&str) -> Option<String>,
+    vault_allow_http: bool,
+) -> anyhow::Result<DomainBinding> {
+    // Keep the established fail-fast order: validate bounded lifetimes before constructing the
+    // Vault signer, then validate the JWT policy.
+    let session_ttl = Duration::from_secs(identity_session_ttl_secs(|name| get(name))?);
+    let refresh_ttl = Duration::from_secs(refresh_ttl_secs(|name| get(name))?);
+    let signer = Arc::new(build_vault_signer_with(|name| get(name), vault_allow_http)?);
+    let jwt = build_jwt_issuer_config(get)?;
+    let composition = IdentityModuleDeps::new(
+        pg,
+        signer,
+        Arc::new(SystemClock),
+        jwt,
+        session_ttl,
+        refresh_ttl,
+    );
+    identity_composition::wire(composition)
+}
+
+/// Integration-only identity binding with injectable configuration and Vault HTTP policy.
 ///
-/// `get` supplies `RSS_VAULT_ADDR`, `RSS_VAULT_TOKEN`, `RSS_VAULT_TRANSIT_MOUNT`,
-/// `RSS_JWT_ISSUER`, `RSS_JWT_AUDIENCE`, `RSS_JWT_ES256_KEY_ID`, and
-/// `RSS_JWT_ACCESS_TTL_SECS`; session and refresh TTL variables are optional and bounded.
-/// `vault_allow_http` exists only for hermetic tests with a loopback mock Vault. Production callers
-/// production generated module path is HTTPS-only.
+/// `vault_allow_http` exists only for hermetic tests with a loopback mock Vault. The generated
+/// production module path is HTTPS-only.
 ///
 /// # Errors
 ///
-/// Returns an error when required configuration is absent or invalid, TTL bounds are violated, or
-/// the Vault signer or JWT issuer cannot be constructed.
+/// Returns an error when configuration or identity composition fails.
 #[cfg(feature = "integration")]
 pub(crate) fn wire_identity_with(
     deps: &SharedRuntimeDeps,
     get: impl Fn(&str) -> Option<String>,
     vault_allow_http: bool,
-) -> anyhow::Result<IdentityDomain<VaultSigner>> {
-    wire_identity_from(
-        deps.pg.for_domain::<caps::Identity>(),
-        get,
-        vault_allow_http,
-    )
-}
-
-fn wire_identity_from(
-    identity_pg: PgDomainDeps<caps::Identity>,
-    get: impl Fn(&str) -> Option<String>,
-    vault_allow_http: bool,
-) -> anyhow::Result<IdentityDomain<VaultSigner>> {
-    let ttl = Duration::from_secs(identity_session_ttl_secs(|name| get(name))?);
-    let refresh_ttl = Duration::from_secs(refresh_ttl_secs(|name| get(name))?);
-
-    let credentials = Arc::from(DynCredentialRepo::new_box(identity_pg.credential_repo()));
-    let lifecycle = Arc::from(DynSessionLifecycle::new_box(
-        identity_pg.session_lifecycle(Box::new(SystemClock)),
-    ));
-    let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(identity_pg.role_repo()));
-    let roles_for_list = Arc::from(DynRoleReadRepo::new_box(identity_pg.role_repo()));
-    let policies = Arc::from(DynPolicyRepo::new_box(identity_pg.policy_repo()));
-    let resource_attrs = Arc::from(DynResourceAttributeRepo::new_box(
-        identity_pg.resource_attribute_repo(),
-    ));
-    let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
-        identity_pg.policy_lifecycle(Box::new(SystemClock)),
-    ));
-    let bindings = Arc::from(DynRoleBindingLifecycle::new_box(
-        identity_pg.role_binding_lifecycle(Box::new(SystemClock)),
-    ));
-
-    let signer = Arc::new(build_vault_signer_with(|name| get(name), vault_allow_http)?);
-    let issuer = Arc::new(
-        authn::JwtIssuer::new(
-            signer,
-            Box::new(SystemClock),
-            build_jwt_issuer_config(|name| get(name))?,
-        )
-        .map_err(|error| anyhow::anyhow!("jwt issuer config error: {error}"))?,
-    );
-
-    let refresh = Arc::new(RefreshService::new(
-        DynRefreshTokenStore::new_box(identity_pg.refresh_token_store()),
-        issuer,
-        Box::new(SystemClock),
-        refresh_ttl,
-    ));
-    let login = Arc::new(LoginService::new(
-        credentials,
-        lifecycle,
-        Arc::clone(&refresh),
-        Box::new(SystemClock),
-        ttl,
-    ));
-    let rbac_admin = Arc::new(RbacAdminService::new(
-        roles_for_admin,
-        Arc::clone(&bindings),
-        Box::new(SystemClock),
-    ));
-    let policy_manage = Arc::new(PolicyManageService::new(
-        Arc::clone(&policies),
-        policy_lifecycle,
-        Box::new(SystemClock),
-    ));
-    Ok(IdentityDomain::new(IdentityDomainDeps {
-        login,
-        refresh,
-        rbac_admin,
-        policy_manage,
-        roles: roles_for_list,
-        bindings,
-        policies,
-        resource_attrs,
-        clock: Arc::new(SystemClock),
-    }))
+) -> anyhow::Result<DomainBinding> {
+    wire_configured(deps.pg.for_domain(), get, vault_allow_http)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use bootstrap::compose_bindings;
-
-    struct TestModuleSource {
-        pg: postgres::PgRuntimeDeps,
-    }
-
-    impl sealed::Sealed for TestModuleSource {}
-
-    impl IdentityModuleSource for TestModuleSource {
-        fn identity_pg(&self) -> PgDomainDeps<caps::Identity> {
-            self.pg.for_domain()
-        }
-
-        fn config(&self, name: &str) -> Option<String> {
-            module_env(name)
-        }
-
-        fn vault_allow_http(&self) -> bool {
-            true
-        }
-    }
 
     fn module_env(name: &str) -> Option<String> {
         match name {
@@ -280,17 +150,18 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
-        let source = TestModuleSource {
-            pg: postgres::PgRuntimeDeps::for_module_test(),
-        };
-        module(&source).await
+        wire_configured(
+            postgres::PgRuntimeDeps::for_module_test().for_domain(),
+            module_env,
+            true,
+        )
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn module_executes_hermetic_source_and_has_stable_empty_output() {
+    async fn module_executes_hermetic_providers_and_has_stable_empty_output() {
         let mut bindings = vec![test_binding().await.expect("identity module builds")];
-        assert_eq!(bindings[0].name(), DOMAIN_NAME);
+        assert_eq!(bindings[0].name(), "identity");
 
         let (_, output) = compose_bindings(&mut bindings).expect("identity domain composes");
         assert!(bindings.is_empty());

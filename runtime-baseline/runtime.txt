@@ -15,6 +15,7 @@ amqp = path=../../adapters/amqp; features=[backend]
 anyhow = workspace=true
 assembly-schema = path=../../crates/assembly-schema
 audit = path=../../crates/audit
+audit-composition = path=../../composition/audit
 authn = path=../../crates/authn
 aws-sdk-s3 = workspace=true
 aws-smithy-http-client = workspace=true
@@ -32,6 +33,7 @@ generated = path=../../generated
 httpd = path=../../adapters/httpd
 httpserve = path=../../crates/httpserve
 identity = path=../../crates/identity
+identity-composition = path=../../composition/identity
 oidc = path=../../adapters/oidc; features=[backend]
 otel = path=../../adapters/otel; features=[backend]
 p256 = workspace=true; features=[ecdsa,pem]

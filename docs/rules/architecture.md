@@ -84,9 +84,11 @@ rss/
 │   ├── server/           # 部署二进制
 │   └── rss/              # 薄 cli：只放 xtask/cargo 干不了的运行时命令（产品/二进制名仅此处保留）
 ├── contracts/            # ★ 跨边界单源：{kind}/{domain}/{version}/contract.toml + *.schema.json（typify 消费）
-├── assemblies/           # ★ 物理打包（assembly.toml：static assembly intent + DI provider 声明）
+├── assemblies/           # ★ 物理打包（runtime/settingsonly/identityaudit；assembly.toml 声明 static intent + DI provider）
 ├── composition/          # ★ 可复用的域组合根接线（依赖域 + adapter；不承载 assembly intent）
-│   └── settings/         # settings PG/KeyProvider typed wiring + readiness 生命周期
+│   ├── settings/         # settings PG/KeyProvider typed wiring + readiness 生命周期
+│   ├── identity/         # identity PG/Signer/JWT typed wiring
+│   └── audit/            # audit PG/MacVerifier typed wiring
 ├── journeys/             # ★ 验收规格（*-journey.toml）+ status-board.toml；亦承载验收 journey 组合根 crate（demo 组装根 + 集成测试，RW-G1）
 ├── fixtures/             # ★ 测试夹具（fixture-*.toml）
 ├── examples/             # ssobff / todoorder / iotdevice / corebundlestarter
@@ -183,7 +185,7 @@ literal reusable jobs；Meta 与 Security 为 root，Core 与 Coverage 仅 `need
 INVARIANT CI-PIPELINE-DELEGATE-01 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定 job、lane、DAG、
 权限和唯一 xtask 委托，不允许 workflow 重列低层门。gate registry 的闭枚举、穷举 dispatch 与唯一/完整断言由
 Rust 编译期证明（Hard），YAML 边界由 xtask/CI 守卫证明（Medium），无依赖人工记忆的 Soft 约束。
-本地仍可用 `cargo xtask ci` 兼容聚合四条 lane 的 43 个唯一 gate；它不是 GitHub workflow lane 或 required check。
+本地仍可用 `cargo xtask ci` 兼容聚合四条 lane 的 46 个唯一 gate；它不是 GitHub workflow lane 或 required check。
 门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
 (`cargo llvm-cov`,引擎-基础 ≥90%、无 ratchet 例外)、`public-api --check`
 (轴 A;`cargo-semver-checks` 因全 crate `publish=false` 空转、本轮 deferred) 与 cargo-audit(供应链漏洞,#1133)。
@@ -204,10 +206,11 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
 
 - **组合根 / `module()`**:当前 `bootstrap` 已落私有字段 `DomainBinding` + `DomainBinding::new` +
   `compose_bindings(&mut Vec<DomainBinding>)`;该受控出口只在 compose 成功后返回聚合 `DomainModuleResult`,失败保持
-  bindings/outputs 原样。runtime 的 settings/identity/audit 已有统一 async `module(&impl XModuleSource) ->
-  Future<Result<DomainBinding>>`；各 source trait sealed，生产实现仅 `SharedRuntimeDeps`，测试实现仅注入同域 provider。
+  bindings/outputs 原样。runtime 的 settings/identity/audit 统一返回 `Future<Result<DomainBinding>>`；
+  identity/audit 的 provider-to-binding 构造由 `composition/*` 必填 typed deps 单源承载，runtime 仅保留
+  env/provider 适配与 generated module 薄入口。
   generated list 已由 #1672 接入 live `compose_bindings`；`assembly.toml` 顺序是唯一域构造、声明注册与生命周期输出聚合顺序。
-  adapter↔域绑定在 `bins/server` / assembly 用构造器注入完成(无独立组合层)。
+  adapter↔域绑定在 `bins/server` / assembly / reusable `composition/*` 用构造器注入完成。
   topology-gated resolver(`eventtransport`/`replaydeps`/`sagaprojectiondeps`)
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。
 - **持久化能力分层**:`DomainBinding`(域实例+生命周期输出的单一 owner) / `DomainModuleResult`(仅聚合

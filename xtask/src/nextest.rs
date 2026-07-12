@@ -172,11 +172,12 @@ pub(crate) enum CoreTestScope {
     GrpcBackend,
     VaultBackend,
     SettingsOnly,
+    IdentityAudit,
 }
 
 impl CoreTestScope {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Workspace,
         Self::S3Backend,
         Self::RedisBackend,
@@ -186,6 +187,7 @@ impl CoreTestScope {
         Self::GrpcBackend,
         Self::VaultBackend,
         Self::SettingsOnly,
+        Self::IdentityAudit,
     ];
 
     fn args(self, partitioned: bool) -> Vec<String> {
@@ -206,6 +208,13 @@ impl CoreTestScope {
             Self::GrpcBackend => backend_args("grpc"),
             Self::VaultBackend => backend_args("vault"),
             Self::SettingsOnly => ["-p", "settingsonly"].map(str::to_owned).to_vec(),
+            Self::IdentityAudit => {
+                let mut args = ["-p", "identityaudit"].map(str::to_owned).to_vec();
+                if partitioned {
+                    args.push("--no-tests=pass".to_owned());
+                }
+                args
+            }
         }
     }
 }
@@ -1459,6 +1468,45 @@ mod tests {
                 scope: CoreTestScope::Workspace,
                 partition
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_scope_fails_loud_unpartitioned_and_allows_empty_partition() -> Result<()> {
+        let invocation =
+            NextestInvocation::for_core(CoreTestScope::IdentityAudit, NextestLane::CiCore, None);
+        assert_eq!(
+            invocation.execution_argv(),
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "ci-core",
+                "-p",
+                "identityaudit",
+            ]
+        );
+        let invocation = NextestInvocation::for_core(
+            CoreTestScope::IdentityAudit,
+            NextestLane::CiCore,
+            Some(HashPartition::new(2, 2)?),
+        );
+        assert_eq!(
+            invocation.execution_argv(),
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "ci-core",
+                "-p",
+                "identityaudit",
+                "--no-tests=pass",
+                "--partition",
+                "hash:2/2",
+            ]
         );
         Ok(())
     }

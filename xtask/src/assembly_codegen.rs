@@ -421,18 +421,35 @@ purpose = "test"
             settingsonly.join("assembly.toml"),
             manifest(r#""settings""#).replace("name = \"runtime\"", "name = \"settingsonly\""),
         )?;
+        let identityaudit = root.join("assemblies/identityaudit");
+        fs::create_dir_all(&identityaudit)?;
+        fs::write(
+            identityaudit.join("assembly.toml"),
+            manifest(r#""identity", "audit""#)
+                .replace("name = \"runtime\"", "name = \"identityaudit\""),
+        )?;
 
         generate_root(&root, false)?;
         generate_root(&root, true)?;
 
         let runtime = fs::read_to_string(output(&root))?;
         let settings = fs::read_to_string(settingsonly.join("src/generated/modules_gen.rs"))?;
+        let identity_audit =
+            fs::read_to_string(identityaudit.join("src/generated/modules_gen.rs"))?;
         assert!(runtime.contains("domains::identity"));
         assert!(runtime.contains("domains::audit"));
         assert!(!runtime.contains("domains::settings"));
         assert!(settings.contains("domains::settings"));
         assert!(!settings.contains("domains::identity"));
         assert!(!settings.contains("domains::audit"));
+        let identity = identity_audit
+            .find("domains::identity")
+            .ok_or_else(|| anyhow::anyhow!("identityaudit missing identity"))?;
+        let audit = identity_audit
+            .find("domains::audit")
+            .ok_or_else(|| anyhow::anyhow!("identityaudit missing audit"))?;
+        assert!(identity < audit);
+        assert!(!identity_audit.contains("domains::settings"));
 
         fs::write(
             settingsonly.join("assembly.toml"),

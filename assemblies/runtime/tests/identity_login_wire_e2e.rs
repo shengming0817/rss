@@ -428,7 +428,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     };
 
     // 4. wire_identity_with（注入 mock vault URL + JWT 配置，vault_allow_http=true 接受 wiremock http，#1252 F3）。
-    let identity_domain = wire_identity_with(
+    let identity_binding = wire_identity_with(
         &deps,
         |name| match name {
             "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
@@ -445,7 +445,8 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     )?;
 
     // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
-    let mut registry = bootstrap::compose(&[&identity_domain])?;
+    let mut bindings = vec![identity_binding];
+    let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
     let mut primary = None;
     for assembled in runtime::routes::assemble_authed_routers(
         &mut registry,
@@ -665,7 +666,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
         domain_transport: noop_domain_transport(),
     };
-    let identity_domain = wire_identity_with(
+    let identity_binding = wire_identity_with(
         &deps,
         |name| match name {
             "RSS_VAULT_ADDR" => Some(vault_uri.clone()),
@@ -680,9 +681,9 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         },
         true,
     )?;
-    let (settings_domain, _settings_module) = wire_settings(&deps).await?;
-    let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &settings_domain];
-    let mut registry = bootstrap::compose(&domains)?;
+    let settings_binding = wire_settings(&deps).await?;
+    let mut bindings = vec![identity_binding, settings_binding];
+    let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
     let mut primary = None;
     for assembled in runtime::routes::assemble_authed_routers(
         &mut registry,

@@ -1,0 +1,34 @@
+[package]
+name = "identityaudit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "identityaudit"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+audit = { path = "../../crates/audit" }
+audit-composition = { path = "../../composition/audit" }
+authn = { path = "../../crates/authn" }
+bootstrap = { path = "../../crates/bootstrap" }
+crypto-adapter = { path = "../../adapters/crypto" }
+diport = { path = "../../crates/diport" }
+identity = { path = "../../crates/identity" }
+identity-composition = { path = "../../composition/identity" }
+oidc = { path = "../../adapters/oidc", features = ["backend"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit"] }
+primitives = { path = "../../crates/primitives" }
+vault = { path = "../../adapters/vault", features = ["backend"] }
+
+[dev-dependencies]
+audit-composition = { path = "../../composition/audit", features = ["test-support"] }
+identity-composition = { path = "../../composition/identity", features = ["test-support"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit", "test-support"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

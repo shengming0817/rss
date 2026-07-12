@@ -1,0 +1,39 @@
+name = "identityaudit"
+profile = "demo"
+domains = ["identity", "audit"]
+topology = "demo"
+
+[[listeners]]
+kind = "primary"
+
+[[listeners]]
+kind = "admin"
+
+[[diportProviders]]
+port = "diport::Signer"
+provider = "vault::VaultSigner"
+providerCrate = "vault"
+requiredFeatures = ["backend"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-access-token-signing"
+
+[[diportProviders]]
+port = "diport::Pdp"
+provider = "oidc::OidcProvider"
+providerCrate = "oidc"
+requiredFeatures = ["backend"]
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "jwt-credential-verification-capability-witness"
+
+[[diportProviders]]
+port = "diport::AuditSink"
+provider = "postgres::PgAuthAuditSink"
+providerCrate = "postgres"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "persistent"
+purpose = "http-auth-decision-audit"

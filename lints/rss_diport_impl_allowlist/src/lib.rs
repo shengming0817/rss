@@ -23,7 +23,7 @@
 //! - impl 站点放行（二选一，均键 **package 身份 / 位置**，非源**文件**路径）：① 被编译 crate 是 `diport`
 //!   自身（定义方 + dynosaur/trait_variant 宏在 diport 源内生成的 bridge impl，按 `LOCAL_CRATE` 身份判）；
 //!   ② 被编译 package 的 `CARGO_MANIFEST_DIR`（绝对路径、随调用位置不变）其**父目录名** ∈ workspace 顶层
-//!   成员目录 `adapters` / `bins` / `assemblies`（对齐 `xtask/src/layers.rs` 顶层成员分层）——新增 adapter
+//!   成员目录 `adapters` / `bins` / `assemblies` / `composition`（对齐 `xtask/src/layers.rs` 顶层成员分层）——新增 adapter
 //!   自动覆盖，零 lint 编辑。键 package 位置而非源文件位置 ⇒ 域 crate 把 impl 放进 `crates/<domain>/src/
 //!   adapters/` 子目录**无法绕过**（manifest dir 仍 `crates/<domain>`，父目录 `crates`）。`xtask` 父目录是
 //!   workspace 根、且系构建工具永不 impl runtime DI port，**故意不**入 allowlist。
@@ -34,13 +34,13 @@
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦，azure 无 CI ⇒
 //! verify 是唯一实际 gate；② `#[cfg(test)]` 子树因 `cargo dylint --all` 默认不带 `--all-targets` 不被扫——
 //! diport smoke / 服务 crate 的 `#[cfg(test)]` mock impl 不报（test 替身 impl 合法，非生产 impl；`#[cfg(test)]`
-//! 不进生产构建，无生产绕过口）；③ allowlist 顶层成员目录集（`adapters`/`bins`/`assemblies`）扩项无机器复核
+//! 不进生产构建，无生产绕过口）；③ allowlist 顶层成员目录集（`adapters`/`bins`/`assemblies`/`composition`）扩项无机器复核
 //! （与 `layers.rs` 顶层成员约定同源，靠 greppable + 治理评审）。键 `CARGO_MANIFEST_DIR` 父目录而非源文件
 //! 路径，无「祖先目录同名误放行」「域内子目录绕过」隐患。
 //!
 //! anti-vacuity（守卫非恒真 / 恒假，两向均机器锁）：红向（恒放行）由 UI golden 锁（example crate 路径非
 //! allowlist，红例 impl port trait **必报** 2 条）；绿向（恒报 / 误伤 adapter）由 `cargo xtask verify` 的
-//! `cargo dylint --all` 工作区跑锁（12 adapter 真实 impl **0 诊断**）——是 verify 机器门（非一次性人工）。
+//! `cargo dylint --all` 工作区跑锁（adapter/组合根真实 impl **0 诊断**）——是 verify 机器门（非一次性人工）。
 //! adapter-path 绿分支无法在 UI harness 内单测（harness 控制 example 源路径），故由工作区门承载。
 //!
 //! Hard 化评估（ai-robust.md §审查要求）：无低成本 Hard 路径——跨 crate sealed-trait 不可行（ADR-003 §4.2），
@@ -60,7 +60,7 @@ use rustc_lint::{LateContext, LateLintPass};
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
-    /// 标记**非** allowlist crate（package manifest 父目录不在 `adapters`/`bins`/`assemblies`，即域 / 服务 /
+    /// 标记**非** allowlist crate（package manifest 父目录不在 `adapters`/`bins`/`assemblies`/`composition`，即域 / 服务 /
     /// 引擎 / 基础 crate）里对 `diport` 定义的任一 DI port trait 的 `impl`。
     ///
     /// ### Why is this bad?
@@ -72,7 +72,7 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Known problems
     /// 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；`#[cfg(test)]` 子树
-    /// 默认不被扫（test mock impl 放行）；allowlist 顶层成员目录集（`adapters`/`bins`/`assemblies`）扩项无机器
+    /// 默认不被扫（test mock impl 放行）；allowlist 顶层成员目录集（`adapters`/`bins`/`assemblies`/`composition`）扩项无机器
     /// 复核（与 `xtask/src/layers.rs` 顶层成员约定同源，靠 greppable + 治理）。键 package 的 `CARGO_MANIFEST_DIR`
     /// 父目录而非源文件路径，无目录名绕过（域内 `src/adapters/` 子目录、祖先同名目录均不误判）。
     /// 确需在 allowlist 外 impl 加 `#[allow(rss_diport_impl_allowlist)] // reason: ...`。
@@ -120,7 +120,7 @@ impl<'tcx> LateLintPass<'tcx> for RssDiportImplAllowlist {
             ),
             |diag| {
                 diag.help(
-                    "把 provider 实现放到 `adapters/<name>`（或组合根 `bins/`·`assemblies/`），域 / 服务 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_diport_impl_allowlist)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由",
+                    "把 provider 实现放到 `adapters/<name>`（或组合根 `bins/`·`assemblies/`·`composition/`），域 / 服务 crate 经构造器注入 `Box<DynX>` / `Arc<DynX>` 消费；确需在 allowlist 外 impl，在该 impl 块加 `#[allow(rss_diport_impl_allowlist)] // reason: ...`（item-level 逃生门），并在 PR review 说明理由",
                 );
             },
         );
@@ -140,7 +140,7 @@ fn trait_defined_in_diport(cx: &LateContext<'_>, trait_did: DefId) -> bool {
 ///    域 / 服务 crate 用 `macro_rules!` / proc-macro 展开的 `impl <port> for ...` 其 `LOCAL_CRATE` 是该域 /
 ///    服务 crate（非 diport），不在此分支放行。
 /// 2. 被编译 package 的 manifest 目录（cargo 为每个 crate 设 `CARGO_MANIFEST_DIR`，绝对路径、随调用位置
-///    不变）其**父目录名** ∈ workspace 顶层成员目录 `adapters` / `bins` / `assemblies`。键 package 位置而非
+///    不变）其**父目录名** ∈ workspace 顶层成员目录 `adapters` / `bins` / `assemblies` / `composition`。键 package 位置而非
 ///    源**文件**位置 ⇒ 域 crate 把 impl 放进 `crates/<domain>/src/adapters/` 等子目录**无法绕过**（其
 ///    manifest dir 仍是 `crates/<domain>`，父目录 `crates`）。`xtask` 父目录是 workspace 根（非这三者）、
 ///    且系构建工具永不 impl runtime DI port，**故意不**入 allowlist（fail-closed 更严，确需走 item-level
@@ -159,7 +159,7 @@ fn impl_site_allowed(cx: &LateContext<'_>) -> bool {
             .parent()
             .and_then(Path::file_name)
             .and_then(|n| n.to_str()),
-        Some("adapters" | "bins" | "assemblies")
+        Some("adapters" | "bins" | "assemblies" | "composition")
     )
 }
 
