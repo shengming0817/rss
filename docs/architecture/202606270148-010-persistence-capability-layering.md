@@ -91,9 +91,10 @@ resource channel 直接扩展；注册顺序固定为 Redis → S3 → Vault，�
 这条窄 trait 只覆盖生命周期形状相同的三项 live provider。PG readiness 需要 interval / cancel token，
 不适用此 trait。#1677 以唯一 `build_pg_runtime_module(owner, period)` 消费 owner，把 ordered pool guards 与单个 worker
 直接转换为既有 `DomainModuleResult`，不再定义平行 PG output type。`LaunchPlanParts` 必填 PG module batch；它和普通 domain
-module batch 复用同一个 resources→workers 注册 helper，但分批位于 trace 后、event infra 前，以保留 sampler 与 event
-worker 的 LIFO 依赖。PG 不实现通用 `ProviderOutput`，helper 外也不直接调用 lifecycle primitives。AMQP 属 event-infra
-生命周期；二者均不为追求表面统一而塞进宽泛 provider trait。
+module batch 复用同一个 resources→workers 注册 helper，但 PG batch 位于 trace 后、统一 domain module 前，以保留 sampler
+与下游 worker 的 LIFO 依赖。PG 不实现通用 `ProviderOutput`，helper 外也不直接调用 lifecycle primitives。#1678 进一步
+删除 `EventRuntime` 平行出口：crate-private `wire_event_transport` 直接返回 `DomainModuleResult`，AMQP guards 进入
+`resources`，event loops 进入 `workers`，不为表面统一引入宽泛 provider trait。
 
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
@@ -173,9 +174,12 @@ impl PgRuntimeHandle {
   `PgRuntimeHandle` 没有生命周期 API，因此能力消费者无法取得 pool guard 或重复启动 sampler。owner 只能转换为既有
   `DomainModuleResult`，不存在第二套 lifecycle output seam。
 - PG 关闭顺序漂移收敛：owner 交出的 guards 固定 primary → optional audit-admin，PG module batch 经公共 helper 固定
-  resources → workers 注册；LIFO 关闭时 sampler 先停，再关 audit-admin 与 primary。PG module 在 trace 后、event infra 前注册，
+  resources → workers 注册；LIFO 关闭时 sampler 先停，再关 audit-admin 与 primary。PG module 在 trace 后、统一 domain module 前注册，
   使 event/domain/listener 均先于 sampler 排空。类型系统 Hard 锁定 owner/factory 的单次消费；无法跨文件类型化证明的唯一
   helper 调用、无平行 output 与注册相对顺序由带 synthetic-red/green 的 Medium runtime baseline 门补齐。
+- Event output 分叉威胁收敛：`wire_event_transport` 的 crate-private owned 返回类型使旧 `.module/.infra_guards`
+  投影不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；跨文件唯一 resource 派生、run merge 与 launch
+  注册顺序由 `EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 的 synthetic-red/anti-vacuity AST 门补齐（Medium）。
 
 结论：既有 adapter/domain、typed route/auth 与跨域隔离安全边界均不降级；binding/output 分离进一步强化这些边界。
 
@@ -190,7 +194,8 @@ impl PgRuntimeHandle {
 | result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
 | provider 输出形状与 live 集合 | **Hard（类型 + 可见性）/ Medium（精确 layer-deps deny + baseline）** | crate-private `ProviderOutput` 固定返回 `DomainModuleResult`；`LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 仅拒绝 `adapters/redis|s3|vault → bootstrap`（Cargo package 为 `redis-adapter|s3|vault`），三条 synthetic red + postgres→bootstrap/目标→diport anti-vacuity green，真实 workspace 由 `cargo xtask layer-deps` 校验；runtime baseline 锁定 Redis → S3 → Vault 集合、顺序与唯一 `provider_module` merge 路径 |
 | PG owner / handle 权限分离 | **Hard（类型 + 可见性）** | `PgRuntimeDeps` non-`Clone` 且只包 `PgRuntimeHandle`；handle `Clone` 但只暴露能力投影，生命周期字段/API 不可见；compile-fail/pass UI tests 锁 owner 不可克隆、handle 无 lifecycle API、能力投影可用 |
-| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（runtime baseline）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费（Hard）；唯一 `build_pg_runtime_module` 直接生成既有 `DomainModuleResult`，`LaunchPlanParts` 必填 PG batch，PG 不实现通用 `ProviderOutput`。公共 `register_module_output` 按 resources → workers 注册；`RUNTIME-PROVIDER-OUTPUTS-LIVE-01` 锁唯一 helper/生产调用、helper 外无 lifecycle primitive、无平行 output type，以及 PG batch 在 event infra 前注册（AcceptedMedium；synthetic red + anti-vacuity green） |
+| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（runtime baseline）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费（Hard）；唯一 `build_pg_runtime_module` 直接生成既有 `DomainModuleResult`，`LaunchPlanParts` 必填 PG batch，PG 不实现通用 `ProviderOutput`。公共 `register_module_output` 按 resources → workers 注册；`RUNTIME-PROVIDER-OUTPUTS-LIVE-01` 锁唯一 helper/生产调用、helper 外无 lifecycle primitive、无平行 output type，以及 PG batch 在统一 domain module 前注册（AcceptedMedium；synthetic red + anti-vacuity green） |
+| Event transport 单一 output | **Hard（类型 + 可见性）/ Medium（runtime baseline）** | `EVENT-TRANSPORT-OUTPUT-TYPE-01` 以 crate-private `wire_event_transport -> DomainModuleResult` 禁止旧字段投影；`EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 以 synthetic-red/anti-vacuity AST 门锁 AMQP resources 唯一派生、run 唯一 merge、launch 公共 helper 注册（AcceptedMedium） |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
 无 Soft 新增 enforcement。

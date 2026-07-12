@@ -1,15 +1,17 @@
 //! event_transport — topology-gated 事件传输组合根接线（issue #1251）。
 //!
 //! [`wire_event_transport`] 是 `run()` 事件传输单入口：根据 [`EventTransportConfig`] 中的拓扑决策
-//! 连接 AMQP（per-domain），spawn relay worker + PG inbox consumer workers，并返回 [`EventRuntime`]
-//! 交给 `run()` merge/drain 标准 [`bootstrap::DomainModuleResult`]。
+//! 连接 AMQP（per-domain），spawn relay worker + PG inbox consumer workers，并直接返回
+//! [`bootstrap::DomainModuleResult`] 交给 `run()` 的统一 merge/drain 路径。
 //!
-//! LIFO 注册顺序（由 `run()` 负责执行）：
-//! - `infra_guards`（AMQP 连接 guard）先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
-//! - `module.resources/module.workers`（relay + consumers + outbox sampler/sweeper）后注册 ⇒ LIFO 最先 drain。
+//! LIFO 顺序由通用 module funnel 保证：AMQP guards 进入 `resources`，relay / consumer /
+//! sampler / sweeper 进入 `workers`；launch 先注册 resources 再注册 workers，故关停时
+//! workers 先 drain，AMQP 连接后断开。
 //!
-//! Demo 拓扑：`wire_event_transport` 返回空 [`EventRuntime`]（无 env/容器即可单测）；生产 Demo
+//! Demo 拓扑：`wire_event_transport` 返回空 [`bootstrap::DomainModuleResult`]；生产 Demo
 //! 时组合根 `run()` 在此前已 `anyhow::bail!`（TOPO-INMEM-SEAL-01 组合根层保证）。
+//!
+//! INVARIANT: EVENT-TRANSPORT-OUTPUT-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "crate-private wire_event_transport returns one owned DomainModuleResult directly; legacy field projection is not representable" }
 //!
 //! ## relay_loop 专用 OS 线程
 //!
@@ -74,32 +76,6 @@ pub struct EventTransportConfig {
     pub dlx_payload_protector: Option<DlxPayloadProtector>,
     /// dead_letter row 保留期（秒）。
     pub dead_letter_retain_seconds: u64,
-}
-
-/// 事件传输接线产物（交 `run()` 装配进 [`bootstrap::ShutdownStack`]）。
-pub struct EventRuntime {
-    /// infra 连接守卫（AMQP）：先注册 ⇒ LIFO 最后关（workers drain 后再断连接）。
-    pub infra_guards: Vec<Box<DynManagedResource<'static>>>,
-    /// 标准 module 产物：probes/resources/workers 由 runtime 统一 merge/drain。
-    pub module: DomainModuleResult,
-}
-
-impl EventRuntime {
-    /// 空产物（Demo 拓扑：无 infra 连接 / worker / probe）。
-    // reason: Demo 拓扑 `wire_event_transport` 返回空 EventRuntime——函数可脱离 env/容器单测；
-    // 生产走 Demo 时组合根 `run()` 已在此前 fail-fast（TOPO-INMEM-SEAL-01）。
-    pub fn empty() -> Self {
-        Self {
-            infra_guards: Vec::new(),
-            module: DomainModuleResult::default(),
-        }
-    }
-}
-
-impl Default for EventRuntime {
-    fn default() -> Self {
-        Self::empty()
-    }
 }
 
 // ── 内部类型 ──────────────────────────────────────────────────────────────────
@@ -427,16 +403,16 @@ fn resolve_event_decision(
 
 /// topology-gated 事件传输接线单入口（`run()` 调用点）。
 ///
-/// - Demo 拓扑：返回 [`EventRuntime::empty`]（不建连接/不 spawn；生产 Demo fail-fast 由 `run()` 保证）。
+/// - Demo 拓扑：返回空 [`DomainModuleResult`]（不建连接/不 spawn；生产 Demo fail-fast 由 `run()` 保证）。
 /// - Durable 拓扑（Shared / Isolated）：连接 per-domain AMQP → spawn relay + PG inbox consumer workers。
 ///
 /// `cfg` 按值消费（`TransportConfig` 不 impl Clone）。
-pub async fn wire_event_transport(
+pub(crate) async fn wire_event_transport(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
-) -> anyhow::Result<EventRuntime> {
+) -> anyhow::Result<DomainModuleResult> {
     let required = required_domains(&subscribers);
     let required_refs: Vec<&str> = required.iter().map(String::as_str).collect();
     let timing = RelayTiming {
@@ -456,7 +432,7 @@ pub async fn wire_event_transport(
                 stage = "event-transport",
                 "Demo 拓扑：事件传输不接线（组合根 fail-fast 保证生产路径不进此臂）"
             );
-            Ok(EventRuntime::empty())
+            Ok(DomainModuleResult::default())
         }
         EventDecision::Durable { per_domain } => {
             let security = security.context("durable event security config missing")?;
@@ -588,9 +564,8 @@ fn event_security_for_topology(
 
 /// durable 拓扑接线内核（Shared / Isolated）：建立 AMQP，spawn relay + PG inbox consumer workers。
 #[allow(clippy::cognitive_complexity)]
-// reason: wire_durable 是顺序聚合函数，步骤严格有序（guard → AMQP → relay → consumers）以
-// 保证 LIFO 关闭顺序（infra_guards 最后关 = AMQP 连接在 workers drain 后才断开）；
-// 拆分为子函数会把 Vec push 顺序散布到多处并隐藏 LIFO 约束，复杂度来自不可压缩的业务顺序。
+// reason: wire_durable 是顺序聚合函数，步骤严格有序（AMQP resources → relay → consumers）；
+// 拆分会把 module channel 填充顺序散布到多处，隐藏通用 resources → workers 注册约束。
 async fn wire_durable(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
@@ -598,10 +573,9 @@ async fn wire_durable(
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
     timing: RelayTiming,
     security: EventSecurity,
-) -> anyhow::Result<EventRuntime> {
+) -> anyhow::Result<DomainModuleResult> {
     // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
 
-    let mut infra_guards: Vec<Box<DynManagedResource<'static>>> = Vec::new();
     let mut module = DomainModuleResult::default();
 
     // 每个 required 域（generated producer domain ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
@@ -614,7 +588,7 @@ async fn wire_durable(
         let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain)
             .await
             .with_context(|| format!("connect amqp for domain '{domain}'"))?;
-        infra_guards.extend(amqp_deps.runtime_resources());
+        module.resources.extend(amqp_deps.runtime_resources());
         tracing::info!(domain, "durable event transport: amqp connected");
         amqp_map.insert(domain, amqp_deps);
     }
@@ -643,10 +617,7 @@ async fn wire_durable(
     // Consumer resource bundle（per binding PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
     wire_consumer_resource_bundle(pg, subscribers, &amqp_map, &security, &timing, &mut module)?;
 
-    Ok(EventRuntime {
-        infra_guards,
-        module,
-    })
+    Ok(module)
 }
 
 /// 取某发布域的 AMQP publisher 句柄（relay 用）；该域无连接即 fail-closed。
@@ -1900,18 +1871,6 @@ mod tests {
             err.contains(DLX_PAYLOAD_KEY_NAME_ENV),
             "missing DLX payload key name must fail fast"
         );
-    }
-
-    // ── EventRuntime::empty() constructor ─────────────────────────────────────
-
-    /// Demo 路径不接线：EventRuntime::empty() 产出空产物（无 infra guard / worker / probe）。
-    #[test]
-    fn event_runtime_empty_constructor_is_empty() {
-        let runtime = EventRuntime::empty();
-        assert!(runtime.infra_guards.is_empty());
-        assert!(runtime.module.probes.is_empty());
-        assert!(runtime.module.resources.is_empty());
-        assert!(runtime.module.workers.is_empty());
     }
 
     #[test]

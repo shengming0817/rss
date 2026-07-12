@@ -13,6 +13,8 @@
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
 //! INVARIANT: RUNTIME-PROVIDER-OUTPUTS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_outputs_reject_missing_reordered_legacy_and_bait", anti_vacuity = "tests::runtime_provider_outputs_accept_unified_live_path" } -- the sole runtime-local constructor must merge Redis, S3, and Vault in order; postgres must remain outside that trait and cross the launch boundary exactly once as an owned `DomainModuleResult`, without lifecycle primitive bypasses or a parallel output type.
+//!
+//! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, merge it once into runtime assembly, and register AMQP resources plus workers only through the common lifecycle funnel.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
@@ -189,6 +191,7 @@ fn collect_report(root: &Path) -> Result<Report> {
     }
     findings.extend(generated_domains_live_findings(root)?);
     findings.extend(provider_outputs_live_findings(root)?);
+    findings.extend(event_transport_output_findings(root)?);
 
     Ok(Report {
         rendered: render_baseline(
@@ -445,6 +448,239 @@ fn out_of_line_module_candidates(base: &Path, module: &syn::ItemMod) -> Vec<Path
     ]
 }
 
+fn event_transport_output_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    if !root.join("Cargo.toml").exists() {
+        return Ok(Vec::new());
+    }
+    let event = parse_rust_file(&root.join("assemblies/runtime/src/event_transport.rs"))?;
+    let runtime = parse_rust_file(&root.join(RUNTIME_LIB_PATH))?;
+    let launch = parse_rust_file(&root.join(RUNTIME_LAUNCH_PATH))?;
+    let mut findings = Vec::new();
+
+    let wire = event
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "wire_event_transport" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let canonical_signature = wire.len() == 1
+        && matches!(&wire[0].vis, syn::Visibility::Restricted(vis) if vis.path.is_ident("crate"))
+        && wire[0].sig.asyncness.is_some()
+        && matches!(&wire[0].sig.output, syn::ReturnType::Type(_, ty)
+            if compact_tokens(ty.as_ref()) == "anyhow::Result<DomainModuleResult>");
+    let legacy_type = event.items.iter().any(|item| match item {
+        syn::Item::Struct(item) => item.ident == "EventRuntime",
+        syn::Item::Enum(item) => item.ident == "EventRuntime",
+        syn::Item::Type(item) => item.ident == "EventRuntime",
+        _ => false,
+    });
+    if !canonical_signature || legacy_type || !has_only_canonical_amqp_runtime_resources(&event) {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            "assemblies/runtime/src/event_transport.rs",
+            "event transport 必须以 crate-private async fn 直接返回 DomainModuleResult，AMQP resources 只能在 durable 连接循环进入 module.resources",
+        ));
+    }
+
+    let run = runtime.items.iter().find_map(|item| match item {
+        syn::Item::Fn(item) if item.sig.ident == "run" => Some(item),
+        _ => None,
+    });
+    let wire_blocks = run.map(wire_domains_blocks).unwrap_or_default();
+    let event_binding = wire_blocks
+        .first()
+        .and_then(|block| event_module_binding(block));
+    let canonical_run = wire_blocks.len() == 1
+        && wire_blocks.first().is_some_and(|block| {
+            event_binding.as_ref().is_some_and(|binding| {
+                exact_named_path_call_count(block, &["event_transport", "wire_event_transport"])
+                    == 1
+                    && runtime_module_field_use_count(block, "event_module", binding) == 1
+                    && binding_field_projection_count(block, binding) == 0
+            })
+        });
+    let assembly = runtime.items.iter().find_map(|item| match item {
+        syn::Item::Fn(item) if item.sig.ident == "assemble_runtime_module_outputs" => Some(item),
+        _ => None,
+    });
+    if !canonical_run
+        || assembly.is_none_or(|item| {
+            direct_assembly_field_merges(&item.block, "event_module") != 1
+                || assembly_input_field_use_count(&item.block, "event_module") != 1
+        })
+    {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LIB_PATH,
+            "run() 必须恰好一次把 wire_event_transport 的 owned output 直接交给 event_module merge，不得投影或平行拆包",
+        ));
+    }
+
+    if compact_tokens(&launch).contains("event_infra_guards")
+        || !has_canonical_pg_runtime_registration(&launch)
+        || !launch_plan_fields_are_closed(&launch)
+        || !launch_lifecycle_calls_are_canonical(&launch)
+    {
+        findings.push(finding(
+            Rule::ForbiddenWiring,
+            RUNTIME_LAUNCH_PATH,
+            "LaunchPlan 必须按 PG module → domain module 两批调用公共 register_module_output，禁止 event 专用字段或生命周期旁路",
+        ));
+    }
+    Ok(findings)
+}
+
+fn parse_rust_file(path: &Path) -> Result<syn::File> {
+    let source = fs::read_to_string(path).with_context(|| format!("读 {} 失败", path.display()))?;
+    syn::parse_file(&source).with_context(|| format!("解析 {} 失败", path.display()))
+}
+
+fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
+    tokens
+        .to_token_stream()
+        .to_string()
+        .split_whitespace()
+        .collect()
+}
+
+fn event_module_binding(block: &syn::Block) -> Option<String> {
+    let bindings = block
+        .stmts
+        .iter()
+        .filter_map(|stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return None;
+            };
+            let syn::Pat::Ident(binding) = &local.pat else {
+                return None;
+            };
+            let init = local.init.as_ref()?;
+            (binding.mutability.is_none()
+                && init.diverge.is_none()
+                && is_direct_event_transport_binding(&init.expr))
+            .then(|| binding.ident.to_string())
+        })
+        .collect::<Vec<_>>();
+    (bindings.len() == 1).then(|| bindings[0].clone())
+}
+
+fn is_direct_event_transport_binding(expr: &syn::Expr) -> bool {
+    let syn::Expr::Try(try_) = expr else {
+        return false;
+    };
+    let syn::Expr::MethodCall(context) = try_.expr.as_ref() else {
+        return false;
+    };
+    if context.method != "context" || context.args.len() != 1 {
+        return false;
+    }
+    let syn::Expr::Await(await_) = context.receiver.as_ref() else {
+        return false;
+    };
+    let syn::Expr::Call(call) = await_.base.as_ref() else {
+        return false;
+    };
+    is_exact_path(&call.func, &["event_transport", "wire_event_transport"])
+}
+
+fn runtime_module_field_use_count(block: &syn::Block, field_name: &str, binding: &str) -> usize {
+    struct Counter<'a> {
+        field_name: &'a str,
+        binding: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+            if item
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "RuntimeModuleAssemblyInputs")
+            {
+                self.count += item
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        matches!(&field.member, syn::Member::Named(member) if member == self.field_name)
+                            && expr_path_last(&field.expr)
+                                .is_some_and(|ident| ident == self.binding)
+                    })
+                    .count();
+            }
+            syn::visit::visit_expr_struct(self, item);
+        }
+    }
+    let mut counter = Counter {
+        field_name,
+        binding,
+        count: 0,
+    };
+    counter.visit_block(block);
+    counter.count
+}
+
+fn binding_field_projection_count(block: &syn::Block, binding: &str) -> usize {
+    struct Counter<'a> {
+        binding: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+            if expr_path_last(&field.base).is_some_and(|ident| ident == self.binding) {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_field(self, field);
+        }
+    }
+    let mut counter = Counter { binding, count: 0 };
+    counter.visit_block(block);
+    counter.count
+}
+
+fn direct_assembly_field_merges(block: &syn::Block, field_name: &str) -> usize {
+    block
+        .stmts
+        .iter()
+        .filter(|stmt| {
+            let syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)) = stmt else {
+                return false;
+            };
+            call.method == "merge"
+                && expr_path_last(&call.receiver).is_some_and(|ident| ident == "module")
+                && call.args.first().is_some_and(|arg| {
+                    matches!(arg, syn::Expr::Field(field)
+                        if expr_path_last(&field.base).is_some_and(|ident| ident == "inputs")
+                            && matches!(&field.member, syn::Member::Named(member) if member == field_name))
+                })
+        })
+        .count()
+}
+
+fn assembly_input_field_use_count(block: &syn::Block, field_name: &str) -> usize {
+    struct Counter<'a> {
+        field_name: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+            if expr_path_last(&field.base).is_some_and(|ident| ident == "inputs")
+                && matches!(&field.member, syn::Member::Named(member) if member == self.field_name)
+            {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_field(self, field);
+        }
+    }
+    let mut counter = Counter {
+        field_name,
+        count: 0,
+    };
+    counter.visit_block(block);
+    counter.count
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -604,7 +840,7 @@ fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             findings.push(finding(
                 Rule::ForbiddenWiring,
                 relative.display().to_string(),
-                "provider primitive 只能经 canonical DomainModuleResult seam；PG module 必须在 LaunchPlan 中于 trace 后、event infra 前注册一次",
+                "provider primitive 只能经 canonical DomainModuleResult seam；PG module 必须在 LaunchPlan 中于 trace 后、domain module 前注册一次",
             ));
         }
     }
@@ -1200,18 +1436,126 @@ fn has_canonical_pg_runtime_registration(file: &syn::File) -> bool {
     let Some(pg_binding) = launch_destructured_binding(stmts, "pg_runtime_module") else {
         return false;
     };
+    let Some(domain_binding) = launch_destructured_binding(stmts, "domain_module") else {
+        return false;
+    };
     let trace = stmts.iter().position(is_trace_registration_stmt);
     let pg = stmts
         .iter()
         .position(|stmt| is_pg_runtime_registration_stmt(stmt, &pg_binding));
-    let event = stmts.iter().position(is_event_infra_registration_stmt);
-    matches!((trace, pg, event), (Some(trace), Some(pg), Some(event)) if trace < pg && pg < event)
+    let domain = stmts
+        .iter()
+        .position(|stmt| is_pg_runtime_registration_stmt(stmt, &domain_binding));
+    matches!((trace, pg, domain), (Some(trace), Some(pg), Some(domain)) if trace < pg && pg < domain)
         && stmts
             .iter()
             .filter(|stmt| is_pg_runtime_registration_stmt(stmt, &pg_binding))
             .count()
             == 1
+        && stmts
+            .iter()
+            .filter(|stmt| is_pg_runtime_registration_stmt(stmt, &domain_binding))
+            .count()
+            == 1
         && module_registration_call_count(file, &pg_binding) == 1
+        && module_registration_call_count(file, &domain_binding) == 1
+        && method_call_count_in_block(&methods[0].block, "register_detached") == 1
+        && method_call_count_in_block(&methods[0].block, "register_with_token") == 0
+}
+
+fn launch_plan_fields_are_closed(file: &syn::File) -> bool {
+    const ALLOWED_FIELDS: &[&str] = &[
+        "listeners",
+        "trace_exporter",
+        "pg_runtime_module",
+        "domain_module",
+    ];
+    let plans = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item)
+                if item.ident == "LaunchPlanParts" || item.ident == "LaunchPlan" =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    plans.len() == 2
+        && plans.iter().all(|plan| {
+            plan.fields.iter().all(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ALLOWED_FIELDS.contains(&ident.to_string().as_str()))
+            })
+        })
+}
+
+fn launch_lifecycle_calls_are_canonical(file: &syn::File) -> bool {
+    fn has_lifecycle_calls(block: &syn::Block) -> bool {
+        method_call_count_in_block(block, "register_detached") != 0
+            || method_call_count_in_block(block, "register_with_token") != 0
+    }
+
+    for item in &file.items {
+        match item {
+            syn::Item::Fn(function) if attrs_may_be_production(&function.attrs) => {
+                let detached = method_call_count_in_block(&function.block, "register_detached");
+                let with_token = method_call_count_in_block(&function.block, "register_with_token");
+                if function.sig.ident == "bind_and_register" {
+                    if detached != 0 || with_token != 2 {
+                        return false;
+                    }
+                } else if detached != 0 || with_token != 0 {
+                    return false;
+                }
+            }
+            syn::Item::Impl(item) if attrs_may_be_production(&item.attrs) => {
+                let is_launch_plan =
+                    type_last_ident(&item.self_ty).is_some_and(|ident| ident == "LaunchPlan");
+                for method in item.items.iter().filter_map(|item| match item {
+                    syn::ImplItem::Fn(method) if attrs_may_be_production(&method.attrs) => {
+                        Some(method)
+                    }
+                    _ => None,
+                }) {
+                    let detached = method_call_count_in_block(&method.block, "register_detached");
+                    let with_token =
+                        method_call_count_in_block(&method.block, "register_with_token");
+                    let canonical = is_launch_plan
+                        && ((method.sig.ident == "register" && detached == 1 && with_token == 0)
+                            || (method.sig.ident == "register_module_output"
+                                && detached == 1
+                                && with_token == 1));
+                    if has_lifecycle_calls(&method.block) && !canonical {
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn method_call_count_in_block(block: &syn::Block, method: &str) -> usize {
+    struct Counter<'a> {
+        method: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == self.method {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut counter = Counter { method, count: 0 };
+    counter.visit_block(block);
+    counter.count
 }
 
 fn launch_destructured_binding(stmts: &[syn::Stmt], field_name: &str) -> Option<String> {
@@ -1289,12 +1633,6 @@ fn is_pg_runtime_registration_stmt(stmt: &syn::Stmt, binding: &str) -> bool {
     let mut finder = Finder { binding, count: 0 };
     finder.visit_stmt(stmt);
     finder.count == 1
-}
-
-fn is_event_infra_registration_stmt(stmt: &syn::Stmt) -> bool {
-    matches!(stmt, syn::Stmt::Expr(syn::Expr::ForLoop(loop_), None)
-        if matches!(loop_.pat.as_ref(), syn::Pat::Ident(pat) if pat.ident == "guard")
-            && expr_path_last(&loop_.expr).is_some_and(|ident| ident == "event_infra_guards"))
 }
 
 #[derive(Default)]
@@ -2195,7 +2533,8 @@ fn has_only_canonical_amqp_runtime_resources(file: &syn::File) -> bool {
     if wire_durable.len() != 1 {
         return false;
     }
-    wire_durable[0]
+    let wire_durable = wire_durable[0];
+    wire_durable
         .block
         .stmts
         .iter()
@@ -2205,6 +2544,80 @@ fn has_only_canonical_amqp_runtime_resources(file: &syn::File) -> bool {
         })
         .count()
         == 1
+        && wire_durable_returns_owned_module(wire_durable)
+        && !wire_durable_discards_module_output(wire_durable)
+}
+
+fn wire_durable_returns_owned_module(wire_durable: &syn::ItemFn) -> bool {
+    matches!(wire_durable.block.stmts.last(),
+    Some(syn::Stmt::Expr(syn::Expr::Call(call), None))
+        if is_exact_path(&call.func, &["Ok"])
+            && call.args.len() == 1
+            && call.args.first().is_some_and(|arg| {
+                expr_path_last(arg).is_some_and(|ident| ident == "module")
+            }))
+}
+
+fn wire_durable_discards_module_output(wire_durable: &syn::ItemFn) -> bool {
+    struct Visitor {
+        discards_output: bool,
+    }
+
+    impl<'ast> Visit<'ast> for Visitor {
+        fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
+            if is_module_or_output_channel_expr(&assign.left) {
+                self.discards_output = true;
+            }
+            syn::visit::visit_expr_assign(self, assign);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if is_module_output_channel_expr(&call.receiver)
+                && matches!(
+                    call.method.to_string().as_str(),
+                    "clear" | "drain" | "split_off" | "truncate"
+                )
+            {
+                self.discards_output = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            let destructive_mem_call = is_exact_path(&call.func, &["std", "mem", "take"])
+                || is_exact_path(&call.func, &["std", "mem", "replace"])
+                || is_exact_path(&call.func, &["mem", "take"])
+                || is_exact_path(&call.func, &["mem", "replace"]);
+            if destructive_mem_call
+                && call.args.first().is_some_and(|arg| {
+                    matches!(arg, syn::Expr::Reference(reference)
+                        if reference.mutability.is_some()
+                            && is_module_or_output_channel_expr(&reference.expr))
+                })
+            {
+                self.discards_output = true;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
+    let mut visitor = Visitor {
+        discards_output: false,
+    };
+    visitor.visit_block(&wire_durable.block);
+    visitor.discards_output
+}
+
+fn is_module_or_output_channel_expr(expr: &syn::Expr) -> bool {
+    expr_path_last(expr).is_some_and(|ident| ident == "module")
+        || is_module_output_channel_expr(expr)
+}
+
+fn is_module_output_channel_expr(expr: &syn::Expr) -> bool {
+    matches!(expr, syn::Expr::Field(field)
+        if expr_path_last(&field.base).is_some_and(|ident| ident == "module")
+            && matches!(&field.member, syn::Member::Named(member)
+                if matches!(member.to_string().as_str(), "probes" | "resources" | "workers")))
 }
 
 fn is_canonical_amqp_connection_loop(loop_: &syn::ExprForLoop) -> bool {
@@ -2270,7 +2683,9 @@ fn is_canonical_amqp_runtime_resources_stmt(stmt: &syn::Stmt) -> bool {
     };
     extend.method == "extend"
         && extend.args.len() == 1
-        && expr_path_last(&extend.receiver).is_some_and(|ident| ident == "infra_guards")
+        && matches!(extend.receiver.as_ref(), syn::Expr::Field(field)
+            if expr_path_last(&field.base).is_some_and(|ident| ident == "module")
+                && matches!(&field.member, syn::Member::Named(member) if member == "resources"))
         && extend.args.first().is_some_and(|arg| {
             matches!(arg, syn::Expr::MethodCall(resources)
                 if resources.method == "runtime_resources"
@@ -2930,9 +3345,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "Self::register_module_output(stack, pg_runtime_module)?;",
     },
     AnchorSpec {
-        id: "launch.shutdown.event-infra",
+        id: "launch.shutdown.domain-output",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "for guard in event_infra_guards",
+        pattern: "Self::register_module_output(stack, domain_module)?;",
     },
     AnchorSpec {
         id: "launch.shutdown.resources",
@@ -3903,6 +4318,233 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {
         .to_string()
     }
 
+    fn write_event_output_fixture(root: &Path) -> Result<()> {
+        write(&root.join("Cargo.toml"), "[workspace]\n")?;
+        write(
+            &root.join("assemblies/runtime/src/event_transport.rs"),
+            r#"
+pub(crate) async fn wire_event_transport() -> anyhow::Result<DomainModuleResult> { result }
+async fn wire_durable() {
+    let mut module = DomainModuleResult::default();
+    let mut amqp_map = BTreeMap::new();
+    for (domain_upper, url) in &per_domain {
+        let domain = domain_upper.to_ascii_lowercase();
+        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain).await?;
+        module.resources.extend(amqp_deps.runtime_resources());
+        amqp_map.insert(domain, amqp_deps);
+    }
+    Ok(module)
+}
+"#,
+        )?;
+        write(
+            &root.join(RUNTIME_LIB_PATH),
+            r#"
+pub async fn run() {
+    let _ = phase_result(RuntimePhase::WireDomains, async {
+        let event_module = event_transport::wire_event_transport()
+            .await
+            .context("wire event transport")?;
+        let _module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+            event_module,
+        });
+    });
+}
+fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> DomainModuleResult {
+    let mut module = DomainModuleResult::default();
+    module.merge(inputs.event_module);
+    module
+}
+"#,
+        )?;
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            r#"
+struct LaunchPlanParts { pg_runtime_module: DomainModuleResult, domain_module: DomainModuleResult }
+struct LaunchPlan { pg_runtime_module: DomainModuleResult, domain_module: DomainModuleResult }
+impl LaunchPlan {
+    fn register(self, stack: &mut ShutdownStack) {
+        let Self { trace_exporter, pg_runtime_module, domain_module } = self;
+        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
+        Self::register_module_output(stack, pg_runtime_module)?;
+        Self::register_module_output(stack, domain_module)?;
+    }
+    fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
+        for resource in output.resources { stack.register_detached(resource); }
+        for worker in output.workers { stack.register_with_token(worker); }
+    }
+}
+"#,
+        )
+    }
+
+    #[test]
+    fn event_transport_output_funnel_accepts_unified_live_path() -> Result<()> {
+        let root = fixture_root("event-transport-output-green")?;
+        write_event_output_fixture(&root)?;
+        assert_eq!(
+            event_transport_output_findings(&root)?,
+            Vec::<Finding<Rule>>::new()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn event_transport_output_funnel_rejects_legacy_and_bypasses() -> Result<()> {
+        let root = fixture_root("event-transport-output-red")?;
+        write_event_output_fixture(&root)?;
+        let event_path = root.join("assemblies/runtime/src/event_transport.rs");
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let launch_path = root.join(RUNTIME_LAUNCH_PATH);
+        let event = fs::read_to_string(&event_path)?;
+        let runtime = fs::read_to_string(&runtime_path)?;
+        let launch = fs::read_to_string(&launch_path)?;
+
+        for (label, path, mutated) in [
+            (
+                "public output API",
+                &event_path,
+                event.replacen(
+                    "pub(crate) async fn wire_event_transport",
+                    "pub async fn wire_event_transport",
+                    1,
+                ),
+            ),
+            (
+                "legacy wrapper",
+                &event_path,
+                format!("struct EventRuntime {{ module: DomainModuleResult }}\n{event}"),
+            ),
+            (
+                "dead resource branch",
+                &event_path,
+                event.replace(
+                    "module.resources.extend(amqp_deps.runtime_resources());",
+                    "if false { module.resources.extend(amqp_deps.runtime_resources()); }",
+                ),
+            ),
+            (
+                "discard unified output",
+                &event_path,
+                event.replace("Ok(module)", "Ok(DomainModuleResult::default())"),
+            ),
+            (
+                "clear unified resources",
+                &event_path,
+                event.replace(
+                    "Ok(module)",
+                    "module.resources.clear();\n    Ok(module)",
+                ),
+            ),
+            (
+                "take unified resources",
+                &event_path,
+                event.replace(
+                    "Ok(module)",
+                    "let _ = std::mem::take(&mut module.resources);\n    Ok(module)",
+                ),
+            ),
+            (
+                "clear unified workers",
+                &event_path,
+                event.replace("Ok(module)", "module.workers.clear();\n    Ok(module)"),
+            ),
+            (
+                "take unified probes",
+                &event_path,
+                event.replace(
+                    "Ok(module)",
+                    "let _ = std::mem::take(&mut module.probes);\n    Ok(module)",
+                ),
+            ),
+            (
+                "wrapped event output",
+                &runtime_path,
+                runtime.replace(
+                    "let event_module = event_transport::wire_event_transport()\n            .await\n            .context(\"wire event transport\")?;",
+                    "let event_module = discard(event_transport::wire_event_transport()\n            .await\n            .context(\"wire event transport\")?);",
+                ),
+            ),
+            (
+                "output field projection",
+                &runtime_path,
+                runtime.replace(
+                    "let _module = crate::assemble_runtime_module_outputs",
+                    "let _ = event_module.resources;\n        let _module = crate::assemble_runtime_module_outputs",
+                ),
+            ),
+            (
+                "duplicate event merge",
+                &runtime_path,
+                runtime.replace(
+                    "module.merge(inputs.event_module);",
+                    "module.merge(inputs.event_module);\n    module.merge(inputs.event_module);",
+                ),
+            ),
+            (
+                "preconsume event module",
+                &runtime_path,
+                runtime.replace(
+                    "module.merge(inputs.event_module);",
+                    "inputs.event_module.workers.clear();\n    module.merge(inputs.event_module);",
+                ),
+            ),
+            (
+                "event launch field",
+                &launch_path,
+                launch.replacen(
+                    "struct LaunchPlanParts {",
+                    "struct LaunchPlanParts { event_infra_guards: Vec<Resource>,",
+                    1,
+                ),
+            ),
+            (
+                "direct lifecycle bypass",
+                &launch_path,
+                launch.replace(
+                    "Self::register_module_output(stack, domain_module)?;",
+                    "Self::register_module_output(stack, domain_module)?;\n        stack.register_detached(event_guard);",
+                ),
+            ),
+            (
+                "renamed lifecycle carrier helper bypass",
+                &launch_path,
+                format!(
+                    "{}\nfn register_event_lifecycle(stack: &mut ShutdownStack, event_lifecycle: Vec<Resource>) {{\n    for guard in event_lifecycle {{ stack.register_detached(guard); }}\n}}\n",
+                    launch
+                        .replacen(
+                            "struct LaunchPlanParts {",
+                            "struct LaunchPlanParts { event_lifecycle: Vec<Resource>,",
+                            1,
+                        )
+                        .replacen(
+                            "struct LaunchPlan {",
+                            "struct LaunchPlan { event_lifecycle: Vec<Resource>,",
+                            1,
+                        )
+                        .replace(
+                            "let Self { trace_exporter, pg_runtime_module, domain_module } = self;",
+                            "let Self { trace_exporter, pg_runtime_module, domain_module, event_lifecycle } = self;",
+                        )
+                        .replace(
+                            "Self::register_module_output(stack, domain_module)?;",
+                            "Self::register_module_output(stack, domain_module)?;\n        register_event_lifecycle(stack, event_lifecycle);",
+                        )
+                ),
+            ),
+        ] {
+            write(path, &mutated)?;
+            assert!(
+                !event_transport_output_findings(&root)?.is_empty(),
+                "{label} must fail"
+            );
+            write(&event_path, &event)?;
+            write(&runtime_path, &runtime)?;
+            write(&launch_path, &launch)?;
+        }
+        Ok(())
+    }
+
     fn provider_adapter_fixture() -> &'static str {
         r#"
 trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult; }
@@ -3937,10 +4579,10 @@ fn build_pg_runtime_module(owner: PgRuntimeDeps, period: Duration) -> DomainModu
             r#"
 impl LaunchPlan {
     fn register(self, stack: &mut ShutdownStack) {
-        let Self { trace_exporter, pg_runtime_module, event_infra_guards } = self;
+        let Self { trace_exporter, pg_runtime_module, domain_module } = self;
         if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
         Self::register_module_output(stack, pg_runtime_module)?;
-        for guard in event_infra_guards { stack.register_detached(guard); }
+        Self::register_module_output(stack, domain_module)?;
     }
     fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
         for resource in output.resources { stack.register_detached(resource); }
@@ -3960,12 +4602,14 @@ impl LaunchPlan {
             &root.join("assemblies/runtime/src/event_transport.rs"),
             r#"
 async fn wire_durable() {
+    let mut module = DomainModuleResult::default();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
         let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain).await?;
-        infra_guards.extend(amqp_deps.runtime_resources());
+        module.resources.extend(amqp_deps.runtime_resources());
         amqp_map.insert(domain, amqp_deps);
     }
+    Ok(module)
 }
 "#,
         )?;
@@ -3996,23 +4640,23 @@ async fn wire_durable() {
             (
                 "dead branch",
                 canonical.replace(
-                    "        infra_guards.extend(amqp_deps.runtime_resources());",
-                    "        if false { infra_guards.extend(amqp_deps.runtime_resources()); }",
+                    "        module.resources.extend(amqp_deps.runtime_resources());",
+                    "        if false { module.resources.extend(amqp_deps.runtime_resources()); }",
                 ),
             ),
             (
                 "dead closure",
                 canonical.replace(
-                    "        infra_guards.extend(amqp_deps.runtime_resources());",
-                    "        let _dead = || infra_guards.extend(amqp_deps.runtime_resources());",
+                    "        module.resources.extend(amqp_deps.runtime_resources());",
+                    "        let _dead = || module.resources.extend(amqp_deps.runtime_resources());",
                 ),
             ),
             (
                 "outside connection loop",
                 canonical.replace(
-                    "        infra_guards.extend(amqp_deps.runtime_resources());",
+                    "        module.resources.extend(amqp_deps.runtime_resources());",
                     "",
-                ) + "\nfn bypass() { infra_guards.extend(amqp_deps.runtime_resources()); }\n",
+                ) + "\nfn bypass() { module.resources.extend(amqp_deps.runtime_resources()); }\n",
             ),
         ] {
             write(&event_transport, &mutated)?;
@@ -4676,7 +5320,7 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
 impl LaunchPlan { fn register() {
 if let Some(exporter) = trace_exporter
 Self::register_module_output(stack, pg_runtime_module)?;
-for guard in event_infra_guards
+Self::register_module_output(stack, domain_module)?;
 }
 fn register_module_output() {
 for worker in output.workers

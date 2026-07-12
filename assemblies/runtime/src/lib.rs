@@ -55,7 +55,17 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 /// through the committed generated module list.
 #[cfg(feature = "integration")]
 pub mod test_support {
-    use super::SharedRuntimeDeps;
+    use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
+
+    /// Wires the production event transport through an integration-only seam.
+    pub async fn wire_event_transport(
+        pg: &postgres::PgRuntimeHandle,
+        distributed: DistributedRuntimeDeps,
+        subscribers: Vec<crate::event_transport::BridgedSubscription>,
+        cfg: crate::event_transport::EventTransportConfig,
+    ) -> anyhow::Result<bootstrap::DomainModuleResult> {
+        crate::event_transport::wire_event_transport(pg, distributed, subscribers, cfg).await
+    }
 
     /// Builds the settings binding for container-backed integration tests.
     pub async fn wire_settings(
@@ -3930,7 +3940,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
     )?;
 
     // WireDomains phase: domain roots, registry/module outputs, probes, workers, and event transport.
-    let (mut registry, pg_readiness_period, event_infra_guards, domain_module) = phase_result(
+    let (mut registry, pg_readiness_period, domain_module) = phase_result(
         RuntimePhase::WireDomains,
         async {
             // assembly.toml 的 domain 顺序经 committed generated glue 成为 live 单源；typed route/subscriber
@@ -3990,7 +4000,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             let event_subscribers =
                 event_transport::bridge_generated_subscriptions(registry.drain_subscribers())
                     .context("bridge generated event subscriptions")?;
-            let event_runtime = event_transport::wire_event_transport(
+            let event_module = event_transport::wire_event_transport(
                 &deps.pg,
                 distributed,
                 event_subscribers,
@@ -3998,8 +4008,6 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             )
             .await
             .context("wire event transport")?;
-            let event_infra_guards = event_runtime.infra_guards;
-
             // 聚合各域 module result / provider capability guards / event transport outputs。
             let redis_for_sampler = deps.redis.clone();
             let redis_readiness_worker: bootstrap::WorkerSpec = Box::new(move |token| {
@@ -4017,7 +4025,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 provider_module,
                 oidc_resource,
                 domain_transport_module,
-                event_module: event_runtime.module,
+                event_module,
                 redis_readiness_worker,
             });
 
@@ -4038,7 +4046,7 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 "redis readiness sampler interval configured"
             );
 
-            Ok::<_, anyhow::Error>((registry, pg_readiness_period, event_infra_guards, module))
+            Ok::<_, anyhow::Error>((registry, pg_readiness_period, module))
         }
         .await,
     )?;
@@ -4080,7 +4088,6 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
         listeners,
         trace_exporter,
         pg_runtime_module,
-        event_infra_guards,
         domain_module,
     });
     phase_result(
@@ -4121,7 +4128,7 @@ mod tests {
             [
                 "phase-order: build_provider -> build_infra -> wire_domains -> finalize -> launch",
                 "module-probes: configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, dead_letter_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper",
-                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport",
+                "module-resources: redis, s3, vault-secret-resolver, vault-key-provider, oidc-jwks, domain-http-transport, identity-pub, identity-sub, settings-pub, settings-sub",
                 "module-workers: keyprovider-readiness-sampler, session-sweeper, s3-canary-sampler, outbox-relay-identity, outbox-relay-settings, outbox-sampler, outbox-sweeper, dead-letter-sweeper, event-consumer:settings:settings.config-version-changed, event-consumer:audit:identity.session-created, event-consumer:audit:identity.role-assigned, event-consumer:audit:identity.role-revoked, event-consumer:audit:identity.policy-updated, inbox-sweeper, redis-readiness-sampler",
                 "readyz-probes-before-reporter: rls_ready, redis_ready, oidc_jwks_ready, configs_ready, keyprovider_ready, session_sweeper, s3_object_store_ready, domain_transport_ready, outbox_relay_identity, outbox_relay_settings, outbox_sampler, outbox_sweeper, dead_letter_sweeper, event_consumer:settings_config-version-changed__settings__settings_config-version-changed, event_consumer:identity_session-created__audit__audit_session-created, event_consumer:identity_role-assigned__audit__audit_role-assigned, event_consumer:identity_role-revoked__audit__audit_role-revoked, event_consumer:identity_policy-updated__audit__audit_policy-updated, inbox_sweeper",
                 "reporter-probe-count: 19",
@@ -4210,6 +4217,14 @@ mod tests {
 
     fn event_transport_harness_module() -> DomainModuleResult {
         let mut module = DomainModuleResult::default();
+        for domain in ["identity", "settings"] {
+            module
+                .resources
+                .push(harness_resource_owned(format!("{domain}-pub")));
+            module
+                .resources
+                .push(harness_resource_owned(format!("{domain}-sub")));
+        }
         for domain in ["identity", "settings"] {
             module.probes.push(harness_probe_owned(format!(
                 "{OUTBOX_RELAY_PROBE}_{domain}"

@@ -123,7 +123,7 @@ mergeExtends = probes,resources,workers
 25 | run.launch | assemblies/runtime/src/lib.rs | launch::launch(launch_plan) | status=ok
 26 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
 27 | launch.shutdown.pg-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, pg_runtime_module)?; | status=ok
-28 | launch.shutdown.event-infra | assemblies/runtime/src/launch.rs | for guard in event_infra_guards | status=ok
+28 | launch.shutdown.domain-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, domain_module)?; | status=ok
 29 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in output.resources | status=ok
 30 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in output.workers | status=ok
 31 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack)?; | status=ok

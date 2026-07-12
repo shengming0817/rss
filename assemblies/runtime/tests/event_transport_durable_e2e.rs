@@ -48,9 +48,8 @@ use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 
-use runtime::event_transport::{
-    bridge_generated_subscriptions, build_event_transport_config_from, wire_event_transport,
-};
+use runtime::event_transport::{bridge_generated_subscriptions, build_event_transport_config_from};
+use runtime::test_support::wire_event_transport;
 use runtime::{
     SharedRuntimeDeps, SystemClock, TracingAuthAuditSink, build_redis_runtime_deps,
     build_vault_runtime_deps, wire_distributed,
@@ -695,7 +694,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .clone()
         .context("durable e2e dlx payload protector missing")?;
 
-    // ── 步骤 6：wire_event_transport → EventRuntime（relay OS 线程 + consumer worker 启动）──────
+    // ── 步骤 6：wire_event_transport → DomainModuleResult（relay OS 线程 + consumer worker 启动）────
 
     let redis_fixture = testkit::env_or_redis().await?;
     let redis = build_redis_runtime_deps(|name| match name {
@@ -727,11 +726,31 @@ async fn event_transport_durable_e2e() -> Result<()> {
         settings_config_value_key_name: diport::KeyName::try_new("settings-config")?,
         domain_transport: noop_domain_transport(),
     };
+    let demo_cfg = build_event_transport_config_from(|name| {
+        (name == "RSS_TOPOLOGY").then(|| "demo".to_string())
+    })?;
+    let demo_module =
+        wire_event_transport(&pg, wire_distributed(&deps)?, Vec::new(), demo_cfg).await?;
+    assert!(demo_module.probes.is_empty());
+    assert!(demo_module.resources.is_empty());
+    assert!(demo_module.workers.is_empty());
+
     let distributed = wire_distributed(&deps)?;
-    let event_runtime = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
-    assert!(
-        event_runtime.module.resources.is_empty(),
-        "event transport workers must drain through DomainModuleResult::workers"
+    let event_module = wire_event_transport(&pg, distributed, subscribers, cfg).await?;
+    let resource_names = event_module
+        .resources
+        .iter()
+        .map(|resource| diport::ManagedResource::name(resource.as_ref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resource_names,
+        [
+            "identity-pub",
+            "identity-sub",
+            "settings-pub",
+            "settings-sub"
+        ],
+        "durable event infra must leave through DomainModuleResult::resources"
     );
     let generated_subscription_count = generated::event::EVENTS
         .iter()
@@ -739,40 +758,63 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .sum::<usize>();
     let expected_worker_count = generated_subscription_count + 6;
     assert_eq!(
-        event_runtime.module.workers.len(),
+        event_module.workers.len(),
         expected_worker_count,
         "identity/settings relays + generated consumers + sampler + outbox sweeper + dead_letter sweeper + inbox sweeper"
     );
-    let probe_names: Vec<&str> = event_runtime
-        .module
+    let probe_names: Vec<&str> = event_module
         .probes
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    for expected in ["outbox_sampler", "outbox_sweeper"] {
-        assert!(
-            probe_names.contains(&expected),
-            "durable module probes must include {expected}; got {probe_names:?}"
-        );
-    }
-    assert!(
-        probe_names.contains(&"outbox_relay_settings"),
-        "settings.config-version-changed is active and must have a production relay"
+    assert_eq!(
+        probe_names,
+        [
+            "outbox_relay_identity",
+            "outbox_relay_settings",
+            "outbox_sampler",
+            "outbox_sweeper",
+            "dead_letter_sweeper",
+            "event_consumer:settings_config-version-changed__settings__settings_config-version-changed",
+            "event_consumer:identity_session-created__audit__audit_session-created",
+            "event_consumer:identity_role-assigned__audit__audit_role-assigned",
+            "event_consumer:identity_role-revoked__audit__audit_role-revoked",
+            "event_consumer:identity_policy-updated__audit__audit_policy-updated",
+            "inbox_sweeper",
+        ],
+        "durable event probes must preserve generated topology order"
     );
 
-    // ── 步骤 7：注册 ShutdownStack（infra_guards 先注册 → LIFO 最后关；workers 后注册 → LIFO 最先 drain）
+    // ── 步骤 7：统一注册 ShutdownStack（resources 先注册，workers 后注册）────────
 
     let mut stack = bootstrap::shutdown::ShutdownStack::new(CancellationToken::new());
-    for guard in event_runtime.infra_guards {
-        stack.register_detached(guard);
-    }
-    let module = event_runtime.module;
-    for resource in module.resources {
+    for resource in event_module.resources {
         stack.register_detached(resource);
     }
-    for worker in module.workers {
+    for worker in event_module.workers {
         stack.register_with_token(worker);
     }
+    assert_eq!(
+        stack.registered_names().collect::<Vec<_>>(),
+        [
+            "identity-pub",
+            "identity-sub",
+            "settings-pub",
+            "settings-sub",
+            "outbox-relay-identity",
+            "outbox-relay-settings",
+            "outbox-sampler",
+            "outbox-sweeper",
+            "dead-letter-sweeper",
+            "event-consumer:settings:settings.config-version-changed",
+            "event-consumer:audit:identity.session-created",
+            "event-consumer:audit:identity.role-assigned",
+            "event-consumer:audit:identity.role-revoked",
+            "event-consumer:audit:identity.policy-updated",
+            "inbox-sweeper",
+        ],
+        "resources must register before workers so LIFO drains workers first"
+    );
 
     // ── 步骤 8a：settings active event 走生产 relay + AMQP consumer bridge ───────────────────
 

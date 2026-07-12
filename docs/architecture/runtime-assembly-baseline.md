@@ -95,8 +95,9 @@ PG intentionally does not implement the runtime-local generic `ProviderOutput` t
 `build_pg_runtime_module` helper converts its ordered pool guards and non-Clone sampler factory
 directly into `DomainModuleResult`; no parallel PG output type exists. `LaunchPlanParts` requires the
 PG module batch and the normal domain module batch, and both use the same resources-then-workers
-registration helper. Keeping them as ordered batches preserves the PG sampler-before-event-infra
-registration dependency without creating a second output seam.
+registration helper. Keeping them as ordered batches preserves the PG sampler-before-domain-module
+dependency without creating a second output seam. Event transport itself returns the normal domain
+module type directly: AMQP guards are resources and event loops are workers, with no parallel runtime wrapper.
 
 `DomainModuleResult` currently carries:
 
@@ -115,12 +116,12 @@ Authenticated listeners are built through `assemble_authed_routers`. Health and 
 
 1. optional OTEL exporter
 2. PG `DomainModuleResult`: primary pool guard, optional audit-admin pool guard, then readiness sampler
-3. event infra guards
-4. module resources
-5. module workers
-6. listeners, registered inside `launch_until`
+3. unified module resources, including AMQP publisher/subscriber guards
+4. unified module workers
+5. listeners, registered inside `launch_until`
 
-The effective shutdown drain order is the reverse: listeners first, then workers/resources, event infra, sampler, pool guards, and finally OTEL flushing.
+The effective shutdown drain order is the reverse: listeners first, then workers, module resources
+(including AMQP guards), PG sampler, pool guards, and finally OTEL flushing.
 
 ## Machine Gate
 
@@ -132,7 +133,9 @@ The effective shutdown drain order is the reverse: listeners first, then workers
 - required `runtime::run()` or `launch.rs` anchors are missing or out of order
 - the unique PG helper or its unique production call is missing/duplicated, PG implements generic
   `ProviderOutput`, lifecycle primitives escape the helper, a parallel PG output type appears, or
-  PG module registration moves after event infra
+  PG module registration moves after the unified domain module
+- event transport restores a parallel output type, exposes its production wiring API outside the crate,
+  extracts channels in `run()`, bypasses the single merge, or registers lifecycle primitives outside the common helper
 - `DomainModuleResult::merge` is absent or stops merging a field
 
 `cargo xtask verify --fast` and `cargo xtask ci` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

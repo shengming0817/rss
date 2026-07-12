@@ -138,6 +138,16 @@ const FUNNELS: &[FunnelSpec] = &[
         },
     },
     FunnelSpec {
+        key: "event-transport-output",
+        source_issues: &[1678],
+        upstream: &[invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")],
+        downstream: &[invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "跨文件 event output 唯一 merge 与 launch 相对顺序仍可能出现 AST visitor 未识别的新语法形态",
+            why_no_low_cost_hardening: "Rust 类型系统已锁定 owned DomainModuleResult 返回形状，但无法表达跨文件唯一调用与 LIFO 相对顺序；synthetic-red/green AST 门覆盖已知旁路",
+        },
+    },
+    FunnelSpec {
         key: "pg-capability",
         source_issues: &[1423, 1436],
         upstream: &[invariant("PG-TX-CAPABILITY-SEAL-01")],
@@ -322,7 +332,7 @@ pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
                 .with_context(|| format!("写入 matrix `{}`", path.display()))?;
             eprintln!("archrules matrix: 已写入 {MATRIX_DOC}");
         }
-        MatrixAction::Check => eprintln!("archrules matrix: 12 行与 committed 文档一致"),
+        MatrixAction::Check => eprintln!("archrules matrix: 13 行与 committed 文档一致"),
     }
     Ok(())
 }
@@ -334,15 +344,15 @@ fn validate_matrix(
 ) -> Result<Vec<Finding<Rule>>> {
     let mut findings = Vec::new();
     let mut expected_issues = (1422_u32..=1442).collect::<BTreeSet<_>>();
-    expected_issues.insert(1677);
+    expected_issues.extend([1677, 1678]);
     let mut actual_issues = BTreeSet::new();
     let mut seen_issues = BTreeSet::new();
     let mut keys = BTreeSet::new();
-    if FUNNELS.len() != 12 {
+    if FUNNELS.len() != 13 {
         findings.push(finding(
             Rule::MatrixCoverage,
             "FUNNELS",
-            format!("必须恰好 12 行，实际 {} 行", FUNNELS.len()),
+            format!("必须恰好 13 行，实际 {} 行", FUNNELS.len()),
         ));
     }
     for funnel in FUNNELS {
@@ -604,7 +614,7 @@ fn render_matrix(records: &[RuleRecord]) -> Result<String> {
     }
     out.push_str(
         "\n## Verification\n\n\
-`cargo xtask archrules matrix --check` 校验固定 12 行、#1422–#1442 + #1677 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
+`cargo xtask archrules matrix --check` 校验固定 13 行、#1422–#1442 + #1677–#1678 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
     );
     Ok(out)
 }
@@ -3470,14 +3480,14 @@ members = ["rss_demo"]
 
     #[test]
     fn funnel_matrix_has_exact_rows_and_issue_partition() -> Result<()> {
-        assert_eq!(FUNNELS.len(), 12);
+        assert_eq!(FUNNELS.len(), 13);
         let issues = FUNNELS
             .iter()
             .flat_map(|funnel| funnel.source_issues.iter().copied())
             .collect::<Vec<_>>();
-        assert_eq!(issues.len(), 22, "每个来源 issue 必须且只能归属一行");
+        assert_eq!(issues.len(), 23, "每个来源 issue 必须且只能归属一行");
         let mut expected = (1422_u32..=1442).collect::<BTreeSet<_>>();
-        expected.insert(1677);
+        expected.extend([1677, 1678]);
         assert_eq!(issues.iter().copied().collect::<BTreeSet<_>>(), expected);
         let pg_runtime = FUNNELS
             .iter()
@@ -3501,6 +3511,18 @@ members = ["rss_demo"]
             pg_runtime.residual,
             ResidualDisposition::AcceptedMedium { .. }
         ));
+        let event_output = FUNNELS
+            .iter()
+            .find(|funnel| funnel.source_issues == [1678])
+            .context("#1678 event transport output funnel")?;
+        assert_eq!(
+            event_output.upstream,
+            [invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")]
+        );
+        assert_eq!(
+            event_output.downstream,
+            [invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01")]
+        );
         assert!(
             FUNNELS
                 .iter()
@@ -3513,7 +3535,7 @@ members = ["rss_demo"]
     fn real_workspace_archrules_and_derived_matrix_pass() -> Result<()> {
         let (summary, findings) = ArchRules.check()?;
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(summary.contains("12 行持久化 funnel"), "{summary}");
+        assert!(summary.contains("13 行持久化 funnel"), "{summary}");
         matrix(MatrixAction::Check)?;
         Ok(())
     }

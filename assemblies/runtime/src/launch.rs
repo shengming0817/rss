@@ -20,7 +20,6 @@ pub(crate) struct LaunchPlanParts {
     pub(crate) listeners: Vec<routes::AssembledListener>,
     pub(crate) trace_exporter: Option<Box<DynManagedResource<'static>>>,
     pub(crate) pg_runtime_module: DomainModuleResult,
-    pub(crate) event_infra_guards: Vec<Box<DynManagedResource<'static>>>,
     pub(crate) domain_module: DomainModuleResult,
 }
 
@@ -29,7 +28,6 @@ pub(crate) struct LaunchPlan {
     listeners: Vec<routes::AssembledListener>,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     pg_runtime_module: DomainModuleResult,
-    event_infra_guards: Vec<Box<DynManagedResource<'static>>>,
     domain_module: DomainModuleResult,
 }
 
@@ -39,7 +37,6 @@ impl LaunchPlan {
             listeners: parts.listeners,
             trace_exporter: parts.trace_exporter,
             pg_runtime_module: parts.pg_runtime_module,
-            event_infra_guards: parts.event_infra_guards,
             domain_module: parts.domain_module,
         }
     }
@@ -53,7 +50,6 @@ impl LaunchPlan {
             listeners,
             trace_exporter,
             pg_runtime_module,
-            event_infra_guards,
             domain_module,
         } = self;
 
@@ -63,10 +59,7 @@ impl LaunchPlan {
         }
         // PG guards outlive their sampler and all downstream workers.
         Self::register_module_output(stack, pg_runtime_module)?;
-        // Event infra must outlive the event/domain workers that drain through it.
-        for guard in event_infra_guards {
-            stack.register_detached(guard);
-        }
+        // Event infra lives in domain_module.resources and outlives all module workers.
         Self::register_module_output(stack, domain_module)?;
 
         Ok(listeners)
@@ -331,7 +324,6 @@ mod tests {
             listeners,
             trace_exporter: None,
             pg_runtime_module: pg_runtime_module(false),
-            event_infra_guards: Vec::new(),
             domain_module: DomainModuleResult::default(),
         })
     }
@@ -341,9 +333,13 @@ mod tests {
             listeners: vec![test_health_assembled()],
             trace_exporter: trace.then(|| resource("trace-exporter")),
             pg_runtime_module: pg_runtime_module(audit_guard),
-            event_infra_guards: vec![resource("event-infra-a"), resource("event-infra-b")],
             domain_module: DomainModuleResult {
-                resources: vec![resource("domain-resource-a"), resource("domain-resource-b")],
+                resources: vec![
+                    resource("domain-resource-a"),
+                    resource("domain-resource-b"),
+                    resource("event-infra-a"),
+                    resource("event-infra-b"),
+                ],
                 workers: vec![worker("domain-worker-a"), worker("domain-worker-b")],
                 ..DomainModuleResult::default()
             },
@@ -381,10 +377,10 @@ mod tests {
                 "pg-store",
                 "pg-audit",
                 "pg-sampler",
-                "event-infra-a",
-                "event-infra-b",
                 "domain-resource-a",
                 "domain-resource-b",
+                "event-infra-a",
+                "event-infra-b",
                 "domain-worker-a",
                 "domain-worker-b",
                 "http-health",
@@ -397,10 +393,10 @@ mod tests {
                 "http-health",
                 "domain-worker-b",
                 "domain-worker-a",
-                "domain-resource-b",
-                "domain-resource-a",
                 "event-infra-b",
                 "event-infra-a",
+                "domain-resource-b",
+                "domain-resource-a",
                 "pg-sampler",
                 "pg-audit",
                 "pg-store",
@@ -417,10 +413,10 @@ mod tests {
             [
                 "pg-store",
                 "pg-sampler",
-                "event-infra-a",
-                "event-infra-b",
                 "domain-resource-a",
                 "domain-resource-b",
+                "event-infra-a",
+                "event-infra-b",
                 "domain-worker-a",
                 "domain-worker-b",
                 "http-health",
