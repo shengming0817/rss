@@ -568,6 +568,7 @@ impl core::marker::UnsafeUnpin for vocab::http::LocalTxCommitUnknown
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxCommitUnknown
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxCommitUnknown
 pub enum vocab::http::LocalTxModel
+pub vocab::http::LocalTxModel::RepoAtomicCas
 pub vocab::http::LocalTxModel::TenantScopedUow
 impl vocab::http::LocalTxModel
 pub const vocab::http::LocalTxModel::ALL: &'static [Self]
@@ -1317,6 +1318,7 @@ impl core::marker::UnsafeUnpin for vocab::http::LocalTxCommitUnknown
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::LocalTxCommitUnknown
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::LocalTxCommitUnknown
 pub enum vocab::LocalTxModel
+pub vocab::LocalTxModel::RepoAtomicCas
 pub vocab::LocalTxModel::TenantScopedUow
 impl vocab::http::LocalTxModel
 pub const vocab::http::LocalTxModel::ALL: &'static [Self]

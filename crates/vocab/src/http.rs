@@ -52,10 +52,12 @@ closed_label_enum! {
 }
 
 closed_label_enum! {
-    /// LocalTx unit-of-work model declared by a contract.
+    /// LocalTx atomic execution model declared by a contract.
     pub enum LocalTxModel {
         /// Tenant scope is injected before opening the unit of work.
         TenantScopedUow => "tenant_scoped_uow",
+        /// One repository operation atomically compares the expected version and inserts.
+        RepoAtomicCas => "repo_atomic_cas",
     }
 }
 
@@ -522,7 +524,7 @@ mod tests {
         assert_labels(
             LocalTxModel::ALL,
             LocalTxModel::as_label,
-            &["tenant_scoped_uow"],
+            &["tenant_scoped_uow", "repo_atomic_cas"],
         );
         assert_labels(
             LocalTxRetry::ALL,
@@ -538,6 +540,7 @@ mod tests {
         let labels = [
             LocalTxBoundary::SingleDomain.as_label(),
             LocalTxModel::TenantScopedUow.as_label(),
+            LocalTxModel::RepoAtomicCas.as_label(),
             LocalTxRetry::BoundedTransient.as_label(),
             LocalTxCommitUnknown::NotRetryable.as_label(),
         ];

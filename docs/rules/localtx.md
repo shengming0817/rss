@@ -8,6 +8,8 @@
 
 `consistencyLevel = "LocalTx"` 必须是 `kind = "http"`，并声明完整 `[capabilities.localTx]`：
 
+显式 UoW 模型：
+
 ```toml
 [capabilities.localTx]
 boundary = "single-domain"
@@ -16,32 +18,56 @@ retry = "bounded-transient"
 commitUnknown = "not-retryable"
 ```
 
+repository 原子 CAS 模型：
+
+```toml
+[capabilities.localTx]
+boundary = "single-domain"
+txModel = "repo-atomic-cas"
+retry = "bounded-transient"
+commitUnknown = "not-retryable"
+```
+
 旧的 boundary-only 形态不再接受。字段和取值均为闭集：
 
 - `boundary = "single-domain"`：一个 LocalTx 只覆盖单一域 crate 拥有的本地持久化边界。
-- `txModel = "tenant-scoped-uow"`：事务模型是租户作用域 Unit of Work，tenant scope 必须来自上下文/注入边界，
-  不从 HTTP body 取得。
-- `retry = "bounded-transient"`：只允许有界瞬态重试；每次重试必须重建完整 transaction scope，不复用失败事务。
-- `commitUnknown = "not-retryable"`：commit outcome unknown 不能当普通 transient 自动重放副作用。
+- `txModel` 是闭合执行模型：
+  - `tenant-scoped-uow`：显式 Unit of Work 承载事务生命周期，tenant scope 必须来自上下文/注入边界。
+  - `repo-atomic-cas`：单次 repository mutation 以原子 compare-and-set 完成；冲突不得写入，handler 不自动重试。
+  两种模型的 tenant scope 均不得从 HTTP body 取得。
+- `retry = "bounded-transient"` 按模型解释：
+  - `tenant-scoped-uow` 只允许有界瞬态重试；每次重试必须重建完整 transaction scope，不复用失败事务。
+  - `repo-atomic-cas` 的 handler 不自动重试 CAS 冲突；冲突返回调用方，由调用方基于新版本发起新的业务请求。
+- `commitUnknown = "not-retryable"` 同样按模型解释：UoW commit outcome unknown 不得自动重放整个事务；
+  repository CAS 返回的写入结果未知时也不得重放同一条件写，因为第一次调用可能已经提交。
 
 `serde` typed struct + closed enum + `deny_unknown_fields` 负责 Hard 化缺字段、未知字段和未知枚举；R22 负责
 Medium 条件门：只有 L1 允许 localTx block，且 L1 必须声明上述完整证据。
 
 运行期 evidence 的四个闭值只在基础层 `vocab` 定义一次；`generated::http::LocalTxSpec` 直接持有这些类型，
 `consistency::localtx` 也复用同一类型身份，不各自维护镜像 enum。变体、完整 `ALL` 集合和低基数 label 由同一个
-私有宏声明生成（`single_domain` / `tenant_scoped_uow` / `bounded_transient` / `not_retryable`），新增或改名必须
+私有宏声明生成（`single_domain` / `tenant_scoped_uow` / `repo_atomic_cas` / `bounded_transient` /
+`not_retryable`），新增或改名必须
 同时通过 Rust 穷举编译、codegen committed golden 与 public-api 门。
 
 ## Runtime meaning
 
-LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写。它不表示跨域事务，不表示 outbox 发布已兑现，
-也不表示 saga/reconcile/workflow 已接线。
+LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写。原子性可以由显式 UoW 生命周期承载，
+也可以由 repository 的单次原子 CAS mutation 承载；contract 必须选择与执行体一致的 `txModel`。它不表示跨域事务，
+不表示 outbox 发布已兑现，也不表示 saga/reconcile/workflow 已接线。
+
+`settings.secret-publish` 使用 `repo-atomic-cas`：应用层先读最高版本并构造候选版本，最终正确性由
+`SecretRepo::save` 的单次条件写保证；并发竞争失败映射为 `VersionConflict`，不得把两次 repo 调用描述成同一 UoW。
 
 `audit.list-tenant-entries` 的 LocalTx UoW 只覆盖持久 `auth_audit_events` append。append 成功提交后才签发
 `CrossTenantReadScope` 并执行专用 admin pool read；append 与 read 不在同一事务，系统也不自动重试整条
 append+read 序列。
 
-`commitUnknown = "not-retryable"` 的含义是：当提交结果未知时，不允许按普通 transient path 自动重放整个副作用序列。
+以下 `LocalTxFinalStatus`、`cotx`、`LocalTxAttempt` 与 Postgres retry runner 的结算语义只适用于
+`tenant-scoped-uow`，不适用于 `repo-atomic-cas`。
+
+`commitUnknown = "not-retryable"` 对 `tenant-scoped-uow` 的含义是：当提交结果未知时，不允许按普通 transient path
+自动重放整个副作用序列。
 `consistency::LocalTxFinalStatus` 将一次 UoW 的结算闭合为 `committed` / `rolled_back` / `rollback_failed` /
 `commit_unknown`。只有显式 rollback 成功才能报告 `rolled_back`；retry class/final status 与事务结算正交，不能据
 `TxRetryFinalStatus` 猜测 rollback 或 commit outcome。

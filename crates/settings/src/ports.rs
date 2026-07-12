@@ -197,7 +197,8 @@ pub trait SecretRepoLocal: Send + Sync {
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError>;
 
-    /// CAS 追加新版本（`entry.version()` 须等于当前最高版本 + 1，否则 `VersionConflict`）。
+    /// 单次调用原子地比较并追加新版本：`entry.version()` 须等于当前最高版本 + 1，否则返回
+    /// [`SecretRepoError::VersionConflict`]，且不得插入、覆盖或产生任何部分写入。调用方不负责重试 CAS。
     async fn save(&self, scope: TenantRepoScope, entry: SecretEntry)
     -> Result<(), SecretRepoError>;
 

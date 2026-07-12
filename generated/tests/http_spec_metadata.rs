@@ -4,7 +4,7 @@
 //! use every consistency enum variant, but `generated::http::SPECS` stays
 //! active-only.
 
-use generated::http::{self, LocalTxSpec};
+use generated::http;
 use vocab::{
     HttpConsistencyLevel, HttpEffectKind, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
     LocalTxRetry,
@@ -36,12 +36,12 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
     ("settings.secret-publish", HttpConsistencyLevel::LocalTx),
 ];
 
-const EXPECTED_LOCAL_TX_SPECS: &[&str] = &[
-    "audit.list-tenant-entries",
-    "identity.logout",
-    "identity.password-change",
-    "identity.refresh",
-    "settings.secret-publish",
+const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
+    ("audit.list-tenant-entries", LocalTxModel::TenantScopedUow),
+    ("identity.logout", LocalTxModel::TenantScopedUow),
+    ("identity.password-change", LocalTxModel::TenantScopedUow),
+    ("identity.refresh", LocalTxModel::TenantScopedUow),
+    ("settings.secret-publish", LocalTxModel::RepoAtomicCas),
 ];
 
 fn active_spec(contract_id: &str) -> Option<&'static http::HttpSpec> {
@@ -127,36 +127,46 @@ fn audit_reads_expose_split_effect_profiles() {
 fn local_tx_registry_contains_exact_active_l1_contracts() {
     let actual: Vec<_> = http::LOCAL_TX_SPECS
         .iter()
-        .map(|spec| spec.route.contract_id())
+        .map(|spec| {
+            (
+                spec.route.contract_id(),
+                spec.local_tx
+                    .expect("every LocalTx registry entry should carry LocalTx evidence")
+                    .tx_model,
+            )
+        })
         .collect();
     let from_specs: Vec<_> = http::SPECS
         .iter()
         .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::LocalTx)
         .map(|spec| spec.route.contract_id())
         .collect();
-    let expected_evidence = LocalTxSpec {
-        boundary: LocalTxBoundary::SingleDomain,
-        tx_model: LocalTxModel::TenantScopedUow,
-        retry: LocalTxRetry::BoundedTransient,
-        commit_unknown: LocalTxCommitUnknown::NotRetryable,
-    };
-
     assert_eq!(
         actual.as_slice(),
         EXPECTED_LOCAL_TX_SPECS,
         "LOCAL_TX_SPECS should expose the current active L1 contract set"
     );
     assert_eq!(
-        actual, from_specs,
+        actual
+            .iter()
+            .map(|(contract_id, _)| *contract_id)
+            .collect::<Vec<_>>(),
+        from_specs,
         "LOCAL_TX_SPECS should be derived from active LocalTx HTTP specs"
     );
     for spec in http::LOCAL_TX_SPECS {
+        let evidence = spec
+            .local_tx
+            .expect("every LocalTx registry entry should carry LocalTx evidence");
         assert_eq!(
             spec.route.consistency_level(),
             HttpConsistencyLevel::LocalTx
         );
-        assert_eq!(spec.local_tx, Some(expected_evidence));
+        assert_eq!(evidence.boundary, LocalTxBoundary::SingleDomain);
+        assert_eq!(evidence.retry, LocalTxRetry::BoundedTransient);
+        assert_eq!(evidence.commit_unknown, LocalTxCommitUnknown::NotRetryable);
     }
+
     for spec in http::SPECS {
         assert_eq!(
             spec.local_tx.is_some(),

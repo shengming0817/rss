@@ -13,6 +13,25 @@ use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use vocab::{CoreError, CoreErrorKind, PublicDetail};
 
+/// Returns whether an axum body collection error was caused by the configured byte limit.
+///
+/// Axum wraps body-provider errors, so callers must inspect the complete source chain rather than
+/// classify every read failure as a payload overflow. This keeps transport error classification in
+/// the HTTP service layer: only [`http_body_util::LengthLimitError`] maps to 413; other read errors
+/// remain validation failures at bounded-body handlers.
+pub fn body_error_is_length_limit(err: &axum::Error) -> bool {
+    let mut source: &(dyn std::error::Error + 'static) = err;
+    loop {
+        if source.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        match source.source() {
+            Some(next) => source = next,
+            None => return false,
+        }
+    }
+}
+
 /// Wire 错误响应 envelope（camelCase；error-handling.md §Wire 格式）。
 #[derive(Serialize)]
 struct ErrorEnvelope {
@@ -190,6 +209,29 @@ pub fn too_many_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn body_read_error_classifies_length_limit_from_source_chain() {
+        let err = axum::body::to_bytes(axum::body::Body::from("too large"), 1)
+            .await
+            .expect_err("body must exceed the collector limit");
+
+        assert!(body_error_is_length_limit(&err));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn body_read_error_does_not_classify_provider_failure_as_length_limit() {
+        let body = axum::body::Body::from_stream(futures::stream::once(async {
+            Err::<axum::body::Bytes, _>(std::io::Error::other("body provider failed"))
+        }));
+        let err = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect_err("provider failure must reach the collector");
+
+        assert!(!body_error_is_length_limit(&err));
+    }
 
     /// typed helper 固定 (code, status) 配对（取代 raw error_response 跨 crate 暴露）。
     #[allow(clippy::expect_used)]

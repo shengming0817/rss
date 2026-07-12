@@ -318,6 +318,9 @@ pub(crate) async fn secret_publish_handler(
     let (_, body) = req.into_parts();
     let body = match to_bytes(body, MAX_SECRET_BODY_BYTES).await {
         Ok(body) => body,
+        Err(err) if httpserve::error::body_error_is_length_limit(&err) => {
+            return httpserve::error::payload_too_large(&request_id);
+        }
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     secret_publish_handler_bytes(&secrets, scope, body, &request_id).await
@@ -397,6 +400,7 @@ fn secret_error_response(err: &SecretServiceError, tenant: TenantId, request_id:
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
 
     use diport::{DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolverError};
@@ -490,6 +494,181 @@ mod tests {
         )))
     }
 
+    #[derive(Clone, Copy)]
+    enum SaveScript {
+        Succeed,
+        Conflict,
+        StorageFailure,
+    }
+
+    #[derive(Clone)]
+    struct SaveAttempt {
+        scope_tenant: TenantId,
+        entry: SecretEntry,
+    }
+
+    #[derive(Default)]
+    struct ProbeState {
+        find_calls: usize,
+        find_version_calls: usize,
+        latest_calls: usize,
+        save_attempts: Vec<SaveAttempt>,
+        delete_calls: usize,
+        committed: Vec<SecretEntry>,
+    }
+
+    impl ProbeState {
+        fn total_calls(&self) -> usize {
+            self.find_calls
+                + self.find_version_calls
+                + self.latest_calls
+                + self.save_attempts.len()
+                + self.delete_calls
+        }
+    }
+
+    struct ProbeSecretRepo {
+        state: Arc<Mutex<ProbeState>>,
+        latest: Option<u64>,
+        save_script: SaveScript,
+    }
+
+    impl SecretRepo for ProbeSecretRepo {
+        async fn find(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SecretKey,
+        ) -> Result<Option<SecretEntry>, SecretRepoError> {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .find_calls += 1;
+            Ok(None)
+        }
+
+        async fn find_version(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SecretKey,
+            _version: u64,
+        ) -> Result<Option<SecretEntry>, SecretRepoError> {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .find_version_calls += 1;
+            Ok(None)
+        }
+
+        async fn latest_version(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SecretKey,
+        ) -> Result<Option<u64>, SecretRepoError> {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .latest_calls += 1;
+            Ok(self.latest)
+        }
+
+        async fn save(
+            &self,
+            scope: TenantRepoScope,
+            entry: SecretEntry,
+        ) -> Result<(), SecretRepoError> {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.save_attempts.push(SaveAttempt {
+                scope_tenant: scope.tenant(),
+                entry: entry.clone(),
+            });
+            match self.save_script {
+                SaveScript::Succeed => {
+                    state.committed.push(entry);
+                    Ok(())
+                }
+                SaveScript::Conflict => Err(SecretRepoError::VersionConflict),
+                SaveScript::StorageFailure => Err(SecretRepoError::Storage(Box::new(
+                    std::io::Error::other("backend leaked sentinel"),
+                ))),
+            }
+        }
+
+        async fn delete(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SecretKey,
+        ) -> Result<(), SecretRepoError> {
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .delete_calls += 1;
+            Ok(())
+        }
+    }
+
+    fn probe_repo(
+        latest: Option<u64>,
+        save_script: SaveScript,
+    ) -> (Arc<DynSecretRepo<'static>>, Arc<Mutex<ProbeState>>) {
+        let state = Arc::new(Mutex::new(ProbeState::default()));
+        let repo = ProbeSecretRepo {
+            state: Arc::clone(&state),
+            latest,
+            save_script,
+        };
+        (Arc::from(DynSecretRepo::new_box(repo)), state)
+    }
+
+    struct SameSnapshotRepo {
+        inner: InMemSecretRepo,
+        latest_barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    impl SecretRepo for SameSnapshotRepo {
+        async fn find(
+            &self,
+            scope: TenantRepoScope,
+            key: &SecretKey,
+        ) -> Result<Option<SecretEntry>, SecretRepoError> {
+            self.inner.find(scope, key).await
+        }
+
+        async fn find_version(
+            &self,
+            scope: TenantRepoScope,
+            key: &SecretKey,
+            version: u64,
+        ) -> Result<Option<SecretEntry>, SecretRepoError> {
+            self.inner.find_version(scope, key, version).await
+        }
+
+        async fn latest_version(
+            &self,
+            scope: TenantRepoScope,
+            key: &SecretKey,
+        ) -> Result<Option<u64>, SecretRepoError> {
+            let snapshot = self.inner.latest_version(scope, key).await?;
+            self.latest_barrier.wait().await;
+            Ok(snapshot)
+        }
+
+        async fn save(
+            &self,
+            scope: TenantRepoScope,
+            entry: SecretEntry,
+        ) -> Result<(), SecretRepoError> {
+            self.inner.save(scope, entry).await
+        }
+
+        async fn delete(
+            &self,
+            scope: TenantRepoScope,
+            key: &SecretKey,
+        ) -> Result<(), SecretRepoError> {
+            self.inner.delete(scope, key).await
+        }
+    }
+
     /// post-authz 授权证据（Primary route gate 注入）。
     fn user_evidence(t: TenantId) -> AuthorizedSubject {
         AuthorizedSubject::for_test(t, PrincipalKind::User, "subject", None)
@@ -535,7 +714,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_handler_missing_auth_returns_401() {
-        let router = secret_router(secret_repo_arc(), None);
+        let (repo, state) = probe_repo(None, SaveScript::Succeed);
+        let router = secret_router(repo, None);
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").json(&publish_request(None)),
@@ -544,19 +724,45 @@ mod tests {
         .expect("call");
         resp.ensure_status(StatusCode::UNAUTHORIZED)
             .expect("缺认证证据 → 401");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .total_calls(),
+            0,
+            "未认证请求不得触碰仓储"
+        );
     }
 
     #[tokio::test]
     async fn secret_publish_bytes_invalid_json_returns_400() {
-        let repo = secret_repo_arc();
-        let resp = secret_publish_handler_bytes(
-            &repo,
-            tenant_scope(),
-            axum::body::Bytes::from_static(b"not json"),
-            "rid",
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let invalid_bodies = [
+            "not json",
+            r#"{"key":"vault.db","storeId":"vault"}"#,
+            r#"{"key":"vault.db","storeId":"vault","refKey":"db/pw","extra":true}"#,
+            r#"{"key":"bad.key.extra","storeId":"vault","refKey":"db/pw"}"#,
+            r#"{"key":"vault.db","storeId":"bad/store","refKey":"db/pw"}"#,
+            r#"{"key":"vault.db","storeId":"vault","refKey":"a/../evil"}"#,
+        ];
+        for body in invalid_bodies {
+            let (repo, state) = probe_repo(None, SaveScript::Succeed);
+            let resp = secret_publish_handler_bytes(
+                &repo,
+                tenant_scope(),
+                Bytes::copy_from_slice(body.as_bytes()),
+                "rid",
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body={body}");
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .total_calls(),
+                0,
+                "非法请求不得触碰仓储: {body}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -576,6 +782,184 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "路径穿越坐标 → 400 Validation（domain newtype funnel fail-closed）"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_handler_oversize_returns_413_without_repo_calls() {
+        let (repo, state) = probe_repo(None, SaveScript::Succeed);
+        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").raw_body(vec![b'x'; MAX_SECRET_BODY_BYTES + 1]),
+        )
+        .await
+        .expect("call");
+        resp.ensure_error(StatusCode::PAYLOAD_TOO_LARGE, "ERR_CORE_PAYLOAD_TOO_LARGE")
+            .expect("oversize contract");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .total_calls(),
+            0,
+            "超限请求不得触碰仓储"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_handler_stream_failure_returns_400_without_repo_calls() {
+        use futures::stream;
+        use tower::ServiceExt as _;
+
+        let (repo, state) = probe_repo(None, SaveScript::Succeed);
+        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let body = Body::from_stream(stream::once(async {
+            Err::<Bytes, _>(std::io::Error::other("body provider failed"))
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/secrets")
+            .body(body)
+            .expect("request");
+        let response = router.oneshot(request).await.expect("router response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("error response body");
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).expect("error envelope");
+        assert_eq!(envelope["error"]["code"], "ERR_CORE_VALIDATION");
+        assert_eq!(envelope["error"]["message"], "validation error");
+        assert_eq!(envelope["error"]["retryable"], false);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .total_calls(),
+            0,
+            "body provider 读取失败不得触碰仓储"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_success_passes_authenticated_scope_and_coordinate_once() {
+        let (repo, state) = probe_repo(Some(6), SaveScript::Succeed);
+        let router = secret_router(Arc::clone(&repo), Some(user_evidence(tenant())));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").json(&publish_request(Some("v3"))),
+        )
+        .await
+        .expect("call");
+        resp.ensure_status(StatusCode::CREATED).expect("201");
+        let decoded: SettingsSecretPublishResponse = resp.json().expect("json");
+        assert_eq!(decoded.data.version, 7);
+
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.latest_calls, 1);
+        assert_eq!(state.save_attempts.len(), 1);
+        assert_eq!(state.committed.len(), 1);
+        let call = &state.save_attempts[0];
+        assert_eq!(call.scope_tenant, tenant());
+        assert_eq!(call.entry.tenant(), tenant());
+        assert_eq!(call.entry.key().as_str(), "vault.db");
+        assert_eq!(call.entry.version(), 7);
+        assert_eq!(call.entry.secret_ref().store_id().as_str(), "vault");
+        assert_eq!(call.entry.secret_ref().ref_key(), "myapp/db-password");
+        assert_eq!(call.entry.secret_ref().ref_version(), Some("v3"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_conflict_is_retryable_409_without_retry_or_commit() {
+        let (repo, state) = probe_repo(Some(2), SaveScript::Conflict);
+        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").json(&publish_request(None)),
+        )
+        .await
+        .expect("call");
+        resp.ensure_error(StatusCode::CONFLICT, "ERR_CORE_VERSION_CONFLICT")
+            .expect("conflict contract");
+        assert!(resp.wire_error().expect("wire error").retryable);
+        let body = String::from_utf8_lossy(resp.body_bytes());
+        assert!(!body.contains("vault.db"));
+        assert!(!body.contains("myapp/db-password"));
+
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.latest_calls, 1, "handler 不重读 head");
+        assert_eq!(state.save_attempts.len(), 1, "handler 不自动重试 CAS");
+        assert!(state.committed.is_empty(), "冲突必须零提交");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_publish_storage_failure_is_generic_500_without_commit() {
+        let (repo, state) = probe_repo(None, SaveScript::StorageFailure);
+        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let resp = testkit::call(
+            router,
+            ContractRequest::post("/secrets").json(&publish_request(Some("private-version"))),
+        )
+        .await
+        .expect("call");
+        resp.ensure_error(StatusCode::INTERNAL_SERVER_ERROR, "ERR_CORE_INTERNAL")
+            .expect("storage contract");
+        let body = String::from_utf8_lossy(resp.body_bytes());
+        for secret in [
+            "backend leaked sentinel",
+            "vault.db",
+            "vault",
+            "myapp/db-password",
+            "private-version",
+        ] {
+            assert!(!body.contains(secret), "response leaked {secret}");
+        }
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.latest_calls, 1);
+        assert_eq!(state.save_attempts.len(), 1);
+        assert!(state.committed.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn concurrent_same_snapshot_has_exactly_one_commit_and_one_conflict() {
+        let store = new_secret_store();
+        let repo: Arc<DynSecretRepo<'static>> =
+            Arc::from(DynSecretRepo::new_box(SameSnapshotRepo {
+                inner: InMemSecretRepo::from_shared(store),
+                latest_barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            }));
+        let first = publish_secret_to_repo(
+            &repo,
+            tenant_scope(),
+            make_key("vault.db"),
+            make_ref("vault", "first"),
+        );
+        let second = publish_secret_to_repo(
+            &repo,
+            tenant_scope(),
+            make_key("vault.db"),
+            make_ref("vault", "second"),
+        );
+        let (a, b) = tokio::join!(first, second);
+        assert!(
+            matches!(
+                (&a, &b),
+                (Ok(1), Err(SecretServiceError::VersionConflict))
+                    | (Err(SecretServiceError::VersionConflict), Ok(1))
+            ),
+            "same-snapshot CAS outcomes: a={a:?}, b={b:?}"
+        );
+        let stored = repo
+            .find(tenant_scope(), &make_key("vault.db"))
+            .await
+            .expect("find")
+            .expect("one committed row");
+        assert_eq!(stored.version(), 1);
     }
 
     #[tokio::test]

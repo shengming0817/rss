@@ -212,7 +212,7 @@ pub const SPEC: super::HttpSpec = super::HttpSpec {
     route: ROUTE.evidence(),
     local_tx: Some(super::LocalTxSpec {
         boundary: ::vocab::LocalTxBoundary::SingleDomain,
-        tx_model: ::vocab::LocalTxModel::TenantScopedUow,
+        tx_model: ::vocab::LocalTxModel::RepoAtomicCas,
         retry: ::vocab::LocalTxRetry::BoundedTransient,
         commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
     }),

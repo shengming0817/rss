@@ -541,14 +541,17 @@ fn rule_consistency_capability_one(
             match &m.capabilities.local_tx {
                 Some(local_tx)
                     if local_tx.boundary == LocalTxBoundary::SingleDomain
-                        && local_tx.tx_model == LocalTxModel::TenantScopedUow
+                        && matches!(
+                            local_tx.tx_model,
+                            LocalTxModel::TenantScopedUow | LocalTxModel::RepoAtomicCas
+                        )
                         && local_tx.retry == LocalTxRetry::BoundedTransient
                         && local_tx.commit_unknown == LocalTxCommitUnknown::NotRetryable => {}
                 _ => out.push(consistency_capability_finding(
                     m,
                     label,
                     CAP_LOCAL_TX,
-                    "LocalTx 须声明 boundary=\"single-domain\" + txModel=\"tenant-scoped-uow\" + retry=\"bounded-transient\" + commitUnknown=\"not-retryable\"",
+                    "LocalTx 须声明 boundary=\"single-domain\" + txModel ∈ {\"tenant-scoped-uow\", \"repo-atomic-cas\"} + retry=\"bounded-transient\" + commitUnknown=\"not-retryable\"",
                 )),
             }
             out.extend(unexpected_capabilities(m, label, &[CAP_LOCAL_TX]));
@@ -2421,6 +2424,18 @@ mod tests {
             local_tx: Some(LocalTxCapability {
                 boundary: LocalTxBoundary::SingleDomain,
                 tx_model: LocalTxModel::TenantScopedUow,
+                retry: LocalTxRetry::BoundedTransient,
+                commit_unknown: LocalTxCommitUnknown::NotRetryable,
+            }),
+            ..Capabilities::default()
+        }
+    }
+
+    fn repo_atomic_cas_local_tx_capability() -> Capabilities {
+        Capabilities {
+            local_tx: Some(LocalTxCapability {
+                boundary: LocalTxBoundary::SingleDomain,
+                tx_model: LocalTxModel::RepoAtomicCas,
                 retry: LocalTxRetry::BoundedTransient,
                 commit_unknown: LocalTxCommitUnknown::NotRetryable,
             }),
@@ -5117,6 +5132,30 @@ mod tests {
         m.id = "identity.local-tx-event".to_string();
         let findings = rule_consistency_capability(&[discovered(m, PathBuf::from("/x"))]);
         assert_r22_detail(&findings, "identity.local-tx-event", CAP_LOCAL_TX);
+        assert!(findings.iter().any(|finding| {
+            finding
+                .detail
+                .contains("txModel ∈ {\"tenant-scoped-uow\", \"repo-atomic-cas\"}")
+        }));
+    }
+
+    #[test]
+    fn r22_consistency_localtx_accepts_repo_atomic_cas_model() {
+        let mut manifest = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalTx,
+            ContractOwner::Domain("settings".to_string()),
+            http_schemas(),
+        );
+        manifest.id = "settings.secret-publish".to_string();
+        manifest.capabilities = repo_atomic_cas_local_tx_capability();
+        manifest.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Write, EffectKind::Transaction]);
+
+        assert!(
+            rule_consistency_capability(&[discovered(manifest, PathBuf::from("/settings"))])
+                .is_empty()
+        );
     }
 
     #[test]

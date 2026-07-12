@@ -196,6 +196,7 @@ pub(crate) enum LocalTxBoundary {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum LocalTxModel {
     TenantScopedUow,
+    RepoAtomicCas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -892,6 +893,29 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn parses_repo_atomic_cas_local_tx_model() -> anyhow::Result<()> {
+        let toml = format!(
+            r#"{VALID_HTTP}
+
+            [capabilities.localTx]
+            boundary = "single-domain"
+            txModel = "repo-atomic-cas"
+            retry = "bounded-transient"
+            commitUnknown = "not-retryable"
+        "#
+        );
+        let manifest = ContractManifest::from_toml_str(&toml)?;
+        assert_eq!(
+            manifest
+                .capabilities
+                .local_tx
+                .map(|capability| capability.tx_model),
+            Some(LocalTxModel::RepoAtomicCas)
+        );
+        Ok(())
+    }
+
     fn assert_local_tx_capability(m: &ContractManifest) -> anyhow::Result<()> {
         let local_tx = m
             .capabilities
@@ -1066,6 +1090,11 @@ mod tests {
         "#
         );
         assert!(ContractManifest::from_toml_str(&toml).is_err());
+
+        let unknown_model = toml
+            .replace("multi-domain", "single-domain")
+            .replace("tenant-scoped-uow", "repository-cas");
+        assert!(ContractManifest::from_toml_str(&unknown_model).is_err());
     }
 
     #[test]

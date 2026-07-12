@@ -818,6 +818,7 @@ fn render_local_tx_boundary(boundary: LocalTxBoundary) -> &'static str {
 fn render_local_tx_model(model: LocalTxModel) -> &'static str {
     match model {
         LocalTxModel::TenantScopedUow => "TenantScopedUow",
+        LocalTxModel::RepoAtomicCas => "RepoAtomicCas",
     }
 }
 
@@ -3153,6 +3154,43 @@ mod tests {
                 "LocalTx endpoint SPEC should carry generated closed-enum evidence",
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_emits_repo_atomic_cas_local_tx_model() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-repo-atomic-cas");
+        seed_http(&root)?;
+        write_seed_active_http_contract(
+            &root,
+            "LocalTx",
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+            Some(concat!(
+                "[effectProfile]\n",
+                "effects = [\"auth\", \"write\", \"transaction\"]\n",
+            )),
+            concat!(
+                "[capabilities.localTx]\n",
+                "boundary = \"single-domain\"\n",
+                "txModel = \"repo-atomic-cas\"\n",
+                "retry = \"bounded-transient\"\n",
+                "commitUnknown = \"not-retryable\"\n",
+            ),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &rendered,
+            "tx_model: ::vocab::LocalTxModel::RepoAtomicCas",
+            "repo atomic CAS manifest model should render to canonical vocab evidence",
+        );
         Ok(())
     }
 

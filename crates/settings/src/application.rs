@@ -775,6 +775,9 @@ async fn config_publish_handler(
     let (_, body) = req.into_parts();
     let body = match to_bytes(body, MAX_CONFIG_BODY_BYTES).await {
         Ok(body) => body,
+        Err(err) if httpserve::error::body_error_is_length_limit(&err) => {
+            return httpserve::error::payload_too_large(&request_id);
+        }
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     config_publish_handler_bytes(service, scope, actor, body, &request_id).await
@@ -885,6 +888,9 @@ async fn config_rollback_handler(
     let (_, body) = req.into_parts();
     let body = match to_bytes(body, MAX_CONFIG_BODY_BYTES).await {
         Ok(body) => body,
+        Err(err) if httpserve::error::body_error_is_length_limit(&err) => {
+            return httpserve::error::payload_too_large(&request_id);
+        }
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
     let request: SettingsConfigRollbackRequest = match serde_json::from_slice(&body) {
@@ -2009,6 +2015,45 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn config_publish_body_limit_and_provider_failure_are_413_and_400_without_write() {
+        use futures::stream;
+        use tower::ServiceExt as _;
+
+        for (body, expected) in [
+            (
+                Body::from(vec![b'x'; MAX_CONFIG_BODY_BYTES + 1]),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                Body::from_stream(stream::once(async {
+                    Err::<Bytes, _>(std::io::Error::other("body provider failed"))
+                })),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let capture = CapturingEmitter::default();
+            let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+            let response = config_router(service, Some(user_evidence(tenant())))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/configs")
+                        .body(body)
+                        .expect("request"),
+                )
+                .await
+                .expect("router response");
+
+            assert_eq!(response.status(), expected);
+            assert!(
+                emitted_facts(&capture).is_empty(),
+                "body 读取失败不得进入 co-tx"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn config_get_delete_and_rollback_handlers_serve_typed_contracts() {
         let capture = CapturingEmitter::default();
         let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
@@ -2076,6 +2121,61 @@ mod tests {
         missing
             .ensure_status(StatusCode::NOT_FOUND)
             .expect("deleted is 404");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn config_rollback_body_limit_and_provider_failure_are_413_and_400_without_write() {
+        use futures::stream;
+        use tower::ServiceExt as _;
+
+        for (body, expected) in [
+            (
+                Body::from(vec![b'x'; MAX_CONFIG_BODY_BYTES + 1]),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                Body::from_stream(stream::once(async {
+                    Err::<Bytes, _>(std::io::Error::other("body provider failed"))
+                })),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let capture = CapturingEmitter::default();
+            let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+            service
+                .publish_config(tenant(), actor(), publish_req("app.k", "v1"))
+                .await
+                .expect("seed v1");
+            let response =
+                config_resource_router(Arc::clone(&service), Some(user_evidence(tenant())))
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/configs/app.k/rollbacks")
+                            .body(body)
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("router response");
+
+            assert_eq!(response.status(), expected);
+            assert_eq!(
+                emitted_facts(&capture).len(),
+                1,
+                "body 读取失败不得产生 rollback fact"
+            );
+            assert_eq!(
+                service
+                    .config_query_service()
+                    .get_config(tenant(), "app.k")
+                    .await
+                    .expect("read current")
+                    .map(|entry| entry.version()),
+                Some(1),
+                "body 读取失败不得提交新版本"
+            );
+        }
     }
 
     #[tokio::test]
