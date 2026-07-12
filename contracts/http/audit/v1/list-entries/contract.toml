@@ -9,6 +9,10 @@ lifecycle = "active"
 path = "/api/v1/audit/entries"
 method = "GET"
 
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+
 [endpoints.http.auth]
 mode = "permission"
 permission = "audit:read"

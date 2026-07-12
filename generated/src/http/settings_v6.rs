@@ -182,6 +182,8 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFac
         CONTRACT,
         PATH,
         "POST",
+        ::vocab::http::HttpSuccessStatus::new(201),
+        ::vocab::http::HttpIdempotency::NonIdempotent,
         ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::SettingsConfigRollback),
         None,
         false,

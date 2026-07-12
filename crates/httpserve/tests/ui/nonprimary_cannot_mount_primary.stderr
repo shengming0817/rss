@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:31:79
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:33:79
    |
-31 |     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
+33 |     let _internal = unfinalized_for_test::<httpserve::Internal>(|rb| rb.mount(endpoint()));
    |                                                                         ----- ^^^^^^^^^^ expected `GeneratedEndpoint<(), _>`, found `GeneratedPrimaryEndpoint<(), LocalOnly>`
    |                                                                         |
    |                                                                         arguments to this method are incorrect
@@ -15,9 +15,9 @@ note: method defined here
    |            ^^^^^
 
 error[E0308]: mismatched types
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:32:73
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:34:73
    |
-32 |     let _admin = unfinalized_for_test::<httpserve::Admin>(|rb| rb.mount(endpoint()));
+34 |     let _admin = unfinalized_for_test::<httpserve::Admin>(|rb| rb.mount(endpoint()));
    |                                                                   ----- ^^^^^^^^^^ expected `GeneratedEndpoint<(), _>`, found `GeneratedPrimaryEndpoint<(), LocalOnly>`
    |                                                                   |
    |                                                                   arguments to this method are incorrect
@@ -31,9 +31,9 @@ note: method defined here
    |            ^^^^^
 
 error[E0599]: the method `mount` exists for struct `ListenerRouter<Health>`, but its trait bounds were not satisfied
-  --> tests/ui/nonprimary_cannot_mount_primary.rs:33:69
+  --> tests/ui/nonprimary_cannot_mount_primary.rs:35:69
    |
-33 |     let _health = unfinalized_for_test::<httpserve::Health>(|rb| rb.mount(endpoint()));
+35 |     let _health = unfinalized_for_test::<httpserve::Health>(|rb| rb.mount(endpoint()));
    |                                                                     ^^^^^ method cannot be called on `ListenerRouter<Health>` due to unsatisfied trait bounds
    |
   ::: src/routes.rs

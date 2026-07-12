@@ -40,6 +40,7 @@ use bootstrap::{KernelError, Registry, SubscriberExecution};
 use consistency::ConsumerGroup;
 use diport::Message;
 use generated::event::EventSpec;
+use generated::event::SubscriptionExecution;
 use generated::event::identity_v1::{
     policy_updated::{
         IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
@@ -842,6 +843,9 @@ fn register_audit_subscriber(reg: &mut Registry, event: EventSpec) -> Result<(),
         .iter()
         .find(|s| s.consumer() == AUDIT_DOMAIN)
         .ok_or(KernelError::Subscriber)?;
+    if (spec.execution(), spec.effect()) != (SubscriptionExecution::AdapterNative, None) {
+        return Err(KernelError::Subscriber);
+    }
     let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
     reg.subscriber(
         event.contract_id(),
@@ -1812,6 +1816,8 @@ mod tests {
         assert_eq!(subs.len(), expected.len());
         for (event, spec) in expected {
             assert_eq!(spec.consumer(), AUDIT_DOMAIN);
+            assert_eq!(spec.execution(), SubscriptionExecution::AdapterNative);
+            assert_eq!(spec.effect(), None);
             assert!(
                 subs.iter()
                     .any(|(contract_id, topic, consumer, group, execution)| {

@@ -106,6 +106,8 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFac
         CONTRACT,
         PATH,
         "DELETE",
+        ::vocab::http::HttpSuccessStatus::new(204),
+        ::vocab::http::HttpIdempotency::Idempotent,
         ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::SettingsConfigDelete),
         None,
         false,

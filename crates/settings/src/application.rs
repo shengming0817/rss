@@ -56,6 +56,7 @@ use diport::{Clock, EnvelopeSubjectId, Message, OpaqueActorId, OutboxActor, Outb
 use generated::event::settings_v1::{
     SPEC as VERSION_CHANGED_SPEC, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
 };
+use generated::event::{SubscriptionEffect, SubscriptionExecution};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -1006,6 +1007,14 @@ impl ::bootstrap::Domain for SettingsDomain {
             .iter()
             .find(|s| s.consumer() == SETTINGS_DOMAIN)
             .ok_or(KernelError::Subscriber)?;
+        if (spec.execution(), spec.effect())
+            != (
+                SubscriptionExecution::DomainEffect,
+                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            )
+        {
+            return Err(KernelError::Subscriber);
+        }
         let group = ConsumerGroup::parse(spec.group()).map_err(|_| KernelError::Subscriber)?;
         let effect_config = Arc::clone(&self.config);
         let effect: SubscriberEffect = Arc::new(move |message, authenticated_tenant| {
@@ -1489,6 +1498,11 @@ mod tests {
         let mut subs = reg.drain_subscribers().into_iter();
         let spec = VERSION_CHANGED_SPEC.subscriptions()[0];
         assert_eq!(spec.consumer(), SETTINGS_DOMAIN);
+        assert_eq!(spec.execution(), SubscriptionExecution::DomainEffect);
+        assert_eq!(
+            spec.effect(),
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh)
+        );
         let (contract_id, topic, consumer, group, execution) =
             subs.next().expect("settings subscriber").into_parts();
         assert!(subs.next().is_none());

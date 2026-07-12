@@ -1,7 +1,7 @@
 # contracts/ — 跨边界契约声明源（格式冻结）
 
 > 单一事实源：`docs/rules/architecture.md` §核心载体。本文件只**冻结目录布局 + 文件名 + 字段集**，
-> 语义规则（鉴权 / 扇出 / 版本窗口）不在此复制，见 `.claude/rules/rss/`（contract-fanout·api-versioning）。
+> 语义规则（鉴权 / 扇出）不在此复制，见 `.claude/rules/rss/contract-fanout.md`。
 > 由后续 G1/W/Join 单元在此格式上增量加真实域契约；本单元（RW-G0.3）冻结格式并搭起 codegen 管道。
 
 ## 布局（冻结）
@@ -39,6 +39,7 @@ contracts/{kind}/{domain}/{version}/
 | `[schemas]` | `request`/`response`/`payload` → schema 文件名（http 需 `request`+`response`、event/saga 需 `payload`、**command 需 `request`**） | 按 kind（R4） |
 | `path` | http 业务路径（`/api/v{N}/{domain}/…` 约定，如 `/api/v1/_seed/echo`；形态安全由 R7 守：绝对、非 `//`、无 `..`/空白） | 按 kind（active http 必填，R8） |
 | `method` | http 方法 `GET`/`POST`/`PUT`/`PATCH`/`DELETE`（闭值集，非法即解析 `Err`） | 按 kind（active http 必填，R8） |
+| `[endpoints.http]` | HTTP wire 语义 carrier：`successStatus = <200..299>` 与 `idempotency = "idempotent" \| "non-idempotent"`；状态码由 typed `HttpSuccessStatus` 在 codegen/binding 漏斗中再校验，幂等性是闭枚举 | 所有 `kind=http` 必填，无默认值或兼容路径 |
 | `[endpoints.http.auth]` | active http serving 鉴权声明：`mode = "permission"`（`permission` 必须精确匹配 `vocab::RoutePermissionId` 闭值集成员，禁止前后空白，且禁止 `reason`）或显式 opt-out `public`/`bootstrap`/`clientsOnly`/`serviceOwned`（需非空 `reason`，禁止 `permission`）。未知子键解析即拒 | active http 必填（R18；validate 与 codegen 均 fail-closed；catalog 规则见 `docs/rules/tenancy.md`） |
 | `[endpoints.http.resourceSharing]` | HTTP resource sharing 声明：未声明等同 `mode = "tenantScoped"`；显式 `mode = "global"` 必须带非空 `reason` 且 endpoint 必须声明 `endpoints.http.resource`。`tenantScoped` 禁止 `reason`。未知子键解析即拒。global route 是 shared/global resource opt-out，不读全局 resource attribute 表，也不允许 dynamic `resource.*` policy 条件 | 按 endpoint（默认 tenant-scoped；global opt-out 由 R18 校验并进入 codegen） |
 | `[endpoints.http.headers]` | HTTP header 声明；当前最小闭值集仅接受 `"X-Tenant-ID" = "populate-only"`（public/pre-auth 填充）或 `"service-token-tenant-bound"`（serviceOwned service-token MAC 绑定） | 按 endpoint（`identity.login` public serving 必填，serviceOwned 必填 tenant-bound，R18） |
@@ -46,7 +47,7 @@ contracts/{kind}/{domain}/{version}/
 | `topic` | event 或 command 稳定 dotted topic 名（event 如 `seed.thing-happened`，command 如 `device.commands.reboot`；点分小写形态由 R7 守，同 `id`） | 按 kind（active event 必填，R8；active command 必填，R8） |
 | `delivery` | event 投递语义 `at-least-once`/`at-most-once`/`exactly-once`（闭值集）。**当前实现路径仅 `at-least-once`**（outbox + 幂等消费者）；`at-most-once`/`exactly-once` 为前瞻保留值（broker 链路无运行时保证），**active event 经 R11 机器拒**（仅放行 at-least-once），draft/deprecated 可表达前瞻设计 | 按 kind（active event 必填，R8；值由 R11 限） |
 | `[saga]` | saga 专属 block（TOML 键名 **camelCase**）：`steps`（`{ name, outputSchema }` 数组）+ `compensationOrder = "reverse"` + `retryMillis`/`timeoutMillis`（`u64` 毫秒，非负由类型保证，block 级 runtime policy）。codegen 派生 step output DTO、`STEP_*`、`STEPS`、`POLICY: vocab::SagaRuntimePolicySpec` 和 `SPEC`；runtime typed factory 从同一 `SPEC` 校验 step 数量/顺序/名称/schema，policy 转为 `eventexec::saga::SagaPolicy` 后生效：`0/0` 禁用、`retry>0 && timeout=0` 非法、正 timeout 是 do/undo 单 phase 总预算且包含重试/backoff。完整示例见 `xtask` 解析测试 `VALID_SAGA` | **kind=saga 必填（R10，无条件、不论 lifecycle）**；良构 R10 |
-| `[[subscriptions]]` + `[subscriptions.topology]` | event 订阅拓扑声明（#1120/#1438，TOML 数组）：每项须含 `consumer`、`group` 与 typed topology。codegen 为每个 event 派生唯一 `SPEC: EventSpec`，根模块只以 `EVENTS` 聚合 active event；producer partition strategy 与 subscriber readiness 不再存在平行 registry。 | **`lifecycle=active && kind=event` 必须非空（R14）**；同一 event 的全部 subscription 必须使用同一个 `partitionKey`；draft/deprecated 无订阅豁免 |
+| `[[subscriptions]]` + `[subscriptions.topology]` | event 订阅拓扑声明（#1120/#1438，TOML 数组）：每项须含 `consumer`、`group`、typed topology 与 `execution = "adapter-native" \| "domain-effect"`。`domain-effect` 必须同时声明当前唯一闭值 `effect = "settings-config-version-refresh"`；`adapter-native` 禁止 `effect`。codegen 为每个 event 派生唯一 `SPEC: EventSpec`，runtime bridge 穷尽匹配 generated execution/effect 与实际 handler，不推断、不 fallback。 | **`lifecycle=active && kind=event` 必须非空（R14）**；同一 event 的全部 subscription 必须使用同一个 `partitionKey`；draft/deprecated 无订阅豁免 |
 | `[command]` | command 持久化策略，`journal` 闭值为 `required` 或 `none`。无默认值；codegen 分别只生成 `journal_async` 或 `emit_async`，两者不会同时出现。 | **所有 command 必填，所有非 command 禁止（R24）** |
 
 校验规则（`cargo xtask contract validate`，R1–R23 ↔ `Rule` 枚举）：
@@ -64,7 +65,7 @@ contracts/{kind}/{domain}/{version}/
 | R9 | `PerKindFieldScope` | per-kind 字段只允许出现在匹配 kind（`path`/`method` 仅 http、`topic`/`delivery` 仅 event 或 command（topic 允许 event ∪ command）、`[saga]` 仅 saga）——错配会被派生 silently-ignored，须拒 |
 | R10 | `SagaBlock` | **`kind=saga` ⇒ 须有非空 `[saga]` block（无条件、不论 lifecycle，saga.md governance）**；block 存在即查良构：≥1 step、step `name` 合法非关键字 Rust 标识符（拒 raw `r#`）且唯一、`outputSchema` 非空。非-saga kind 误带 `[saga]` 由 R9 拒 |
 | R11 | `ActiveDeliverySupported` | `lifecycle=active` 的 event 只能声明当前可兑现的投递语义（仅 `at-least-once`）；`at-most-once`/`exactly-once` broker 链路无运行时保证，能力落地前限 draft/deprecated（active 资源不得声明系统不能兑现的能力） |
-| R12 | `DuplicateId` | contract `id` 须跨**全部**契约全局唯一（跨契约扫描）；id 是契约注册标识，api-versioning.md 要求破坏式 wire 变更新建版本目录 **且** 新 contract ID。同根因只报 1 条（subject=该 id，detail 列冲突契约路径） |
+| R12 | `DuplicateId` | contract `id` 须跨**全部**契约全局唯一（跨契约扫描）；id 是契约注册标识，破坏式 wire 变更必须新建版本目录 **且** 新 contract ID，并保留旧 identity。同根因只报 1 条（subject=该 id，detail 列冲突契约路径） |
 | R13 | `SchemaTitle` | 每个 declared schema（喂 codegen TypeSpace 的 `request`/`response`/`payload`，saga 还包含 step `outputSchema`）：root **必须有 string `title`**（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部（含嵌套对象）title 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）+ **契约内**唯一（title→typify Rust 类型名；数字可在非首位，如 `SeedEchoData`/`EchoV2`）。坏 JSON / 缺文件 skip（由 codegen parse 门 / R5 兜底） |
 | R14 | `ActiveSubscriber` | **`lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空**（EVENT-ACTIVE-SUB-01，Medium）；active event 无 subscriber 即死事件，视为错误配置。draft/deprecated 豁免 |
 | R15 | `CommandConsistency` | `kind=command` ⇒ `consistencyLevel=OutboxFact`（命令分发 = 本地事务 + outbox 发布，L2 语义） |
@@ -78,7 +79,7 @@ contracts/{kind}/{domain}/{version}/
 | R22 | `ConsistencyCapability` | `consistencyLevel` 必须匹配 typed `[capabilities.*]` 证据，且禁止跨等级 stray capability。所有 `kind=http` 契约必须声明 `[effectProfile]`，非 HTTP 禁止声明，`effects` 必须非空且无重复。L0 仅允许 `kind=http` 且不得声明 outbox/workflow/deviceLatent；L1 要 `kind=http + localTx.boundary=single-domain + txModel` 为 `tenant-scoped-uow` 或 `repo-atomic-cas`，并声明 `retry=bounded-transient + commitUnknown=not-retryable`；L2 event/command/http 分别要 outbox `fact`/`command`/`producer + same-transaction + emits`，fact/command 禁止 producer-only 字段，HTTP `emits` 必须引用存在的 `kind=event && consistencyLevel=OutboxFact` 契约；若 HTTP producer 为 `lifecycle=active`，目标 event 还必须 `lifecycle=active` 且声明 `[[subscriptions]]` readiness；L3 要 workflow `saga`（`kind=saga + [saga]` 且禁止 projection-only 字段）或完整 projection synthetic evidence（`inputs` 引用存在的 L2 event），不要求 `[reconcile]`；L4 要 `kind=http + [capabilities.deviceLatent].loop="reconcile" + [reconcile]` 全字段 |
 | R23 | `HttpProjectionCoverage` | `lifecycle=active && kind=http && method=GET` 的 response schema 中，`x-pii` 字段与 `tenantId` 字段必须由 `[endpoints.http.projection].fields.responsePath` 精确覆盖；每个 projection field 的 `field`/`permission`/`obligationKey`/`responsePath` 必须匹配闭枚举 canonical 四元组，声明路径必须存在且指向 protected field |
 
-> 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs`）——`method`/`delivery`/`compensationOrder`/HTTP auth mode/header mode/resourceSharing mode/subscription `partitionKey`/`readiness`/`capabilities.*`/`[reconcile]`/`[effectProfile]` 枚举解析拒非法 variant，LocalTx 的 `boundary`/`txModel`/`retry`/`commitUnknown` 以及 effect vocabulary 均为闭值；`retryMillis`/`timeoutMillis` 用 `u64` 拒负；嵌套结构 `#[serde(deny_unknown_fields)]` 拒未知子键。R8–R11/R15/R18/R20 是依赖 lifecycle/kind/值/路径形态的条件化不变式，类型层无法免费表达，与 R1–R7 同属 Medium（CI 门 + synthetic red/anti-vacuity）。R12（跨契约 id 唯一）/ R13（schema title PascalCase + 契约内唯一）/ R14（active event 须有 subscriber，EVENT-ACTIVE-SUB-01）/ R16（字段级 redaction 策略）/ R17（字段级 protection 策略）/ R19（request schema tenant source）/ R21（扁平/嵌套契约形态互斥）/ R22（HTTP effect carrier + L0–L4 typed capability evidence + LocalTx 完整证据 + outbox emits 引用完整性 + active producer readiness + L4 reconcile block）/ R23（active GET protected response projection enrollment + canonical field tuple）是跨/内契约内容扫描，类型层亦无法表达，同属 Medium；R13 契约内重复**未必**被 codegen typify 兜底（同 title 不同结构可能合并 / 类型歧义），R16/R17/R18/R19/R22/R23 在 validate/codegen 阶段早于 serving fail-fast，避免生成不安全 `Debug`、未声明 storage protection、modeless HTTP route、body-sourced tenant scope、虚开的 L0/L1/L2/L3/L4 一致性能力或 projection 字段语义漂移。
+> 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs` + codegen funnel）——`method`/`delivery`/`compensationOrder`/HTTP auth mode/header mode/resourceSharing mode/idempotency/subscription execution/effect/topology/`capabilities.*`/`[reconcile]`/`[effectProfile]` 使用闭枚举，HTTP success status 经 `HttpSuccessStatus` 限制为 2xx，嵌套结构 `#[serde(deny_unknown_fields)]` 拒未知子键。条件化不变式与跨/内契约扫描由 CI 门 + synthetic red/anti-vacuity 强制（Medium）；需读取 Git 历史的 wire diff 同样是 Medium，无法用 Rust 类型系统表达而不可再上移。新增 enforcement 零 Soft。
 
 ## schema.json
 
@@ -147,13 +148,15 @@ contracts/{kind}/{domain}/{version}/
 
 ### wire 破坏式变更检测门（`contract breaking`，ADR-008）
 
-`cargo xtask contract breaking [--against <git-ref>] [--deny]`：对 `*.schema.json` 做 **base ref ↔ working-tree** 的跨版本 JSON-Schema 递归 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（R1–R23 = manifest 元数据 + schema 文件存在性 + redaction/protection 策略结构 + HTTP AuthZ/header shape + request tenant source + HTTP effect carrier + consistency capability evidence + projection enrollment = **结构**）、`cargo public-api`（轴 A Rust 符号）互补无重叠——本门只校验 schema **内容跨版本 diff**（语义破坏）。规则与窗口分级单源见 `xtask/src/contract/breaking.rs`（INVARIANT WIRE-BREAKING-01 / WIRE-BREAKING-WINDOW-01）。
+`cargo xtask contract breaking [--against <git-ref>]`：对 **base ref ↔ working-tree** 的 manifest + `*.schema.json` 做 typed 跨版本 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（当前结构）、`cargo public-api`（轴 A Rust 符号）互补；本门守历史语义。
 
-- **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。base ref 不可解析（未 fetch）按模式分级：**warn 模式跳过整门（退出码 0）**；**deny 模式 fail-closed（退出码 1，无法读基准即无法判定破坏）**——提示 `git fetch <remote> <branch>` 或换 `--against <本地 ref>`。
+- **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。ref 不可解析、Git 命令/对象读取失败、基线 TOML/JSON 损坏均 fail-closed；只有 Git 明确证明历史路径不存在时才按“新契约”处理。
 - **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
-- **规则**（schema 内字段）：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`（结构收紧）+ `REDACTION_POLICY_CHANGED`（`x-pii`/`x-redaction` 隐私语义漂移）+ `PROTECTION_POLICY_CHANGED`（`x-protection`/`x-at-rest` at-rest 保护语义漂移，#1468）。只报既有字段的删除 / 收紧 / 策略漂移；新增可选字段不报（向后兼容）。后 3 条 manifest 依赖规则（HTTP 状态码 / `auth.required` / 幂等）登记第三期（依赖扩 manifest schema）。
-- **lifecycle 范围**：只对 `active` + `deprecated` 契约 diff；`draft`（seed / 前瞻原地演进）跳过。
-- **窗口分级**（对齐 `api-versioning.md` §兼容窗口，**配置驱动、不读墙上时钟**）：默认 **warn**（pre-GA 至 2026-12-31，退出码 0，记录不阻断）；env `RSS_WIRE_BREAKING=deny` 或 `--deny` 升 **deny**——对 `active` 契约破坏 fail-closed（退出码 1），`deprecated` 恒 warn。窗口到期 / GA / 出现外部 wire 消费方时由人改 env/默认提前收紧。
+- **schema 规则**：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`、`REDACTION_POLICY_CHANGED`、`PROTECTION_POLICY_CHANGED`。
+- **manifest 规则**：HTTP 比较 `successStatus`、`auth.mode + permission`（忽略说明性 `reason`）、`idempotency`；L2 比较 topic、delivery、consistency level、outbox role/atomicity/emits，以及 subscription 集合、consumer/group、topology、execution/effect。`emits` 与 subscription 忽略排序，但任何增、删、替换都是 breaking；重复 contract identity 直接拒绝。
+- **lifecycle 分级**：以 base lifecycle 决定处置，`active` 恒 deny、`deprecated` 恒 warn、`draft` 跳过；active 降级不能绕过门。新 contract ID/version 且旧 identity 完整保留时放行，删除或破坏旧 identity 仍拦截。
+
+> 当前 4 个 draft HTTP（`seed.echo`、`audit.session-projection`、`identity.reconcile-loop`、`settings.config-projection`）声明 `successStatus = 200`仅为非 serving 的契约元数据，不构成运行时状态码承诺；激活前必须按实际 handler 重新确认。
 
 per-kind 扩展字段由冻结类型直接解析。command 的 `[command]` 是本次有意破坏式收口：旧 command manifest 不再解析为有效契约，必须显式选择 journal policy。
 

@@ -11,6 +11,10 @@ lifecycle = "draft"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+
 [effectProfile]
 effects = ["reconcile", "worker"]
 

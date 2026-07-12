@@ -323,7 +323,10 @@ pub mod policy_updated {
         &[super::super::SubscriptionSpec::new(
             "audit",
             "audit.policy-updated",
+            super::super::SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit,
             super::super::SubscriberReadiness::Required,
+            super::super::SubscriptionExecution::AdapterNative,
+            None,
         )],
     );
 }
@@ -548,7 +551,10 @@ pub mod role_assigned {
         &[super::super::SubscriptionSpec::new(
             "audit",
             "audit.role-assigned",
+            super::super::SubscriptionDispatchKey::IdentityRoleAssignedV1Audit,
             super::super::SubscriberReadiness::Required,
+            super::super::SubscriptionExecution::AdapterNative,
+            None,
         )],
     );
 }
@@ -773,7 +779,10 @@ pub mod role_revoked {
         &[super::super::SubscriptionSpec::new(
             "audit",
             "audit.role-revoked",
+            super::super::SubscriptionDispatchKey::IdentityRoleRevokedV1Audit,
             super::super::SubscriberReadiness::Required,
+            super::super::SubscriptionExecution::AdapterNative,
+            None,
         )],
     );
 }
@@ -884,7 +893,10 @@ pub mod session_created {
         &[super::super::SubscriptionSpec::new(
             "audit",
             "audit.session-created",
+            super::super::SubscriptionDispatchKey::IdentitySessionCreatedV1Audit,
             super::super::SubscriberReadiness::Required,
+            super::super::SubscriptionExecution::AdapterNative,
+            None,
         )],
     );
 }

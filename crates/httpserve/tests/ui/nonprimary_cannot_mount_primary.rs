@@ -15,6 +15,8 @@ fn endpoint() -> httpserve::GeneratedPrimaryEndpoint<(), vocab::http::LocalOnly>
         ),
         "/x",
         "GET",
+        vocab::HttpSuccessStatus::new(200),
+        vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::Public,
         None,
         false,

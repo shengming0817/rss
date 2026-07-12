@@ -479,7 +479,7 @@ mod tests {
             return StatusCode::INTERNAL_SERVER_ERROR;
         };
         *slot = Some((*meta.evidence(), meta.method().clone()));
-        StatusCode::NO_CONTENT
+        StatusCode::CREATED
     }
 
     #[allow(clippy::expect_used)]
@@ -823,7 +823,7 @@ mod tests {
             )
             .await
             .expect("route response");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::CREATED);
 
         let observed = capture
             .0
@@ -881,7 +881,7 @@ mod tests {
                                     httpserve::RouteAuthorizationDecision::Allow
                                     | httpserve::RouteAuthorizationDecision::AllowWithProjection(
                                         _,
-                                    ) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                                    ) => axum::http::StatusCode::OK.into_response(),
                                     httpserve::RouteAuthorizationDecision::Deny => {
                                         axum::http::StatusCode::FORBIDDEN.into_response()
                                     }
@@ -926,6 +926,6 @@ mod tests {
             )
             .await
             .expect("admin probe");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

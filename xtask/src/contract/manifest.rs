@@ -12,7 +12,7 @@
 //!
 //! event 订阅声明（#1120）：`[[subscriptions]]` 声明 event 契约的 consumer 域与 consumer group，
 //! 由 codegen 派生订阅注册 glue（`SUBSCRIPTIONS` 常量数组），供 bootstrap 接线消费（EVENT-ACTIVE-SUB-01 守）。
-//! `#[serde(default)]` 保证现有无 subscriptions 的契约仍解析（空 vec），不破坏 CONTRACT-FREEZE-01。
+//! `#[serde(default)]` 将未声明 subscriptions 精确表达为空集合；active 非空约束由 validate R14 承担。
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -86,7 +86,7 @@ pub(crate) struct ContractManifest {
     #[serde(default, rename = "effectProfile")]
     pub(crate) effect_profile: Option<EffectProfile>,
     /// event 订阅声明（#1120）：`[[subscriptions]]` 数组，每项声明一个消费者域 + consumer group。
-    /// `#[serde(default)]` ⇒ 无 subscriptions 字段的既有契约仍解析（空 vec，不破坏 CONTRACT-FREEZE-01）。
+    /// `#[serde(default)]` ⇒ 未声明 subscriptions 时为空集合；draft/deprecated 可合法为空。
     /// active event 必须非空（EVENT-ACTIVE-SUB-01，R14）；draft/deprecated 豁免。
     #[serde(default)]
     pub(crate) subscriptions: Vec<Subscription>,
@@ -433,9 +433,12 @@ pub(crate) struct Endpoints {
     pub(crate) http: Option<HttpEndpoint>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpEndpoint {
+    #[serde(rename = "successStatus")]
+    pub(crate) success_status: u16,
+    pub(crate) idempotency: HttpIdempotency,
     #[serde(default)]
     pub(crate) auth: Option<HttpAuth>,
     #[serde(default)]
@@ -448,6 +451,13 @@ pub(crate) struct HttpEndpoint {
     pub(crate) headers: BTreeMap<String, HttpHeaderMode>,
     #[serde(default)]
     pub(crate) projection: Option<HttpProjection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HttpIdempotency {
+    Idempotent,
+    NonIdempotent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -684,8 +694,26 @@ pub(crate) struct Subscription {
     pub(crate) consumer: String,
     /// 稳定 consumer group 名（如 `audit.session-created`）——broker 用此键唯一标识消费位点。
     pub(crate) group: String,
+    /// handler 执行边界。必填闭值，runtime 不得再按 consumer 推断行为。
+    pub(crate) execution: SubscriptionExecution,
+    /// domain effect 标识；与 `execution` 的出现关系由 validate fail-closed。
+    #[serde(default)]
+    pub(crate) effect: Option<SubscriptionEffect>,
     /// L2 topology gate：partition key 策略 + subscriber readiness 要求。
     pub(crate) topology: SubscriptionTopology,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SubscriptionExecution {
+    AdapterNative,
+    DomainEffect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SubscriptionEffect {
+    SettingsConfigVersionRefresh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -726,6 +754,9 @@ mod tests {
         lifecycle = "draft"
         path = "/api/v1/_seed/echo"
         method = "POST"
+        [endpoints.http]
+        successStatus = 200
+        idempotency = "idempotent"
         [schemas]
         request = "request.schema.json"
         response = "response.schema.json"
@@ -782,6 +813,37 @@ mod tests {
         assert_eq!(m.topic, None);
         assert_eq!(m.delivery, None);
         assert_eq!(m.saga, None);
+        Ok(())
+    }
+
+    #[test]
+    fn http_wire_metadata_is_required_and_closed() -> anyhow::Result<()> {
+        for required_line in [
+            "        successStatus = 200\n",
+            "        idempotency = \"idempotent\"\n",
+        ] {
+            let missing = VALID_HTTP.replace(required_line, "");
+            assert!(ContractManifest::from_toml_str(&missing).is_err());
+        }
+
+        let valid = VALID_HTTP
+            .replace("successStatus = 200", "successStatus = 201")
+            .replace(
+                "idempotency = \"idempotent\"",
+                "idempotency = \"non-idempotent\"",
+            );
+        let manifest = ContractManifest::from_toml_str(&valid)?;
+        let http = manifest
+            .endpoints
+            .and_then(|endpoints| endpoints.http)
+            .ok_or_else(|| {
+                anyhow::anyhow!("valid HTTP manifest should contain endpoint metadata")
+            })?;
+        assert_eq!(http.success_status, 201);
+        assert_eq!(http.idempotency, HttpIdempotency::NonIdempotent);
+
+        let invalid = valid.replace("non-idempotent", "sometimes");
+        assert!(ContractManifest::from_toml_str(&invalid).is_err());
         Ok(())
     }
 
@@ -1278,12 +1340,15 @@ mod tests {
             [[subscriptions]]
             consumer = "audit"
             group = "audit.session-created"
+            execution = "adapter-native"
             [subscriptions.topology]
             partitionKey = "none"
             readiness = "required"
             [[subscriptions]]
             consumer = "devicestate"
             group = "devicestate.session-watch"
+            execution = "domain-effect"
+            effect = "settings-config-version-refresh"
             [subscriptions.topology]
             partitionKey = "aggregate"
             readiness = "required"
@@ -1303,6 +1368,19 @@ mod tests {
         assert_eq!(m.subscriptions[1].consumer, "devicestate");
         assert_eq!(m.subscriptions[1].group, "devicestate.session-watch");
         assert_eq!(
+            m.subscriptions[0].execution,
+            SubscriptionExecution::AdapterNative
+        );
+        assert_eq!(m.subscriptions[0].effect, None);
+        assert_eq!(
+            m.subscriptions[1].execution,
+            SubscriptionExecution::DomainEffect
+        );
+        assert_eq!(
+            m.subscriptions[1].effect,
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh)
+        );
+        assert_eq!(
             m.subscriptions[1].topology.partition_key,
             PartitionKeyStrategy::Aggregate
         );
@@ -1313,14 +1391,33 @@ mod tests {
         Ok(())
     }
 
-    /// 绿用例（anti-vacuity）：无 subscriptions 字段的既有契约仍解析（`#[serde(default)]`，空 vec）。
-    /// 守卫现有合约兼容性：CONTRACT-FREEZE-01 扩展不破坏旧格式。
+    #[test]
+    fn subscription_execution_is_required_and_closed() {
+        let missing = VALID_EVENT.replace(
+            "        [schemas]",
+            "        [[subscriptions]]\n        consumer = \"audit\"\n        group = \"audit.events\"\n        [subscriptions.topology]\n        partitionKey = \"none\"\n        readiness = \"required\"\n        [schemas]",
+        );
+        assert!(ContractManifest::from_toml_str(&missing).is_err());
+        let unknown = missing.replace(
+            "        group = \"audit.events\"",
+            "        group = \"audit.events\"\n        execution = \"worker\"",
+        );
+        assert!(ContractManifest::from_toml_str(&unknown).is_err());
+
+        let unknown_effect = missing.replace(
+            "        group = \"audit.events\"",
+            "        group = \"audit.events\"\n        execution = \"domain-effect\"\n        effect = \"refresh-something\"",
+        );
+        assert!(ContractManifest::from_toml_str(&unknown_effect).is_err());
+    }
+
+    /// 绿用例（anti-vacuity）：draft event 可不声明 subscriptions，并精确解析为空集合。
     #[test]
     fn event_without_subscriptions_parses_as_empty() -> anyhow::Result<()> {
         let m = ContractManifest::from_toml_str(VALID_EVENT)?;
         assert!(
             m.subscriptions.is_empty(),
-            "无 [[subscriptions]] 字段应解析为空 vec（serde default）"
+            "draft event 未声明 [[subscriptions]] 时应解析为空 vec"
         );
         Ok(())
     }

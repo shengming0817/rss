@@ -724,6 +724,65 @@ impl core::marker::Unpin for generated::event::SubscriberReadiness
 impl core::marker::UnsafeUnpin for generated::event::SubscriberReadiness
 impl core::panic::unwind_safe::RefUnwindSafe for generated::event::SubscriberReadiness
 impl core::panic::unwind_safe::UnwindSafe for generated::event::SubscriberReadiness
+pub enum generated::event::SubscriptionDispatchKey
+pub generated::event::SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit
+pub generated::event::SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
+pub generated::event::SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
+pub generated::event::SubscriptionDispatchKey::IdentitySessionCreatedV1Audit
+pub generated::event::SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings
+impl core::clone::Clone for generated::event::SubscriptionDispatchKey
+pub fn generated::event::SubscriptionDispatchKey::clone(&self) -> generated::event::SubscriptionDispatchKey
+impl core::cmp::Eq for generated::event::SubscriptionDispatchKey
+impl core::cmp::PartialEq for generated::event::SubscriptionDispatchKey
+pub fn generated::event::SubscriptionDispatchKey::eq(&self, &generated::event::SubscriptionDispatchKey) -> bool
+impl core::fmt::Debug for generated::event::SubscriptionDispatchKey
+pub fn generated::event::SubscriptionDispatchKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::event::SubscriptionDispatchKey
+impl core::marker::StructuralPartialEq for generated::event::SubscriptionDispatchKey
+impl core::marker::Freeze for generated::event::SubscriptionDispatchKey
+impl core::marker::Send for generated::event::SubscriptionDispatchKey
+impl core::marker::Sync for generated::event::SubscriptionDispatchKey
+impl core::marker::Unpin for generated::event::SubscriptionDispatchKey
+impl core::marker::UnsafeUnpin for generated::event::SubscriptionDispatchKey
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::SubscriptionDispatchKey
+impl core::panic::unwind_safe::UnwindSafe for generated::event::SubscriptionDispatchKey
+pub enum generated::event::SubscriptionEffect
+pub generated::event::SubscriptionEffect::SettingsConfigVersionRefresh
+impl core::clone::Clone for generated::event::SubscriptionEffect
+pub fn generated::event::SubscriptionEffect::clone(&self) -> generated::event::SubscriptionEffect
+impl core::cmp::Eq for generated::event::SubscriptionEffect
+impl core::cmp::PartialEq for generated::event::SubscriptionEffect
+pub fn generated::event::SubscriptionEffect::eq(&self, &generated::event::SubscriptionEffect) -> bool
+impl core::fmt::Debug for generated::event::SubscriptionEffect
+pub fn generated::event::SubscriptionEffect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::event::SubscriptionEffect
+impl core::marker::StructuralPartialEq for generated::event::SubscriptionEffect
+impl core::marker::Freeze for generated::event::SubscriptionEffect
+impl core::marker::Send for generated::event::SubscriptionEffect
+impl core::marker::Sync for generated::event::SubscriptionEffect
+impl core::marker::Unpin for generated::event::SubscriptionEffect
+impl core::marker::UnsafeUnpin for generated::event::SubscriptionEffect
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::SubscriptionEffect
+impl core::panic::unwind_safe::UnwindSafe for generated::event::SubscriptionEffect
+pub enum generated::event::SubscriptionExecution
+pub generated::event::SubscriptionExecution::AdapterNative
+pub generated::event::SubscriptionExecution::DomainEffect
+impl core::clone::Clone for generated::event::SubscriptionExecution
+pub fn generated::event::SubscriptionExecution::clone(&self) -> generated::event::SubscriptionExecution
+impl core::cmp::Eq for generated::event::SubscriptionExecution
+impl core::cmp::PartialEq for generated::event::SubscriptionExecution
+pub fn generated::event::SubscriptionExecution::eq(&self, &generated::event::SubscriptionExecution) -> bool
+impl core::fmt::Debug for generated::event::SubscriptionExecution
+pub fn generated::event::SubscriptionExecution::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::event::SubscriptionExecution
+impl core::marker::StructuralPartialEq for generated::event::SubscriptionExecution
+impl core::marker::Freeze for generated::event::SubscriptionExecution
+impl core::marker::Send for generated::event::SubscriptionExecution
+impl core::marker::Sync for generated::event::SubscriptionExecution
+impl core::marker::Unpin for generated::event::SubscriptionExecution
+impl core::marker::UnsafeUnpin for generated::event::SubscriptionExecution
+impl core::panic::unwind_safe::RefUnwindSafe for generated::event::SubscriptionExecution
+impl core::panic::unwind_safe::UnwindSafe for generated::event::SubscriptionExecution
 pub struct generated::event::EventSpec
 impl generated::event::EventSpec
 pub const fn generated::event::EventSpec::contract(self) -> vocab::contract::binding::ContractBinding
@@ -752,6 +811,9 @@ impl core::panic::unwind_safe::UnwindSafe for generated::event::EventSpec
 pub struct generated::event::SubscriptionSpec
 impl generated::event::SubscriptionSpec
 pub const fn generated::event::SubscriptionSpec::consumer(self) -> &'static str
+pub const fn generated::event::SubscriptionSpec::dispatch(self) -> generated::event::SubscriptionDispatchKey
+pub const fn generated::event::SubscriptionSpec::effect(self) -> core::option::Option<generated::event::SubscriptionEffect>
+pub const fn generated::event::SubscriptionSpec::execution(self) -> generated::event::SubscriptionExecution
 pub const fn generated::event::SubscriptionSpec::group(self) -> &'static str
 pub const fn generated::event::SubscriptionSpec::readiness(self) -> generated::event::SubscriberReadiness
 impl core::clone::Clone for generated::event::SubscriptionSpec

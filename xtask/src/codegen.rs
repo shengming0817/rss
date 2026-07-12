@@ -25,8 +25,8 @@ use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
     CommandJournalPolicy, ConsistencyLevel, ContractKind, EffectKind, HttpAuthMode, HttpHeaderMode,
-    HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
-    LocalTxRetry, WorkflowMode,
+    HttpIdempotency, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
+    LocalTxModel, LocalTxRetry, SubscriptionEffect, SubscriptionExecution, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -133,6 +133,7 @@ fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>
             mod_rs.push_str(&render_http_root_specs(contracts)?);
         }
         if *mod_kind == ModKind::Event {
+            mod_rs.push_str(&render_event_dispatch_keys(contracts)?);
             mod_rs.push_str(&render_event_root_subscriptions(contracts)?);
             mod_rs.push_str(&render_event_root_projection_inputs(contracts)?);
             mod_rs.push_str(&render_event_root_producer_domains(contracts)?);
@@ -292,6 +293,36 @@ fn producer_domain_variant(domain: &str) -> Result<String> {
     }
     if variant.starts_with("r#") || syn::parse_str::<syn::Ident>(&variant).is_err() {
         bail!("event domain {domain:?} 派生非法 Rust enum variant {variant:?}");
+    }
+    Ok(variant)
+}
+
+/// Stable event identity + version + consumer → closed generated dispatch variant.
+fn subscription_dispatch_variant(c: &DiscoveredContract, consumer: &str) -> Result<String> {
+    let mut variant = String::new();
+    for segment in [
+        c.manifest.id.as_str(),
+        c.manifest.version.as_str(),
+        consumer,
+    ]
+    .into_iter()
+    .flat_map(|value| value.split(['.', '-', '_']))
+    .filter(|part| !part.is_empty())
+    {
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            variant.push(first.to_ascii_uppercase());
+            variant.extend(chars);
+        }
+    }
+    if variant.starts_with("r#") || syn::parse_str::<syn::Ident>(&variant).is_err() {
+        bail!(
+            "event subscription {}@{} consumer {:?} 派生非法 dispatch variant {:?}",
+            c.manifest.id,
+            c.manifest.version,
+            consumer,
+            variant
+        );
     }
     Ok(variant)
 }
@@ -579,6 +610,11 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ServiceOwned => "::vocab::HttpRouteAuth::ServiceOwned".to_string(),
     };
     let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
+    let success_status = http.success_status;
+    let idempotency = match http.idempotency {
+        HttpIdempotency::Idempotent => "Idempotent",
+        HttpIdempotency::NonIdempotent => "NonIdempotent",
+    };
     let effect_profile = render_http_effect_profile_consts(c)?;
     let local_tx = render_http_local_tx(c, sup)?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
@@ -701,6 +737,8 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
     CONTRACT,
     PATH,
     "{method}",
+    ::vocab::http::HttpSuccessStatus::new({success_status}),
+    ::vocab::http::HttpIdempotency::{idempotency},
     {auth},
     {resource},
     {self_scoped},
@@ -1146,8 +1184,19 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
                 c.manifest.version,
             );
         }
+        let execution = match s.execution {
+            SubscriptionExecution::AdapterNative => "AdapterNative",
+            SubscriptionExecution::DomainEffect => "DomainEffect",
+        };
+        let effect = match s.effect {
+            None => "None".to_string(),
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh) => {
+                format!("Some({sup}SubscriptionEffect::SettingsConfigVersionRefresh)")
+            }
+        };
+        let dispatch = subscription_dispatch_variant(c, &s.consumer)?;
         subs.push(format!(
-            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriberReadiness::{})",
+            "    {sup}SubscriptionSpec::new(\"{}\", \"{}\", {sup}SubscriptionDispatchKey::{dispatch}, {sup}SubscriberReadiness::{}, {sup}SubscriptionExecution::{execution}, {effect})",
             s.consumer,
             s.group,
             match s.topology.readiness {
@@ -1466,6 +1515,22 @@ pub enum SubscriberReadiness {
     Required,
 }
 
+/// Handler execution boundary generated from subscription metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionExecution {
+    /// The adapter owns decoding and execution without a domain callback.
+    AdapterNative,
+    /// Runtime assembly must inject the declared domain effect handler.
+    DomainEffect,
+}
+
+/// Closed set of domain effects supported by generated subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionEffect {
+    /// Refresh settings configuration after a version-change fact.
+    SettingsConfigVersionRefresh,
+}
+
 /// 一个 event contract 的唯一 producer/subscriber topology 规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSpec {
@@ -1503,21 +1568,33 @@ impl EventSpec {
 pub struct SubscriptionSpec {
     consumer: &'static str,
     group: &'static str,
+    dispatch: SubscriptionDispatchKey,
     readiness: SubscriberReadiness,
+    execution: SubscriptionExecution,
+    effect: Option<SubscriptionEffect>,
 }
 
 impl SubscriptionSpec {
     pub(crate) const fn new(
         consumer: &'static str,
         group: &'static str,
+        dispatch: SubscriptionDispatchKey,
         readiness: SubscriberReadiness,
-    ) -> Self { Self { consumer, group, readiness } }
+        execution: SubscriptionExecution,
+        effect: Option<SubscriptionEffect>,
+    ) -> Self { Self { consumer, group, dispatch, readiness, execution, effect } }
     /// Consumer domain identifier.
     pub const fn consumer(self) -> &'static str { self.consumer }
     /// Durable consumer group.
     pub const fn group(self) -> &'static str { self.group }
+    /// Closed runtime dispatch identity derived from the contract identity and consumer.
+    pub const fn dispatch(self) -> SubscriptionDispatchKey { self.dispatch }
     /// Runtime-readiness policy.
     pub const fn readiness(self) -> SubscriberReadiness { self.readiness }
+    /// Handler execution boundary.
+    pub const fn execution(self) -> SubscriptionExecution { self.execution }
+    /// Domain effect required by this subscription, when execution is domain-owned.
+    pub const fn effect(self) -> Option<SubscriptionEffect> { self.effect }
 }
 "#;
 
@@ -1861,6 +1938,48 @@ pub const LOCAL_TX_SPECS: &[HttpSpec] = &[{local_tx_body}];
     ))
 }
 
+fn render_event_dispatch_keys(contracts: &[DiscoveredContract]) -> Result<String> {
+    let mut variants = BTreeMap::new();
+    for c in contracts
+        .iter()
+        .filter(|c| c.manifest.kind == ContractKind::Event)
+        .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
+    {
+        for subscription in &c.manifest.subscriptions {
+            let variant = subscription_dispatch_variant(c, &subscription.consumer)?;
+            let identity = format!(
+                "{}@{}:{}",
+                c.manifest.id, c.manifest.version, subscription.consumer
+            );
+            if let Some(previous) = variants.insert(variant.clone(), identity.clone()) {
+                bail!(
+                    "event subscription dispatch variant {variant} 冲突: {previous} / {identity}"
+                );
+            }
+        }
+    }
+
+    let body = variants
+        .into_iter()
+        .map(|(variant, identity)| {
+            format!("    /// Generated dispatch identity for `{identity}`.\n    {variant},")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        r#"
+/// Closed runtime dispatch identities derived from active event subscriptions.
+///
+/// Runtime assembly must match this enum exhaustively. Adding a subscription therefore makes a
+/// missing handler binding a compile-time error instead of extending a handwritten registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionDispatchKey {{
+{body}
+}}
+"#
+    ))
+}
+
 fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<String> {
     let mut entries = Vec::new();
     for c in contracts
@@ -2193,6 +2312,27 @@ mod tests {
         assert!(source.contains(needle), "{message}:\n{source}");
     }
 
+    fn assert_subscription_wire_semantics(rendered: &str, root_module: &str) {
+        assert!(
+            rendered.contains("super::SubscriptionExecution::AdapterNative")
+                && rendered.contains("None"),
+            "SPEC 缺 manifest-derived execution/effect 闭值:\n{rendered}"
+        );
+        for required in [
+            "pub enum SubscriptionDispatchKey",
+            "pub enum SubscriptionExecution",
+            "pub enum SubscriptionEffect",
+            "pub const fn dispatch",
+            "pub const fn execution",
+            "pub const fn effect",
+        ] {
+            assert!(
+                root_module.contains(required),
+                "event root module 缺 subscription wire API {required}:\n{root_module}"
+            );
+        }
+    }
+
     fn generated_http_spec_slice<'a>(source: &'a str, const_name: &str) -> Result<&'a str> {
         let marker = format!("pub const {const_name}: &[HttpSpec] = &[");
         let Some(start) = source.find(&marker) else {
@@ -2270,6 +2410,13 @@ mod tests {
             ),
             consistency_level = consistency_level,
         );
+        let wire_semantics =
+            "[endpoints.http]\nsuccessStatus = 200\nidempotency = \"idempotent\"\n";
+        let endpoints_http = if endpoints_http.contains("[endpoints.http]\n") {
+            endpoints_http.replacen("[endpoints.http]\n", wire_semantics, 1)
+        } else {
+            format!("{wire_semantics}{endpoints_http}")
+        };
         std::fs::write(
             dir.join("contract.toml"),
             format!(
@@ -2317,6 +2464,7 @@ mod tests {
                 "[[subscriptions]]\n",
                 "consumer = \"audit\"\n",
                 "group = \"audit.seed-happened\"\n",
+                "execution = \"adapter-native\"\n",
                 "[subscriptions.topology]\n",
                 "partitionKey = \"none\"\n",
                 "readiness = \"required\"\n",
@@ -2959,6 +3107,22 @@ mod tests {
             "route: ROUTE.evidence()",
             "HttpSpec should derive runtime evidence from the typed binding",
         );
+        assert_generated_contains(
+            &rendered,
+            "::vocab::http::HttpSuccessStatus::new(200)",
+            "success status should be sealed inside route evidence",
+        );
+        assert_generated_contains(
+            &rendered,
+            "::vocab::http::HttpIdempotency::Idempotent",
+            "idempotency should be sealed inside route evidence",
+        );
+        for removed in ["pub success_status:", "pub idempotency:"] {
+            assert!(
+                !root_mod.contains(removed),
+                "wire semantics must not create a parallel HttpSpec field: {removed}"
+            );
+        }
         Ok(())
     }
 
@@ -3432,9 +3596,11 @@ mod tests {
         assert!(
             rendered.contains("SubscriptionSpec::new(")
                 && rendered.contains(r#""audit""#)
-                && rendered.contains(r#""audit.seed-happened""#),
+                && rendered.contains(r#""audit.seed-happened""#)
+                && rendered.contains("SubscriptionDispatchKey::SeedHappenedV1Audit"),
             "SPEC 缺 consumer 字面量:\n{rendered}"
         );
+        assert_subscription_wire_semantics(&rendered, &mod_rs);
         assert!(
             rendered.contains("super::PartitionKeyStrategy::None"),
             "SPEC 缺 typed partition strategy:\n{rendered}"

@@ -68,7 +68,8 @@ use super::manifest::{
     FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
     HttpMethod, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
     LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD,
-    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
+    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionExecution, WorkflowMode, WorkflowOrdering,
+    WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -198,6 +199,9 @@ pub(crate) enum Rule {
     /// INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "verify", source = "code" }— 一致性等级不能只停留在字符串枚举；
     /// 必须有闭值 typed 能力证据，禁止跨等级 stray capability，防 L2/L3/L4 语义虚开。
     ConsistencyCapability,
+    /// HTTP success status、subscription execution/effect 组合及 identity 集合必须良构且无重复，
+    /// 方可进入 codegen/runtime。
+    ManifestWireMetadata,
 }
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
@@ -1019,6 +1023,7 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_ident_syntax(&c.manifest, &label));
     findings.extend(rule_perkind_active_fields(&c.manifest, &label));
     findings.extend(rule_perkind_field_scope(&c.manifest, &label));
+    findings.extend(rule_manifest_wire_metadata(&c.manifest, &label));
     findings.extend(rule_http_auth(&c.manifest, &label));
     findings.extend(rule_http_request_tenant_source(c, &label));
     findings.extend(rule_http_projection_response_coverage(c, &label));
@@ -1030,6 +1035,68 @@ pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
     findings.extend(rule_active_subscriber(&c.manifest, &label));
     findings.extend(rule_slug_syntax(c, &label));
     findings
+}
+
+fn rule_manifest_wire_metadata(m: &ContractManifest, label: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if let Some(http) = m
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+        && !(200..=299).contains(&http.success_status)
+    {
+        out.push(finding(
+            Rule::ManifestWireMetadata,
+            label,
+            format!(
+                "endpoints.http.successStatus 必须位于 200..=299，实为 {}",
+                http.success_status
+            ),
+        ));
+    }
+
+    let mut subscription_identities = BTreeSet::new();
+    for subscription in &m.subscriptions {
+        let valid_effect_shape = matches!(
+            (subscription.execution, subscription.effect),
+            (SubscriptionExecution::AdapterNative, None)
+                | (SubscriptionExecution::DomainEffect, Some(_))
+        );
+        if !valid_effect_shape {
+            out.push(finding(
+                Rule::ManifestWireMetadata,
+                label,
+                format!(
+                    "subscription consumer={} group={} 的 execution/effect 组合非法：domain-effect 必须声明 effect，adapter-native 禁止 effect",
+                    subscription.consumer, subscription.group
+                ),
+            ));
+        }
+        if !subscription_identities.insert((&subscription.consumer, &subscription.group)) {
+            out.push(finding(
+                Rule::ManifestWireMetadata,
+                label,
+                format!(
+                    "subscription identity 重复：consumer={} group={}",
+                    subscription.consumer, subscription.group
+                ),
+            ));
+        }
+    }
+
+    if let Some(outbox) = m.capabilities.outbox.as_ref() {
+        let mut emitted_ids = BTreeSet::new();
+        for emitted_id in &outbox.emits {
+            if !emitted_ids.insert(emitted_id) {
+                out.push(finding(
+                    Rule::ManifestWireMetadata,
+                    label,
+                    format!("capabilities.outbox.emits 含重复 contract id={emitted_id}"),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// R20：嵌套 slug 段语法（INVARIANT: CONTRACT-SLUG-SYNTAX-01 { level = "Medium", exec = "verify", source = "code" }）。扁平契约（`slug=None`）豁免。
@@ -2335,10 +2402,11 @@ mod tests {
         Capabilities, CompensationOrder, Delivery, DeviceLatentCapability, DeviceLatentFencing,
         DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentTenancy, DeviceLatentTrigger,
         EffectKind, EffectProfile, Endpoints, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
-        HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
+        HttpIdempotency, HttpMethod, HttpProjection, HttpProjectionField, HttpProjectionFieldName,
         HttpResourceSharing, HttpResourceSharingMode, Lifecycle, LocalTxCapability,
         OutboxCapability, PartitionKeyStrategy, ReconcileBlock, SagaBlock, SagaStep, Schemas,
-        SubscriberReadiness, Subscription, SubscriptionTopology, WorkflowCapability,
+        SubscriberReadiness, Subscription, SubscriptionEffect, SubscriptionExecution,
+        SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
     use rstest::rstest;
@@ -2376,6 +2444,8 @@ mod tests {
     fn public_http_endpoints() -> Endpoints {
         Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Public,
                     reason: Some("public endpoint".to_string()),
@@ -2397,11 +2467,94 @@ mod tests {
         Subscription {
             consumer: "audit".to_string(),
             group: "audit.session-created".to_string(),
+            execution: SubscriptionExecution::AdapterNative,
+            effect: None,
             topology: SubscriptionTopology {
                 partition_key: PartitionKeyStrategy::None,
                 readiness: SubscriberReadiness::Required,
             },
         }
+    }
+
+    #[test]
+    fn wire_metadata_rejects_invalid_http_status_and_subscription_execution_shape() {
+        let mut http = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            ContractOwner::Framework,
+            http_schemas(),
+        );
+        for invalid_status in [0, 199, 300, u16::MAX] {
+            http.endpoints = Some(Endpoints {
+                http: Some(HttpEndpoint {
+                    success_status: invalid_status,
+                    idempotency: HttpIdempotency::Idempotent,
+                    auth: None,
+                    resource: None,
+                    self_scoped: false,
+                    resource_sharing: None,
+                    headers: BTreeMap::new(),
+                    projection: None,
+                }),
+            });
+            assert_eq!(rule_manifest_wire_metadata(&http, "http").len(), 1);
+        }
+
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        event.subscriptions = vec![Subscription {
+            execution: SubscriptionExecution::DomainEffect,
+            effect: None,
+            ..one_subscription()
+        }];
+        assert_eq!(rule_manifest_wire_metadata(&event, "event").len(), 1);
+
+        event.subscriptions[0].execution = SubscriptionExecution::AdapterNative;
+        event.subscriptions[0].effect = Some(SubscriptionEffect::SettingsConfigVersionRefresh);
+        assert_eq!(rule_manifest_wire_metadata(&event, "event").len(), 1);
+    }
+
+    #[test]
+    fn wire_metadata_rejects_duplicate_subscription_identity_and_emits() {
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        event.subscriptions = vec![one_subscription(), one_subscription()];
+        assert_eq!(rule_manifest_wire_metadata(&event, "event").len(), 1);
+
+        event.subscriptions.clear();
+        event.capabilities.outbox = Some(OutboxCapability {
+            role: OutboxRole::Producer,
+            atomicity: Some(OutboxAtomicity::SameTransaction),
+            emits: vec![
+                "identity.session-created".into(),
+                "identity.session-created".into(),
+            ],
+        });
+        assert_eq!(rule_manifest_wire_metadata(&event, "event").len(), 1);
+    }
+
+    #[test]
+    fn wire_metadata_accepts_valid_closed_shapes() {
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            ContractOwner::Framework,
+            payload_schemas(),
+        );
+        event.subscriptions = vec![Subscription {
+            execution: SubscriptionExecution::DomainEffect,
+            effect: Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            ..one_subscription()
+        }];
+        assert!(rule_manifest_wire_metadata(&event, "event").is_empty());
     }
 
     fn http_schemas() -> Schemas {
@@ -3119,6 +3272,8 @@ mod tests {
         m.subscriptions = vec![Subscription {
             consumer: consumer.to_string(),
             group: group.to_string(),
+            execution: SubscriptionExecution::AdapterNative,
+            effect: None,
             topology: SubscriptionTopology {
                 partition_key: PartitionKeyStrategy::None,
                 readiness: SubscriberReadiness::Required,
@@ -3295,6 +3450,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Public,
                     reason: Some(" ".to_string()),
@@ -3332,6 +3489,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: Some("not allowed".to_string()),
@@ -3364,6 +3523,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3392,6 +3553,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3424,6 +3587,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3467,6 +3632,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3510,6 +3677,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3549,6 +3718,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3588,6 +3759,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3639,6 +3812,8 @@ mod tests {
         m.method = Some(HttpMethod::Delete);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3671,6 +3846,8 @@ mod tests {
         m.method = Some(HttpMethod::Delete);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3703,6 +3880,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Public,
                     reason: Some("public".to_string()),
@@ -3737,6 +3916,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Public,
                     reason: Some("public".to_string()),
@@ -3769,6 +3950,8 @@ mod tests {
         m.method = Some(HttpMethod::Delete);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3801,6 +3984,8 @@ mod tests {
         m.method = Some(HttpMethod::Delete);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3844,6 +4029,8 @@ mod tests {
         m.method = Some(HttpMethod::Delete);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3881,6 +4068,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::ServiceOwned,
                     reason: Some("internal service-token route".to_string()),
@@ -3912,6 +4101,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -3949,6 +4140,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::ServiceOwned,
                     reason: Some("internal service-token route".to_string()),
@@ -3983,6 +4176,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,
@@ -4020,6 +4215,8 @@ mod tests {
         m.method = Some(HttpMethod::Post);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Public,
                     reason: Some("public login".to_string()),
@@ -5627,6 +5824,8 @@ mod tests {
         m.method = Some(HttpMethod::Get);
         m.endpoints = Some(Endpoints {
             http: Some(HttpEndpoint {
+                success_status: 200,
+                idempotency: HttpIdempotency::Idempotent,
                 auth: Some(HttpAuth {
                     mode: HttpAuthMode::Permission,
                     reason: None,

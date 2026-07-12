@@ -24,6 +24,7 @@ role = "fact"
 [[subscriptions]]
 consumer = "audit"
 group = "audit.role-revoked"
+execution = "adapter-native"
 
 [subscriptions.topology]
 partitionKey = "none"

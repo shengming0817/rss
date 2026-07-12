@@ -812,7 +812,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         ),
         (
             shape.handler_mapping,
-            "runtime 必须以单一 resolver 保留 generated subscription + execution → ConsumerTx plan 的 fail-closed mapping",
+            "runtime 必须以单一 resolver 穷尽匹配 generated typed dispatch key → ConsumerTx plan，且不得使用 wildcard/guard",
         ),
     ]
     .into_iter()
@@ -831,63 +831,14 @@ fn consumer_tx_plan_resolver_is_closed(item: &syn::ItemFn) -> bool {
     let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) = item.block.stmts.last() else {
         return false;
     };
-    if normalized_tokens(&mapping.expr)
-        != "(spec.consumer(),event.contract_id(),event.topic(),group.as_str(),execution,)"
-        || mapping.arms.len() != 8
-        || mapping.arms.iter().any(|arm| arm.guard.is_some())
-    {
-        return false;
-    }
-
-    let expected_mappings = [
-        (
-            "(\"audit\",generated::event::identity_v1::session_created::CONTRACT_ID,generated::event::identity_v1::session_created::TOPIC,\"audit.session-created\",SubscriberExecution::AdapterNative,)",
-            "Ok(ConsumerTxPlan::AuditSessionCreated)",
-        ),
-        (
-            "(\"audit\",generated::event::identity_v1::role_assigned::CONTRACT_ID,generated::event::identity_v1::role_assigned::TOPIC,\"audit.role-assigned\",SubscriberExecution::AdapterNative,)",
-            "Ok(ConsumerTxPlan::AuditRoleAssigned)",
-        ),
-        (
-            "(\"audit\",generated::event::identity_v1::role_revoked::CONTRACT_ID,generated::event::identity_v1::role_revoked::TOPIC,\"audit.role-revoked\",SubscriberExecution::AdapterNative,)",
-            "Ok(ConsumerTxPlan::AuditRoleRevoked)",
-        ),
-        (
-            "(\"audit\",generated::event::identity_v1::policy_updated::CONTRACT_ID,generated::event::identity_v1::policy_updated::TOPIC,\"audit.policy-updated\",SubscriberExecution::AdapterNative,)",
-            "Ok(ConsumerTxPlan::AuditPolicyUpdated)",
-        ),
-        (
-            "(\"settings\",generated::event::settings_v1::CONTRACT_ID,generated::event::settings_v1::TOPIC,\"settings.config-version-changed\",SubscriberExecution::DomainEffect(effect),)",
-            "Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect))",
-        ),
-    ];
-    if !expected_mappings.iter().all(|(pat, body)| {
-        mapping
-            .arms
-            .iter()
-            .any(|arm| normalized_tokens(&arm.pat) == *pat && normalized_tokens(&arm.body) == *body)
-    }) {
-        return false;
-    }
-
-    let expected_fail_closed = [
-        "(\"settings\",_,_,_,SubscriberExecution::AdapterNative)",
-        "(\"audit\",_,_,_,SubscriberExecution::DomainEffect(_))",
-        "_",
-    ];
-    expected_fail_closed.iter().all(|pat| {
-        mapping
-            .arms
-            .iter()
-            .any(|arm| normalized_tokens(&arm.pat) == *pat && expr_is_anyhow_bail(&arm.body))
-    }) && mapping
-        .arms
-        .last()
-        .is_some_and(|arm| normalized_tokens(&arm.pat) == "_" && expr_is_anyhow_bail(&arm.body))
-}
-
-fn expr_is_anyhow_bail(expr: &syn::Expr) -> bool {
-    matches!(expr, syn::Expr::Macro(expr) if normalized_tokens(&expr.mac.path) == "anyhow::bail")
+    normalized_tokens(&mapping.expr) == "spec.dispatch()"
+        && !mapping.arms.is_empty()
+        && mapping.arms.iter().all(|arm| {
+            arm.guard.is_none()
+                && matches!(&arm.pat, syn::Pat::Path(path)
+                    if path.path.segments.len() == 2
+                        && path.path.segments[0].ident == "SubscriptionDispatchKey")
+        })
 }
 
 fn normalized_tokens(tokens: &impl ToTokens) -> String {
@@ -1561,58 +1512,14 @@ mod tests {
                 wire_inbox_sweeper(pg, timing, module)?;
             }
             fn resolve_consumer_tx_plan(
-                event: EventSpec,
                 spec: SubscriptionSpec,
-                group: &ConsumerGroup,
                 execution: SubscriberExecution,
             ) -> anyhow::Result<ConsumerTxPlan> {
-                match (
-                    spec.consumer(),
-                    event.contract_id(),
-                    event.topic(),
-                    group.as_str(),
-                    execution,
-                ) {
-                    (
-                        "audit",
-                        generated::event::identity_v1::session_created::CONTRACT_ID,
-                        generated::event::identity_v1::session_created::TOPIC,
-                        "audit.session-created",
-                        SubscriberExecution::AdapterNative,
-                    ) => Ok(ConsumerTxPlan::AuditSessionCreated),
-                    (
-                        "audit",
-                        generated::event::identity_v1::role_assigned::CONTRACT_ID,
-                        generated::event::identity_v1::role_assigned::TOPIC,
-                        "audit.role-assigned",
-                        SubscriberExecution::AdapterNative,
-                    ) => Ok(ConsumerTxPlan::AuditRoleAssigned),
-                    (
-                        "audit",
-                        generated::event::identity_v1::role_revoked::CONTRACT_ID,
-                        generated::event::identity_v1::role_revoked::TOPIC,
-                        "audit.role-revoked",
-                        SubscriberExecution::AdapterNative,
-                    ) => Ok(ConsumerTxPlan::AuditRoleRevoked),
-                    (
-                        "audit",
-                        generated::event::identity_v1::policy_updated::CONTRACT_ID,
-                        generated::event::identity_v1::policy_updated::TOPIC,
-                        "audit.policy-updated",
-                        SubscriberExecution::AdapterNative,
-                    ) => Ok(ConsumerTxPlan::AuditPolicyUpdated),
-                    (
-                        "settings",
-                        generated::event::settings_v1::CONTRACT_ID,
-                        generated::event::settings_v1::TOPIC,
-                        "settings.config-version-changed",
-                        SubscriberExecution::DomainEffect(effect),
-                    ) => Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect)),
-                    ("settings", _, _, _, SubscriberExecution::AdapterNative) =>
-                        anyhow::bail!("settings requires effect"),
-                    ("audit", _, _, _, SubscriberExecution::DomainEffect(_)) =>
-                        anyhow::bail!("audit requires native"),
-                    _ => anyhow::bail!("no plan"),
+                match spec.dispatch() {
+                    SubscriptionDispatchKey::SeedHappenedV1Audit =>
+                        adapter_native_plan(spec, execution),
+                    SubscriptionDispatchKey::FutureEventV1Audit =>
+                        adapter_native_plan(spec, execution),
                 }
             }
             "#,
@@ -1695,22 +1602,23 @@ mod tests {
         else {
             panic!("resolver must end in match");
         };
-        *mapping.arms.last_mut().expect("wildcard arm").body =
-            syn::parse_quote!(Ok(ConsumerTxPlan::AuditSessionCreated));
+        mapping.arms.last_mut().expect("dispatch arm").pat = syn::parse_quote!(_);
         assert!(!consumer_tx_plan_resolver_is_closed(&resolver));
     }
 
     #[test]
-    #[allow(clippy::panic)]
-    fn consumer_tx_plan_resolver_rejects_missing_topology_arm() {
+    #[allow(clippy::expect_used, clippy::panic)]
+    fn consumer_tx_plan_resolver_accepts_new_typed_dispatch_without_shadow_registry() {
         let mut resolver = workspace_consumer_tx_plan_resolver();
         let Some(syn::Stmt::Expr(syn::Expr::Match(mapping), None)) =
             resolver.block.stmts.last_mut()
         else {
             panic!("resolver must end in match");
         };
-        mapping.arms.remove(0);
-        assert!(!consumer_tx_plan_resolver_is_closed(&resolver));
+        let mut arm = mapping.arms.last().expect("dispatch arm").clone();
+        arm.pat = syn::parse_quote!(SubscriptionDispatchKey::FutureEventV1Audit);
+        mapping.arms.push(arm);
+        assert!(consumer_tx_plan_resolver_is_closed(&resolver));
     }
 
     #[test]

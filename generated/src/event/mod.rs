@@ -16,6 +16,22 @@ pub enum SubscriberReadiness {
     Required,
 }
 
+/// Handler execution boundary generated from subscription metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionExecution {
+    /// The adapter owns decoding and execution without a domain callback.
+    AdapterNative,
+    /// Runtime assembly must inject the declared domain effect handler.
+    DomainEffect,
+}
+
+/// Closed set of domain effects supported by generated subscriptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionEffect {
+    /// Refresh settings configuration after a version-change fact.
+    SettingsConfigVersionRefresh,
+}
+
 /// 一个 event contract 的唯一 producer/subscriber topology 规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSpec {
@@ -74,19 +90,28 @@ impl EventSpec {
 pub struct SubscriptionSpec {
     consumer: &'static str,
     group: &'static str,
+    dispatch: SubscriptionDispatchKey,
     readiness: SubscriberReadiness,
+    execution: SubscriptionExecution,
+    effect: Option<SubscriptionEffect>,
 }
 
 impl SubscriptionSpec {
     pub(crate) const fn new(
         consumer: &'static str,
         group: &'static str,
+        dispatch: SubscriptionDispatchKey,
         readiness: SubscriberReadiness,
+        execution: SubscriptionExecution,
+        effect: Option<SubscriptionEffect>,
     ) -> Self {
         Self {
             consumer,
             group,
+            dispatch,
             readiness,
+            execution,
+            effect,
         }
     }
     /// Consumer domain identifier.
@@ -97,14 +122,44 @@ impl SubscriptionSpec {
     pub const fn group(self) -> &'static str {
         self.group
     }
+    /// Closed runtime dispatch identity derived from the contract identity and consumer.
+    pub const fn dispatch(self) -> SubscriptionDispatchKey {
+        self.dispatch
+    }
     /// Runtime-readiness policy.
     pub const fn readiness(self) -> SubscriberReadiness {
         self.readiness
+    }
+    /// Handler execution boundary.
+    pub const fn execution(self) -> SubscriptionExecution {
+        self.execution
+    }
+    /// Domain effect required by this subscription, when execution is domain-owned.
+    pub const fn effect(self) -> Option<SubscriptionEffect> {
+        self.effect
     }
 }
 pub mod _seed_v1;
 pub mod identity_v1;
 pub mod settings_v1;
+
+/// Closed runtime dispatch identities derived from active event subscriptions.
+///
+/// Runtime assembly must match this enum exhaustively. Adding a subscription therefore makes a
+/// missing handler binding a compile-time error instead of extending a handwritten registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionDispatchKey {
+    /// Generated dispatch identity for `identity.policy-updated@v1:audit`.
+    IdentityPolicyUpdatedV1Audit,
+    /// Generated dispatch identity for `identity.role-assigned@v1:audit`.
+    IdentityRoleAssignedV1Audit,
+    /// Generated dispatch identity for `identity.role-revoked@v1:audit`.
+    IdentityRoleRevokedV1Audit,
+    /// Generated dispatch identity for `identity.session-created@v1:audit`.
+    IdentitySessionCreatedV1Audit,
+    /// Generated dispatch identity for `settings.config-version-changed@v1:settings`.
+    SettingsConfigVersionChangedV1Settings,
+}
 
 /// Root event topology registry aggregated from every active generated event `SPEC`.
 ///

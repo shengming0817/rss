@@ -1290,6 +1290,7 @@ role = "fact"
 [[subscriptions]]
 consumer = "outside"
 group = "outside.created"
+execution = "adapter-native"
 [subscriptions.topology]
 partitionKey = "none"
 readiness = "required"

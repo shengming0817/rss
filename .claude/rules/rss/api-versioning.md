@@ -2,8 +2,8 @@
 
 ## 何时升级版本
 
-> Pre-GA wire 破坏窗口（至 2026-12-31）内，下列变更**允许原地修改 active 版本**、无需新版本
-> 目录；详见 §兼容窗口。窗口结束后本节严格生效。
+> 轴 B（HTTP / event / command wire）的 `active` 破坏式变更必须新建版本目录和
+> 新 contract ID，并完整保留旧 identity；不存在 pre-GA 时间窗口或原地修改例外。
 
 以下变更必须新建版本目录和新 contract ID：
 
@@ -14,27 +14,23 @@
 
 新增可选响应字段可以留在当前版本。新增必填请求字段必须升级版本。
 
-## 兼容窗口
+## 轴 A / 轴 B 边界
 
-RSS 当前 pre-GA，不保留旧 Rust API shim。
+RSS 当前没有外部 Rust API 调用方，因此轴 A（库 crate 公开 API 与 authoring schema）
+的破坏变更不保留旧 Rust API shim；公开符号面仍由 `cargo public-api` /
+`cargo-semver-checks` 显式审查。
 
-**Pre-GA wire 破坏窗口（至 2026-12-31）**：在此窗口内，HTTP / event / command wire
-contract 的破坏式变更——含在 **active 版本上**新增 / 收紧 required 字段、改字段类型 / 枚举 /
-鉴权 / 幂等 / 分页语义、改错误码 / HTTP 状态码——**允许原地修改 active 版本**，无需新建
-版本目录。依据：pre-GA 阶段 rss 无外部 wire 消费方，全部 in-repo 调用方随同一 PR 原子更新，
-版本目录隔离（其价值是保护可独立演进的消费方）此时为纯仪式。原地破坏式变更**仍须**：
+轴 B 是版本化 wire contract，不使用轴 A 的“不留 shim”结论绕过消费方隔离。
+`active` wire 发生破坏式变更时必须：
 
-- 完成契约扇出闭环（schema → generated → 域 crate metadata（`Cargo.toml` / `contract.toml`）→ tests → docs，见 `contract-fanout.md`）；
-- 在 PR 说明动机。
+- 新建 `contracts/{kind}/{domain}/{version+1}/` 与新 contract ID；
+- 保留旧 contract identity 及其 wire 语义，不用新版本替换或删除旧版本；
+- 完成契约扇出闭环（schema → generated → 域 crate metadata → tests → docs，见
+  `contract-fanout.md`）。
 
-**窗口结束后（2026-12-31 起，趋近 GA）**：恢复严格隔离——破坏式 wire 变更用新版本目录，
-不在旧版本上偷改语义；下文 §何时升级版本 与 §内部 API 的升版要求严格生效。窗口到期前须复核
-本条：rss 进入 GA 或出现外部 wire 消费方时即提前收紧，否则显式续期（"暂定" 上限 2026-12-31）。
-
-**本 wire 破坏窗口仅限 HTTP / event / command wire contract（轴 B）**；库 crate 公开 API
-（`vocab` / `consistency` / `bootstrap` 等库 crate 的 exported 符号、`generated` 契约派生类型）+ authoring schema
-（`contract.toml` / `assembly.toml`）走 SemVer（轴 A）。
-crate 公开 API 面用 `cargo public-api` 守。
+`cargo xtask contract breaking` 以 base lifecycle 分级：`active` deny、`deprecated` warn、`draft`
+skip。该分级只定义历史 breaking 检查的处置范围，不授予原地破坏权限；更不得先将
+`active` 降为 `deprecated` / `draft` 再绕过 deny。
 
 ## 内部 API
 
@@ -42,7 +38,7 @@ crate 公开 API 面用 `cargo public-api` 守。
 
 - contract.toml 声明鉴权和 caller
 - path、schema、handler、generated code 同步
-- 破坏式 wire 变更新增版本（Pre-GA 窗口期内同 §兼容窗口，可原地改 active 版本）
+- `active` 破坏式 wire 变更新增版本和 contract ID，并保留旧 identity
 
 ## Setup / bootstrap 路径
 

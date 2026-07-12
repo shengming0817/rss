@@ -1,6 +1,25 @@
 use generated::event::{
-    EVENTS, PartitionKeyStrategy, SubscriberReadiness, identity_v1, settings_v1,
+    EVENTS, PartitionKeyStrategy, SubscriberReadiness, SubscriptionEffect, SubscriptionExecution,
+    identity_v1, settings_v1,
 };
+
+fn assert_unique_dispatch_keys() {
+    let mut dispatches = Vec::new();
+    for subscription in EVENTS.iter().flat_map(|event| event.subscriptions()) {
+        assert!(
+            !dispatches.contains(&subscription.dispatch()),
+            "generated subscription dispatch keys must be globally unique"
+        );
+        dispatches.push(subscription.dispatch());
+    }
+    assert_eq!(
+        dispatches.len(),
+        EVENTS
+            .iter()
+            .map(|event| event.subscriptions().len())
+            .sum::<usize>()
+    );
+}
 
 #[test]
 fn active_event_registry_exposes_complete_single_source_topology() {
@@ -13,6 +32,7 @@ fn active_event_registry_exposes_complete_single_source_topology() {
     ];
 
     assert_eq!(EVENTS, expected);
+    assert_unique_dispatch_keys();
     for event in EVENTS {
         let contract = event.contract();
         assert_eq!(event.contract_id(), contract.contract_id());
@@ -29,5 +49,17 @@ fn active_event_registry_exposes_complete_single_source_topology() {
         assert!(!subscription.consumer().is_empty());
         assert!(!subscription.group().is_empty());
         assert_eq!(subscription.readiness(), SubscriberReadiness::Required);
+        let expected_execution = if event.contract_id() == "settings.config-version-changed" {
+            (
+                SubscriptionExecution::DomainEffect,
+                Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+            )
+        } else {
+            (SubscriptionExecution::AdapterNative, None)
+        };
+        assert_eq!(
+            (subscription.execution(), subscription.effect()),
+            expected_execution
+        );
     }
 }

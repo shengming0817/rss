@@ -36,7 +36,7 @@ use std::task::{Context, Poll};
 
 use axum::body::Body;
 use axum::extract::{FromRequestParts, RawPathParams, Request};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
@@ -106,6 +106,18 @@ impl RouteMeta {
     #[must_use]
     pub const fn contract_id(&self) -> &'static str {
         self.evidence.contract_id()
+    }
+
+    /// Successful response status declared by the generated contract.
+    #[must_use]
+    pub const fn success_status(&self) -> vocab::HttpSuccessStatus {
+        self.evidence.success_status()
+    }
+
+    /// Request replay semantics declared by the generated contract.
+    #[must_use]
+    pub const fn idempotency(&self) -> vocab::HttpIdempotency {
+        self.evidence.idempotency()
     }
 }
 
@@ -645,6 +657,36 @@ impl AuthDecision {
     }
 }
 
+/// Enforce the generated success response contract at the serving boundary.
+///
+/// Error responses remain owned by each handler's error mapping, so only 4xx/5xx statuses may
+/// differ from the declared success status. Informational, alternate successful, redirect, and
+/// non-standard status classes fail closed instead of silently serving a wire shape that differs
+/// from the manifest.
+fn response_status_matches_contract(declared: u16, actual: StatusCode) -> bool {
+    actual.as_u16() == declared || actual.is_client_error() || actual.is_server_error()
+}
+
+fn enforce_declared_success_status(
+    meta: &RouteMeta,
+    request_id: &str,
+    response: Response,
+) -> Response {
+    let declared = meta.success_status().get();
+    let idempotency = meta.idempotency();
+    if !response_status_matches_contract(declared, response.status()) {
+        tracing::error!(
+            contract_id = meta.contract_id(),
+            declared_status = declared,
+            actual_status = response.status().as_u16(),
+            declared_idempotency = ?idempotency,
+            "route success status drift"
+        );
+        return crate::error::internal_error(request_id);
+    }
+    response
+}
+
 /// 决策结果（Allow / Require / Deny）。
 ///
 /// `evidence_scheme` = 请求所携 [`Authenticated`] 证据的已验证方案（无证据 / `Anonymous` 证据 → `None`，见 `call`）。
@@ -1023,10 +1065,11 @@ where
             }
             // ambient scope 绑定 handler（+ 下游 diport emit）：scoped 认证主体（有 tenant）才建，跨租户 /
             // Public ⇒ 下游 `runctx::try_current()` fail-closed `MissingCtx`（#1105 F2）。
-            match scope_ctx {
+            let response = match scope_ctx {
                 Some(ctx) => runctx::scope(ctx, inner.call(req)).await,
                 None => inner.call(req).await,
-            }
+            }?;
+            Ok(enforce_declared_success_status(&meta, &rid, response))
         })
     }
 }
@@ -1095,6 +1138,8 @@ mod tests {
         TEST_BINDING,
         "/test",
         "GET",
+        vocab::HttpSuccessStatus::new(200),
+        vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::Public,
         None,
         false,
@@ -1102,6 +1147,34 @@ mod tests {
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
     );
     const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn declared_response_status_policy_is_closed_by_http_class() {
+        let cases = [
+            (100, false),
+            (199, false),
+            (200, false),
+            (201, true),
+            (299, false),
+            (300, false),
+            (399, false),
+            (400, true),
+            (499, true),
+            (500, true),
+            (599, true),
+            (600, false),
+        ];
+
+        for (actual, expected) in cases {
+            let actual = StatusCode::from_u16(actual).expect("test status is valid");
+            assert_eq!(
+                response_status_matches_contract(201, actual),
+                expected,
+                "unexpected policy for status {actual}"
+            );
+        }
+    }
 
     #[allow(clippy::unwrap_used)]
     fn tenant() -> TenantId {

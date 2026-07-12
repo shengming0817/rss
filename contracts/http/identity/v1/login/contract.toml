@@ -14,6 +14,10 @@ method = "POST"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[endpoints.http]
+successStatus = 201
+idempotency = "non-idempotent"
+
 [endpoints.http.auth]
 mode = "public"
 reason = "login is pre-auth; tenant scope is populated from X-Tenant-ID"

@@ -1,4 +1,4 @@
-//! wire 破坏式变更检测门（`cargo xtask contract breaking [--against <git-ref>] [--deny]`，ADR-008 落地）。
+//! wire 破坏式变更检测门（`cargo xtask contract breaking [--against <git-ref>]`，ADR-008 落地）。
 //!
 //! 轴 B（wire JSON Schema）跨版本破坏检测：对 `contracts/{kind}/{domain}/{version}/*.schema.json` 做
 //! base-ref ↔ working-tree 的递归 JSON-Schema diff，对标 Buf WIRE_JSON 规则分类（借规则思想、不迁 protobuf）。
@@ -14,43 +14,38 @@
 //! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "verify", source = "code" }—— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
 //!   FIELD_FORMAT_CHANGED / ENUM_VALUE_DELETED / ADDITIONAL_PROPS_TIGHTENED / NULLABLE_REMOVED /
 //!   REDACTION_POLICY_CHANGED / PROTECTION_POLICY_CHANGED）对 base↔working
-//!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。后 3 条
-//!   manifest 依赖规则（HTTP_STATUS_CODE_CHANGED / AUTH_REQUIREMENT_CHANGED / IDEMPOTENCY_LEVEL_CHANGED）依赖
-//!   扩 manifest schema，登记第三期（ADR-008 §3.1）。首版不覆盖 `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
-//! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "verify", source = "code" }—— 窗口分级 **配置驱动、不读墙上时钟**（clippy 全 workspace 禁
-//!   `SystemTime::now`/`chrono::Utc::now`）：默认 [`EnforcementMode::Warn`]（pre-GA，至 2026-12-31，退出码 0）；
-//!   env `RSS_WIRE_BREAKING=deny` 或 standalone `--deny` 升 [`EnforcementMode::Deny`]（窗口到期 / GA / 外部
-//!   wire 消费方提前收紧）。[`disposition`] 纯函数：仅 `(Deny, active)` → `Deny`（退出码 1），余 `Warn`（退出码 0）。
-//!   gate 只对 **active + deprecated** 契约 diff（draft = seed/前瞻原地演进豁免，对齐 ADR §3.2「只检 active」）。
+//!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。
+//!   manifest wire 投影另覆盖 HTTP、L2 topology、subscription 与 lifecycle 降级规则。当前不覆盖
+//!   `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
+//! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "verify", source = "code" }——
+//!   lifecycle 固定分级：active 恒 deny，deprecated 恒 warn，draft 跳过；既有契约以 base lifecycle
+//!   分级，working 降级不得绕过。
 //!
 //! anti-vacuity（ai-robust 第 4 档强制，守卫不恒真）：每条规则配 synthetic red（破坏→finding）+ green
 //! （兼容→无），并含「≥1 active 契约破坏」red（防恒真）+ draft 跳过 red（draft 删字段→无 finding）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Stdio;
+use std::process::Output;
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::discover;
-use super::manifest::{ContractManifest, Lifecycle};
+use super::manifest::{
+    ConsistencyLevel, ContractKind, ContractManifest, Delivery, HttpAuthMode, HttpIdempotency,
+    HttpMethod, HttpResourceSharingMode, Lifecycle, OutboxAtomicity, OutboxRole,
+    PartitionKeyStrategy, SubscriberReadiness, SubscriptionEffect, SubscriptionExecution,
+};
 use super::protection;
 use super::redaction;
 
 /// base ref 默认值（`--against` 缺省）：与 ADR-008 §3.2 一致（PR 基准分支）。
 pub(crate) const DEFAULT_AGAINST: &str = "origin/develop";
 
-/// 窗口分级开关 env 名（单一事实源）。值 `deny`（大小写不敏感）升 [`EnforcementMode::Deny`]。
-pub(crate) const ENFORCE_ENV: &str = "RSS_WIRE_BREAKING";
-
 /// JSON Schema `properties` 键名（DRY：compare_node + check_field_deletions 多处引用）。
 const PROPS: &str = "properties";
-
-/// 第三期规则缺口透明化注脚（每次运行打印）：后 3 条 manifest 依赖规则尚未实现，gate 不检测——
-/// 防用户误以为已全覆盖（B-F3 / ADR-008 §3.1 第二期表）。
-const THIRD_PHASE_NOTE: &str = "  注：HTTP_STATUS_CODE_CHANGED / AUTH_REQUIREMENT_CHANGED / IDEMPOTENCY_LEVEL_CHANGED 依赖 manifest schema 扩展，第三期落地前不检测（ADR-008 §3.1）。";
 
 /// 首版破坏规则（对标 Buf WIRE_JSON，适配 JSON Schema）。`id()` = 稳定大写蛇形 ID（输出 + 测试断言用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +64,38 @@ pub(crate) enum BreakingRule {
     AdditionalPropsTightened,
     /// 字段 `type` 由含 `"null"` 收紧到不含（旧客户端发 null 失败）。优先于 `FieldTypeChanged`（同变化不重复报）。
     NullableRemoved,
+    NullableAdded,
+    RequiredFieldRemoved,
+    EnumValueAdded,
+    EnumConstraintRemoved,
+    FieldAddedToOutput,
+    AdditionalPropsLoosened,
     /// 既有字段的 `x-pii` / `x-redaction` 隐私语义改变。
     RedactionPolicyChanged,
     /// 既有字段的 `x-protection`（at-rest 加密）或 schema 级 `x-at-rest` 保护语义改变（#1468，
     /// ADR-011 D1b：保护策略漂移须作审查材料，防 wire 隐私语义静默漂移）。
     ProtectionPolicyChanged,
+    HttpStatusCodeChanged,
+    HttpPathChanged,
+    HttpMethodChanged,
+    AuthRequirementChanged,
+    AuthScopeChanged,
+    ResourceSharingChanged,
+    IdempotencyLevelChanged,
+    TopicChanged,
+    DeliveryChanged,
+    ConsistencyLevelChanged,
+    OutboxRoleChanged,
+    OutboxAtomicityChanged,
+    OutboxEmitsChanged,
+    SubscriptionSetChanged,
+    SubscriptionConsumerChanged,
+    SubscriptionGroupChanged,
+    SubscriptionTopologyChanged,
+    SubscriptionExecutionChanged,
+    SubscriptionEffectChanged,
+    LifecycleDowngraded,
+    ContractRemoved,
 }
 
 impl BreakingRule {
@@ -87,33 +109,35 @@ impl BreakingRule {
             BreakingRule::EnumValueDeleted => "ENUM_VALUE_DELETED",
             BreakingRule::AdditionalPropsTightened => "ADDITIONAL_PROPS_TIGHTENED",
             BreakingRule::NullableRemoved => "NULLABLE_REMOVED",
+            BreakingRule::NullableAdded => "NULLABLE_ADDED",
+            BreakingRule::RequiredFieldRemoved => "REQUIRED_FIELD_REMOVED",
+            BreakingRule::EnumValueAdded => "ENUM_VALUE_ADDED",
+            BreakingRule::EnumConstraintRemoved => "ENUM_CONSTRAINT_REMOVED",
+            BreakingRule::FieldAddedToOutput => "FIELD_ADDED_TO_OUTPUT",
+            BreakingRule::AdditionalPropsLoosened => "ADDITIONAL_PROPS_LOOSENED",
             BreakingRule::RedactionPolicyChanged => "REDACTION_POLICY_CHANGED",
             BreakingRule::ProtectionPolicyChanged => "PROTECTION_POLICY_CHANGED",
-        }
-    }
-}
-
-/// 窗口分级 enforcement 模式（WIRE-BREAKING-WINDOW-01）。默认 `Warn`（pre-GA）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EnforcementMode {
-    /// pre-GA：所有 finding 仅记录（退出码 0），不阻断 verify。
-    Warn,
-    /// 窗口到期 / 提前收紧：active 契约破坏升 deny（退出码 1）。
-    Deny,
-}
-
-impl EnforcementMode {
-    /// 从 env [`ENFORCE_ENV`] 解析；`deny`（大小写不敏感）→ `Deny`，缺省 / 其它 → `Warn`。
-    /// **不读墙上时钟**——窗口到期由人改 env/默认或 `--deny`，与 clock 纪律一致（WIRE-BREAKING-WINDOW-01）。
-    pub(crate) fn from_env() -> Self {
-        Self::from_raw(std::env::var(ENFORCE_ENV).ok().as_deref())
-    }
-
-    /// 纯解析（与 env 读取分离，便于单测——不触 `std::env`，避 edition-2024 `set_var` unsafe）。
-    fn from_raw(raw: Option<&str>) -> Self {
-        match raw {
-            Some(v) if v.trim().eq_ignore_ascii_case("deny") => EnforcementMode::Deny,
-            _ => EnforcementMode::Warn,
+            BreakingRule::HttpStatusCodeChanged => "HTTP_STATUS_CODE_CHANGED",
+            BreakingRule::HttpPathChanged => "HTTP_PATH_CHANGED",
+            BreakingRule::HttpMethodChanged => "HTTP_METHOD_CHANGED",
+            BreakingRule::AuthRequirementChanged => "AUTH_REQUIREMENT_CHANGED",
+            BreakingRule::AuthScopeChanged => "AUTH_SCOPE_CHANGED",
+            BreakingRule::ResourceSharingChanged => "RESOURCE_SHARING_CHANGED",
+            BreakingRule::IdempotencyLevelChanged => "IDEMPOTENCY_LEVEL_CHANGED",
+            BreakingRule::TopicChanged => "TOPIC_CHANGED",
+            BreakingRule::DeliveryChanged => "DELIVERY_CHANGED",
+            BreakingRule::ConsistencyLevelChanged => "CONSISTENCY_LEVEL_CHANGED",
+            BreakingRule::OutboxRoleChanged => "OUTBOX_ROLE_CHANGED",
+            BreakingRule::OutboxAtomicityChanged => "OUTBOX_ATOMICITY_CHANGED",
+            BreakingRule::OutboxEmitsChanged => "OUTBOX_EMITS_CHANGED",
+            BreakingRule::SubscriptionSetChanged => "SUBSCRIPTION_SET_CHANGED",
+            BreakingRule::SubscriptionConsumerChanged => "SUBSCRIPTION_CONSUMER_CHANGED",
+            BreakingRule::SubscriptionGroupChanged => "SUBSCRIPTION_GROUP_CHANGED",
+            BreakingRule::SubscriptionTopologyChanged => "SUBSCRIPTION_TOPOLOGY_CHANGED",
+            BreakingRule::SubscriptionExecutionChanged => "SUBSCRIPTION_EXECUTION_CHANGED",
+            BreakingRule::SubscriptionEffectChanged => "SUBSCRIPTION_EFFECT_CHANGED",
+            BreakingRule::LifecycleDowngraded => "LIFECYCLE_DOWNGRADED",
+            BreakingRule::ContractRemoved => "CONTRACT_REMOVED",
         }
     }
 }
@@ -134,12 +158,12 @@ impl Disposition {
     }
 }
 
-/// 窗口分级核心（纯函数，WIRE-BREAKING-WINDOW-01）：仅 `Deny` 模式下 active 契约破坏升 `Deny`，
-/// 余皆 `Warn`。`draft` 在 [`evaluate`] 前已被滤除，此处对其返回 `Warn`（总性，不应被调用到）。
-pub(crate) fn disposition(mode: EnforcementMode, lifecycle: Lifecycle) -> Disposition {
-    match (mode, lifecycle) {
-        (EnforcementMode::Deny, Lifecycle::Active) => Disposition::Deny,
-        _ => Disposition::Warn,
+/// lifecycle 分级核心：active 契约破坏阻断，deprecated 仅告警；draft 在 [`evaluate`]
+/// 前被滤除，此处对其返回 `Warn` 以保持函数总性。
+pub(crate) fn disposition(lifecycle: Lifecycle) -> Disposition {
+    match lifecycle {
+        Lifecycle::Active => Disposition::Deny,
+        Lifecycle::Deprecated | Lifecycle::Draft => Disposition::Warn,
     }
 }
 
@@ -160,9 +184,21 @@ pub(crate) struct RawBreak {
 
 /// 比对两版 schema 树（base `old` → working `new`），返回全部破坏（首版 7 规则；递归 `properties`）。
 /// 纯函数——不触 IO，便于表驱动红/绿单测。
+#[cfg(test)]
 pub(crate) fn compare_schemas(old: &Value, new: &Value) -> Vec<RawBreak> {
+    compare_schemas_for_direction(old, new, SchemaDirection::Input)
+}
+
+fn compare_schemas_for_direction(
+    old: &Value,
+    new: &Value,
+    direction: SchemaDirection,
+) -> Vec<RawBreak> {
     let mut out = Vec::new();
-    compare_node(old, new, "", &mut out);
+    match direction {
+        SchemaDirection::Input => compare_node(old, new, "", &mut out),
+        SchemaDirection::Output => compare_output_node(old, new, "", &mut out),
+    }
     check_redaction_policy(old, new, &mut out);
     check_protection_policy(old, new, &mut out);
     out
@@ -208,6 +244,152 @@ fn compare_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
         new.get("items").filter(|v| v.is_object()),
     ) {
         compare_node(oi, ni, &item_path(path), out);
+    }
+}
+
+/// Producer output must remain a subset of the values accepted by the old schema. This is the
+/// opposite variance from request/input schemas, but retains the same recursive traversal.
+fn compare_output_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    check_field_deletions(old, new, path, out);
+    check_output_fields_added(old, new, path, out);
+    check_required_removed(old, new, path, out);
+    check_output_type_and_nullable(old, new, path, out);
+    check_format(old, new, path, out);
+    check_output_enum(old, new, path, out);
+    check_additional_props_loosened(old, new, path, out);
+
+    if let (Some(op), Some(np)) = (
+        old.get(PROPS).and_then(Value::as_object),
+        new.get(PROPS).and_then(Value::as_object),
+    ) {
+        for (key, old_property) in op {
+            if let Some(new_property) = np.get(key) {
+                compare_output_node(old_property, new_property, &child(path, key), out);
+            }
+        }
+    }
+    if let (Some(old_items), Some(new_items)) = (
+        old.get("items").filter(|value| value.is_object()),
+        new.get("items").filter(|value| value.is_object()),
+    ) {
+        compare_output_node(old_items, new_items, &item_path(path), out);
+    }
+}
+
+fn check_output_fields_added(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    let Some(old_properties) = old.get(PROPS).and_then(Value::as_object) else {
+        return;
+    };
+    let Some(new_properties) = new.get(PROPS).and_then(Value::as_object) else {
+        return;
+    };
+    if old.get("additionalProperties").and_then(Value::as_bool) != Some(false) {
+        return;
+    }
+    for key in new_properties.keys() {
+        if !old_properties.contains_key(key) {
+            out.push(RawBreak {
+                rule: BreakingRule::FieldAddedToOutput,
+                pointer: child(path, key),
+                detail: format!("输出新增旧 schema 禁止的字段 `{key}`"),
+            });
+        }
+    }
+}
+
+fn check_required_removed(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    let old_required = string_set(old.get("required"));
+    let new_required = string_set(new.get("required"));
+    for field in old_required.difference(&new_required) {
+        out.push(RawBreak {
+            rule: BreakingRule::RequiredFieldRemoved,
+            pointer: child(path, field),
+            detail: format!("输出字段 `{field}` 不再保证 required"),
+        });
+    }
+}
+
+fn check_output_type_and_nullable(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    let old_types = type_set(old.get("type"));
+    let new_types = type_set(new.get("type"));
+    if old_types.is_empty() || new_types.is_empty() {
+        return;
+    }
+    const NULL: &str = "null";
+    if !old_types.contains(NULL) && new_types.contains(NULL) {
+        out.push(RawBreak {
+            rule: BreakingRule::NullableAdded,
+            pointer: path.to_string(),
+            detail: format!("{} 输出由不可空扩大为可空", show(path)),
+        });
+    }
+    let old_non_null: BTreeSet<&str> = old_types
+        .iter()
+        .map(String::as_str)
+        .filter(|value| *value != NULL)
+        .collect();
+    let new_non_null: BTreeSet<&str> = new_types
+        .iter()
+        .map(String::as_str)
+        .filter(|value| *value != NULL)
+        .collect();
+    let added: Vec<&str> = new_non_null
+        .iter()
+        .copied()
+        .filter(|value| !type_accepted(value, &old_non_null))
+        .collect();
+    if !added.is_empty() {
+        out.push(RawBreak {
+            rule: BreakingRule::FieldTypeChanged,
+            pointer: path.to_string(),
+            detail: format!(
+                "{} 输出类型扩大：旧 {:?} → 新 {:?}（新增 {:?}）",
+                show(path),
+                sorted(&old_types),
+                sorted(&new_types),
+                added
+            ),
+        });
+    }
+}
+
+fn check_output_enum(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    let old_enum = old.get("enum").and_then(Value::as_array);
+    let new_enum = new.get("enum").and_then(Value::as_array);
+    match (old_enum, new_enum) {
+        (Some(_), None) => out.push(RawBreak {
+            rule: BreakingRule::EnumConstraintRemoved,
+            pointer: path.to_string(),
+            detail: format!("{} 输出 enum 约束被删除", show(path)),
+        }),
+        (Some(old_values), Some(new_values)) => {
+            for value in new_values {
+                if !old_values.contains(value) {
+                    out.push(RawBreak {
+                        rule: BreakingRule::EnumValueAdded,
+                        pointer: path.to_string(),
+                        detail: format!("{} 输出新增 enum 值 {value}", show(path)),
+                    });
+                }
+            }
+        }
+        (None, _) => {}
+    }
+}
+
+fn check_additional_props_loosened(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    let old_restrictive = old
+        .get("additionalProperties")
+        .is_some_and(|value| value.as_bool() == Some(false) || value.is_object());
+    let new_permissive = new
+        .get("additionalProperties")
+        .is_none_or(|value| value.as_bool() == Some(true));
+    if old_restrictive && new_permissive {
+        out.push(RawBreak {
+            rule: BreakingRule::AdditionalPropsLoosened,
+            pointer: path.to_string(),
+            detail: format!("{} 输出 additionalProperties 由受限扩大为宽松", show(path)),
+        });
     }
 }
 
@@ -420,6 +602,368 @@ pub(crate) struct GradedFinding {
     pub(crate) detail: String,
 }
 
+/// Manifest 中真正影响 wire/runtime 兼容性的窄投影。它与 JSON Schema slot 独立，避免把
+/// metadata 伪装成 schema；集合字段在构造时归一化为 `BTreeSet`，比较与声明顺序无关。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ManifestProjection {
+    http: Option<HttpWireProjection>,
+    topic: Option<String>,
+    delivery: Option<String>,
+    consistency: Option<String>,
+    outbox: Option<OutboxProjection>,
+    subscriptions: BTreeSet<SubscriptionProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpWireProjection {
+    path: Option<String>,
+    method: Option<String>,
+    success_status: Option<u16>,
+    auth: Option<AuthProjection>,
+    auth_scope: AuthScopeProjection,
+    resource_sharing: String,
+    idempotency: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthProjection {
+    mode: String,
+    permission: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AuthScopeProjection {
+    resource: Option<String>,
+    self_scoped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutboxProjection {
+    role: String,
+    atomicity: Option<String>,
+    emits: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SubscriptionProjection {
+    consumer: String,
+    group: String,
+    partition: String,
+    readiness: String,
+    execution: Option<String>,
+    effect: Option<String>,
+}
+
+fn changed(
+    rule: BreakingRule,
+    pointer: &str,
+    old: &impl std::fmt::Debug,
+    new: &impl std::fmt::Debug,
+) -> RawBreak {
+    RawBreak {
+        rule,
+        pointer: pointer.to_string(),
+        detail: format!("wire 声明由 {old:?} 变更为 {new:?}"),
+    }
+}
+
+fn compare_optional<T: PartialEq + std::fmt::Debug>(
+    out: &mut Vec<RawBreak>,
+    rule: BreakingRule,
+    pointer: &str,
+    old: &Option<T>,
+    new: &Option<T>,
+) {
+    // 历史 manifest 尚无当前 carrier 时不追溯阻断；working parser 始终严格。
+    if old.is_some() && old != new {
+        out.push(changed(rule, pointer, old, new));
+    }
+}
+
+pub(crate) fn compare_manifests(
+    old: &ManifestProjection,
+    new: &ManifestProjection,
+) -> Vec<RawBreak> {
+    let mut out = Vec::new();
+    match (&old.http, &new.http) {
+        (Some(a), Some(b)) => {
+            compare_optional(
+                &mut out,
+                BreakingRule::HttpPathChanged,
+                "path",
+                &a.path,
+                &b.path,
+            );
+            compare_optional(
+                &mut out,
+                BreakingRule::HttpMethodChanged,
+                "method",
+                &a.method,
+                &b.method,
+            );
+            compare_optional(
+                &mut out,
+                BreakingRule::HttpStatusCodeChanged,
+                "endpoints.http.successStatus",
+                &a.success_status,
+                &b.success_status,
+            );
+            compare_optional(
+                &mut out,
+                BreakingRule::IdempotencyLevelChanged,
+                "endpoints.http.idempotency",
+                &a.idempotency,
+                &b.idempotency,
+            );
+            if a.auth != b.auth {
+                out.push(changed(
+                    BreakingRule::AuthRequirementChanged,
+                    "endpoints.http.auth",
+                    &a.auth,
+                    &b.auth,
+                ));
+            }
+            if a.auth_scope != b.auth_scope {
+                out.push(changed(
+                    BreakingRule::AuthScopeChanged,
+                    "endpoints.http.authorizationScope",
+                    &a.auth_scope,
+                    &b.auth_scope,
+                ));
+            }
+            if a.resource_sharing != b.resource_sharing {
+                out.push(changed(
+                    BreakingRule::ResourceSharingChanged,
+                    "endpoints.http.resourceSharing.mode",
+                    &a.resource_sharing,
+                    &b.resource_sharing,
+                ));
+            }
+        }
+        (Some(a), None) => {
+            compare_optional(
+                &mut out,
+                BreakingRule::HttpPathChanged,
+                "path",
+                &a.path,
+                &None::<String>,
+            );
+            compare_optional(
+                &mut out,
+                BreakingRule::HttpMethodChanged,
+                "method",
+                &a.method,
+                &None::<String>,
+            );
+            compare_optional(
+                &mut out,
+                BreakingRule::HttpStatusCodeChanged,
+                "endpoints.http.successStatus",
+                &a.success_status,
+                &None::<u16>,
+            );
+            if a.auth.is_some() {
+                out.push(changed(
+                    BreakingRule::AuthRequirementChanged,
+                    "endpoints.http.auth",
+                    &a.auth,
+                    &None::<AuthProjection>,
+                ));
+            }
+            compare_optional(
+                &mut out,
+                BreakingRule::IdempotencyLevelChanged,
+                "endpoints.http.idempotency",
+                &a.idempotency,
+                &None::<String>,
+            );
+            if a.auth_scope != AuthScopeProjection::default() {
+                out.push(changed(
+                    BreakingRule::AuthScopeChanged,
+                    "endpoints.http.authorizationScope",
+                    &a.auth_scope,
+                    &AuthScopeProjection::default(),
+                ));
+            }
+        }
+        (None, _) => {}
+    }
+    compare_optional(
+        &mut out,
+        BreakingRule::TopicChanged,
+        "topic",
+        &old.topic,
+        &new.topic,
+    );
+    compare_optional(
+        &mut out,
+        BreakingRule::DeliveryChanged,
+        "delivery",
+        &old.delivery,
+        &new.delivery,
+    );
+    compare_optional(
+        &mut out,
+        BreakingRule::ConsistencyLevelChanged,
+        "consistencyLevel",
+        &old.consistency,
+        &new.consistency,
+    );
+    compare_outbox(&mut out, &old.outbox, &new.outbox);
+    compare_subscriptions(&mut out, &old.subscriptions, &new.subscriptions);
+    out
+}
+
+fn compare_outbox(
+    out: &mut Vec<RawBreak>,
+    old: &Option<OutboxProjection>,
+    new: &Option<OutboxProjection>,
+) {
+    let Some(a) = old else { return };
+    let Some(b) = new else {
+        out.push(changed(
+            BreakingRule::OutboxRoleChanged,
+            "capabilities.outbox",
+            old,
+            new,
+        ));
+        if a.atomicity.is_some() {
+            out.push(changed(
+                BreakingRule::OutboxAtomicityChanged,
+                "capabilities.outbox.atomicity",
+                &a.atomicity,
+                &None::<String>,
+            ));
+        }
+        if !a.emits.is_empty() {
+            out.push(changed(
+                BreakingRule::OutboxEmitsChanged,
+                "capabilities.outbox.emits",
+                &a.emits,
+                &BTreeSet::<String>::new(),
+            ));
+        }
+        return;
+    };
+    if a.role != b.role {
+        out.push(changed(
+            BreakingRule::OutboxRoleChanged,
+            "capabilities.outbox.role",
+            &a.role,
+            &b.role,
+        ));
+    }
+    if a.atomicity != b.atomicity {
+        out.push(changed(
+            BreakingRule::OutboxAtomicityChanged,
+            "capabilities.outbox.atomicity",
+            &a.atomicity,
+            &b.atomicity,
+        ));
+    }
+    if a.emits != b.emits {
+        out.push(changed(
+            BreakingRule::OutboxEmitsChanged,
+            "capabilities.outbox.emits",
+            &a.emits,
+            &b.emits,
+        ));
+    }
+}
+
+fn compare_subscriptions(
+    out: &mut Vec<RawBreak>,
+    old: &BTreeSet<SubscriptionProjection>,
+    new: &BTreeSet<SubscriptionProjection>,
+) {
+    if old == new {
+        return;
+    }
+    let old_identities = subscription_identities(old);
+    let new_identities = subscription_identities(new);
+    if old_identities != new_identities {
+        let old_consumers = subscription_consumers(old);
+        let new_consumers = subscription_consumers(new);
+        let old_groups = subscription_groups(old);
+        let new_groups = subscription_groups(new);
+        if old.len() == new.len() && old_groups == new_groups {
+            out.push(changed(
+                BreakingRule::SubscriptionConsumerChanged,
+                "subscriptions.consumer",
+                old,
+                new,
+            ));
+            return;
+        }
+        if old.len() == new.len() && old_consumers == new_consumers {
+            out.push(changed(
+                BreakingRule::SubscriptionGroupChanged,
+                "subscriptions.group",
+                old,
+                new,
+            ));
+            return;
+        }
+        out.push(changed(
+            BreakingRule::SubscriptionSetChanged,
+            "subscriptions",
+            old,
+            new,
+        ));
+        return;
+    }
+    let new_by_identity: BTreeMap<(&str, &str), &SubscriptionProjection> = new
+        .iter()
+        .map(|s| ((s.consumer.as_str(), s.group.as_str()), s))
+        .collect();
+    for a in old {
+        let identity = (a.consumer.as_str(), a.group.as_str());
+        let b = new_by_identity[&identity];
+        if a.partition != b.partition || a.readiness != b.readiness {
+            out.push(changed(
+                BreakingRule::SubscriptionTopologyChanged,
+                "subscriptions.topology",
+                a,
+                b,
+            ));
+        }
+        compare_optional(
+            out,
+            BreakingRule::SubscriptionExecutionChanged,
+            "subscriptions.execution",
+            &a.execution,
+            &b.execution,
+        );
+        // execution 在历史 base 缺失时一并忽略当前 carrier；一旦存在，effect 的
+        // None↔Some 也是语义变化，不能使用 `compare_optional` 的 legacy 宽限。
+        if a.execution.is_some() && a.effect != b.effect {
+            out.push(changed(
+                BreakingRule::SubscriptionEffectChanged,
+                "subscriptions.effect",
+                &a.effect,
+                &b.effect,
+            ));
+        }
+    }
+}
+
+fn subscription_identities(
+    subscriptions: &BTreeSet<SubscriptionProjection>,
+) -> BTreeSet<(&str, &str)> {
+    subscriptions
+        .iter()
+        .map(|s| (s.consumer.as_str(), s.group.as_str()))
+        .collect()
+}
+
+fn subscription_consumers(subscriptions: &BTreeSet<SubscriptionProjection>) -> BTreeSet<&str> {
+    subscriptions.iter().map(|s| s.consumer.as_str()).collect()
+}
+
+fn subscription_groups(subscriptions: &BTreeSet<SubscriptionProjection>) -> BTreeSet<&str> {
+    subscriptions.iter().map(|s| s.group.as_str()).collect()
+}
+
 /// 一个待 diff 的契约投影（从 [`DiscoveredContract`](super::DiscoveredContract) + git/fs 读取派生，
 /// 便于 [`evaluate`] 不依赖真 git 单测）。
 #[derive(Debug, Clone)]
@@ -427,7 +971,17 @@ pub(crate) struct ContractDiff {
     /// 契约 label `{kind}/{domain}/{version}`。
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
+    /// working tree lifecycle；与 base 分级值分开保留，用于显式识别降级。
+    pub(crate) working_lifecycle: Option<Lifecycle>,
     pub(crate) schemas: Vec<SchemaVersions>,
+    pub(crate) manifest: ManifestVersions,
+    pub(crate) removed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ManifestVersions {
+    pub(crate) old: Option<ManifestProjection>,
+    pub(crate) new: Option<ManifestProjection>,
 }
 
 /// 单个 logical schema slot 的两版本：`old=None` ⇒ base ref 无此 slot（新契约 / 新 slot，不报）；
@@ -435,8 +989,16 @@ pub(crate) struct ContractDiff {
 #[derive(Debug, Clone)]
 pub(crate) struct SchemaVersions {
     pub(crate) file: String,
+    direction: SchemaDirection,
+    removed: bool,
     pub(crate) old: Option<Value>,
     pub(crate) new: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchemaDirection {
+    Input,
+    Output,
 }
 
 /// 一侧（base 或 working）的契约投影：label + lifecycle + slot→已解析 schema JSON。
@@ -444,40 +1006,49 @@ pub(crate) struct SchemaVersions {
 #[derive(Debug, Clone)]
 pub(crate) struct ContractSide {
     /// 稳定契约身份。来自 manifest `id`，不随 flat/nested 目录迁移漂移。
-    pub(crate) identity: String,
+    pub(crate) identity: ContractIdentity,
     /// 人读诊断 label，保留来源路径形态。
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
-    pub(crate) slots: BTreeMap<String, Value>,
+    pub(crate) slots: BTreeMap<String, (SchemaDirection, Value)>,
+    pub(crate) manifest: ManifestProjection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ContractIdentity {
+    id: String,
+    version: String,
 }
 
 /// 按 (identity, slot) 构造 base ∪ working 并集（纯函数，C1）：
-/// - lifecycle：working 在场用其 lifecycle，否则用 base 的（删整个契约 = base lifecycle 决定是否检）。
+/// - lifecycle：base 在场恒用 base lifecycle，否则使用 working（降级不得绕过 active gate）。
 /// - `old` = base slot schema（`None` ⇒ base 无此 slot ⇒ 新契约/新 slot，[`evaluate`] 跳过不报）。
 /// - `new` = working slot schema；base 有而 working 无（slot/契约被删）⇒ 空 schema ⇒ compare 报 base 字段全删。
 ///
 /// 这修复「只遍历 working 侧」漏检删除整个 active 契约 / 删 schema slot / slot 改名丢字段（对标 Buf
 /// FILE_NO_DELETE / MESSAGE_NO_DELETE：基准侧存在而当前侧缺失须进入比较）。
-pub(crate) fn plan_diffs(base: &[ContractSide], working: &[ContractSide]) -> Vec<ContractDiff> {
-    let base_idx: BTreeMap<&str, &ContractSide> =
-        base.iter().map(|s| (s.identity.as_str(), s)).collect();
-    let work_idx: BTreeMap<&str, &ContractSide> =
-        working.iter().map(|s| (s.identity.as_str(), s)).collect();
-    let identities: BTreeSet<&str> = base_idx.keys().chain(work_idx.keys()).copied().collect();
+pub(crate) fn plan_diffs(
+    base: &[ContractSide],
+    working: &[ContractSide],
+) -> Result<Vec<ContractDiff>> {
+    let base_idx = index_sides("base", base)?;
+    let work_idx = index_sides("working", working)?;
+    let identities: BTreeSet<&ContractIdentity> =
+        base_idx.keys().chain(work_idx.keys()).copied().collect();
 
     let mut diffs = Vec::new();
     for identity in identities {
         let b = base_idx.get(identity).copied();
         let w = work_idx.get(identity).copied();
-        // working 在场优先用其 lifecycle，否则 base 的；label 取自并集，至少一侧在场。
-        let lifecycle = match w.or(b) {
+        // 既有契约一律以 base lifecycle 分级，working 降级不得绕过 active gate。
+        let lifecycle = match b.or(w) {
             Some(s) => s.lifecycle,
             None => continue,
         };
         let label = w
             .or(b)
             .map(|s| s.label.as_str())
-            .unwrap_or(identity)
+            .unwrap_or(identity.id.as_str())
             .to_string();
         let mut slot_keys: BTreeSet<&str> = BTreeSet::new();
         if let Some(s) = b {
@@ -488,13 +1059,28 @@ pub(crate) fn plan_diffs(base: &[ContractSide], working: &[ContractSide]) -> Vec
         }
         let mut schemas = Vec::new();
         for slot in slot_keys {
-            let old = b.and_then(|s| s.slots.get(slot)).cloned();
-            let new = w
-                .and_then(|s| s.slots.get(slot))
-                .cloned()
+            let base_slot = b.and_then(|side| side.slots.get(slot));
+            let working_slot = w.and_then(|side| side.slots.get(slot));
+            let direction = match (base_slot, working_slot) {
+                (Some((base_direction, _)), Some((working_direction, _))) => {
+                    if base_direction != working_direction {
+                        bail!(
+                            "contract breaking: schema slot `{slot}` direction 由 {base_direction:?} 变为 {working_direction:?}"
+                        );
+                    }
+                    *base_direction
+                }
+                (Some((direction, _)), None) | (None, Some((direction, _))) => *direction,
+                (None, None) => continue,
+            };
+            let old = base_slot.map(|(_, schema)| schema.clone());
+            let new = working_slot
+                .map(|(_, schema)| schema.clone())
                 .unwrap_or_else(empty_schema);
             schemas.push(SchemaVersions {
                 file: slot.to_string(),
+                direction,
+                removed: working_slot.is_none(),
                 old,
                 new,
             });
@@ -502,10 +1088,33 @@ pub(crate) fn plan_diffs(base: &[ContractSide], working: &[ContractSide]) -> Vec
         diffs.push(ContractDiff {
             label,
             lifecycle,
+            working_lifecycle: w.map(|s| s.lifecycle),
             schemas,
+            manifest: ManifestVersions {
+                old: b.map(|s| s.manifest.clone()),
+                new: w.map(|s| s.manifest.clone()),
+            },
+            removed: b.is_some() && w.is_none(),
         });
     }
-    diffs
+    Ok(diffs)
+}
+
+fn index_sides<'a>(
+    side: &str,
+    sides: &'a [ContractSide],
+) -> Result<BTreeMap<&'a ContractIdentity, &'a ContractSide>> {
+    let mut index = BTreeMap::new();
+    for contract in sides {
+        if index.insert(&contract.identity, contract).is_some() {
+            bail!(
+                "contract breaking: {side} 存在重复 contract identity `{}@{}`",
+                contract.identity.id,
+                contract.identity.version,
+            );
+        }
+    }
+    Ok(index)
 }
 
 /// 空 JSON Schema（`{}`，无 properties）——working 侧删除的 slot 用此作 `new`，使 compare 报 base 字段全删。
@@ -522,50 +1131,102 @@ pub(crate) struct EvalResult {
 
 /// 纯评估（无 IO）：过滤 active/deprecated（draft 跳过）→ 逐 schema diff → 按 [`disposition`] 分级。
 /// 这是 gate 的可测核心 seam——run 只负责 discover + git/fs 读取 + 打印 + 退出码。
-pub(crate) fn evaluate(contracts: &[ContractDiff], mode: EnforcementMode) -> EvalResult {
+pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
     let mut result = EvalResult::default();
     for c in contracts {
         if !is_checked(c.lifecycle) {
             continue; // draft：seed/前瞻原地演进豁免（WIRE-BREAKING-WINDOW-01）
         }
-        let disp = disposition(mode, c.lifecycle);
+        let disp = disposition(c.lifecycle);
+        if c.lifecycle == Lifecycle::Active
+            && let Some(working @ (Lifecycle::Draft | Lifecycle::Deprecated)) = c.working_lifecycle
+        {
+            push_finding(
+                &mut result,
+                disp,
+                BreakingRule::LifecycleDowngraded,
+                format!("{} manifest (lifecycle)", c.label),
+                format!("active 契约 lifecycle 降级为 {working:?}"),
+            );
+        }
+        if c.removed {
+            push_finding(
+                &mut result,
+                disp,
+                BreakingRule::ContractRemoved,
+                c.label.clone(),
+                "base 契约在 working tree 中被删除".to_string(),
+            );
+        }
+        if let (Some(old), Some(new)) = (&c.manifest.old, &c.manifest.new) {
+            for b in compare_manifests(old, new) {
+                push_finding(
+                    &mut result,
+                    disp,
+                    b.rule,
+                    format!("{} manifest ({})", c.label, b.pointer),
+                    b.detail,
+                );
+            }
+        }
         for sv in &c.schemas {
             let Some(old) = &sv.old else {
                 continue; // base ref 无此 schema：新契约 / 新版本，不报
             };
-            for b in compare_schemas(old, &sv.new) {
-                if disp == Disposition::Deny {
-                    result.any_deny = true;
-                }
-                result.findings.push(GradedFinding {
-                    disposition: disp,
-                    rule: b.rule,
-                    subject: format!("{} {} ({})", c.label, sv.file, show(&b.pointer)),
-                    detail: b.detail,
-                });
+            let breaks = if sv.removed {
+                compare_schemas_for_direction(old, &sv.new, SchemaDirection::Input)
+            } else {
+                compare_schemas_for_direction(old, &sv.new, sv.direction)
+            };
+            for b in breaks {
+                push_finding(
+                    &mut result,
+                    disp,
+                    b.rule,
+                    format!("{} {} ({})", c.label, sv.file, show(&b.pointer)),
+                    b.detail,
+                );
             }
         }
     }
     result
 }
 
+fn push_finding(
+    result: &mut EvalResult,
+    disposition: Disposition,
+    rule: BreakingRule,
+    subject: String,
+    detail: String,
+) {
+    result.any_deny |= disposition == Disposition::Deny;
+    result.findings.push(GradedFinding {
+        disposition,
+        rule,
+        subject,
+        detail,
+    });
+}
+
 /// gate 入口：discover working-tree 契约 → 读 base schema（`git show {against}:...`）→ [`evaluate`] →
 /// 打印分级 finding → 有 `Deny` 即 `bail`（退出码 1），否则 `Ok`（退出码 0）。
-/// base ref 不可解析（如未 fetch `origin/develop`）→ 按模式分级处置（见 [`unresolved_ref`]）。
-pub(crate) fn run(against: &str, mode: EnforcementMode) -> Result<()> {
+/// base ref 不可解析或 Git 基线命令失败均 fail-closed。
+pub(crate) fn run(against: &str) -> Result<()> {
     let root = crate::workspace_root()?;
-    if !ref_exists(&root, against) {
-        return unresolved_ref(against, mode);
+    match read_ref(&root, against) {
+        GitRead::Found(()) => {}
+        GitRead::Missing => return unresolved_ref(against),
+        GitRead::CommandFailed(failure) => return Err(failure.into()),
     }
     let contracts_root = root.join("contracts");
     let working = working_sides(&contracts_root)?;
     let base = base_sides(&root, against)?;
-    let diffs = plan_diffs(&base, &working);
-    let result = evaluate(&diffs, mode);
-    print_result(against, mode, &result);
+    let diffs = plan_diffs(&base, &working)?;
+    let result = evaluate(&diffs);
+    print_result(against, &result);
     if result.any_deny {
         bail!(
-            "contract breaking: {} 项 active 契约 wire 破坏（deny 模式 fail-closed）",
+            "contract breaking: {} 项 active 契约 wire 破坏（fail-closed）",
             result
                 .findings
                 .iter()
@@ -576,24 +1237,12 @@ pub(crate) fn run(against: &str, mode: EnforcementMode) -> Result<()> {
     Ok(())
 }
 
-/// base ref 不可解析时的窗口分级处置（WIRE-BREAKING-WINDOW-01）：`warn` → 跳过（`Ok`，pre-GA advisory）；
-/// `deny` → **fail-closed**（`Err`）——无法读基准 schema 即无法判定破坏，enforce 模式不可静默放行
-/// （浅克隆 / CI 漏 fetch 场景，B-F1 fail-closed 缺口）。
-fn unresolved_ref(against: &str, mode: EnforcementMode) -> Result<()> {
+/// base ref 不可解析时 fail-closed；无法读基准 wire 就不能判定兼容性。
+fn unresolved_ref(against: &str) -> Result<()> {
     let hint = fetch_hint(against);
-    match mode {
-        EnforcementMode::Deny => bail!(
-            "contract breaking: base ref `{against}` 不可解析，deny 模式 fail-closed——\
-             无法读基准 schema 即无法判定 wire 破坏。先 `{hint}`，或 `--against <本地 ref>`（如 HEAD~1）。"
-        ),
-        EnforcementMode::Warn => {
-            eprintln!(
-                "contract breaking: [跳过] base ref `{against}` 不可解析（未 fetch？）。\
-                 warn 模式不阻断；先 `{hint}`，或 `--against <本地 ref>`（如 HEAD~1）。"
-            );
-            Ok(())
-        }
-    }
+    bail!(
+        "contract breaking: base ref `{against}` 不可解析，fail-closed——无法读基准 wire。先 `{hint}`，或 `--against <本地 ref>`（如 HEAD~1）。"
+    )
 }
 
 /// 由 base ref 推 fetch 指引：含 `/`（如 `origin/develop`）→ `git fetch origin develop`；无 `/` → `git fetch`。
@@ -604,14 +1253,10 @@ fn fetch_hint(against: &str) -> String {
     }
 }
 
-/// 打印分级 finding（warn / deny 前缀 + 规则 ID + subject + detail）+ 第三期缺口注脚（恒打印）。
-fn print_result(against: &str, mode: EnforcementMode, result: &EvalResult) {
-    let mode_label = match mode {
-        EnforcementMode::Warn => "warn",
-        EnforcementMode::Deny => "deny",
-    };
+/// 打印分级 finding（warn / deny 前缀 + 规则 ID + subject + detail）。
+fn print_result(against: &str, result: &EvalResult) {
     if result.findings.is_empty() {
-        eprintln!("contract breaking（against {against}，{mode_label} 模式）：无 wire 破坏");
+        eprintln!("contract breaking（against {against}）：无 wire 破坏");
     } else {
         for f in &result.findings {
             eprintln!(
@@ -628,27 +1273,86 @@ fn print_result(against: &str, mode: EnforcementMode, result: &EvalResult) {
             .filter(|f| f.disposition == Disposition::Deny)
             .count();
         eprintln!(
-            "contract breaking（against {against}，{mode_label} 模式）：{} 项破坏（{denies} deny / {} warn）",
+            "contract breaking（against {against}）：{} 项破坏（{denies} deny / {} warn）",
             result.findings.len(),
             result.findings.len() - denies
         );
     }
-    eprintln!("{THIRD_PHASE_NOTE}");
 }
 
-/// `git rev-parse --verify --quiet {ref}` 退出 0 ⇒ ref 可解析。经 [`external_cmd`](crate::cmd::external_cmd)（CMD-FUNNEL-01）。
-fn ref_exists(root: &Path, git_ref: &str) -> bool {
+#[derive(Debug)]
+enum GitRead<T> {
+    Found(T),
+    Missing,
+    CommandFailed(GitCommandFailure),
+}
+
+#[derive(Debug)]
+struct GitCommandFailure {
+    command: String,
+    status: Option<i32>,
+    stderr: String,
+}
+
+impl std::fmt::Display for GitCommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "contract breaking: `{}` 失败（status={:?}, stderr={}），fail-closed",
+            self.command, self.status, self.stderr
+        )
+    }
+}
+
+impl std::error::Error for GitCommandFailure {}
+
+fn git_output(root: &Path, args: &[&str]) -> std::result::Result<Output, GitCommandFailure> {
     crate::cmd::external_cmd(
-        crate::cmd::ExternalProgram::Git,
-        &["rev-parse", "--verify", "--quiet", git_ref],
+        crate::cmd::ExternalProgram::SystemGit,
+        args,
         &[],
         Some(root),
     )
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false)
+    .output()
+    .map_err(|error| GitCommandFailure {
+        command: format!("git {}", args.join(" ")),
+        status: None,
+        stderr: sanitize_git_stderr(&error.to_string()),
+    })
+}
+
+fn command_failure(args: &[&str], output: &Output) -> GitCommandFailure {
+    GitCommandFailure {
+        command: format!("git {}", args.join(" ")),
+        status: output.status.code(),
+        stderr: sanitize_git_stderr(&String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
+fn sanitize_git_stderr(stderr: &str) -> String {
+    let collapsed = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sanitized = if collapsed.is_empty() {
+        "<empty>"
+    } else {
+        collapsed.as_str()
+    };
+    sanitized.chars().take(1024).collect()
+}
+
+/// 明确区分 ref 不存在与 Git 命令失败。
+fn read_ref(root: &Path, git_ref: &str) -> GitRead<()> {
+    let args = ["rev-parse", "--verify", "--quiet", git_ref];
+    let output = match git_output(root, &args) {
+        Ok(output) => output,
+        Err(failure) => return GitRead::CommandFailed(failure),
+    };
+    if output.status.success() {
+        GitRead::Found(())
+    } else if output.stderr.is_empty() {
+        GitRead::Missing
+    } else {
+        GitRead::CommandFailed(command_failure(&args, &output))
+    }
 }
 
 /// 读 working-tree schema 文件并解析为 `Value`。
@@ -662,33 +1366,141 @@ fn read_working_schema(dir: &Path, file: &str) -> Result<Value> {
 /// manifest 的 logical schema slot → 文件名映射（DRY，base/working 两侧同源构造 [`ContractSide`]）。
 /// slot 名：`request`/`response`/`payload` + 每个 saga step `saga:{name}`——按 slot（非文件名）对齐，
 /// 使「slot 改名」按内容比对（文件名非 wire，重命名本身不破坏；内容丢字段才破坏）。
-fn slot_files(m: &ContractManifest) -> Vec<(String, String)> {
+fn slot_files(m: &ContractManifest) -> Vec<(String, String, SchemaDirection)> {
     let mut v = Vec::new();
-    for (slot, file) in [
-        ("request", m.schemas.request.as_deref()),
-        ("response", m.schemas.response.as_deref()),
-        ("payload", m.schemas.payload.as_deref()),
+    for (slot, file, direction) in [
+        (
+            "request",
+            m.schemas.request.as_deref(),
+            SchemaDirection::Input,
+        ),
+        (
+            "response",
+            m.schemas.response.as_deref(),
+            SchemaDirection::Output,
+        ),
+        (
+            "payload",
+            m.schemas.payload.as_deref(),
+            payload_direction(m.kind),
+        ),
     ] {
         if let Some(f) = file {
-            v.push((slot.to_string(), f.to_string()));
+            v.push((slot.to_string(), f.to_string(), direction));
         }
     }
     if let Some(saga) = &m.saga {
         for s in &saga.steps {
-            v.push((format!("saga:{}", s.name), s.output_schema.clone()));
+            v.push((
+                format!("saga:{}", s.name),
+                s.output_schema.clone(),
+                SchemaDirection::Output,
+            ));
         }
     }
     v
 }
 
+fn payload_direction(kind: ContractKind) -> SchemaDirection {
+    match kind {
+        ContractKind::Event => SchemaDirection::Output,
+        ContractKind::Http | ContractKind::Command | ContractKind::Saga => SchemaDirection::Input,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BaseContractManifest {
     id: String,
+    kind: ContractKind,
+    version: String,
     lifecycle: Lifecycle,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    method: Option<HttpMethod>,
+    #[serde(default, rename = "consistencyLevel")]
+    consistency_level: Option<ConsistencyLevel>,
+    #[serde(default)]
+    endpoints: Option<BaseEndpoints>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    delivery: Option<Delivery>,
+    #[serde(default)]
+    capabilities: BaseCapabilities,
+    #[serde(default)]
+    subscriptions: Vec<BaseSubscription>,
     #[serde(default)]
     schemas: BaseSchemas,
     #[serde(default)]
     saga: Option<BaseSagaBlock>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BaseEndpoints {
+    #[serde(default)]
+    http: Option<BaseHttpEndpoint>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseHttpEndpoint {
+    #[serde(default, rename = "successStatus")]
+    success_status: Option<u16>,
+    #[serde(default)]
+    idempotency: Option<HttpIdempotency>,
+    #[serde(default)]
+    auth: Option<BaseHttpAuth>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default, rename = "selfScoped")]
+    self_scoped: bool,
+    #[serde(default, rename = "resourceSharing")]
+    resource_sharing: Option<BaseHttpResourceSharing>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseHttpResourceSharing {
+    mode: HttpResourceSharingMode,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseHttpAuth {
+    mode: HttpAuthMode,
+    #[serde(default)]
+    permission: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BaseCapabilities {
+    #[serde(default)]
+    outbox: Option<BaseOutbox>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseOutbox {
+    role: OutboxRole,
+    #[serde(default)]
+    atomicity: Option<OutboxAtomicity>,
+    #[serde(default)]
+    emits: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseSubscription {
+    consumer: String,
+    group: String,
+    #[serde(default)]
+    execution: Option<SubscriptionExecution>,
+    #[serde(default)]
+    effect: Option<SubscriptionEffect>,
+    topology: BaseSubscriptionTopology,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BaseSubscriptionTopology {
+    partition_key: PartitionKeyStrategy,
+    readiness: SubscriberReadiness,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -718,23 +1530,204 @@ struct BaseSagaStep {
 /// Base refs may carry an older authoring schema. Wire-breaking only needs
 /// identity, lifecycle and schema slot filenames, so keep this projection narrow
 /// instead of accepting legacy manifests in the current full manifest parser.
-fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String)> {
+fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String, SchemaDirection)> {
     let mut v = Vec::new();
-    for (slot, file) in [
-        ("request", m.schemas.request.as_deref()),
-        ("response", m.schemas.response.as_deref()),
-        ("payload", m.schemas.payload.as_deref()),
+    for (slot, file, direction) in [
+        (
+            "request",
+            m.schemas.request.as_deref(),
+            SchemaDirection::Input,
+        ),
+        (
+            "response",
+            m.schemas.response.as_deref(),
+            SchemaDirection::Output,
+        ),
+        (
+            "payload",
+            m.schemas.payload.as_deref(),
+            payload_direction(m.kind),
+        ),
     ] {
         if let Some(f) = file {
-            v.push((slot.to_string(), f.to_string()));
+            v.push((slot.to_string(), f.to_string(), direction));
         }
     }
     if let Some(saga) = &m.saga {
         for s in &saga.steps {
-            v.push((format!("saga:{}", s.name), s.output_schema.clone()));
+            v.push((
+                format!("saga:{}", s.name),
+                s.output_schema.clone(),
+                SchemaDirection::Output,
+            ));
         }
     }
     v
+}
+
+fn manifest_projection(m: &ContractManifest) -> ManifestProjection {
+    let http = m
+        .endpoints
+        .as_ref()
+        .and_then(|e| e.http.as_ref())
+        .map(|h| HttpWireProjection {
+            path: m.path.clone(),
+            method: m.method.map(http_method).map(str::to_string),
+            success_status: Some(h.success_status),
+            auth: h.auth.as_ref().map(|a| AuthProjection {
+                mode: auth_mode(a.mode).to_string(),
+                permission: a.permission.clone(),
+            }),
+            auth_scope: AuthScopeProjection {
+                resource: h.resource.clone(),
+                self_scoped: h.self_scoped,
+            },
+            resource_sharing: h
+                .resource_sharing
+                .as_ref()
+                .map(|sharing| resource_sharing_mode(sharing.mode))
+                .unwrap_or("tenantScoped")
+                .to_string(),
+            idempotency: Some(idempotency(h.idempotency).to_string()),
+        });
+    ManifestProjection {
+        http,
+        topic: m.topic.clone(),
+        delivery: m.delivery.map(delivery).map(str::to_string),
+        consistency: Some(consistency(m.consistency_level).to_string()),
+        outbox: m.capabilities.outbox.as_ref().map(|o| OutboxProjection {
+            role: outbox_role(o.role).to_string(),
+            atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
+            emits: o.emits.iter().cloned().collect(),
+        }),
+        subscriptions: m
+            .subscriptions
+            .iter()
+            .map(|s| SubscriptionProjection {
+                consumer: s.consumer.clone(),
+                group: s.group.clone(),
+                partition: partition(s.topology.partition_key).to_string(),
+                readiness: readiness(s.topology.readiness).to_string(),
+                execution: Some(execution(s.execution).to_string()),
+                effect: s.effect.map(effect).map(str::to_string),
+            })
+            .collect(),
+    }
+}
+
+fn base_manifest_projection(m: &BaseContractManifest) -> ManifestProjection {
+    let http = m
+        .endpoints
+        .as_ref()
+        .and_then(|e| e.http.as_ref())
+        .map(|h| HttpWireProjection {
+            path: m.path.clone(),
+            method: m.method.map(http_method).map(str::to_string),
+            success_status: h.success_status,
+            auth: h.auth.as_ref().map(|a| AuthProjection {
+                mode: auth_mode(a.mode).to_string(),
+                permission: a.permission.clone(),
+            }),
+            auth_scope: AuthScopeProjection {
+                resource: h.resource.clone(),
+                self_scoped: h.self_scoped,
+            },
+            resource_sharing: h
+                .resource_sharing
+                .as_ref()
+                .map(|sharing| resource_sharing_mode(sharing.mode))
+                .unwrap_or("tenantScoped")
+                .to_string(),
+            idempotency: h.idempotency.map(idempotency).map(str::to_string),
+        });
+    ManifestProjection {
+        http,
+        topic: m.topic.clone(),
+        delivery: m.delivery.map(delivery).map(str::to_string),
+        consistency: m.consistency_level.map(consistency).map(str::to_string),
+        outbox: m.capabilities.outbox.as_ref().map(|o| OutboxProjection {
+            role: outbox_role(o.role).to_string(),
+            atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
+            emits: o.emits.iter().cloned().collect(),
+        }),
+        subscriptions: m
+            .subscriptions
+            .iter()
+            .map(|s| SubscriptionProjection {
+                consumer: s.consumer.clone(),
+                group: s.group.clone(),
+                partition: partition(s.topology.partition_key).to_string(),
+                readiness: readiness(s.topology.readiness).to_string(),
+                execution: s.execution.map(execution).map(str::to_string),
+                effect: s.effect.map(effect).map(str::to_string),
+            })
+            .collect(),
+    }
+}
+
+fn consistency(value: ConsistencyLevel) -> &'static str {
+    match value {
+        ConsistencyLevel::LocalOnly => "LocalOnly",
+        ConsistencyLevel::LocalTx => "LocalTx",
+        ConsistencyLevel::OutboxFact => "OutboxFact",
+        ConsistencyLevel::WorkflowEventual => "WorkflowEventual",
+        ConsistencyLevel::DeviceLatent => "DeviceLatent",
+    }
+}
+fn delivery(value: Delivery) -> &'static str {
+    value.as_wire()
+}
+fn auth_mode(value: HttpAuthMode) -> &'static str {
+    value.as_wire()
+}
+fn http_method(value: HttpMethod) -> &'static str {
+    value.as_wire()
+}
+fn resource_sharing_mode(value: HttpResourceSharingMode) -> &'static str {
+    match value {
+        HttpResourceSharingMode::TenantScoped => "tenantScoped",
+        HttpResourceSharingMode::Global => "global",
+    }
+}
+fn idempotency(value: HttpIdempotency) -> &'static str {
+    match value {
+        HttpIdempotency::Idempotent => "idempotent",
+        HttpIdempotency::NonIdempotent => "non-idempotent",
+    }
+}
+fn outbox_role(value: OutboxRole) -> &'static str {
+    match value {
+        OutboxRole::Producer => "producer",
+        OutboxRole::Fact => "fact",
+        OutboxRole::Command => "command",
+    }
+}
+fn outbox_atomicity(value: OutboxAtomicity) -> &'static str {
+    match value {
+        OutboxAtomicity::SameTransaction => "same-transaction",
+    }
+}
+fn partition(value: PartitionKeyStrategy) -> &'static str {
+    match value {
+        PartitionKeyStrategy::None => "none",
+        PartitionKeyStrategy::Aggregate => "aggregate",
+    }
+}
+fn readiness(value: SubscriberReadiness) -> &'static str {
+    match value {
+        SubscriberReadiness::Required => "required",
+    }
+}
+fn execution(value: SubscriptionExecution) -> &'static str {
+    match value {
+        SubscriptionExecution::AdapterNative => "adapter-native",
+        SubscriptionExecution::DomainEffect => "domain-effect",
+    }
+}
+fn effect(value: SubscriptionEffect) -> &'static str {
+    match value {
+        SubscriptionEffect::SettingsConfigVersionRefresh => "settings-config-version-refresh",
+    }
 }
 
 /// working-tree 侧契约投影：discover + 逐 slot 读磁盘 schema。
@@ -745,14 +1738,15 @@ fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
         let label = contract_label(c);
         let identity = contract_identity(&c.manifest);
         let mut slots = BTreeMap::new();
-        for (slot, file) in slot_files(&c.manifest) {
-            slots.insert(slot, read_working_schema(&c.dir, &file)?);
+        for (slot, file, direction) in slot_files(&c.manifest) {
+            slots.insert(slot, (direction, read_working_schema(&c.dir, &file)?));
         }
         sides.push(ContractSide {
             identity,
             label,
             lifecycle: c.manifest.lifecycle,
             slots,
+            manifest: manifest_projection(&c.manifest),
         });
     }
     Ok(sides)
@@ -762,9 +1756,10 @@ fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
 fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
     let mut sides = Vec::new();
     for manifest_rel in base_contract_manifests(root, against)? {
-        let Some(text) = read_text_at_ref(root, against, &manifest_rel)? else {
-            continue; // 竞态 / 罕见：ls-tree 列了但 show 不到，跳过
-        };
+        let text = require_git_text(
+            read_text_at_ref(root, against, &manifest_rel),
+            format!("base 已枚举 manifest `{manifest_rel}` 但路径不存在，fail-closed"),
+        )?;
         let manifest = toml::from_str::<BaseContractManifest>(&text)
             .map_err(|e| anyhow::anyhow!("解析 base {manifest_rel} 失败: {e}"))?;
         let Some(label) = label_from_manifest_path(&manifest_rel) else {
@@ -774,19 +1769,25 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
             continue;
         };
         let mut slots = BTreeMap::new();
-        for (slot, file) in base_slot_files(&manifest) {
+        for (slot, file, direction) in base_slot_files(&manifest) {
             let schema_rel = format!("{dir_rel}/{file}");
-            if let Some(schema_text) = read_text_at_ref(root, against, &schema_rel)? {
-                let v = serde_json::from_str(&schema_text)
-                    .map_err(|e| anyhow::anyhow!("解析 base schema {schema_rel} 失败: {e}"))?;
-                slots.insert(slot, v);
-            }
+            let schema_text = require_git_text(
+                read_text_at_ref(root, against, &schema_rel),
+                format!("base manifest 引用 schema `{schema_rel}` 不存在，fail-closed"),
+            )?;
+            let v = serde_json::from_str(&schema_text)
+                .map_err(|e| anyhow::anyhow!("解析 base schema {schema_rel} 失败: {e}"))?;
+            slots.insert(slot, (direction, v));
         }
         sides.push(ContractSide {
-            identity: manifest.id,
+            identity: ContractIdentity {
+                id: manifest.id.clone(),
+                version: manifest.version.clone(),
+            },
             label,
             lifecycle: manifest.lifecycle,
             slots,
+            manifest: base_manifest_projection(&manifest),
         });
     }
     Ok(sides)
@@ -795,17 +1796,10 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
 /// `git ls-tree -r --name-only {ref} -- contracts/` 列 base 侧所有 `contract.toml` 路径。
 /// 经 [`external_cmd`](crate::cmd::external_cmd)（CMD-FUNNEL-01）。ref 无 contracts/ → 空（非错）。
 fn base_contract_manifests(root: &Path, against: &str) -> Result<Vec<String>> {
-    let out = crate::cmd::external_cmd(
-        crate::cmd::ExternalProgram::Git,
-        &["ls-tree", "-r", "--name-only", against, "--", "contracts/"],
-        &[],
-        Some(root),
-    )
-    .stderr(Stdio::null())
-    .output()
-    .map_err(|e| anyhow::anyhow!("git ls-tree {against} 失败: {e}"))?;
+    let args = ["ls-tree", "-r", "--name-only", against, "--", "contracts/"];
+    let out = git_output(root, &args)?;
     if !out.status.success() {
-        return Ok(Vec::new());
+        return Err(command_failure(&args, &out).into());
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -814,22 +1808,51 @@ fn base_contract_manifests(root: &Path, against: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-/// `git show {ref}:{rel}` 读文本；rel 不在该 ref → `Ok(None)`。经 [`external_cmd`](crate::cmd::external_cmd)（CMD-FUNNEL-01）。
-fn read_text_at_ref(root: &Path, git_ref: &str, rel: &str) -> Result<Option<String>> {
-    let spec = format!("{git_ref}:{rel}");
-    let out = crate::cmd::external_cmd(
-        crate::cmd::ExternalProgram::Git,
-        &["show", &spec],
-        &[],
-        Some(root),
-    )
-    .stderr(Stdio::null())
-    .output()
-    .map_err(|e| anyhow::anyhow!("git show {spec} 失败: {e}"))?;
-    if !out.status.success() {
-        return Ok(None);
+/// `git show {ref}:{rel}` 读文本；先以 `ls-tree` 明确判定 path missing，任何其它 non-zero
+/// 均携 status/stderr 返回 [`GitRead::CommandFailed`]。
+fn read_text_at_ref(root: &Path, git_ref: &str, rel: &str) -> GitRead<String> {
+    match path_at_ref(root, git_ref, rel) {
+        GitRead::Found(()) => {}
+        GitRead::Missing => return GitRead::Missing,
+        GitRead::CommandFailed(failure) => return GitRead::CommandFailed(failure),
     }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    let spec = format!("{git_ref}:{rel}");
+    let args = ["show", &spec];
+    let out = match git_output(root, &args) {
+        Ok(output) => output,
+        Err(failure) => return GitRead::CommandFailed(failure),
+    };
+    if !out.status.success() {
+        return GitRead::CommandFailed(command_failure(&args, &out));
+    }
+    GitRead::Found(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn path_at_ref(root: &Path, git_ref: &str, rel: &str) -> GitRead<()> {
+    let args = ["ls-tree", "--name-only", git_ref, "--", rel];
+    let out = match git_output(root, &args) {
+        Ok(output) => output,
+        Err(failure) => return GitRead::CommandFailed(failure),
+    };
+    if !out.status.success() {
+        return GitRead::CommandFailed(command_failure(&args, &out));
+    }
+    let found = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|candidate| candidate == rel);
+    if found {
+        GitRead::Found(())
+    } else {
+        GitRead::Missing
+    }
+}
+
+fn require_git_text(read: GitRead<String>, missing: String) -> Result<String> {
+    match read {
+        GitRead::Found(text) => Ok(text),
+        GitRead::Missing => bail!(missing),
+        GitRead::CommandFailed(failure) => Err(failure.into()),
+    }
 }
 
 /// `contracts/{kind}/{domain}/{version}[/<slug>]/contract.toml` → label
@@ -842,8 +1865,11 @@ fn label_from_manifest_path(rel: &str) -> Option<String> {
     matches!(count, 3 | 4).then(|| inner.to_string())
 }
 
-fn contract_identity(m: &ContractManifest) -> String {
-    m.id.clone()
+fn contract_identity(m: &ContractManifest) -> ContractIdentity {
+    ContractIdentity {
+        id: m.id.clone(),
+        version: m.version.clone(),
+    }
 }
 
 /// 契约诊断 label：嵌套契约必须带 slug，否则同一 `{kind}/{domain}/{version}` 下的 sibling 会互相覆盖。
@@ -1194,18 +2220,11 @@ mod tests {
     // ─────────── disposition 真值表 ───────────
 
     #[rstest]
-    #[case(EnforcementMode::Warn, Lifecycle::Active, Disposition::Warn)]
-    #[case(EnforcementMode::Warn, Lifecycle::Deprecated, Disposition::Warn)]
-    #[case(EnforcementMode::Warn, Lifecycle::Draft, Disposition::Warn)]
-    #[case(EnforcementMode::Deny, Lifecycle::Active, Disposition::Deny)]
-    #[case(EnforcementMode::Deny, Lifecycle::Deprecated, Disposition::Warn)]
-    #[case(EnforcementMode::Deny, Lifecycle::Draft, Disposition::Warn)]
-    fn disposition_truth_table(
-        #[case] mode: EnforcementMode,
-        #[case] lifecycle: Lifecycle,
-        #[case] want: Disposition,
-    ) {
-        assert_eq!(disposition(mode, lifecycle), want);
+    #[case(Lifecycle::Active, Disposition::Deny)]
+    #[case(Lifecycle::Deprecated, Disposition::Warn)]
+    #[case(Lifecycle::Draft, Disposition::Warn)]
+    fn disposition_truth_table(#[case] lifecycle: Lifecycle, #[case] want: Disposition) {
+        assert_eq!(disposition(lifecycle), want);
     }
 
     // ─────────── evaluate seam（含「≥1 active 契约破坏」防恒真 + draft 跳过）───────────
@@ -1214,45 +2233,38 @@ mod tests {
         ContractDiff {
             label: label.to_string(),
             lifecycle,
+            working_lifecycle: Some(lifecycle),
             schemas: vec![SchemaVersions {
                 file: "request.schema.json".to_string(),
+                direction: SchemaDirection::Input,
+                removed: false,
                 old: Some(old),
                 new,
             }],
+            manifest: ManifestVersions {
+                old: None,
+                new: None,
+            },
+            removed: false,
         }
     }
 
-    /// ADR §3.2 防恒真：active 契约删字段 + Deny 模式 → any_deny=true（gate 真会拦截）。
+    /// ADR §3.2 防恒真：active 契约删字段恒置 any_deny=true（gate 真会拦截）。
     #[test]
-    fn active_breaking_under_deny_is_deny() {
+    fn active_breaking_is_deny() {
         let c = diff(
             "http/identity/v1",
             Lifecycle::Active,
             json!({"properties": {"id": {"type":"string"}, "name": {"type":"string"}}}),
             json!({"properties": {"id": {"type":"string"}}}),
         );
-        let r = evaluate(&[c], EnforcementMode::Deny);
-        assert!(r.any_deny, "active 破坏在 deny 模式须升 Deny");
+        let r = evaluate(&[c]);
+        assert!(r.any_deny, "active 破坏须恒为 Deny");
         assert_eq!(r.findings.len(), 1);
         assert_eq!(r.findings[0].disposition, Disposition::Deny);
     }
 
-    /// 同样 active 破坏在 Warn 模式 → finding 在但不 deny（退出码 0）。
-    #[test]
-    fn active_breaking_under_warn_is_warn_only() {
-        let c = diff(
-            "http/identity/v1",
-            Lifecycle::Active,
-            json!({"properties": {"id": {"type":"string"}, "name": {"type":"string"}}}),
-            json!({"properties": {"id": {"type":"string"}}}),
-        );
-        let r = evaluate(&[c], EnforcementMode::Warn);
-        assert!(!r.any_deny);
-        assert_eq!(r.findings.len(), 1);
-        assert_eq!(r.findings[0].disposition, Disposition::Warn);
-    }
-
-    /// draft 跳过 red：draft 契约删字段 → 零 finding（即便 Deny 模式）。
+    /// draft 跳过 red：draft 契约删字段 → 零 finding。
     #[test]
     fn draft_breaking_is_skipped() {
         let c = diff(
@@ -1261,12 +2273,12 @@ mod tests {
             json!({"properties": {"id": {"type":"string"}, "name": {"type":"string"}}}),
             json!({"properties": {"id": {"type":"string"}}}),
         );
-        let r = evaluate(&[c], EnforcementMode::Deny);
+        let r = evaluate(&[c]);
         assert!(r.findings.is_empty(), "draft 契约应整体跳过");
         assert!(!r.any_deny);
     }
 
-    /// deprecated 破坏恒 warn（即便 Deny 模式，退出码 0）。
+    /// deprecated 破坏恒 warn（退出码 0）。
     #[test]
     fn deprecated_breaking_is_warn_only() {
         let c = diff(
@@ -1275,7 +2287,7 @@ mod tests {
             json!({"properties": {"id": {"type":"string"}, "name": {"type":"string"}}}),
             json!({"properties": {"id": {"type":"string"}}}),
         );
-        let r = evaluate(&[c], EnforcementMode::Deny);
+        let r = evaluate(&[c]);
         assert_eq!(r.findings.len(), 1);
         assert_eq!(r.findings[0].disposition, Disposition::Warn);
         assert!(!r.any_deny);
@@ -1287,13 +2299,21 @@ mod tests {
         let c = ContractDiff {
             label: "http/identity/v2".to_string(),
             lifecycle: Lifecycle::Active,
+            working_lifecycle: Some(Lifecycle::Active),
             schemas: vec![SchemaVersions {
                 file: "request.schema.json".to_string(),
+                direction: SchemaDirection::Input,
+                removed: false,
                 old: None,
                 new: json!({"properties": {"id": {"type":"string"}}}),
             }],
+            manifest: ManifestVersions {
+                old: None,
+                new: None,
+            },
+            removed: false,
         };
-        let r = evaluate(&[c], EnforcementMode::Deny);
+        let r = evaluate(&[c]);
         assert!(r.findings.is_empty());
         assert!(!r.any_deny);
     }
@@ -1310,14 +2330,29 @@ mod tests {
         lifecycle: Lifecycle,
         slots: &[(&str, Value)],
     ) -> ContractSide {
+        let version = label
+            .split('/')
+            .find(|segment| segment.starts_with('v'))
+            .unwrap_or("v1");
         ContractSide {
-            identity: identity.to_string(),
+            identity: ContractIdentity {
+                id: identity.to_string(),
+                version: version.to_string(),
+            },
             label: label.to_string(),
             lifecycle,
             slots: slots
                 .iter()
-                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .map(|(k, v)| {
+                    let direction = if *k == "response" || k.starts_with("saga:") {
+                        SchemaDirection::Output
+                    } else {
+                        SchemaDirection::Input
+                    };
+                    ((*k).to_string(), (direction, v.clone()))
+                })
                 .collect(),
+            manifest: ManifestProjection::default(),
         }
     }
 
@@ -1363,8 +2398,16 @@ response = "response.schema.json"
         assert_eq!(
             base_slot_files(&manifest),
             vec![
-                ("request".to_string(), "request.schema.json".to_string()),
-                ("response".to_string(), "response.schema.json".to_string()),
+                (
+                    "request".to_string(),
+                    "request.schema.json".to_string(),
+                    SchemaDirection::Input
+                ),
+                (
+                    "response".to_string(),
+                    "response.schema.json".to_string(),
+                    SchemaDirection::Output
+                ),
             ]
         );
         let saga: BaseContractManifest = toml::from_str(
@@ -1393,14 +2436,20 @@ steps = [
         assert_eq!(
             base_slot_files(&saga),
             vec![
-                ("payload".to_string(), "payload.schema.json".to_string()),
+                (
+                    "payload".to_string(),
+                    "payload.schema.json".to_string(),
+                    SchemaDirection::Input
+                ),
                 (
                     "saga:reserve_funds".to_string(),
-                    "reserve.schema.json".to_string()
+                    "reserve.schema.json".to_string(),
+                    SchemaDirection::Output
                 ),
                 (
                     "saga:capture".to_string(),
-                    "capture.schema.json".to_string()
+                    "capture.schema.json".to_string(),
+                    SchemaDirection::Output
                 ),
             ]
         );
@@ -1433,7 +2482,7 @@ lifecycle = "active"
     }
 
     #[test]
-    fn nested_identity_v1_siblings_do_not_collapse_to_three_segment_label() {
+    fn nested_identity_v1_siblings_do_not_collapse_to_three_segment_label() -> anyhow::Result<()> {
         let slugs = [
             "login",
             "refresh",
@@ -1459,7 +2508,7 @@ lifecycle = "active"
             .collect();
         let working = base.clone();
 
-        let diffs = plan_diffs(&base, &working);
+        let diffs = plan_diffs(&base, &working)?;
         let labels: BTreeSet<&str> = diffs.iter().map(|d| d.label.as_str()).collect();
         assert_eq!(diffs.len(), 8, "8 个 sibling 必须逐个参与 breaking diff");
         assert_eq!(
@@ -1468,10 +2517,11 @@ lifecycle = "active"
             "nested sibling label 不能折叠成单个 http/identity/v1"
         );
         assert!(labels.contains("http/identity/v1/roles-revoke"));
+        Ok(())
     }
 
     #[test]
-    fn flat_to_nested_same_contract_id_is_not_treated_as_delete_and_add() {
+    fn flat_to_nested_same_contract_id_is_not_treated_as_delete_and_add() -> anyhow::Result<()> {
         let schema = json!({"properties": {"username": {"type":"string"}}});
         let base = vec![side_with_identity(
             "identity.login",
@@ -1486,19 +2536,48 @@ lifecycle = "active"
             &[("request", schema)],
         )];
 
-        let diffs = plan_diffs(&base, &working);
-        let r = evaluate(&diffs, EnforcementMode::Deny);
+        let diffs = plan_diffs(&base, &working)?;
+        let r = evaluate(&diffs);
         assert!(
             r.findings.is_empty(),
             "flat -> nested path migration must not look like a contract deletion: {:?}",
             r.findings
         );
         assert!(!r.any_deny);
+        Ok(())
+    }
+
+    #[test]
+    fn same_id_moved_to_new_version_does_not_replace_old_identity() -> anyhow::Result<()> {
+        let schema = json!({"properties": {"id": {"type":"string"}}});
+        let base = vec![side_with_identity(
+            "identity.profile",
+            "http/identity/v1/profile",
+            Lifecycle::Active,
+            &[("response", schema.clone())],
+        )];
+        let working = vec![side_with_identity(
+            "identity.profile",
+            "http/identity/v2/profile",
+            Lifecycle::Active,
+            &[("response", schema)],
+        )];
+
+        let result = evaluate(&plan_diffs(&base, &working)?);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|finding| finding.rule == BreakingRule::ContractRemoved),
+            "moving the same id from v1 to v2 must report deletion of the v1 identity: {:?}",
+            result.findings
+        );
+        Ok(())
     }
 
     /// 删除整个 active 契约（base 有、working 无）→ base 各字段报 FIELD_NO_DELETE（经 plan_diffs empty-new）。
     #[test]
-    fn deleted_active_contract_reports_field_deletions() {
+    fn deleted_active_contract_reports_field_deletions() -> anyhow::Result<()> {
         let base = vec![side(
             "http/x/v1",
             Lifecycle::Active,
@@ -1507,25 +2586,26 @@ lifecycle = "active"
                 json!({"properties": {"id": {"type":"string"}, "name": {"type":"string"}}}),
             )],
         )];
-        let diffs = plan_diffs(&base, &[]);
-        let r = evaluate(&diffs, EnforcementMode::Deny);
+        let diffs = plan_diffs(&base, &[])?;
+        let r = evaluate(&diffs);
         assert_eq!(
             r.findings.len(),
-            2,
-            "删契约应报两字段删除: {:?}",
+            3,
+            "删契约应报显式删除 + 两字段删除: {:?}",
             r.findings
         );
         assert!(
             r.findings
                 .iter()
-                .all(|f| f.rule == BreakingRule::FieldNoDelete)
+                .any(|f| f.rule == BreakingRule::ContractRemoved)
         );
         assert!(r.any_deny);
+        Ok(())
     }
 
     /// 删除一个 schema slot（base 有 response、working 无）→ 该 slot base 字段报删除。
     #[test]
-    fn removed_schema_slot_reports_deletions() {
+    fn removed_schema_slot_reports_deletions() -> anyhow::Result<()> {
         let base = vec![side(
             "http/x/v1",
             Lifecycle::Active,
@@ -1542,16 +2622,17 @@ lifecycle = "active"
             Lifecycle::Active,
             &[("request", json!({"properties": {"id": {"type":"string"}}}))],
         )];
-        let diffs = plan_diffs(&base, &working);
-        let r = evaluate(&diffs, EnforcementMode::Warn);
+        let diffs = plan_diffs(&base, &working)?;
+        let r = evaluate(&diffs);
         assert_eq!(r.findings.len(), 1);
         assert_eq!(r.findings[0].rule, BreakingRule::FieldNoDelete);
         assert!(r.findings[0].subject.contains("response"));
+        Ok(())
     }
 
     /// slot 改名（文件名变、slot 不变）按内容比对——丢字段才报，文件名变化本身不报。
     #[test]
-    fn renamed_slot_compares_by_content() {
+    fn renamed_slot_compares_by_content() -> anyhow::Result<()> {
         // 两侧同 slot "request"，working 丢了 name 字段（文件名是否改无关）。
         let base = vec![side(
             "http/x/v1",
@@ -1566,28 +2647,30 @@ lifecycle = "active"
             Lifecycle::Active,
             &[("request", json!({"properties": {"id": {"type":"string"}}}))],
         )];
-        let diffs = plan_diffs(&base, &working);
-        let r = evaluate(&diffs, EnforcementMode::Warn);
+        let diffs = plan_diffs(&base, &working)?;
+        let r = evaluate(&diffs);
         assert_eq!(rules_of(&r), vec![BreakingRule::FieldNoDelete]);
+        Ok(())
     }
 
     /// 新契约（working 有、base 无）→ old=None → 不报（向后兼容）。
     #[test]
-    fn new_contract_not_reported_via_plan() {
+    fn new_contract_not_reported_via_plan() -> anyhow::Result<()> {
         let working = vec![side(
             "http/x/v2",
             Lifecycle::Active,
             &[("request", json!({"properties": {"id": {"type":"string"}}}))],
         )];
-        let diffs = plan_diffs(&[], &working);
-        let r = evaluate(&diffs, EnforcementMode::Deny);
+        let diffs = plan_diffs(&[], &working)?;
+        let r = evaluate(&diffs);
         assert!(r.findings.is_empty());
         assert!(!r.any_deny);
+        Ok(())
     }
 
     /// 删除 draft 契约 → 跳过（lifecycle 由 base 决定，draft 豁免）。
     #[test]
-    fn deleted_draft_contract_skipped_via_plan() {
+    fn deleted_draft_contract_skipped_via_plan() -> anyhow::Result<()> {
         let base = vec![side(
             "http/_seed/v1",
             Lifecycle::Draft,
@@ -1596,16 +2679,17 @@ lifecycle = "active"
                 json!({"properties": {"id": {"type":"string"}, "name": {"type":"string"}}}),
             )],
         )];
-        let diffs = plan_diffs(&base, &[]);
-        let r = evaluate(&diffs, EnforcementMode::Deny);
+        let diffs = plan_diffs(&base, &[])?;
+        let r = evaluate(&diffs);
         assert!(r.findings.is_empty(), "draft 删契约应跳过");
+        Ok(())
     }
 
     fn rules_of(r: &EvalResult) -> Vec<BreakingRule> {
         r.findings.iter().map(|f| f.rule).collect()
     }
 
-    // ─────────── fail-closed：base ref 不可解析的窗口分级处置（B-F1）───────────
+    // ─────────── fail-closed：base ref / Git 命令诊断（B-F1）───────────
 
     /// fetch_hint：含 `/` 的 ref → `git fetch <remote> <branch>`；无 `/` → 裸 `git fetch`。
     #[rstest]
@@ -1616,34 +2700,654 @@ lifecycle = "active"
         assert_eq!(fetch_hint(against), want);
     }
 
-    /// deny 模式 + base ref 不可解析 → fail-closed（`Err`）；warn 模式 → 跳过（`Ok`）。
-    /// 用确定性不存在的 ref（经真实 git rev-parse，bogus ref 恒不可解析），验 [`unresolved_ref`] 分级。
+    /// base ref 不可解析恒 fail-closed。
     #[test]
-    fn unresolved_ref_deny_fails_warn_skips() {
+    fn unresolved_ref_fails_closed() {
         const BOGUS: &str = "zzz-rss-wire-breaking-bogus-ref-xyz";
-        assert!(
-            run(BOGUS, EnforcementMode::Deny).is_err(),
-            "deny 模式下不可解析 base ref 须 fail-closed（Err）"
+        assert!(run(BOGUS).is_err());
+    }
+
+    #[test]
+    fn git_absence_is_distinct_from_command_failure() -> anyhow::Result<()> {
+        let root = crate::testutil::unique_tmp("breaking-repo");
+        std::fs::create_dir_all(&root)?;
+        let run_git = |args: &[&str]| -> anyhow::Result<()> {
+            let output = crate::cmd::external_cmd(
+                crate::cmd::ExternalProgram::SystemGit,
+                args,
+                &[],
+                Some(&root),
+            )
+            .output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "git test setup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(())
+        };
+        run_git(&["init", "--quiet"])?;
+        std::fs::write(root.join("contract.toml"), "id = \"seed.test\"\n")?;
+        run_git(&["add", "contract.toml"])?;
+        run_git(&[
+            "-c",
+            "user.name=RSS Test",
+            "-c",
+            "user.email=rss-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])?;
+        let GitRead::Found(text) = read_text_at_ref(&root, "HEAD", "contract.toml") else {
+            anyhow::bail!("committed path must be found")
+        };
+        assert!(text.contains("seed.test"));
+        assert!(matches!(
+            read_text_at_ref(&root, "HEAD", "contracts/definitely-absent.toml"),
+            GitRead::Missing
+        ));
+
+        let not_a_repo = crate::testutil::unique_tmp("breaking-not-repo");
+        std::fs::create_dir_all(&not_a_repo)?;
+        let failure = read_text_at_ref(&not_a_repo, "HEAD", "contract.toml");
+        let GitRead::CommandFailed(failure) = failure else {
+            anyhow::bail!("not-a-repository must be a command failure")
+        };
+        assert!(failure.status.is_some());
+        assert!(failure.stderr.contains("repository"));
+
+        assert!(matches!(
+            read_ref(&root, "zzz-rss-wire-breaking-bogus-ref-xyz"),
+            GitRead::Missing
+        ));
+        assert!(matches!(
+            read_ref(&not_a_repo, "HEAD"),
+            GitRead::CommandFailed(_)
+        ));
+        let ls_tree_error =
+            match base_contract_manifests(&root, "zzz-rss-wire-breaking-bogus-ref-xyz") {
+                Ok(_) => anyhow::bail!("invalid ref must fail"),
+                Err(error) => error.to_string(),
+            };
+        assert!(ls_tree_error.contains("status="));
+        assert!(ls_tree_error.contains("stderr="));
+        std::fs::remove_dir_all(not_a_repo)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn full_projection() -> ManifestProjection {
+        ManifestProjection {
+            http: Some(HttpWireProjection {
+                path: Some("/api/v1/identity/profile".into()),
+                method: Some("GET".into()),
+                success_status: Some(200),
+                auth: Some(AuthProjection {
+                    mode: "permission".into(),
+                    permission: Some("identity:read".into()),
+                }),
+                auth_scope: AuthScopeProjection {
+                    resource: None,
+                    self_scoped: true,
+                },
+                resource_sharing: "tenantScoped".into(),
+                idempotency: Some("idempotent".into()),
+            }),
+            topic: Some("identity.session-created.v1".into()),
+            delivery: Some("at-least-once".into()),
+            consistency: Some("OutboxFact".into()),
+            outbox: Some(OutboxProjection {
+                role: "producer".into(),
+                atomicity: Some("same-transaction".into()),
+                emits: BTreeSet::from(["identity.session-created.v1".into()]),
+            }),
+            subscriptions: BTreeSet::from([SubscriptionProjection {
+                consumer: "audit".into(),
+                group: "audit.sessions".into(),
+                partition: "aggregate".into(),
+                readiness: "required".into(),
+                execution: Some("adapter-native".into()),
+                effect: None,
+            }]),
+        }
+    }
+
+    type ManifestMutation = Box<dyn Fn(&mut ManifestProjection)>;
+    type SubscriptionMutation = Box<dyn Fn(&mut SubscriptionProjection)>;
+
+    fn manifest_rules(old: &ManifestProjection, new: &ManifestProjection) -> Vec<BreakingRule> {
+        compare_manifests(old, new)
+            .into_iter()
+            .map(|b| b.rule)
+            .collect()
+    }
+
+    #[test]
+    fn manifest_projection_unchanged_and_set_order_are_green() -> anyhow::Result<()> {
+        let old = full_projection();
+        let mut new = old.clone();
+        let new_outbox = new
+            .outbox
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing outbox fixture"))?;
+        new_outbox.emits = [
+            "z.topic".to_string(),
+            "identity.session-created.v1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let mut old_with_two = old;
+        let old_outbox = old_with_two
+            .outbox
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing outbox fixture"))?;
+        old_outbox.emits = [
+            "identity.session-created.v1".to_string(),
+            "z.topic".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert!(compare_manifests(&old_with_two, &new).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn http_manifest_rules_are_non_vacuous() -> anyhow::Result<()> {
+        let old = full_projection();
+        let mut status = old.clone();
+        status
+            .http
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing HTTP fixture"))?
+            .success_status = Some(201);
+        assert_eq!(
+            manifest_rules(&old, &status),
+            vec![BreakingRule::HttpStatusCodeChanged]
         );
+
+        let mut auth = old.clone();
+        auth.http
+            .as_mut()
+            .and_then(|http| http.auth.as_mut())
+            .ok_or_else(|| anyhow::anyhow!("missing auth fixture"))?
+            .permission = Some("identity:write".into());
+        assert_eq!(
+            manifest_rules(&old, &auth),
+            vec![BreakingRule::AuthRequirementChanged]
+        );
+
+        let mut idempotency = old.clone();
+        idempotency
+            .http
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing HTTP fixture"))?
+            .idempotency = Some("non-idempotent".into());
+        assert_eq!(
+            manifest_rules(&old, &idempotency),
+            vec![BreakingRule::IdempotencyLevelChanged]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn http_route_and_authorization_scope_are_wire_identity() -> anyhow::Result<()> {
+        let manifest = |path: &str,
+                        method: &str,
+                        resource: Option<&str>,
+                        self_scoped: bool,
+                        sharing: Option<(&str, &str)>| {
+            let resource = resource
+                .map(|value| format!("resource = \"{value}\"\n"))
+                .unwrap_or_default();
+            let self_scoped = if self_scoped {
+                "selfScoped = true\n"
+            } else {
+                ""
+            };
+            let sharing = sharing
+                .map(|(mode, reason)| {
+                    format!(
+                        "[endpoints.http.resourceSharing]\nmode = \"{mode}\"\nreason = \"{reason}\"\n"
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                r#"
+id = "identity.profile"
+kind = "http"
+version = "v1"
+lifecycle = "active"
+path = "{path}"
+method = "{method}"
+consistencyLevel = "LocalOnly"
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+{resource}{self_scoped}[endpoints.http.auth]
+mode = "permission"
+permission = "identity:profile:read"
+{sharing}
+"#
+            )
+        };
+        let base: BaseContractManifest = toml::from_str(&manifest(
+            "/api/v1/identity/profile",
+            "GET",
+            None,
+            true,
+            Some(("tenantScoped", "old prose")),
+        ))?;
+        let old = base_manifest_projection(&base);
+
+        for changed in [
+            manifest(
+                "/api/v2/identity/profile",
+                "GET",
+                None,
+                true,
+                Some(("tenantScoped", "old prose")),
+            ),
+            manifest(
+                "/api/v1/identity/profile",
+                "POST",
+                None,
+                true,
+                Some(("tenantScoped", "old prose")),
+            ),
+            manifest(
+                "/api/v1/identity/profile",
+                "GET",
+                None,
+                false,
+                Some(("tenantScoped", "old prose")),
+            ),
+            manifest(
+                "/api/v1/identity/profile",
+                "GET",
+                Some("subject"),
+                false,
+                Some(("tenantScoped", "old prose")),
+            ),
+            manifest(
+                "/api/v1/identity/profile",
+                "GET",
+                None,
+                true,
+                Some(("global", "approved exception")),
+            ),
+        ] {
+            let changed: BaseContractManifest = toml::from_str(&changed)?;
+            assert!(
+                !compare_manifests(&old, &base_manifest_projection(&changed)).is_empty(),
+                "route/scope semantic changes must be breaking"
+            );
+        }
+
+        let reason_only: BaseContractManifest = toml::from_str(&manifest(
+            "/api/v1/identity/profile",
+            "GET",
+            None,
+            true,
+            Some(("tenantScoped", "new prose")),
+        ))?;
         assert!(
-            run(BOGUS, EnforcementMode::Warn).is_ok(),
-            "warn 模式下不可解析 base ref 跳过（Ok）"
+            compare_manifests(&old, &base_manifest_projection(&reason_only)).is_empty(),
+            "resourceSharing.reason is prose, not wire identity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn response_type_expansion_is_breaking_while_request_expansion_is_compatible() {
+        let old = json!({"properties": {"n": {"type": "integer"}}});
+        let new = json!({"properties": {"n": {"type": "number"}}});
+
+        let request = diff("http/x/v1", Lifecycle::Active, old.clone(), new.clone());
+        assert!(evaluate(&[request]).findings.is_empty());
+
+        let mut response = diff("http/x/v1", Lifecycle::Active, old, new);
+        response.schemas[0].file = "response".to_string();
+        response.schemas[0].direction = SchemaDirection::Output;
+        let result = evaluate(&[response]);
+        assert!(result.any_deny, "response output expansion must be denied");
+        assert_eq!(
+            rules(
+                &result
+                    .findings
+                    .iter()
+                    .map(|f| RawBreak {
+                        rule: f.rule,
+                        pointer: String::new(),
+                        detail: String::new(),
+                    })
+                    .collect::<Vec<_>>()
+            ),
+            vec![BreakingRule::FieldTypeChanged]
         );
     }
 
-    // ─────────── EnforcementMode::from_env（env 解析，非墙钟）───────────
+    #[test]
+    fn output_variance_covers_nullable_required_enum_and_field_removal() {
+        let cases = [
+            (
+                json!({"type": "string"}),
+                json!({"type": ["string", "null"]}),
+                BreakingRule::NullableAdded,
+            ),
+            (
+                json!({"required": ["value"], "properties": {"value": {"type": "string"}}}),
+                json!({"required": [], "properties": {"value": {"type": "string"}}}),
+                BreakingRule::RequiredFieldRemoved,
+            ),
+            (
+                json!({"enum": ["a"]}),
+                json!({"enum": ["a", "b"]}),
+                BreakingRule::EnumValueAdded,
+            ),
+            (
+                json!({"properties": {"value": {"type": "string"}}}),
+                json!({"properties": {}}),
+                BreakingRule::FieldNoDelete,
+            ),
+        ];
 
-    /// from_raw（纯解析，无 env 触碰）：缺省 / 非 deny 值 → Warn；`deny`（大小写不敏感、容空白）→ Deny。
-    #[rstest]
-    #[case(None, EnforcementMode::Warn)]
-    #[case(Some(""), EnforcementMode::Warn)]
-    #[case(Some("warn"), EnforcementMode::Warn)]
-    #[case(Some("bogus"), EnforcementMode::Warn)]
-    #[case(Some("deny"), EnforcementMode::Deny)]
-    #[case(Some("DENY"), EnforcementMode::Deny)]
-    #[case(Some(" deny "), EnforcementMode::Deny)]
-    fn enforcement_mode_from_raw(#[case] raw: Option<&str>, #[case] want: EnforcementMode) {
-        assert_eq!(EnforcementMode::from_raw(raw), want);
+        for (old, new, expected) in cases {
+            let breaks = compare_schemas_for_direction(&old, &new, SchemaDirection::Output);
+            assert!(
+                rules(&breaks).contains(&expected),
+                "output expansion/removal must report {expected:?}: {breaks:?}"
+            );
+            assert!(
+                compare_schemas_for_direction(&new, &old, SchemaDirection::Output)
+                    .iter()
+                    .all(|finding| finding.rule != expected),
+                "opposite output narrowing must not report {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_reason_is_not_part_of_wire_projection() -> anyhow::Result<()> {
+        let template = |reason: &str| {
+            format!(
+                r#"
+id = "identity.profile.v1"
+kind = "http"
+version = "v1"
+lifecycle = "active"
+consistencyLevel = "LocalOnly"
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+[endpoints.http.auth]
+mode = "permission"
+permission = "identity:profile:read"
+reason = "{reason}"
+"#
+            )
+        };
+        let old: BaseContractManifest = toml::from_str(&template("old prose"))?;
+        let new: BaseContractManifest = toml::from_str(&template("new prose"))?;
+        assert!(
+            compare_manifests(
+                &base_manifest_projection(&old),
+                &base_manifest_projection(&new)
+            )
+            .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn l2_manifest_scalar_and_outbox_rules_are_non_vacuous() {
+        let old = full_projection();
+        let cases: Vec<(BreakingRule, ManifestMutation)> = vec![
+            (
+                BreakingRule::TopicChanged,
+                Box::new(|p| p.topic = Some("renamed".into())),
+            ),
+            (
+                BreakingRule::DeliveryChanged,
+                Box::new(|p| p.delivery = Some("exactly-once".into())),
+            ),
+            (
+                BreakingRule::ConsistencyLevelChanged,
+                Box::new(|p| p.consistency = Some("WorkflowEventual".into())),
+            ),
+            (
+                BreakingRule::OutboxRoleChanged,
+                Box::new(|p| {
+                    if let Some(outbox) = p.outbox.as_mut() {
+                        outbox.role = "fact".into();
+                    }
+                }),
+            ),
+            (
+                BreakingRule::OutboxAtomicityChanged,
+                Box::new(|p| {
+                    if let Some(outbox) = p.outbox.as_mut() {
+                        outbox.atomicity = None;
+                    }
+                }),
+            ),
+            (
+                BreakingRule::OutboxEmitsChanged,
+                Box::new(|p| {
+                    if let Some(outbox) = p.outbox.as_mut() {
+                        outbox.emits.insert("new.topic".into());
+                    }
+                }),
+            ),
+        ];
+        for (rule, mutate) in cases {
+            let mut new = old.clone();
+            mutate(&mut new);
+            assert_eq!(manifest_rules(&old, &new), vec![rule]);
+        }
+    }
+
+    #[test]
+    fn subscription_rules_are_non_vacuous() -> anyhow::Result<()> {
+        let old = full_projection();
+        let cases: Vec<(BreakingRule, SubscriptionMutation)> = vec![
+            (
+                BreakingRule::SubscriptionConsumerChanged,
+                Box::new(|s| s.consumer = "settings".into()),
+            ),
+            (
+                BreakingRule::SubscriptionGroupChanged,
+                Box::new(|s| s.group = "audit.renamed".into()),
+            ),
+            (
+                BreakingRule::SubscriptionTopologyChanged,
+                Box::new(|s| s.partition = "none".into()),
+            ),
+            (
+                BreakingRule::SubscriptionExecutionChanged,
+                Box::new(|s| s.execution = Some("domain-effect".into())),
+            ),
+            (
+                BreakingRule::SubscriptionEffectChanged,
+                Box::new(|s| s.effect = Some("settings-config-version-refresh".into())),
+            ),
+        ];
+        for (rule, mutate) in cases {
+            let mut new = old.clone();
+            let mut subscription = new
+                .subscriptions
+                .pop_first()
+                .ok_or_else(|| anyhow::anyhow!("missing subscription fixture"))?;
+            mutate(&mut subscription);
+            new.subscriptions.insert(subscription);
+            assert_eq!(manifest_rules(&old, &new), vec![rule]);
+        }
+        let mut added = old.clone();
+        let mut extra = added
+            .subscriptions
+            .pop_first()
+            .ok_or_else(|| anyhow::anyhow!("missing subscription fixture"))?;
+        added.subscriptions.insert(extra.clone());
+        extra.consumer = "settings".into();
+        extra.group = "settings.sessions".into();
+        added.subscriptions.insert(extra);
+        assert_eq!(
+            manifest_rules(&old, &added),
+            vec![BreakingRule::SubscriptionSetChanged]
+        );
+        Ok(())
+    }
+
+    fn subscription(
+        consumer: &str,
+        group: &str,
+        partition: &str,
+        readiness: &str,
+        execution: &str,
+        effect: Option<&str>,
+    ) -> SubscriptionProjection {
+        SubscriptionProjection {
+            consumer: consumer.into(),
+            group: group.into(),
+            partition: partition.into(),
+            readiness: readiness.into(),
+            execution: Some(execution.into()),
+            effect: effect.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn same_consumer_multi_group_is_compared_without_loss() -> anyhow::Result<()> {
+        let old = BTreeSet::from([
+            subscription(
+                "audit",
+                "audit.g1",
+                "aggregate",
+                "required",
+                "adapter-native",
+                None,
+            ),
+            subscription(
+                "audit",
+                "audit.g2",
+                "none",
+                "required",
+                "adapter-native",
+                None,
+            ),
+        ]);
+        let first = old
+            .iter()
+            .next()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing g1 fixture"))?;
+        let last = old
+            .iter()
+            .next_back()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing g2 fixture"))?;
+
+        let mut reordered = BTreeSet::new();
+        reordered.insert(last.clone());
+        reordered.insert(first.clone());
+        let mut findings = Vec::new();
+        compare_subscriptions(&mut findings, &old, &reordered);
+        assert!(
+            findings.is_empty(),
+            "declaration order is not wire semantics"
+        );
+
+        let mut added = old.clone();
+        added.insert(subscription(
+            "audit",
+            "audit.g3",
+            "none",
+            "required",
+            "adapter-native",
+            None,
+        ));
+        let mut findings = Vec::new();
+        compare_subscriptions(&mut findings, &old, &added);
+        assert_eq!(rules(&findings), vec![BreakingRule::SubscriptionSetChanged]);
+
+        let removed = BTreeSet::from([first]);
+        let mut findings = Vec::new();
+        compare_subscriptions(&mut findings, &old, &removed);
+        assert_eq!(rules(&findings), vec![BreakingRule::SubscriptionSetChanged]);
+
+        for (expected, changed) in [
+            (
+                BreakingRule::SubscriptionTopologyChanged,
+                subscription(
+                    "audit",
+                    "audit.g1",
+                    "none",
+                    "required",
+                    "adapter-native",
+                    None,
+                ),
+            ),
+            (
+                BreakingRule::SubscriptionTopologyChanged,
+                subscription(
+                    "audit",
+                    "audit.g1",
+                    "aggregate",
+                    "optional",
+                    "adapter-native",
+                    None,
+                ),
+            ),
+            (
+                BreakingRule::SubscriptionExecutionChanged,
+                subscription(
+                    "audit",
+                    "audit.g1",
+                    "aggregate",
+                    "required",
+                    "domain-effect",
+                    None,
+                ),
+            ),
+            (
+                BreakingRule::SubscriptionEffectChanged,
+                subscription(
+                    "audit",
+                    "audit.g1",
+                    "aggregate",
+                    "required",
+                    "adapter-native",
+                    Some("settings-config-version-refresh"),
+                ),
+            ),
+        ] {
+            let new = BTreeSet::from([changed, last.clone()]);
+            let mut findings = Vec::new();
+            compare_subscriptions(&mut findings, &old, &new);
+            assert_eq!(rules(&findings), vec![expected]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn plan_diffs_rejects_duplicate_identity_and_reports_lifecycle_downgrade() -> anyhow::Result<()>
+    {
+        let schema = json!({"properties": {"id": {"type":"string"}}});
+        let active = side("same", Lifecycle::Active, &[("request", schema.clone())]);
+        assert!(plan_diffs(&[active.clone(), active.clone()], &[]).is_err());
+
+        for lifecycle in [Lifecycle::Draft, Lifecycle::Deprecated] {
+            let downgraded = side("same", lifecycle, &[("request", schema.clone())]);
+            let diffs = plan_diffs(std::slice::from_ref(&active), &[downgraded])?;
+            assert_eq!(diffs[0].lifecycle, Lifecycle::Active);
+            assert_eq!(diffs[0].working_lifecycle, Some(lifecycle));
+            let result = evaluate(&diffs);
+            assert!(result.any_deny, "active lifecycle 降级不得绕过");
+            assert_eq!(result.findings.len(), 1);
+            assert_eq!(result.findings[0].rule, BreakingRule::LifecycleDowngraded);
+            assert_eq!(result.findings[0].rule.id(), "LIFECYCLE_DOWNGRADED");
+        }
+        Ok(())
     }
 
     /// 规则 ID 稳定（输出 + 治理断言单源，防漂移）。

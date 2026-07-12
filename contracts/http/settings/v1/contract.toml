@@ -16,6 +16,10 @@ method = "POST"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[endpoints.http]
+successStatus = 201
+idempotency = "non-idempotent"
+
 # 租户作用域特权写：Primary listener JWT verify 强制已认证主体（缺/匿名 fail-closed 401）；
 # 租户来自验签 claim（非 pre-auth X-Tenant-ID header）。permission 声明意图，PDP graduate 后细粒度 enforce。
 [endpoints.http.auth]

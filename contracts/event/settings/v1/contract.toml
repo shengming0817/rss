@@ -24,6 +24,8 @@ role = "fact"
 [[subscriptions]]
 consumer = "settings"
 group = "settings.config-version-changed"
+execution = "domain-effect"
+effect = "settings-config-version-refresh"
 
 [subscriptions.topology]
 partitionKey = "none"

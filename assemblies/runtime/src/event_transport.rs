@@ -43,7 +43,10 @@ use eventexec::{
     SWEEPER_WORKER_NAME, SweeperConfig, SweeperWorker, TenantAuthority, WorkerHealth,
     backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
-use generated::event::{EventSpec, SubscriberReadiness, SubscriptionSpec};
+use generated::event::{
+    EventSpec, SubscriberReadiness, SubscriptionDispatchKey, SubscriptionEffect,
+    SubscriptionExecution, SubscriptionSpec,
+};
 use postgres::{AuditConsumerTxEffect as _, DlxPayloadProtector, PgRuntimeHandle, caps};
 use primitives::{HealthCheck, MacKey, ProbeName};
 use vault::VaultKeyProvider;
@@ -373,7 +376,7 @@ fn bridge_subscriptions_with_events(
             spec.consumer(),
             spec.group()
         );
-        let consumer_tx = resolve_consumer_tx_plan(event, spec, &group, execution)?;
+        let consumer_tx = resolve_consumer_tx_plan(spec, execution)?;
         matched_specs[matched_index] = true;
         bridged.push(BridgedSubscription {
             event,
@@ -938,88 +941,93 @@ enum ConsumerTxPlan {
 }
 
 #[cfg(test)]
-fn consumer_tx_plan_for_spec(
-    event: EventSpec,
-    spec: SubscriptionSpec,
-) -> anyhow::Result<ConsumerTxPlan> {
-    let execution = match spec.consumer() {
-        "settings" => SubscriberExecution::DomainEffect(Arc::new(|_, _| {
+fn test_execution_for_spec(spec: SubscriptionSpec) -> anyhow::Result<SubscriberExecution> {
+    let execution = match (spec.execution(), spec.effect()) {
+        (SubscriptionExecution::AdapterNative, None) => SubscriberExecution::AdapterNative,
+        (
+            SubscriptionExecution::DomainEffect,
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+        ) => SubscriberExecution::DomainEffect(Arc::new(|_, _| {
             Box::pin(async { consistency::HandleResult::ack() })
         })),
-        _ => SubscriberExecution::AdapterNative,
+        (
+            SubscriptionExecution::AdapterNative,
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh),
+        )
+        | (SubscriptionExecution::DomainEffect, None) => {
+            return Err(anyhow::anyhow!(
+                "generated subscription execution/effect is invalid: consumer={} execution={:?} effect={:?}",
+                spec.consumer(),
+                spec.execution(),
+                spec.effect()
+            ));
+        }
     };
-    let group = ConsumerGroup::parse(spec.group()).context("parse generated test group")?;
-    resolve_consumer_tx_plan(event, spec, &group, execution)
+    Ok(execution)
+}
+
+#[cfg(test)]
+fn consumer_tx_plan_for_spec(spec: SubscriptionSpec) -> anyhow::Result<ConsumerTxPlan> {
+    let execution = test_execution_for_spec(spec)?;
+    resolve_consumer_tx_plan(spec, execution)
 }
 
 fn resolve_consumer_tx_plan(
-    event: EventSpec,
     spec: SubscriptionSpec,
-    group: &ConsumerGroup,
     execution: SubscriberExecution,
 ) -> anyhow::Result<ConsumerTxPlan> {
-    match (
-        spec.consumer(),
-        event.contract_id(),
-        event.topic(),
-        group.as_str(),
-        execution,
-    ) {
+    match spec.dispatch() {
+        SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
+            adapter_native_plan(spec, execution, ConsumerTxPlan::AuditSessionCreated)
+        }
+        SubscriptionDispatchKey::IdentityRoleAssignedV1Audit => {
+            adapter_native_plan(spec, execution, ConsumerTxPlan::AuditRoleAssigned)
+        }
+        SubscriptionDispatchKey::IdentityRoleRevokedV1Audit => {
+            adapter_native_plan(spec, execution, ConsumerTxPlan::AuditRoleRevoked)
+        }
+        SubscriptionDispatchKey::IdentityPolicyUpdatedV1Audit => {
+            adapter_native_plan(spec, execution, ConsumerTxPlan::AuditPolicyUpdated)
+        }
+        SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => {
+            settings_config_refresh_plan(spec, execution)
+        }
+    }
+}
+
+fn adapter_native_plan(
+    spec: SubscriptionSpec,
+    execution: SubscriberExecution,
+    plan: ConsumerTxPlan,
+) -> anyhow::Result<ConsumerTxPlan> {
+    match (spec.execution(), spec.effect(), execution) {
+        (SubscriptionExecution::AdapterNative, None, SubscriberExecution::AdapterNative) => {
+            Ok(plan)
+        }
+        _ => anyhow::bail!(
+            "adapter-native subscription dispatch or runtime execution mismatch: dispatch={:?} consumer={} group={}",
+            spec.dispatch(),
+            spec.consumer(),
+            spec.group()
+        ),
+    }
+}
+
+fn settings_config_refresh_plan(
+    spec: SubscriptionSpec,
+    execution: SubscriberExecution,
+) -> anyhow::Result<ConsumerTxPlan> {
+    match (spec.execution(), spec.effect(), execution) {
         (
-            "audit",
-            generated::event::identity_v1::session_created::CONTRACT_ID,
-            generated::event::identity_v1::session_created::TOPIC,
-            "audit.session-created",
-            SubscriberExecution::AdapterNative,
-        ) => Ok(ConsumerTxPlan::AuditSessionCreated),
-        (
-            "audit",
-            generated::event::identity_v1::role_assigned::CONTRACT_ID,
-            generated::event::identity_v1::role_assigned::TOPIC,
-            "audit.role-assigned",
-            SubscriberExecution::AdapterNative,
-        ) => Ok(ConsumerTxPlan::AuditRoleAssigned),
-        (
-            "audit",
-            generated::event::identity_v1::role_revoked::CONTRACT_ID,
-            generated::event::identity_v1::role_revoked::TOPIC,
-            "audit.role-revoked",
-            SubscriberExecution::AdapterNative,
-        ) => Ok(ConsumerTxPlan::AuditRoleRevoked),
-        (
-            "audit",
-            generated::event::identity_v1::policy_updated::CONTRACT_ID,
-            generated::event::identity_v1::policy_updated::TOPIC,
-            "audit.policy-updated",
-            SubscriberExecution::AdapterNative,
-        ) => Ok(ConsumerTxPlan::AuditPolicyUpdated),
-        (
-            "settings",
-            generated::event::settings_v1::CONTRACT_ID,
-            generated::event::settings_v1::TOPIC,
-            "settings.config-version-changed",
+            SubscriptionExecution::DomainEffect,
+            Some(SubscriptionEffect::SettingsConfigVersionRefresh),
             SubscriberExecution::DomainEffect(effect),
         ) => Ok(ConsumerTxPlan::SettingsConfigVersionChanged(effect)),
-        ("settings", _, _, _, SubscriberExecution::AdapterNative) => anyhow::bail!(
-            "generated settings subscription requires domain effect: contract={} topic={} consumer={} group={}",
-            event.contract_id(),
-            event.topic(),
-            spec.consumer(),
-            group.as_str()
-        ),
-        ("audit", _, _, _, SubscriberExecution::DomainEffect(_)) => anyhow::bail!(
-            "generated audit subscription requires adapter-native execution: contract={} topic={} consumer={} group={}",
-            event.contract_id(),
-            event.topic(),
-            spec.consumer(),
-            group.as_str()
-        ),
         _ => anyhow::bail!(
-            "generated subscription has no ConsumerTx plan: contract={} topic={} consumer={} group={}",
-            event.contract_id(),
-            event.topic(),
+            "settings config-version refresh subscription dispatch or runtime execution mismatch: dispatch={:?} consumer={} group={}",
+            spec.dispatch(),
             spec.consumer(),
-            group.as_str()
+            spec.group()
         ),
     }
 }
@@ -1301,13 +1309,18 @@ mod tests {
         consumer: &'static str,
         group: &'static str,
     ) -> SubscriberBinding {
-        let execution = if consumer == "settings" {
-            SubscriberExecution::DomainEffect(Arc::new(|_, _| {
-                Box::pin(async { consistency::HandleResult::ack() })
-            }))
-        } else {
-            SubscriberExecution::AdapterNative
-        };
+        let spec = generated::event::EVENTS
+            .iter()
+            .find(|event| event.contract_id() == contract_id && event.topic() == topic)
+            .and_then(|event| {
+                event
+                    .subscriptions()
+                    .iter()
+                    .find(|spec| spec.consumer() == consumer)
+            })
+            .copied()
+            .unwrap();
+        let execution = test_execution_for_spec(spec).unwrap();
         test_binding_with_execution(contract_id, topic, consumer, group, execution)
     }
 
@@ -1434,7 +1447,7 @@ mod tests {
                     .iter()
                     .map(move |spec| (*event, *spec))
             })
-            .filter(|(event, spec)| consumer_tx_plan_for_spec(*event, *spec).is_err())
+            .filter(|(_, spec)| consumer_tx_plan_for_spec(*spec).is_err())
             .map(|(event, spec)| {
                 format!(
                     "{}:{}:{}:{}",
@@ -1501,7 +1514,9 @@ mod tests {
         assert!(result.is_err(), "binding must fail closed");
         let error = result.err().unwrap();
 
-        assert!(error.to_string().contains("requires domain effect"));
+        assert!(error.to_string().contains(
+            "config-version refresh subscription dispatch or runtime execution mismatch"
+        ));
     }
 
     #[allow(clippy::unwrap_used)]
@@ -1524,7 +1539,11 @@ mod tests {
         assert!(result.is_err(), "binding must fail closed");
         let error = result.err().unwrap();
 
-        assert!(error.to_string().contains("requires adapter-native"));
+        assert!(
+            error
+                .to_string()
+                .contains("adapter-native subscription dispatch or runtime execution mismatch")
+        );
     }
 
     #[allow(clippy::unwrap_used)]

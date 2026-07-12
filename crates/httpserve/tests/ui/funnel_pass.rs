@@ -16,6 +16,8 @@ fn main() {
         ),
         "/x",
         "GET",
+        vocab::HttpSuccessStatus::new(200),
+        vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
@@ -27,27 +29,28 @@ fn main() {
             |_: httpserve::ContractMarker<RouteMarker>| async {},
         )?;
         let rb = rb.mount(endpoint)?;
-        let stateful_binding = vocab::HttpRouteBinding::<
-            StatefulRouteMarker,
-            vocab::http::LocalTx,
-        >::from_static(
-            vocab::ContractBinding::from_static(
-                "test",
-                "ui.pass-stateful",
-                "v1",
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            ),
-            "/stateful",
-            "GET",
-            vocab::HttpRouteAuth::ServiceOwned,
-            None,
-            false,
-            vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Transaction]),
-        );
+        let stateful_binding =
+            vocab::HttpRouteBinding::<StatefulRouteMarker, vocab::http::LocalTx>::from_static(
+                vocab::ContractBinding::from_static(
+                    "test",
+                    "ui.pass-stateful",
+                    "v1",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+                "/stateful",
+                "GET",
+                vocab::HttpSuccessStatus::new(200),
+                vocab::HttpIdempotency::Idempotent,
+                vocab::HttpRouteAuth::ServiceOwned,
+                None,
+                false,
+                vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Transaction]),
+            );
         rb.mount(
             httpserve::GeneratedEndpoint::new(
                 stateful_binding,
-                |_: httpserve::ContractMarker<StatefulRouteMarker>, State(_): State<String>| async {},
+                |_: httpserve::ContractMarker<StatefulRouteMarker>, State(_): State<String>| async {
+                },
             )?
             .with_state(String::new()),
         )

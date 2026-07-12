@@ -105,8 +105,8 @@ enum InternalCheck {
     AssemblyModulesCheck,
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
-    /// wire JSON-Schema 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。窗口分级：默认 warn（退出码 0），
-    /// env `RSS_WIRE_BREAKING=deny` 对 active 契约破坏升 deny（退出码 1）；against = origin/develop。
+    /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
+    /// active 契约破坏恒 deny（退出码 1）；deprecated warn；against = origin/develop。
     ContractBreaking,
     LayerDeps,
     /// server/rss 实际 Cargo feature graph 禁止通过 feature unification 启用 httpserve/test-util。
@@ -1096,11 +1096,10 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
-        // wire 破坏门：against=origin/develop，窗口分级经 env（默认 warn，退出码 0；deny 模式 active 破坏退出码 1）。
-        InternalCheck::ContractBreaking => contract::breaking::run(
-            contract::breaking::DEFAULT_AGAINST,
-            contract::breaking::EnforcementMode::from_env(),
-        ),
+        // wire 破坏门：against=origin/develop；active 恒 deny、deprecated warn、draft skip。
+        InternalCheck::ContractBreaking => {
+            contract::breaking::run(contract::breaking::DEFAULT_AGAINST)
+        }
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::ShippedFeatureGuard => {
             run_check(&shipped_feature_guard::ShippedFeatureGuard)

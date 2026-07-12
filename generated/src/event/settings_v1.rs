@@ -203,6 +203,9 @@ pub const SPEC: super::EventSpec = super::EventSpec::new(
     &[super::SubscriptionSpec::new(
         "settings",
         "settings.config-version-changed",
+        super::SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings,
         super::SubscriberReadiness::Required,
+        super::SubscriptionExecution::DomainEffect,
+        Some(super::SubscriptionEffect::SettingsConfigVersionRefresh),
     )],
 );

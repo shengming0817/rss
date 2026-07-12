@@ -13,6 +13,10 @@ method = "DELETE"
 request = "request.schema.json"
 response = "response.schema.json"
 
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+
 [endpoints.http.auth]
 mode = "permission"
 permission = "identity:role:revoke"

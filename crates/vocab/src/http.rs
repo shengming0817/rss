@@ -228,6 +228,43 @@ pub enum HttpRouteAuth {
     ServiceOwned,
 }
 
+/// Successful response status declared by an HTTP contract.
+///
+/// The inner value is private so generated metadata can only carry a validated 2xx status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpSuccessStatus(u16);
+
+impl HttpSuccessStatus {
+    /// Construct a status for generated static metadata.
+    ///
+    /// # Panics
+    ///
+    /// Panics in const evaluation unless `status` is in the inclusive HTTP success range.
+    #[must_use]
+    pub const fn new(status: u16) -> Self {
+        assert!(
+            status >= 200 && status <= 299,
+            "HTTP success status must be in 200..=299"
+        );
+        Self(status)
+    }
+
+    /// Validated numeric HTTP status.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// Request replay semantics declared by an HTTP contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpIdempotency {
+    /// Repeating the same request has the same intended effect.
+    Idempotent,
+    /// Repeating the same request may produce an additional effect.
+    NonIdempotent,
+}
+
 /// Atomic proof used to register one generated HTTP route.
 ///
 /// All fields are private. Code generation constructs the complete value in one expression;
@@ -237,6 +274,8 @@ pub struct HttpRouteEvidence {
     contract: ContractBinding,
     path: &'static str,
     method: &'static str,
+    success_status: HttpSuccessStatus,
+    idempotency: HttpIdempotency,
     auth: HttpRouteAuth,
     resource: Option<&'static str>,
     self_scoped: bool,
@@ -278,6 +317,8 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
         contract: ContractBinding,
         path: &'static str,
         method: &'static str,
+        success_status: HttpSuccessStatus,
+        idempotency: HttpIdempotency,
         auth: HttpRouteAuth,
         resource: Option<&'static str>,
         self_scoped: bool,
@@ -288,6 +329,8 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
                 contract,
                 path,
                 method,
+                success_status,
+                idempotency,
                 auth,
                 resource,
                 self_scoped,
@@ -318,6 +361,8 @@ impl HttpRouteEvidence {
         contract: ContractBinding,
         path: &'static str,
         method: &'static str,
+        success_status: HttpSuccessStatus,
+        idempotency: HttpIdempotency,
         auth: HttpRouteAuth,
         resource: Option<&'static str>,
         self_scoped: bool,
@@ -342,6 +387,8 @@ impl HttpRouteEvidence {
             contract,
             path,
             method,
+            success_status,
+            idempotency,
             auth,
             resource,
             self_scoped,
@@ -372,6 +419,18 @@ impl HttpRouteEvidence {
     #[must_use]
     pub const fn method(&self) -> &'static str {
         self.method
+    }
+
+    /// Validated successful response status.
+    #[must_use]
+    pub const fn success_status(&self) -> HttpSuccessStatus {
+        self.success_status
+    }
+
+    /// Declared request replay semantics.
+    #[must_use]
+    pub const fn idempotency(&self) -> HttpIdempotency {
+        self.idempotency
     }
 
     /// Closed authentication mode and permission.
@@ -421,6 +480,8 @@ mod tests {
         CONTRACT,
         "/v1/profile",
         "GET",
+        HttpSuccessStatus::new(200),
+        HttpIdempotency::Idempotent,
         HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead),
         None,
         true,
@@ -434,6 +495,8 @@ mod tests {
         assert_eq!(EVIDENCE.contract_id(), "identity.profile");
         assert_eq!(EVIDENCE.path(), "/v1/profile");
         assert_eq!(EVIDENCE.method(), "GET");
+        assert_eq!(EVIDENCE.success_status().get(), 200);
+        assert_eq!(EVIDENCE.idempotency(), HttpIdempotency::Idempotent);
         assert_eq!(
             EVIDENCE.auth(),
             HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead)
@@ -455,6 +518,8 @@ mod tests {
             CONTRACT,
             "/v1/profile",
             "GET",
+            HttpSuccessStatus::new(202),
+            HttpIdempotency::NonIdempotent,
             HttpRouteAuth::Public,
             None,
             false,
@@ -465,6 +530,29 @@ mod tests {
             binding.evidence().consistency_level(),
             HttpConsistencyLevel::OutboxFact
         );
+        assert_eq!(binding.evidence().success_status().get(), 202);
+        assert_eq!(
+            binding.evidence().idempotency(),
+            HttpIdempotency::NonIdempotent
+        );
+    }
+
+    #[test]
+    fn success_status_accepts_the_complete_success_range() {
+        assert_eq!(HttpSuccessStatus::new(200).get(), 200);
+        assert_eq!(HttpSuccessStatus::new(299).get(), 299);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be in 200..=299")]
+    fn informational_status_is_rejected() {
+        let _ = HttpSuccessStatus::new(199);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be in 200..=299")]
+    fn redirect_status_is_rejected() {
+        let _ = HttpSuccessStatus::new(300);
     }
 
     #[test]
@@ -486,6 +574,8 @@ mod tests {
             CONTRACT,
             "v1/profile",
             "GET",
+            HttpSuccessStatus::new(200),
+            HttpIdempotency::Idempotent,
             HttpRouteAuth::Public,
             None,
             false,
@@ -501,6 +591,8 @@ mod tests {
             CONTRACT,
             "/v1/profile",
             "GET",
+            HttpSuccessStatus::new(200),
+            HttpIdempotency::Idempotent,
             HttpRouteAuth::Public,
             Some("subject"),
             false,

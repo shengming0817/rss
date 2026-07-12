@@ -195,12 +195,21 @@ ConsumerTx outcome 使用 typed constructor 收口：`handler_transient` 可在�
 broker `Requeue`，不写 app DLX、不提交 inbox `done`、不 `Ack`；`commit_unknown` / `LeaseLost` 立即 broker
 `Requeue`；只有永久 `Reject` 可写 app DLX、提交 inbox `done` 后 broker `Ack`。
 
-durable runtime 对 generated subscription fail closed：每条订阅由 Registry 声明 generated subscription identity
-（contract/topic/consumer/group）和闭枚举 execution policy。`AdapterNative` 按该 identity 选择 `ConsumerTx`；
-`DomainEffect` 仅用于必须捕获域内 singleton 的 settings cache refresh，并由 generated topology 的穷举 resolver
-限制在 `settings.config-version-changed`。新增订阅、execution 缺失或 identity/execution 错配时，测试与启动均失败；
-不得增加默认分支、通用 handler registry 或 fallback。payload decode / wire DTO 归属域 crate（域可依赖
+durable runtime 对 generated subscription fail closed：每条订阅在 `contract.toml` 声明 identity
+（contract/topic/consumer/group）和闭枚举 `execution = "adapter-native" | "domain-effect"`，再由 codegen 派生为
+`SubscriptionSpec`，并从 `(contract id, version, consumer)` 同源生成闭枚举 `SubscriptionDispatchKey`。
+runtime 必须对该 dispatch key 穷尽匹配并只绑定 `ConsumerTx` plan；新增订阅而未接线时编译失败，guard
+只守穷尽 match 的结构，不维护订阅实例清单。`adapter-native` 禁止声明 `effect`；`domain-effect`
+必须声明当前唯一闭值 `effect = "settings-config-version-refresh"`，仅用于必须捕获域内 singleton 的
+settings cache refresh，并由 generated topology 的穷举 resolver 限制在 `settings.config-version-changed`。
+新增订阅、execution/effect 缺失或配对非法、identity/execution/effect 与实际 handler 错配时，解析、测试或启动失败；
+不得增加 wildcard、默认分支、通用 handler registry、平行映射清单或 fallback。payload decode / wire DTO 归属域 crate（域可依赖
 `generated`），postgres adapter 只保留 PG transaction / TxCapability 职责，避免 adapter 维护第二套 event schema。
+
+active L2 manifest 的 topic、delivery、consistency level、outbox role/atomicity/emits 以及 subscription
+集合、consumer/group、topology、execution/effect 都是 wire 语义，受 `cargo xtask contract breaking`
+跨版本门保护。`emits` 与 subscription 集合的排序不是语义，但元素任何增、删、替换都是
+breaking；active 恒 deny、deprecated warn、draft 跳过。
 
 `settings.config-version-changed` 的 `DomainEffect` 捕获 HTTP routes 使用的同一 `SettingsService`；成功路径必须
 先刷新该 singleton cache，再由 ConsumerTx 提交 inbox `done`。refresh transient 不提交 inbox、走 `Requeue`，
@@ -507,7 +516,7 @@ outbox 派生投影的 durable journal（`projection_events`）只由 outbox wri
 启动期 migrator 用 generated `PROJECTION_INPUTS` 刷新 DB 侧 `projection_input_bindings`，不授 `rss_app`
 写权限；append 函数还要求参数与同事务可见 outbox row 完全匹配，且该 row 命中 DB registry，防止直接 SQL
 绕过 Rust funnel 凭空写 projection journal。append 函数持 xact advisory lock 后插入，使 projection LSN identity 顺序跟随已提交 projection append 顺序。
-0040 migration 是 pre-GA breaking cut：旧 `projection_events` 非空即 fail-fast，不 backfill、不保留裸 append shim。
+0040 migration 是有意的 breaking cut：旧 `projection_events` 非空即 fail-fast，不 backfill、不保留裸 append shim。
 `ProjectionEventSource::read_from(None, limit)` 表示从 source 起点读取；runner 不用 `Lsn(0)` 兼作起点前哨兵。
 Postgres `projection_events` 的 identity 实际从 1 开始，`PgProjectionEvents` 内部才把 `None` 映射为 DB 固定函数的
 exclusive `after=0`。

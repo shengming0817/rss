@@ -218,6 +218,8 @@ mod tests {
         "contract",
         "path",
         "method",
+        "success_status",
+        "idempotency",
         "auth",
         "resource",
         "self_scoped",
@@ -428,8 +430,10 @@ mod tests {
             "pub struct generated::event::EventSpec",
             "pub enum generated::event::PartitionKeyStrategy",
             "pub enum generated::event::SubscriberReadiness",
+            "pub enum generated::event::SubscriptionDispatchKey",
             "pub const generated::event::EVENTS: &[generated::event::EventSpec]",
             "pub const fn generated::event::EventSpec::subscriptions(self) -> &'static [generated::event::SubscriptionSpec]",
+            "pub const fn generated::event::SubscriptionSpec::dispatch(self) -> generated::event::SubscriptionDispatchKey",
         ] {
             assert!(
                 baseline.contains(required),
@@ -492,12 +496,20 @@ mod tests {
             "pub enum vocab::http::HttpEffectKind",
             "pub struct vocab::http::HttpEffectProfile",
             "pub const fn vocab::http::HttpEffectProfile::new",
+            "pub struct vocab::http::HttpSuccessStatus",
+            "pub const fn vocab::http::HttpSuccessStatus::new",
+            "pub const fn vocab::http::HttpSuccessStatus::get",
+            "pub enum vocab::http::HttpIdempotency",
+            "pub vocab::http::HttpIdempotency::Idempotent",
+            "pub vocab::http::HttpIdempotency::NonIdempotent",
             "pub enum vocab::http::HttpRouteAuth",
             "pub struct vocab::http::HttpRouteBinding<M, C>",
             "pub const fn vocab::http::HttpRouteBinding<M, C>::from_static",
             "pub const fn vocab::http::HttpRouteBinding<M, C>::evidence",
             "pub struct vocab::http::HttpRouteEvidence",
             "pub const fn vocab::http::HttpRouteEvidence::from_static",
+            "pub const fn vocab::http::HttpRouteEvidence::success_status",
+            "pub const fn vocab::http::HttpRouteEvidence::idempotency",
             "pub const fn vocab::http::HttpRouteEvidence::effect_profile",
             "pub enum vocab::http::LocalTxBoundary",
             "pub const vocab::http::LocalTxBoundary::ALL: &'static [Self]",
@@ -563,6 +575,8 @@ mod tests {
 pub vocab::http::HttpRouteEvidence::contract: vocab::contract::binding::ContractBinding
 pub vocab::http::HttpRouteEvidence::path: &'static str
 pub vocab::http::HttpRouteEvidence::method: &'static str
+pub vocab::http::HttpRouteEvidence::success_status: vocab::http::HttpSuccessStatus
+pub vocab::http::HttpRouteEvidence::idempotency: vocab::http::HttpIdempotency
 pub vocab::http::HttpRouteEvidence::auth: vocab::http::HttpRouteAuth
 pub vocab::http::HttpRouteEvidence::resource: core::option::Option<&'static str>
 pub vocab::http::HttpRouteEvidence::self_scoped: bool
@@ -575,6 +589,8 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                 "contract",
                 "path",
                 "method",
+                "success_status",
+                "idempotency",
                 "auth",
                 "resource",
                 "self_scoped",

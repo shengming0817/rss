@@ -1252,6 +1252,7 @@ payload = "payload.schema.json"
 [[subscriptions]]
 consumer = "identity"
 group = "identity.session-created"
+execution = "adapter-native"
 
 [subscriptions.topology]
 partitionKey = "none"

@@ -1,7 +1,7 @@
 error[E0599]: the method `with_state` exists for struct `GeneratedPrimaryEndpoint<String, vocab::http::LocalOnly>`, but its trait bounds were not satisfied
-  --> tests/ui/primary_local_only_cannot_with_state.rs:25:22
+  --> tests/ui/primary_local_only_cannot_with_state.rs:27:22
    |
-25 |     let _ = endpoint.with_state(String::new());
+27 |     let _ = endpoint.with_state(String::new());
    |                      ^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
    |
   ::: $WORKSPACE/crates/vocab/src/http.rs

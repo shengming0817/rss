@@ -15,15 +15,15 @@ fn endpoint() -> httpserve::GeneratedEndpoint<(), vocab::http::LocalOnly> {
         ),
         "/x",
         "GET",
+        vocab::HttpSuccessStatus::new(200),
+        vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::ServiceOwned,
         None,
         false,
         vocab::HttpEffectProfile::new(EFFECTS),
     );
-    httpserve::GeneratedEndpoint::new(
-        binding,
-        |_: httpserve::ContractMarker<RouteMarker>| async {},
-    )
+    httpserve::GeneratedEndpoint::new(binding, |_: httpserve::ContractMarker<RouteMarker>| async {
+    })
     .unwrap()
 }
 

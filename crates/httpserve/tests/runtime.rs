@@ -95,6 +95,8 @@ fn permission_binding(
         TEST_BINDING,
         path,
         "GET",
+        vocab::HttpSuccessStatus::new(200),
+        vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::Permission(TEST_PERMISSION),
         resource,
         self_scoped,
@@ -691,6 +693,8 @@ async fn route_meta_in_request_extension() {
             ),
             "/api/v1/meta",
             "GET",
+            vocab::HttpSuccessStatus::new(200),
+            vocab::HttpIdempotency::Idempotent,
             vocab::HttpRouteAuth::Public,
             None,
             false,
@@ -725,7 +729,167 @@ async fn route_meta_in_request_extension() {
     assert_eq!(body, META_CONTRACT);
 }
 
-// ── health builders ──────────────────────────────────────────────────────────
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn route_meta_exposes_both_declared_idempotency_classes() {
+    enum IdempotentMarker {}
+    enum NonIdempotentMarker {}
+    const IDEMPOTENT_BINDING: vocab::HttpRouteBinding<IdempotentMarker, vocab::http::LocalOnly> =
+        vocab::HttpRouteBinding::from_static(
+            TEST_BINDING,
+            "/api/v1/wire-idempotent",
+            "GET",
+            vocab::HttpSuccessStatus::new(200),
+            vocab::HttpIdempotency::Idempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::HttpEffectProfile::new(TEST_EFFECTS),
+        );
+    const NON_IDEMPOTENT_BINDING: vocab::HttpRouteBinding<
+        NonIdempotentMarker,
+        vocab::http::LocalOnly,
+    > = vocab::HttpRouteBinding::from_static(
+        TEST_BINDING,
+        "/api/v1/wire-non-idempotent",
+        "POST",
+        vocab::HttpSuccessStatus::new(201),
+        vocab::HttpIdempotency::NonIdempotent,
+        vocab::HttpRouteAuth::Public,
+        None,
+        false,
+        vocab::HttpEffectProfile::new(TEST_EFFECTS),
+    );
+
+    async fn idempotent_handler(
+        _: httpserve::ContractMarker<IdempotentMarker>,
+        axum::Extension(meta): axum::Extension<RouteMeta>,
+    ) -> StatusCode {
+        assert_eq!(meta.success_status().get(), 200);
+        assert_eq!(meta.idempotency(), vocab::HttpIdempotency::Idempotent);
+        StatusCode::OK
+    }
+
+    async fn non_idempotent_handler(
+        _: httpserve::ContractMarker<NonIdempotentMarker>,
+        axum::Extension(meta): axum::Extension<RouteMeta>,
+    ) -> StatusCode {
+        assert_eq!(meta.success_status().get(), 201);
+        assert_eq!(meta.idempotency(), vocab::HttpIdempotency::NonIdempotent);
+        StatusCode::CREATED
+    }
+
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        let rb = rb.mount(httpserve::GeneratedPrimaryEndpoint::new(
+            IDEMPOTENT_BINDING,
+            idempotent_handler,
+        )?)?;
+        rb.mount(httpserve::GeneratedPrimaryEndpoint::new(
+            NON_IDEMPOTENT_BINDING,
+            non_idempotent_handler,
+        )?)
+    });
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+
+    let idempotent = router
+        .clone()
+        .oneshot(empty_req(Method::GET, "/api/v1/wire-idempotent"))
+        .await
+        .unwrap();
+    assert_eq!(idempotent.status(), StatusCode::OK);
+    let non_idempotent = router
+        .oneshot(empty_req(Method::POST, "/api/v1/wire-non-idempotent"))
+        .await
+        .unwrap();
+    assert_eq!(non_idempotent.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn declared_success_status_drift_fails_closed() {
+    enum DriftMarker {}
+    const DRIFT_BINDING: vocab::HttpRouteBinding<DriftMarker, vocab::http::LocalOnly> =
+        vocab::HttpRouteBinding::from_static(
+            TEST_BINDING,
+            "/api/v1/wire-status-drift",
+            "POST",
+            vocab::HttpSuccessStatus::new(201),
+            vocab::HttpIdempotency::NonIdempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::HttpEffectProfile::new(TEST_EFFECTS),
+        );
+
+    async fn drifted_handler(_: httpserve::ContractMarker<DriftMarker>) -> StatusCode {
+        StatusCode::OK
+    }
+
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        rb.mount(httpserve::GeneratedPrimaryEndpoint::new(
+            DRIFT_BINDING,
+            drifted_handler,
+        )?)
+    });
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+
+    let response = router
+        .oneshot(empty_req(Method::POST, "/api/v1/wire-status-drift"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body_json(response).await["error"]["code"],
+        "ERR_CORE_INTERNAL"
+    );
+}
+
+// ── success-status serving contract ──────────────────────────────────────────
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn undeclared_redirect_status_fails_closed() {
+    enum RedirectMarker {}
+    const REDIRECT_BINDING: vocab::HttpRouteBinding<RedirectMarker, vocab::http::LocalOnly> =
+        vocab::HttpRouteBinding::from_static(
+            TEST_BINDING,
+            "/api/v1/wire-status-redirect",
+            "POST",
+            vocab::HttpSuccessStatus::new(201),
+            vocab::HttpIdempotency::NonIdempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::HttpEffectProfile::new(TEST_EFFECTS),
+        );
+
+    async fn redirect_handler(_: httpserve::ContractMarker<RedirectMarker>) -> StatusCode {
+        StatusCode::FOUND
+    }
+
+    let routes = test_routes::<httpserve::Primary>(|rb| {
+        rb.mount(httpserve::GeneratedPrimaryEndpoint::new(
+            REDIRECT_BINDING,
+            redirect_handler,
+        )?)
+    });
+    let router =
+        finalize_primary_test(routes, primary_plan(AuthScheme::Jwt)).into_router_for_test();
+
+    let response = router
+        .oneshot(empty_req(Method::POST, "/api/v1/wire-status-redirect"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body_json(response).await["error"]["code"],
+        "ERR_CORE_INTERNAL"
+    );
+}
+
+// ── health builders ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]

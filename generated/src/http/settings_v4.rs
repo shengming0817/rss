@@ -168,6 +168,8 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly
         CONTRACT,
         PATH,
         "GET",
+        ::vocab::http::HttpSuccessStatus::new(200),
+        ::vocab::http::HttpIdempotency::Idempotent,
         ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::SettingsConfigGet),
         None,
         false,

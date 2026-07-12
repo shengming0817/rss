@@ -125,17 +125,18 @@ fn audit_reads_expose_split_effect_profiles() {
 
 #[test]
 fn local_tx_registry_contains_exact_active_l1_contracts() {
-    let actual: Vec<_> = http::LOCAL_TX_SPECS
+    let actual: Option<Vec<_>> = http::LOCAL_TX_SPECS
         .iter()
         .map(|spec| {
-            (
-                spec.route.contract_id(),
-                spec.local_tx
-                    .expect("every LocalTx registry entry should carry LocalTx evidence")
-                    .tx_model,
-            )
+            spec.local_tx
+                .map(|evidence| (spec.route.contract_id(), evidence.tx_model))
         })
         .collect();
+    assert!(
+        actual.is_some(),
+        "every LocalTx registry entry should carry LocalTx evidence"
+    );
+    let actual = actual.unwrap_or_default();
     let from_specs: Vec<_> = http::SPECS
         .iter()
         .filter(|spec| spec.route.consistency_level() == HttpConsistencyLevel::LocalTx)
@@ -155,9 +156,13 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
         "LOCAL_TX_SPECS should be derived from active LocalTx HTTP specs"
     );
     for spec in http::LOCAL_TX_SPECS {
-        let evidence = spec
-            .local_tx
-            .expect("every LocalTx registry entry should carry LocalTx evidence");
+        assert!(
+            spec.local_tx.is_some(),
+            "every LocalTx registry entry should carry LocalTx evidence"
+        );
+        let Some(evidence) = spec.local_tx else {
+            continue;
+        };
         assert_eq!(
             spec.route.consistency_level(),
             HttpConsistencyLevel::LocalTx
