@@ -1,6 +1,6 @@
 //! Static LocalOnly route/state/port effect closure gate.
 //!
-//! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forbidden_and_opaque_route_state_fixtures_are_rejected", anti_vacuity = "green_fixture_compiles_and_closes_every_active_localonly_route" }.
+//! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forged_observation_provenance_is_rejected", anti_vacuity = "governed_observation_provenance_is_accepted" }.
 
 use crate::contract::DiscoveredContract;
 use crate::contract::manifest::{
@@ -26,6 +26,7 @@ pub(crate) enum Rule {
     ForbiddenStateEffect,
     CrossTenantPrivilege,
     OpaqueSourceScope,
+    ForgedObservationEvidence,
 }
 
 pub(crate) struct LocalOnlyEffects;
@@ -59,6 +60,7 @@ fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
     // workspace always has Cargo.toml and therefore must close generated/source evidence.
     if root.join("Cargo.toml").is_file() {
         findings.extend(source_findings(root, &contracts)?);
+        findings.extend(observation_provenance_findings(root)?);
     }
     findings
         .sort_by(|a, b| (&a.rule, &a.subject, &a.detail).cmp(&(&b.rule, &b.subject, &b.detail)));
@@ -280,6 +282,651 @@ fn source_findings(root: &Path, contracts: &[Contract]) -> Result<Vec<Finding>> 
         }
     }
     Ok(findings)
+}
+
+/// Closes the runtime-observation provenance seam left deliberately open by `testkit`'s zero
+/// workspace-dependency boundary. The native types make dimensions and proof values
+/// non-interchangeable; this source gate binds those values back to the canonical owner-side
+/// provider/route evidence. Only direct, mechanically auditable shapes are accepted. Wrappers and
+/// aliases that the scanner cannot prove are rejected instead of guessed through.
+fn observation_provenance_findings(root: &Path) -> Result<Vec<Finding>> {
+    let mut files = Vec::new();
+    for member in workspace_member_paths(root)? {
+        if member == Path::new("crates/testkit") {
+            continue;
+        }
+        for source_root in [
+            root.join(&member).join("src"),
+            root.join(&member).join("tests"),
+        ] {
+            if source_root.is_dir() {
+                files.extend(rust_files(&source_root)?);
+            }
+        }
+    }
+    files.sort();
+
+    let mut parsed = Vec::new();
+    for file in files {
+        let subject = relative(root, &file)?;
+        let syntax = syn::parse_file(
+            &std::fs::read_to_string(&file).with_context(|| format!("read `{subject}`"))?,
+        )
+        .with_context(|| format!("parse `{subject}`"))?;
+        let mut recorded_provider_fields = BTreeMap::new();
+        collect_recorded_provider_fields(&syntax.items, &mut recorded_provider_fields);
+        parsed.push((subject, syntax, recorded_provider_fields));
+    }
+
+    let mut findings = Vec::new();
+    for (subject, syntax, recorded_provider_fields) in &parsed {
+        provenance_findings_in_items(
+            &syntax.items,
+            subject,
+            recorded_provider_fields,
+            &mut findings,
+        );
+    }
+    Ok(findings)
+}
+
+fn workspace_member_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let manifest = root.join("Cargo.toml");
+    let value: toml::Value = toml::from_str(
+        &std::fs::read_to_string(&manifest).with_context(|| "read workspace Cargo.toml")?,
+    )
+    .context("parse workspace Cargo.toml")?;
+    let members = value
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| anyhow!("workspace.members must be an explicit array"))?;
+    let mut paths = Vec::new();
+    for member in members {
+        let member = member
+            .as_str()
+            .ok_or_else(|| anyhow!("workspace member must be a string"))?;
+        if member.contains(['*', '?', '[', ']']) {
+            bail!("workspace member globs are opaque to LocalOnly provenance: `{member}`");
+        }
+        let path = PathBuf::from(member);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            bail!("workspace member escapes the repository: `{member}`");
+        }
+        paths.push(path);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn collect_recorded_provider_fields(items: &[Item], out: &mut BTreeMap<String, BTreeSet<String>>) {
+    for item in items {
+        match item {
+            Item::Impl(item) => {
+                if let Some(owner) = terminal_type_ident(&item.self_ty) {
+                    let fields = directly_recorded_fields(&item.items);
+                    if !fields.is_empty() {
+                        out.entry(owner).or_default().extend(fields);
+                    }
+                }
+            }
+            Item::Mod(item) => {
+                if let Some((_, nested)) = &item.content {
+                    collect_recorded_provider_fields(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn directly_recorded_fields(items: &[ImplItem]) -> BTreeSet<String> {
+    struct Calls {
+        fields: BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Calls {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "record"
+                && let Expr::Field(field) = peel_expr(&node.receiver)
+                && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
+                && let syn::Member::Named(member) = &field.member
+            {
+                self.fields.insert(member.to_string());
+            }
+            visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut calls = Calls {
+        fields: BTreeSet::new(),
+    };
+    for item in items {
+        calls.visit_impl_item(item);
+    }
+    calls.fields
+}
+
+fn provenance_findings_in_items(
+    items: &[Item],
+    subject: &str,
+    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    findings: &mut Vec<Finding>,
+) {
+    for item in items {
+        match item {
+            Item::Use(item) if use_tree_contains_local_only_api(&item.tree) => {
+                push_provenance_finding(
+                    findings,
+                    subject,
+                    item.span().start().line,
+                    "LocalOnly evidence APIs may not be imported or renamed; use exact absolute paths",
+                );
+            }
+            Item::Type(item) if type_contains_local_only_api(&item.ty) => {
+                push_provenance_finding(
+                    findings,
+                    subject,
+                    item.span().start().line,
+                    "LocalOnly evidence API type aliases are forbidden",
+                );
+            }
+            Item::Fn(function) => provenance_findings_in_function(
+                function,
+                subject,
+                recorded_provider_fields,
+                findings,
+            ),
+            Item::Impl(item) => {
+                if item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                    path.segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "StaticExclusionOwner")
+                }) {
+                    push_provenance_finding(
+                        findings,
+                        subject,
+                        item.span().start().line,
+                        "legacy StaticExclusionOwner impl is forgeable; use an httpserve governed proof",
+                    );
+                }
+                for child in &item.items {
+                    if let ImplItem::Fn(function) = child {
+                        provenance_findings_in_impl_function(
+                            function,
+                            subject,
+                            recorded_provider_fields,
+                            findings,
+                        );
+                    }
+                }
+            }
+            Item::Mod(item) => {
+                if let Some((_, nested)) = &item.content {
+                    provenance_findings_in_items(
+                        nested,
+                        subject,
+                        recorded_provider_fields,
+                        findings,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn use_tree_contains_local_only_api(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            is_local_only_api_ident(&path.ident) || use_tree_contains_local_only_api(&path.tree)
+        }
+        syn::UseTree::Name(name) => is_local_only_api_ident(&name.ident),
+        syn::UseTree::Rename(rename) => is_local_only_api_ident(&rename.ident),
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_contains_local_only_api),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+fn type_contains_local_only_api(ty: &Type) -> bool {
+    struct ApiType(bool);
+    impl<'ast> Visit<'ast> for ApiType {
+        fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+            if node
+                .path
+                .segments
+                .iter()
+                .any(|segment| is_local_only_api_ident(&segment.ident))
+            {
+                self.0 = true;
+            }
+            visit::visit_type_path(self, node);
+        }
+    }
+    let mut found = ApiType(false);
+    found.visit_type(ty);
+    found.0
+}
+
+fn is_local_only_api_ident(ident: &syn::Ident) -> bool {
+    matches!(
+        ident.to_string().as_str(),
+        "LocalOnlyObservers" | "StaticExclusion" | "ProviderCounter" | "ProviderCounterHandle"
+    )
+}
+
+fn provenance_findings_in_function(
+    function: &syn::ItemFn,
+    subject: &str,
+    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    findings: &mut Vec<Finding>,
+) {
+    provenance_findings_in_block(&function.block, subject, recorded_provider_fields, findings);
+}
+
+fn provenance_findings_in_impl_function(
+    function: &syn::ImplItemFn,
+    subject: &str,
+    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    findings: &mut Vec<Finding>,
+) {
+    provenance_findings_in_block(&function.block, subject, recorded_provider_fields, findings);
+}
+
+fn provenance_findings_in_block(
+    block: &syn::Block,
+    subject: &str,
+    recorded_provider_fields: &BTreeMap<String, BTreeSet<String>>,
+    findings: &mut Vec<Finding>,
+) {
+    let bindings = direct_initializer_bindings(block);
+    let provider_routers = canonical_provider_router_bindings(&bindings);
+    let mut scan = ProvenanceCallScan::default();
+    scan.visit_block(block);
+
+    for line in scan.legacy_evidence_lines {
+        findings.push(finding(
+            Rule::ForgedObservationEvidence,
+            format!("{subject}:{line}"),
+            "legacy RuntimeProbe/StaticExclusionOwner evidence is forgeable; use governed proof or provider-owned counter handle",
+        ));
+    }
+    for (line, _) in scan
+        .api_expr_locations
+        .difference(&scan.allowed_api_locations)
+    {
+        push_provenance_finding(
+            findings,
+            subject,
+            *line,
+            "LocalOnly evidence API must be invoked through its exact absolute canonical path",
+        );
+    }
+
+    for call in scan.from_governed_calls {
+        let Some(argument) = call.args.first() else {
+            push_provenance_finding(
+                findings,
+                subject,
+                call.span().start().line,
+                "from_governed requires one direct governed proof binding",
+            );
+            continue;
+        };
+        let Some(proof) = referenced_ident(argument) else {
+            push_provenance_finding(
+                findings,
+                subject,
+                call.span().start().line,
+                "from_governed argument must be `&proof`, not an inline value or wrapper",
+            );
+            continue;
+        };
+        if bindings
+            .get(&proof)
+            .is_none_or(|initializer| !is_governed_proof_constructor(initializer))
+        {
+            push_provenance_finding(
+                findings,
+                subject,
+                call.span().start().line,
+                "from_governed proof is not bound directly from prove_local_only_state/prove_stateless_local_only_route",
+            );
+        }
+    }
+
+    for observer in scan.observer_calls {
+        for argument in &observer.args {
+            let resolved = resolve_direct_binding(argument, &bindings);
+            let Some(handle) = find_method_call(resolved, "handle") else {
+                if is_from_governed_call(resolved) {
+                    continue;
+                }
+                push_provenance_finding(
+                    findings,
+                    subject,
+                    argument.span().start().line,
+                    "LocalOnly observer evidence is neither a direct governed exclusion nor a provider-owned counter handle",
+                );
+                continue;
+            };
+            let Some(provider) = root_receiver_ident(&handle.receiver) else {
+                push_provenance_finding(
+                    findings,
+                    subject,
+                    handle.span().start().line,
+                    "provider counter handle receiver is opaque",
+                );
+                continue;
+            };
+            if provider_routers
+                .get(&provider)
+                .is_none_or(|routers| routers.is_disjoint(&scan.oneshot_router_receivers))
+            {
+                push_provenance_finding(
+                    findings,
+                    subject,
+                    handle.span().start().line,
+                    "provider handle is not linked through finalized_scoped_router(receiver.test_repo()) to the router.oneshot operation",
+                );
+                continue;
+            }
+            let provider_type = bindings.get(&provider).and_then(unique_constructor_owner);
+            let counter_field = direct_receiver_field(&handle.receiver, &provider);
+            if provider_type.as_ref().is_none_or(|owner| {
+                counter_field.as_ref().is_none_or(|field| {
+                    recorded_provider_fields
+                        .get(owner)
+                        .is_none_or(|fields| !fields.contains(field))
+                })
+            }) {
+                push_provenance_finding(
+                    findings,
+                    subject,
+                    handle.span().start().line,
+                    "provider counter field has no matching `self.<field>.record()` mutation path",
+                );
+            }
+        }
+    }
+}
+
+fn canonical_provider_router_bindings(
+    bindings: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (router, initializer) in bindings {
+        let Expr::Call(call) = peel_expr(initializer) else {
+            continue;
+        };
+        let Expr::Path(function) = peel_expr(&call.func) else {
+            continue;
+        };
+        if function.path.leading_colon.is_some()
+            || function.path.segments.len() != 1
+            || function.path.segments[0].ident != "finalized_scoped_router"
+        {
+            continue;
+        }
+        for argument in &call.args {
+            let Expr::MethodCall(method) = peel_expr(argument) else {
+                continue;
+            };
+            if method.method == "test_repo"
+                && method.args.is_empty()
+                && let Some(provider) = root_receiver_ident(&method.receiver)
+            {
+                out.entry(provider).or_default().insert(router.clone());
+            }
+        }
+    }
+    out
+}
+
+fn direct_receiver_field(expression: &Expr, provider: &str) -> Option<String> {
+    let Expr::Field(field) = peel_expr(expression) else {
+        return None;
+    };
+    let syn::Member::Named(member) = &field.member else {
+        return None;
+    };
+    let Expr::Path(base) = peel_expr(&field.base) else {
+        return None;
+    };
+    (base.path.get_ident().is_some_and(|ident| ident == provider)).then(|| member.to_string())
+}
+
+fn push_provenance_finding(
+    findings: &mut Vec<Finding>,
+    subject: &str,
+    line: usize,
+    detail: &'static str,
+) {
+    findings.push(finding(
+        Rule::ForgedObservationEvidence,
+        format!("{subject}:{line}"),
+        detail,
+    ));
+}
+
+#[derive(Default)]
+struct ProvenanceCallScan<'ast> {
+    from_governed_calls: Vec<&'ast syn::ExprCall>,
+    observer_calls: Vec<&'ast syn::ExprCall>,
+    oneshot_router_receivers: BTreeSet<String>,
+    legacy_evidence_lines: BTreeSet<usize>,
+    api_expr_locations: BTreeSet<(usize, usize)>,
+    allowed_api_locations: BTreeSet<(usize, usize)>,
+}
+
+impl<'ast> Visit<'ast> for ProvenanceCallScan<'ast> {
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if node.segments.iter().any(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "StaticExclusionOwner" | "RuntimeProbe"
+            )
+        }) {
+            self.legacy_evidence_lines.insert(node.span().start().line);
+        }
+        visit::visit_path(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node.path.segments.iter().any(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "LocalOnlyObservers"
+                    | "StaticExclusion"
+                    | "ProviderCounter"
+                    | "prove_local_only_state"
+                    | "prove_stateless_local_only_route"
+            )
+        }) {
+            let start = node.span().start();
+            self.api_expr_locations.insert((start.line, start.column));
+        }
+        visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        let start = node.func.span().start();
+        let location = (start.line, start.column);
+        if absolute_call_path_is(
+            &node.func,
+            &["testkit", "local_only", "StaticExclusion", "from_governed"],
+        ) {
+            self.from_governed_calls.push(node);
+            self.allowed_api_locations.insert(location);
+        }
+        if absolute_call_path_is(
+            &node.func,
+            &["testkit", "local_only", "LocalOnlyObservers", "new"],
+        ) {
+            self.observer_calls.push(node);
+            self.allowed_api_locations.insert(location);
+        }
+        if absolute_call_path_is(
+            &node.func,
+            &["testkit", "local_only", "ProviderCounter", "write"],
+        ) || absolute_call_path_is(&node.func, &["httpserve", "prove_local_only_state"])
+            || absolute_call_path_is(
+                &node.func,
+                &["httpserve", "prove_stateless_local_only_route"],
+            )
+        {
+            self.allowed_api_locations.insert(location);
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "oneshot"
+            && let Some(receiver) = root_receiver_ident(&node.receiver)
+        {
+            self.oneshot_router_receivers.insert(receiver);
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn direct_initializer_bindings(block: &syn::Block) -> BTreeMap<String, Expr> {
+    struct Bindings(BTreeMap<String, Expr>);
+    impl<'ast> Visit<'ast> for Bindings {
+        fn visit_local(&mut self, node: &'ast syn::Local) {
+            if let syn::Pat::Ident(pattern) = &node.pat
+                && pattern.subpat.is_none()
+                && let Some(initializer) = &node.init
+            {
+                self.0
+                    .insert(pattern.ident.to_string(), (*initializer.expr).clone());
+            }
+            visit::visit_local(self, node);
+        }
+    }
+    let mut bindings = Bindings(BTreeMap::new());
+    bindings.visit_block(block);
+    bindings.0
+}
+
+fn resolve_direct_binding<'a>(
+    expression: &'a Expr,
+    bindings: &'a BTreeMap<String, Expr>,
+) -> &'a Expr {
+    let Expr::Path(path) = peel_expr(expression) else {
+        return expression;
+    };
+    let Some(ident) = path.path.get_ident() else {
+        return expression;
+    };
+    bindings.get(&ident.to_string()).unwrap_or(expression)
+}
+
+fn referenced_ident(expression: &Expr) -> Option<String> {
+    let expression = match expression {
+        Expr::Paren(value) => &*value.expr,
+        Expr::Group(value) => &*value.expr,
+        other => other,
+    };
+    let Expr::Reference(reference) = expression else {
+        return None;
+    };
+    let Expr::Path(path) = peel_expr(&reference.expr) else {
+        return None;
+    };
+    path.path.get_ident().map(ToString::to_string)
+}
+
+fn is_governed_proof_constructor(expression: &Expr) -> bool {
+    let Expr::Call(call) = peel_expr(expression) else {
+        return false;
+    };
+    absolute_call_path_is(&call.func, &["httpserve", "prove_local_only_state"])
+        || absolute_call_path_is(
+            &call.func,
+            &["httpserve", "prove_stateless_local_only_route"],
+        )
+}
+
+fn is_from_governed_call(expression: &Expr) -> bool {
+    let Expr::Call(call) = peel_expr(expression) else {
+        return false;
+    };
+    absolute_call_path_is(
+        &call.func,
+        &["testkit", "local_only", "StaticExclusion", "from_governed"],
+    )
+}
+
+fn find_method_call<'ast>(
+    expression: &'ast Expr,
+    method: &str,
+) -> Option<&'ast syn::ExprMethodCall> {
+    struct Finder<'name, 'ast> {
+        method: &'name str,
+        found: Option<&'ast syn::ExprMethodCall>,
+    }
+    impl<'ast> Visit<'ast> for Finder<'_, 'ast> {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if self.found.is_none() && node.method == self.method {
+                self.found = Some(node);
+                return;
+            }
+            visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut finder = Finder {
+        method,
+        found: None,
+    };
+    finder.visit_expr(expression);
+    finder.found
+}
+
+fn root_receiver_ident(expression: &Expr) -> Option<String> {
+    match peel_expr(expression) {
+        Expr::Path(path) => path.path.get_ident().map(ToString::to_string),
+        Expr::Field(field) => root_receiver_ident(&field.base),
+        Expr::MethodCall(call) => root_receiver_ident(&call.receiver),
+        Expr::Reference(reference) => root_receiver_ident(&reference.expr),
+        _ => None,
+    }
+}
+
+fn unique_constructor_owner(expression: &Expr) -> Option<String> {
+    struct Constructors(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Constructors {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let Expr::Path(path) = peel_expr(&node.func)
+                && let Some(owner) = path.path.segments.iter().rev().nth(1)
+            {
+                self.0.insert(owner.ident.to_string());
+            }
+            visit::visit_expr_call(self, node);
+        }
+    }
+    let mut constructors = Constructors(BTreeSet::new());
+    constructors.visit_expr(expression);
+    (constructors.0.len() == 1)
+        .then(|| constructors.0.into_iter().next())
+        .flatten()
+}
+
+fn absolute_call_path_is(expression: &Expr, expected: &[&str]) -> bool {
+    let Expr::Path(path) = peel_expr(expression) else {
+        return false;
+    };
+    path.path.leading_colon.is_some()
+        && path.path.segments.len() == expected.len()
+        && path
+            .path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.ident == *expected)
 }
 
 #[derive(Debug, Clone)]
@@ -1480,6 +2127,202 @@ mod tests {
                 fs::copy(entry.path(), destination)?;
             }
         }
+        Ok(())
+    }
+
+    fn provenance_findings(source: &str) -> Result<Vec<Finding>> {
+        let syntax = syn::parse_file(source)?;
+        let mut recorded_provider_fields = BTreeMap::new();
+        collect_recorded_provider_fields(&syntax.items, &mut recorded_provider_fields);
+        let mut findings = Vec::new();
+        provenance_findings_in_items(
+            &syntax.items,
+            "crates/demo/src/lib.rs",
+            &recorded_provider_fields,
+            &mut findings,
+        );
+        Ok(findings)
+    }
+
+    const GOVERNED_PROVENANCE: &str = r#"
+struct Repo { counter: Counter }
+impl Repo {
+    fn default() -> Self { todo!() }
+    fn test_repo(&self) -> TestRepo { todo!() }
+    fn mutate(&self) { self.counter.record(); }
+}
+fn conforms() {
+    let repo_probe = Repo::default();
+    let router = finalized_scoped_router(repo_probe.test_repo());
+    let proof = ::httpserve::prove_local_only_state::<ReadState>();
+    let outbox = ::testkit::local_only::StaticExclusion::<Outbox>::from_governed(&proof);
+    let publish = ::testkit::local_only::StaticExclusion::<Publish>::from_governed(&proof);
+    let _observers = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), outbox, publish);
+    let _response = router.oneshot();
+}
+"#;
+
+    #[test]
+    fn governed_observation_provenance_is_accepted() -> Result<()> {
+        let findings = provenance_findings(GOVERNED_PROVENANCE)?;
+        assert!(findings.is_empty(), "{findings:#?}");
+
+        let stateless = GOVERNED_PROVENANCE.replace(
+            "::httpserve::prove_local_only_state::<ReadState>()",
+            "::httpserve::prove_stateless_local_only_route(&PROFILE_HTTP_ROUTE)",
+        );
+        let findings = provenance_findings(&stateless)?;
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn forged_observation_provenance_is_rejected() -> Result<()> {
+        let cases = [
+            (
+                "legacy owner trait",
+                GOVERNED_PROVENANCE.replace(
+                    "struct Repo { counter: Counter }",
+                    "impl StaticExclusionOwner<Write> for Fake {}\nstruct Repo { counter: Counter }",
+                ),
+            ),
+            (
+                "legacy runtime closure",
+                GOVERNED_PROVENANCE.replace(
+                    "repo_probe.counter.handle()",
+                    "RuntimeProbe::write(|| 0)",
+                ),
+            ),
+            (
+                "inline proof",
+                GOVERNED_PROVENANCE.replace(
+                    "::testkit::local_only::StaticExclusion::<Outbox>::from_governed(&proof)",
+                    "::testkit::local_only::StaticExclusion::<Outbox>::from_governed(&::httpserve::prove_local_only_state::<ReadState>())",
+                ),
+            ),
+            (
+                "forged proof binding",
+                GOVERNED_PROVENANCE.replace(
+                    "let proof = ::httpserve::prove_local_only_state::<ReadState>();",
+                    "let proof = FakeProof::new();",
+                ),
+            ),
+            (
+                "lookalike proof constructor",
+                GOVERNED_PROVENANCE.replace(
+                    "::httpserve::prove_local_only_state::<ReadState>()",
+                    "::lookalike::prove_local_only_state::<ReadState>()",
+                ),
+            ),
+            (
+                "decoy provider",
+                GOVERNED_PROVENANCE.replace(
+                    "let _observers = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), outbox, publish);",
+                    "let decoy = Repo::default();\n    let _observers = ::testkit::local_only::LocalOnlyObservers::new(decoy.counter.handle(), outbox, publish);",
+                ),
+            ),
+            (
+                "provider misses mutation record",
+                GOVERNED_PROVENANCE.replace("self.counter.record();", "drop(&self.counter);"),
+            ),
+            (
+                "decoy field records instead of observed field",
+                GOVERNED_PROVENANCE.replace("self.counter.record();", "self.decoy.record();"),
+            ),
+            (
+                "provider alias hides origin",
+                GOVERNED_PROVENANCE.replace(
+                    "let _observers = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), outbox, publish);",
+                    "let provider_alias = &repo_probe;\n    let _observers = ::testkit::local_only::LocalOnlyObservers::new(provider_alias.counter.handle(), outbox, publish);",
+                ),
+            ),
+            (
+                "opaque handle parameter",
+                GOVERNED_PROVENANCE
+                    .replace(
+                        "fn conforms()",
+                        "fn conforms(input_handle: ProviderCounterHandle<Write>)",
+                    )
+                    .replace("repo_probe.counter.handle()", "input_handle"),
+            ),
+            (
+                "import-style observer alias",
+                GOVERNED_PROVENANCE.replace(
+                    "::testkit::local_only::LocalOnlyObservers::new",
+                    "LocalOnlyObservers::new",
+                ),
+            ),
+            (
+                "observer function item constructor",
+                GOVERNED_PROVENANCE.replace(
+                    "let _observers = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), outbox, publish);",
+                    "let ctor = ::testkit::local_only::LocalOnlyObservers::new;\n    let _observers = ctor(repo_probe.counter.handle(), outbox, publish);",
+                ),
+            ),
+            (
+                "shadowed absolute-looking proof namespace",
+                GOVERNED_PROVENANCE.replace(
+                    "::httpserve::prove_local_only_state::<ReadState>()",
+                    "::evil::httpserve::prove_local_only_state::<ReadState>()",
+                ),
+            ),
+            (
+                "bait test repo call",
+                GOVERNED_PROVENANCE.replace(
+                    "let router = finalized_scoped_router(repo_probe.test_repo());",
+                    "let _bait = repo_probe.test_repo();\n    let router = finalized_scoped_router(other_probe.test_repo());",
+                ),
+            ),
+            (
+                "bait oneshot call",
+                GOVERNED_PROVENANCE.replace(
+                    "let _response = router.oneshot();",
+                    "let _response = bait_router.oneshot();",
+                ),
+            ),
+        ];
+        for (name, source) in cases {
+            let findings = provenance_findings(&source)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| matches!(finding.rule, Rule::ForgedObservationEvidence)),
+                "{name} unexpectedly passed: {findings:#?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_inventory_includes_non_crates_workspace_members() -> Result<()> {
+        let workspace = WorkspaceFixture::new()?;
+        let manifest = workspace.0.join("Cargo.toml");
+        workspace.replace(
+            &manifest,
+            ", \"generated\"]",
+            ", \"generated\", \"tools/consumer\"]",
+        )?;
+        let consumer = workspace.0.join("tools/consumer");
+        fs::create_dir_all(consumer.join("src"))?;
+        fs::write(
+            consumer.join("Cargo.toml"),
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )?;
+        fs::write(
+            consumer.join("src/lib.rs"),
+            "struct RuntimeProbe; impl RuntimeProbe { fn write(_: impl Fn() -> u64) {} } fn bait() { RuntimeProbe::write(|| 0); }\n",
+        )?;
+        let output = workspace.cargo_check()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let findings = check_root(&workspace.0)?.1;
+        assert!(findings.iter().any(|finding| {
+            matches!(finding.rule, Rule::ForgedObservationEvidence)
+                && finding.subject.starts_with("tools/consumer/src/lib.rs:")
+        }));
         Ok(())
     }
 

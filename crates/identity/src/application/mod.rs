@@ -3008,6 +3008,51 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingAuthAuditSink {
+        events: Arc<Mutex<Vec<diport::AuditEvent>>>,
+    }
+
+    impl RecordingAuthAuditSink {
+        fn events(&self) -> Vec<diport::AuditEvent> {
+            self.events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    fn assert_profile_auth_event(
+        sink: &RecordingAuthAuditSink,
+        principal_kind: vocab::PrincipalKind,
+        outcome: diport::AuditOutcome,
+    ) {
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.principal_id, CANON_USER);
+        assert_eq!(event.principal_kind, principal_kind);
+        assert_eq!(event.tenant_id, Some(tid(CANON_TENANT)));
+        assert_eq!(event.resource_kind, "http_route");
+        assert_eq!(event.resource_id, PROFILE_HTTP_SPEC.route.contract_id());
+        assert_eq!(event.action, "httpserve:authz");
+        assert_eq!(event.outcome, outcome);
+    }
+
+    impl diport::AuditSink for RecordingAuthAuditSink {
+        async fn record(&self, event: diport::AuditEvent) -> Result<(), diport::AuditSinkError> {
+            self.events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(event);
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::AuditSinkError> {
+            Ok(())
+        }
+    }
+
     struct FixedClock(SystemTime);
     impl Clock for FixedClock {
         fn now(&self) -> SystemTime {
@@ -3095,6 +3140,15 @@ mod tests {
         now_secs: u64,
         ttl_secs: u64,
     ) -> IdentityDomain<TestSigner> {
+        seed_domain_with_profile_permissions(capture, now_secs, ttl_secs, &[])
+    }
+
+    fn seed_domain_with_profile_permissions(
+        capture: CapturingSessionLifecycle,
+        now_secs: u64,
+        ttl_secs: u64,
+        profile_permissions: &[&str],
+    ) -> IdentityDomain<TestSigner> {
         let refresh = Arc::new(make_refresh_svc(
             crate::internal::mem::InMemRefreshTokenStore::new(),
             make_clock(now_secs),
@@ -3117,12 +3171,39 @@ mod tests {
         let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
-        let roles_for_list = Arc::from(DynRoleReadRepo::new_box(
-            crate::internal::mem::InMemRoleRepo::new(),
-        ));
-        let bindings = Arc::from(crate::ports::DynRoleBindingLifecycle::new_box(
-            crate::internal::mem::InMemRoleBindingLifecycle::new(),
-        ));
+        let (roles_for_list, bindings): (
+            Arc<DynRoleReadRepo<'static>>,
+            Arc<DynRoleBindingLifecycle<'static>>,
+        ) = if profile_permissions.is_empty() {
+            (
+                Arc::from(DynRoleReadRepo::new_box(
+                    crate::internal::mem::InMemRoleRepo::new(),
+                )),
+                Arc::from(DynRoleBindingLifecycle::new_box(
+                    crate::internal::mem::InMemRoleBindingLifecycle::new(),
+                )),
+            )
+        } else {
+            let profile_role = role(
+                "role-profile-local-only",
+                "Profile LocalOnly",
+                profile_permissions,
+            );
+            let profile_role_id = profile_role.id().clone();
+            (
+                Arc::from(DynRoleReadRepo::new_box(
+                    crate::internal::mem::InMemRoleRepo::new()
+                        .with_role_entity(tid(CANON_TENANT), profile_role),
+                )),
+                Arc::from(DynRoleBindingLifecycle::new_box(
+                    crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                        tid(CANON_TENANT),
+                        &profile_role_id,
+                        CANON_USER,
+                    ),
+                )),
+            )
+        };
         let rbac_admin = Arc::new(RbacAdminService::new(
             roles_for_admin,
             Arc::clone(&bindings),
@@ -3140,6 +3221,76 @@ mod tests {
             resource_attrs: empty_resource_attribute_repo(),
             clock: make_shared_clock(now_secs),
         })
+    }
+
+    #[allow(clippy::expect_used)]
+    fn finalized_profile_router(
+        capture: CapturingSessionLifecycle,
+        profile_permissions: &[&str],
+        auth_sink: RecordingAuthAuditSink,
+    ) -> axum::Router {
+        let domain =
+            seed_domain_with_profile_permissions(capture, 1_000, 3_600, profile_permissions);
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        let authorizer = registry
+            .take_primary_authorizer()
+            .expect("identity Primary authorizer");
+        let mut finalized = registry
+            .finalize_routes()
+            .expect("finalize identity routes");
+        assert_eq!(finalized.len(), 1, "identity owns one Primary listener");
+        let (listener, routes) = finalized.pop().expect("identity Primary routes");
+        assert_eq!(listener, ListenerKind::Primary);
+        let plan = primitives::AuthPlan::new(ListenerKind::Primary, primitives::AuthScheme::Jwt)
+            .expect("Primary JWT auth plan");
+        httpserve::finalize_primary_auth_with_audit(
+            routes,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            make_shared_clock(1_000),
+            authorizer,
+        )
+        .expect("finalize Primary auth")
+        .into_router_for_test()
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn profile_local_only_call(
+        router: axum::Router,
+        authenticated: Option<(vocab::PrincipalKind, &str)>,
+    ) -> testkit::ContractResponse {
+        let router = if let Some((kind, subject)) = authenticated {
+            router.layer(axum::Extension(httpserve::Authenticated::new(
+                primitives::RequiredScheme::Jwt,
+                kind,
+                subject,
+                Some(tid(CANON_TENANT)),
+            )))
+        } else {
+            router
+        };
+
+        // Profile is mounted stateless by the typed LocalOnly funnel. It has no runtime provider
+        // seam to observe, so all three forbidden dimensions are explicit static exclusions rather
+        // than interchangeable closures over an unrelated domain capture.
+        let proof = ::httpserve::prove_stateless_local_only_route(&PROFILE_HTTP_ROUTE);
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Write>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        ::testkit::local_only::assert_local_only(observers, || {
+            testkit::call(router, ContractRequest::get(PROFILE_HTTP_SPEC.route.path()))
+        })
+        .await
+        .expect("profile remains LocalOnly")
+        .expect("call finalized profile route")
     }
 
     fn user_evidence(subject: &str) -> AuthorizedSubject {
@@ -6003,6 +6154,87 @@ mod tests {
             .expect("call");
         resp.ensure_status(StatusCode::UNAUTHORIZED)
             .expect("profile missing auth -> 401");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn profile_local_only_finalized_route_keeps_default_projection_masked() {
+        let capture = CapturingSessionLifecycle::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let router = finalized_profile_router(capture, &[], auth_sink.clone());
+        let response =
+            profile_local_only_call(router, Some((vocab::PrincipalKind::User, CANON_USER))).await;
+
+        response.ensure_status(StatusCode::OK).expect("profile 200");
+        let decoded: IdentityProfileResponse = response.json().expect("profile json");
+        assert_eq!(decoded.data.subject, "<redacted>");
+        assert_eq!(decoded.data.tenant_id, "<redacted>");
+        assert_eq!(decoded.data.kind, IdentityProfileDataKind::User);
+        assert_profile_auth_event(
+            &auth_sink,
+            vocab::PrincipalKind::User,
+            diport::AuditOutcome::Success,
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn profile_local_only_finalized_route_applies_explicit_projection() {
+        let capture = CapturingSessionLifecycle::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let router = finalized_profile_router(
+            capture,
+            &[vocab::IDENTITY_PROFILE_FIELD_SUBJECT_PERMISSION.as_str()],
+            auth_sink.clone(),
+        );
+        let response =
+            profile_local_only_call(router, Some((vocab::PrincipalKind::User, CANON_USER))).await;
+
+        response.ensure_status(StatusCode::OK).expect("profile 200");
+        let decoded: IdentityProfileResponse = response.json().expect("profile json");
+        assert_eq!(decoded.data.subject, CANON_USER);
+        assert_eq!(decoded.data.tenant_id, "<redacted>");
+        assert_eq!(decoded.data.kind, IdentityProfileDataKind::User);
+        assert_profile_auth_event(
+            &auth_sink,
+            vocab::PrincipalKind::User,
+            diport::AuditOutcome::Success,
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn profile_local_only_finalized_route_rejects_missing_authentication() {
+        let capture = CapturingSessionLifecycle::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let router = finalized_profile_router(capture, &[], auth_sink.clone());
+        let response = profile_local_only_call(router, None).await;
+
+        response
+            .ensure_status(StatusCode::UNAUTHORIZED)
+            .expect("profile without authentication -> 401");
+        assert!(auth_sink.events().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn profile_local_only_finalized_route_rejects_unauthorized_principal() {
+        let capture = CapturingSessionLifecycle::default();
+        let auth_sink = RecordingAuthAuditSink::default();
+        let router = finalized_profile_router(capture, &[], auth_sink.clone());
+        let response =
+            profile_local_only_call(router, Some((vocab::PrincipalKind::Device, CANON_USER))).await;
+
+        response
+            .ensure_status(StatusCode::FORBIDDEN)
+            .expect("non-self-service principal -> 403");
+        assert_profile_auth_event(
+            &auth_sink,
+            vocab::PrincipalKind::Device,
+            diport::AuditOutcome::Failure {
+                reason: "forbidden",
+            },
+        );
     }
 
     #[tokio::test]

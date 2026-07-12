@@ -17,7 +17,9 @@
 //! [`finalize_auth`] 或 [`finalize_primary_auth`] 产 [`AuthenticatedRoutes`]。
 
 use crate::auth::{AuditSinkHandle, AuthAudit, RouteAuthorizer, enforce_layer};
-use crate::{PrimaryRouteAuthz, RouteGroupError, RoutePermission, RouteResourceScope};
+use crate::{
+    PrimaryRouteAuthz, RouteGroupError, RoutePermission, RouteResourceScope, RouteTenantBinding,
+};
 use axum::extract::FromRequestParts;
 use axum::handler::Handler;
 use core::marker::PhantomData;
@@ -52,6 +54,32 @@ pub trait ClassifiedRouteState {
     type Effect: PortEffectClass;
     /// Strongest privilege reachable through the state.
     type Privilege: PortPrivilegeClass;
+}
+
+/// Opaque test-only proof that a state satisfies the production `LocalOnly` capability bounds.
+#[cfg(any(test, feature = "test-util"))]
+pub struct LocalOnlyStateProof<S>(PhantomData<fn() -> S>);
+
+/// Produces a proof only when `S` passes the same bounds as `with_classified_state`.
+#[cfg(any(test, feature = "test-util"))]
+pub fn prove_local_only_state<S>() -> LocalOnlyStateProof<S>
+where
+    S: Clone + Send + Sync + 'static + ClassifiedRouteState<Privilege = LocalPrivilege>,
+    S::Effect: LocalOnlyAllowedEffect,
+{
+    LocalOnlyStateProof(PhantomData)
+}
+
+/// Opaque test-only proof bound to one generated stateless `LocalOnly` route marker.
+#[cfg(any(test, feature = "test-util"))]
+pub struct StatelessLocalOnlyRouteProof<M>(PhantomData<fn() -> M>);
+
+/// Binds a stateless proof to one generated `LocalOnly` route identity.
+#[cfg(any(test, feature = "test-util"))]
+pub fn prove_stateless_local_only_route<M>(
+    _binding: &HttpRouteBinding<M, LocalOnly>,
+) -> StatelessLocalOnlyRouteProof<M> {
+    StatelessLocalOnlyRouteProof(PhantomData)
 }
 
 /// Zero-cost extractor carrying one generated HTTP contract identity into a handler signature.
@@ -328,6 +356,7 @@ impl TestPrimaryRoute {
             authz: PrimaryRouteAuthz::Permission(RoutePermission {
                 permission: permission.permission,
                 scope,
+                tenant_binding: RouteTenantBinding::Unrestricted,
             }),
         })
     }
@@ -544,12 +573,12 @@ impl<L: NonPrimaryListener> ListenerRouter<L> {
             method,
             handler,
         } = endpoint.0;
-        nonprimary_auth(evidence, L::KIND)?;
+        let authz = nonprimary_authz::<C>(evidence, L::KIND)?;
         let path = relative_path(evidence, self.prefix, L::KIND)?;
         Ok(Self {
             inner: self
                 .inner
-                .route(path, handler.layer(enforce_layer(None, method, evidence))),
+                .route(path, handler.layer(enforce_layer(authz, method, evidence))),
             prefix: self.prefix,
             _l: PhantomData,
         })
@@ -640,22 +669,32 @@ fn nonprimary_auth(
     Ok(())
 }
 
+fn nonprimary_authz<C: HttpConsistencyClass>(
+    evidence: HttpRouteEvidence,
+    listener: ListenerKind,
+) -> Result<Option<PrimaryRouteAuthz>, RouteGroupError> {
+    nonprimary_auth(evidence, listener)?;
+    if listener != ListenerKind::Admin || C::LEVEL != vocab::HttpConsistencyLevel::LocalOnly {
+        return Ok(None);
+    }
+    match evidence.auth() {
+        HttpRouteAuth::Permission(_) => {
+            permission_authz(evidence, listener, RouteTenantBinding::Ambient).map(Some)
+        }
+        HttpRouteAuth::Bootstrap | HttpRouteAuth::ClientsOnly | HttpRouteAuth::ServiceOwned => {
+            Ok(None)
+        }
+        HttpRouteAuth::Public => Err(invalid_auth(evidence, listener)),
+    }
+}
+
 fn primary_authz(evidence: HttpRouteEvidence) -> Result<PrimaryRouteAuthz, RouteGroupError> {
     match evidence.auth() {
-        HttpRouteAuth::Permission(permission) => {
-            let scope = match (evidence.resource(), evidence.self_scoped()) {
-                (Some(resource), false) => RouteResourceScope::PathParam(resource),
-                (None, true) => RouteResourceScope::SelfSubject,
-                (None, false) => RouteResourceScope::None,
-                (Some(_), true) => {
-                    return Err(invalid_auth(evidence, ListenerKind::Primary));
-                }
-            };
-            Ok(PrimaryRouteAuthz::Permission(RoutePermission {
-                permission,
-                scope,
-            }))
-        }
+        HttpRouteAuth::Permission(_) => permission_authz(
+            evidence,
+            ListenerKind::Primary,
+            RouteTenantBinding::Unrestricted,
+        ),
         HttpRouteAuth::Public => Ok(PrimaryRouteAuthz::OptOut(
             primitives::RouteAuthOptOut::Public,
         )),
@@ -663,6 +702,27 @@ fn primary_authz(evidence: HttpRouteEvidence) -> Result<PrimaryRouteAuthz, Route
             Err(invalid_auth(evidence, ListenerKind::Primary))
         }
     }
+}
+
+fn permission_authz(
+    evidence: HttpRouteEvidence,
+    listener: ListenerKind,
+    tenant_binding: RouteTenantBinding,
+) -> Result<PrimaryRouteAuthz, RouteGroupError> {
+    let HttpRouteAuth::Permission(permission) = evidence.auth() else {
+        return Err(invalid_auth(evidence, listener));
+    };
+    let scope = match (evidence.resource(), evidence.self_scoped()) {
+        (Some(resource), false) => RouteResourceScope::PathParam(resource),
+        (None, true) => RouteResourceScope::SelfSubject,
+        (None, false) => RouteResourceScope::None,
+        (Some(_), true) => return Err(invalid_auth(evidence, listener)),
+    };
+    Ok(PrimaryRouteAuthz::Permission(RoutePermission {
+        permission,
+        scope,
+        tenant_binding,
+    }))
 }
 
 /// 单 listener 的 per-listener Router，**未** auth-finalize（#1113 funnel 入态），兼作 finalize 折叠的
@@ -1327,6 +1387,31 @@ mod tests {
 
         assert_rejected::<Admin>("/admin/v1", "/admin/v1/x");
         assert_rejected::<Internal>("/internal/v1", "/internal/v1/x");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn ambient_permission_binding_is_admin_local_only_specific() {
+        let binding = test_binding(
+            "/admin/v1/x",
+            "test.admin-local-permission",
+            vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::AuditRead),
+        );
+        let admin =
+            nonprimary_authz::<vocab::http::LocalOnly>(binding.evidence(), ListenerKind::Admin)
+                .expect("Admin LocalOnly permission metadata");
+        assert!(matches!(
+            admin,
+            Some(PrimaryRouteAuthz::Permission(RoutePermission {
+                tenant_binding: RouteTenantBinding::Ambient,
+                ..
+            }))
+        ));
+
+        let internal =
+            nonprimary_authz::<vocab::http::LocalOnly>(binding.evidence(), ListenerKind::Internal)
+                .expect("Internal LocalOnly keeps mTLS authorization path");
+        assert!(internal.is_none());
     }
 
     #[test]

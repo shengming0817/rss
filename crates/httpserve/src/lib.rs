@@ -30,6 +30,11 @@ pub use routes::{
     finalize_primary_auth_with_audit,
 };
 #[cfg(any(test, feature = "test-util"))]
+pub use routes::{
+    LocalOnlyStateProof, StatelessLocalOnlyRouteProof, prove_local_only_state,
+    prove_stateless_local_only_route,
+};
+#[cfg(any(test, feature = "test-util"))]
 pub use routes::{TestPrimaryRoute, TestRoute, TestRoutePermission, TestRouteResourceScope};
 
 /// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
@@ -49,6 +54,13 @@ pub fn request_id_str(extensions: &axum::http::Extensions) -> Option<&str> {
 pub(crate) struct RoutePermission {
     pub(crate) permission: vocab::RoutePermissionId,
     pub(crate) scope: RouteResourceScope,
+    pub(crate) tenant_binding: RouteTenantBinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteTenantBinding {
+    Unrestricted,
+    Ambient,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

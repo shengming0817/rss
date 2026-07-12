@@ -87,6 +87,45 @@ effect 后把跨租户读取当作普通本地 read。
 源码闭环，拒绝普通 `with_state`、未分类/不透明 state、marker 谎报及不可证明挂载（Medium CI 门；synthetic
 red + compiling green anti-vacuity）。该门不从方法名猜能力，混合 port 始终按最强能力判定。
 
+## LocalOnly runtime conformance
+
+`testkit::local_only::assert_local_only` 在完整 await 一次 HTTP operation 前后，比较调用方必须同时提供的
+`write` / `outbox` / `publish` 三维证据。存在运行时 seam 时，provider 必须持有维度化
+`ProviderCounter<Dimension>`，conformance 只消费其共享只读 handle；任意 `FnMut() -> u64` 入口已删除，三个
+marker 不可互换。能力已被 typed route/state funnel 排除时使用显式 `StaticExclusion::from_governed(&proof)`，
+proof 必须来自 httpserve 的 canonical classified-state / stateless generated-route constructor。不得拿无关计数器、
+恒零闭包、空 owner trait 或任意值冒充观察。跨 crate provenance 由 `consistency local-only-effects` 的 direct-shape
+源码门与 synthetic red 验证，仍诚实定级 Medium，不虚称 Rust Hard proof。任一 runtime 计数增长即失败，
+计数倒退也 fail-loud；非零 fixture baseline 合法。testkit 自身用
+三类 synthetic red 分别证明断言不是恒真，并确保业务失败响应仍经过 post-check。
+
+这里的禁止副作用专指 handler/domain 的业务持久化、业务 outbox 与直接 publish seam。完整 finalized route
+生命周期仍会执行认证 finalizer；其 auth security audit 属于上文 `auth` effect 明确允许的安全门控状态变化，
+不是业务 write/outbox/publish。conformance 测试必须为 auth finalizer 注入独立、可观测的 audit sink，并按
+allow/deny 结果断言事件数量与安全字段，禁止用 Noop sink 隐藏；该 sink 不纳入三项业务副作用零增长 observer。
+
+该断言是 `LOCAL-ONLY-RUNTIME-EFFECTS-01` 的 Medium CI 证据，与上面的 typed route/state Hard funnel
+分工：类型层限制 handler 可获得的 capability，conformance 证明真实测试 seam 在成功、鉴权拒绝与合成读取
+失败路径上没有发生禁止副作用。它只覆盖调用方接入的 observer，不是进程级 syscall sandbox，也不宣称检测
+未插桩的文件系统、网络 client、全局状态或未等待的后台任务。
+
+当前真实 route 覆盖：
+
+- `identity.profile`：经 generated path 与带独立 auth audit sink 的 finalized Primary router 验证默认遮罩、
+  显式 projection、未认证及拒绝路径；stateless LocalOnly binding 不提供 side-effect state，三类业务副作用均
+  从同一 generated route proof 产生显式 static exclusion，不连接无关的 session capture。
+- `audit.list-entries`：经 finalized Admin router 验证 ambient tenant scoped 成功读取、授权拒绝、认证 tenant 与
+  ambient tenant 不匹配、非法 `tenantId` query，以及 repo 完整性合成失败；所有路径不写、不追加 outbox、
+  不直接 publish，且 scoped route 不调用 admin repo / domain cross-tenant audit sink。finalized 生命周期产生的
+  auth audit 由独立 sink 精确断言；Admin LocalOnly permission、ambient tenant binding、PDP 与 audit 在同一
+  finalizer 决策中收口，handler 只消费 `AuthorizedSubject`。其中 write counter 由 finalized route 实际持有的
+  repo provider 所有，observer 只取得同一 counter 的只读 handle；outbox / publish 从
+  `AuditListHandlerState: ClassifiedRouteState<Effect = ReadEffect>` 的 proof 产生 static exclusion。synthetic red
+  让该 repo provider 注入一次 write，必须由共享 handle 捕获；decoy provider/handle 与漏 `record()` 形状由源码门拒绝。
+
+独立的 `audit.list-tenant-entries` 是 LocalTx 跨租户 audited read，按设计先写 durable audit，不属于本
+LocalOnly conformance suite。
+
 ## Audit route split
 
 `audit.list-entries` 只服务 ambient tenant scoped read，声明 `auth`/`read`/`projection`，不接受
@@ -113,4 +152,5 @@ red + compiling green anti-vacuity）。该门不从方法名猜能力，混合 
 - `GeneratedEndpoint` / `GeneratedPrimaryEndpoint` 把 evidence 与 handler 原子绑定，并原样传播到 `RouteMeta`。
 
 #1691 已补 owner-sealed port effect 分类与 audit 读写 capability 拆分；#1693 在 typed route proof 基础上
-补齐 LocalOnly state Hard funnel 与 Medium 注入面闭环；#1694 继续补非 port 的运行时 conformance 证明。
+补齐 LocalOnly state Hard funnel 与 Medium 注入面闭环；`LOCAL-ONLY-RUNTIME-EFFECTS-01` 再补非 port 的
+运行时 conformance 证明。

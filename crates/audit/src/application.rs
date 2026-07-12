@@ -20,17 +20,22 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
+use ::generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
 use ::generated::http::audit_v1::{
     list_entries::{
         AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
-        ROUTE as AUDIT_LIST_HTTP_ROUTE, SPEC as AUDIT_LIST_HTTP_SPEC,
+        ROUTE as AUDIT_LIST_HTTP_ROUTE,
     },
     list_tenant_entries::{
         AuditListTenantEntriesRequest, AuditListTenantEntriesResponse, AuditTenantEntryView,
         ROUTE as AUDIT_LIST_TENANT_HTTP_ROUTE, SPEC as AUDIT_LIST_TENANT_HTTP_SPEC,
     },
 };
-use ::httpserve::{Admin, ContractMarker, GeneratedEndpoint, ResourceProjection, RouteAuthorizer};
+use ::httpserve::{
+    Admin, AuthorizedSubject, ContractMarker, GeneratedEndpoint, ResourceProjection,
+    RouteAuthorizer,
+};
 use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Extension, Path, Query, State};
@@ -499,25 +504,13 @@ fn target_page_from_request(
 /// Tenant-scoped admin read. Target tenant input is not part of this wire shape.
 async fn list_entries(
     repo: Arc<DynAuditReadRepo<'static>>,
-    authenticated: Option<httpserve::Authenticated>,
-    authorizer: Option<Arc<dyn RouteAuthorizer>>,
+    projection: ResourceProjection,
     request: AuditListEntriesRequest,
     request_id: String,
 ) -> Response {
     // 租户 fail-closed：缺 ctx（未经认证通道）即 500，不静默落空租户。
     let Ok(tenant) = runctx::try_with(|ctx| *ctx.tenant()) else {
         return httpserve::error::internal_error(&request_id);
-    };
-    let projection = match authorize_read_projection(
-        authorizer,
-        authenticated.as_ref(),
-        tenant,
-        &AUDIT_LIST_HTTP_SPEC,
-    )
-    .await
-    {
-        Ok(projection) => projection,
-        Err(AuditReadAuthError::Forbidden) => return httpserve::error::forbidden(&request_id),
     };
     // 下限 ≥1 由 wire 类型 `NonZeroU32` 在反序列化层 type-enforced（F5）：limit=0 / 负值反序列化即失败
     // → QueryRejection → 统一 400（见路由闭包）。上限由 `vocab::Limit::new` 与 schema maximum=500
@@ -557,18 +550,15 @@ impl httpserve::ClassifiedRouteState for AuditListHandlerState {
 async fn list_entries_handler(
     _: ContractMarker<::generated::http::audit_v1::list_entries::RouteMarker>,
     State(state): State<AuditListHandlerState>,
-    authenticated: Option<Extension<httpserve::Authenticated>>,
-    authorizer: Option<Extension<Arc<dyn RouteAuthorizer>>>,
+    Extension(authorized): Extension<AuthorizedSubject>,
     query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
     request: axum::extract::Request,
 ) -> Response {
-    let authenticated = authenticated.map(|Extension(authenticated)| authenticated);
-    let authorizer = authorizer.map(|Extension(authorizer)| authorizer);
     let request_id = request_id_from_parts(request.headers(), request.extensions());
     let Ok(query) = query else {
         return httpserve::error::validation_bad_request(&request_id);
     };
-    list_entries(state.repo, authenticated, authorizer, query.0, request_id).await
+    list_entries(state.repo, authorized.projection(), query.0, request_id).await
 }
 
 fn log_cross_tenant_audit_append_failure(
@@ -781,6 +771,38 @@ async fn authorize_read_projection(
     .await
     .map(|subject| subject.projection())
     .ok_or(AuditReadAuthError::Forbidden)
+}
+
+#[cfg(test)]
+async fn authorize_and_list_entries_for_test(
+    repo: Arc<DynAuditReadRepo<'static>>,
+    authorizer: Option<Arc<dyn RouteAuthorizer>>,
+    authenticated: Option<httpserve::Authenticated>,
+    request: AuditListEntriesRequest,
+    request_id: String,
+) -> Response {
+    let Ok(ambient_tenant) = runctx::try_with(|ctx| *ctx.tenant()) else {
+        return httpserve::error::internal_error(&request_id);
+    };
+    if authenticated
+        .as_ref()
+        .and_then(httpserve::Authenticated::tenant_id)
+        != Some(ambient_tenant)
+    {
+        return httpserve::error::forbidden(&request_id);
+    }
+    let projection = match authorize_read_projection(
+        authorizer,
+        authenticated.as_ref(),
+        ambient_tenant,
+        &AUDIT_LIST_HTTP_SPEC,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(AuditReadAuthError::Forbidden) => return httpserve::error::forbidden(&request_id),
+    };
+    list_entries(repo, projection, request, request_id).await
 }
 
 fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &str) -> String {
@@ -1216,6 +1238,108 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct CountingScopedReadRepo {
+        list_calls: Arc<std::sync::atomic::AtomicUsize>,
+        write_effects: testkit::local_only::ProviderCounter<testkit::local_only::Write>,
+        scopes: Arc<std::sync::Mutex<Vec<vocab::TenantId>>>,
+        fail: bool,
+        inject_forbidden_write: bool,
+    }
+
+    impl Default for CountingScopedReadRepo {
+        fn default() -> Self {
+            Self {
+                list_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                write_effects: ::testkit::local_only::ProviderCounter::write(),
+                scopes: Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail: false,
+                inject_forbidden_write: false,
+            }
+        }
+    }
+
+    impl CountingScopedReadRepo {
+        fn failing() -> Self {
+            Self {
+                fail: true,
+                ..Self::default()
+            }
+        }
+
+        fn with_forbidden_write() -> Self {
+            Self {
+                inject_forbidden_write: true,
+                ..Self::default()
+            }
+        }
+
+        fn list_calls(&self) -> usize {
+            self.list_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn record_write_effect(&self) {
+            self.write_effects.record();
+        }
+
+        fn scopes(&self) -> Vec<vocab::TenantId> {
+            self.scopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+
+        fn test_repo(&self) -> TestRepo {
+            TestRepo::from_provider(Arc::new(self.clone()))
+        }
+    }
+
+    impl AuditWriteRepo for CountingScopedReadRepo {
+        async fn append(
+            &self,
+            _scope: TenantRepoScope,
+            _record: AuditRecord,
+        ) -> Result<(), AuditError> {
+            self.record_write_effect();
+            Ok(())
+        }
+    }
+
+    impl AuditReadRepo for CountingScopedReadRepo {
+        async fn list(
+            &self,
+            scope: TenantRepoScope,
+            _page: AuditPage,
+        ) -> Result<AuditListResult, AuditError> {
+            self.list_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.scopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(scope.tenant());
+            if self.inject_forbidden_write {
+                self.record_write_effect();
+            }
+            if self.fail {
+                Err(AuditError::HashMismatch)
+            } else {
+                Ok(AuditListResult {
+                    entries: Vec::new(),
+                    next_cursor: None,
+                    has_more: false,
+                })
+            }
+        }
+
+        async fn verify_tail(
+            &self,
+            _scope: TenantRepoScope,
+            _limit: u32,
+        ) -> Result<(), AuditError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
     struct RecordingAuditSink {
         events: Arc<std::sync::Mutex<Vec<diport::AuditEvent>>>,
         fail: bool,
@@ -1267,6 +1391,21 @@ mod tests {
     struct ProjectionAuthorizer {
         fields: &'static [vocab::ProjectionField],
         allow: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ProjectionAuthorizer {
+        fn new(fields: &'static [vocab::ProjectionField], allow: bool) -> Self {
+            Self {
+                fields,
+                allow,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl httpserve::RouteAuthorizer for ProjectionAuthorizer {
@@ -1275,6 +1414,7 @@ mod tests {
             request: httpserve::RouteAuthorizationRequest,
         ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
         {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
                 if self.allow
                     && [
@@ -1301,17 +1441,11 @@ mod tests {
     fn projection_authorizer(
         fields: &'static [vocab::ProjectionField],
     ) -> Arc<dyn httpserve::RouteAuthorizer> {
-        Arc::new(ProjectionAuthorizer {
-            fields,
-            allow: true,
-        })
+        Arc::new(ProjectionAuthorizer::new(fields, true))
     }
 
     fn denying_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
-        Arc::new(ProjectionAuthorizer {
-            fields: &[],
-            allow: false,
-        })
+        Arc::new(ProjectionAuthorizer::new(&[], false))
     }
 
     #[derive(Clone)]
@@ -1997,7 +2131,14 @@ mod tests {
                             let Ok(q) = q else {
                                 return httpserve::error::validation_bad_request(&request_id);
                             };
-                            list_entries(repo, authenticated, authorizer, q.0, request_id).await
+                            authorize_and_list_entries_for_test(
+                                repo,
+                                authorizer,
+                                authenticated,
+                                q.0,
+                                request_id,
+                            )
+                            .await
                         }
                     },
                 ),
@@ -2060,6 +2201,71 @@ mod tests {
             .await
             .expect("body");
         (status, body.to_vec())
+    }
+
+    #[allow(clippy::expect_used)]
+    #[allow(clippy::too_many_arguments)]
+    fn finalized_scoped_router(
+        repo: TestRepo,
+        admin_repo: Arc<DynAuditAdminRepo<'static>>,
+        domain_sink: RecordingAuditSink,
+        auth_sink: RecordingAuditSink,
+        evidence_tenant: Option<vocab::TenantId>,
+        ambient_principal_kind: vocab::PrincipalKind,
+        ambient_subject: &'static str,
+        authorizer: Arc<dyn httpserve::RouteAuthorizer>,
+    ) -> axum::Router {
+        let domain = AuditDomain::new(
+            repo.read,
+            Some(admin_repo),
+            domain_sink.clone(),
+            audit_clock(),
+        );
+        let mut registry = bootstrap::compose(&[&domain]).expect("compose audit domain");
+        let routes = registry.finalize_routes().expect("finalize routes");
+        let (_, admin) = routes
+            .into_iter()
+            .find(|(listener, _)| matches!(listener, ListenerKind::Admin))
+            .expect("admin routes");
+        let plan = primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::Jwt)
+            .expect("admin jwt plan");
+        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let bridge_principal = principal(vocab::PrincipalKind::Admin, evidence_tenant);
+        let evidence_principal = bridge_principal.clone();
+        httpserve::finalize_auth_with_audit_and_authorizer(
+            admin,
+            plan,
+            httpserve::AuditSinkHandle::new(auth_sink),
+            audit_clock(),
+            authorizer,
+        )
+        .expect("finalize auth")
+        .layer(axum::middleware::from_fn(
+            move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+                let principal = evidence_principal.clone();
+                async move {
+                    request
+                        .extensions_mut()
+                        .insert(httpserve::Authenticated::new(
+                            primitives::RequiredScheme::Jwt,
+                            vocab::PrincipalKind::Admin,
+                            CANON_SUBJECT,
+                            evidence_tenant,
+                        ));
+                    request.extensions_mut().insert(principal);
+                    let ctx = runctx::test_support::app_ctx_with_kind(
+                        ambient,
+                        ambient_principal_kind,
+                        ambient_subject,
+                    );
+                    request
+                        .extensions_mut()
+                        .insert(httpserve::PendingScopeCtx::new(ctx));
+                    next.run(request).await
+                }
+            },
+        ))
+        .into_router_for_test()
     }
 
     async fn get_target_entries_with(
@@ -2294,6 +2500,301 @@ mod tests {
             let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
             assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN", "{label}");
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn local_only_scoped_read_rejects_unbound_tenant_evidence_before_repo() {
+        let other =
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("other tenant");
+
+        for (label, evidence_tenant) in [
+            ("mismatched tenant", Some(other)),
+            ("tenantless evidence", None),
+        ] {
+            let probe = CountingScopedReadRepo::default();
+            let (status, body) = get_entries_with_sink_and_authorizer(
+                probe.test_repo(),
+                None,
+                Some(principal(vocab::PrincipalKind::Admin, evidence_tenant)),
+                audit_sink(),
+                Some(projection_authorizer(&[])),
+                None,
+                "",
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::FORBIDDEN, "{label}");
+            assert_eq!(probe.list_calls(), 0, "{label} must not read repo");
+            assert!(probe.scopes().is_empty(), "{label} must not mint a scope");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(json["error"]["code"], "ERR_CORE_FORBIDDEN", "{label}");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn local_only_scoped_read_conforms_via_finalized_admin_router() {
+        struct Case {
+            label: &'static str,
+            evidence_tenant: Option<vocab::TenantId>,
+            ambient_kind: vocab::PrincipalKind,
+            ambient_subject: &'static str,
+            allow: bool,
+            fail_read: bool,
+            query: String,
+            expected_status: StatusCode,
+            expected_reads: usize,
+            expected_pdp_calls: usize,
+            expected_denial: bool,
+        }
+
+        impl Case {
+            fn new(
+                label: &'static str,
+                evidence_tenant: Option<vocab::TenantId>,
+                expected_status: StatusCode,
+                expected_reads: usize,
+            ) -> Self {
+                Self {
+                    label,
+                    evidence_tenant,
+                    ambient_kind: vocab::PrincipalKind::Admin,
+                    ambient_subject: CANON_SUBJECT,
+                    allow: true,
+                    fail_read: false,
+                    query: String::new(),
+                    expected_status,
+                    expected_reads,
+                    expected_pdp_calls: 1,
+                    expected_denial: false,
+                }
+            }
+        }
+
+        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let other =
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("other tenant");
+        let cases = [
+            Case::new("success", Some(ambient), StatusCode::OK, 1),
+            Case {
+                allow: false,
+                expected_denial: true,
+                ..Case::new(
+                    "authorization denied",
+                    Some(ambient),
+                    StatusCode::FORBIDDEN,
+                    0,
+                )
+            },
+            Case {
+                fail_read: true,
+                ..Case::new(
+                    "hash mismatch",
+                    Some(ambient),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    1,
+                )
+            },
+            Case {
+                expected_pdp_calls: 0,
+                expected_denial: true,
+                ..Case::new("mismatched tenant", Some(other), StatusCode::FORBIDDEN, 0)
+            },
+            Case {
+                expected_pdp_calls: 0,
+                expected_denial: true,
+                ..Case::new("tenantless evidence", None, StatusCode::FORBIDDEN, 0)
+            },
+            Case {
+                ambient_subject: "different-subject",
+                expected_pdp_calls: 0,
+                expected_denial: true,
+                ..Case::new(
+                    "mismatched subject",
+                    Some(ambient),
+                    StatusCode::FORBIDDEN,
+                    0,
+                )
+            },
+            Case {
+                ambient_kind: vocab::PrincipalKind::User,
+                expected_pdp_calls: 0,
+                expected_denial: true,
+                ..Case::new(
+                    "mismatched principal kind",
+                    Some(ambient),
+                    StatusCode::FORBIDDEN,
+                    0,
+                )
+            },
+            Case {
+                query: format!("?tenantId={other}"),
+                ..Case::new(
+                    "legacy tenant query",
+                    Some(ambient),
+                    StatusCode::BAD_REQUEST,
+                    0,
+                )
+            },
+        ];
+
+        for case in cases {
+            let repo_probe = if case.fail_read {
+                CountingScopedReadRepo::failing()
+            } else {
+                CountingScopedReadRepo::default()
+            };
+            let admin_probe = CountingAdminRepo::default();
+            let admin_calls = admin_probe.list_calls();
+            let domain_sink = RecordingAuditSink::ok();
+            let auth_sink = RecordingAuditSink::ok();
+            let authorizer = Arc::new(ProjectionAuthorizer::new(&[], case.allow));
+            let router = finalized_scoped_router(
+                repo_probe.test_repo(),
+                admin_probe.boxed(),
+                domain_sink.clone(),
+                auth_sink.clone(),
+                case.evidence_tenant,
+                case.ambient_kind,
+                case.ambient_subject,
+                authorizer.clone(),
+            );
+            let proof = ::httpserve::prove_local_only_state::<AuditListHandlerState>();
+            let observers = ::testkit::local_only::LocalOnlyObservers::new(
+                repo_probe.write_effects.handle(),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                    &proof,
+                ),
+                ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                    &proof,
+                ),
+            );
+            let request = axum::http::Request::builder()
+                .uri(format!("{AUDIT_ENTRIES_PATH}{}", case.query))
+                .body(axum::body::Body::empty())
+                .expect("request");
+
+            let response =
+                ::testkit::local_only::assert_local_only(observers, move || async move {
+                    router.oneshot(request).await
+                })
+                .await
+                .expect("LocalOnly conformance")
+                .expect("oneshot");
+
+            assert_eq!(response.status(), case.expected_status, "{}", case.label);
+            let auth_events = auth_sink.events();
+            assert_eq!(
+                auth_events.len(),
+                1,
+                "{}: auth audit cardinality",
+                case.label
+            );
+            let auth_event = &auth_events[0];
+            assert_eq!(auth_event.principal_id, CANON_SUBJECT, "{}", case.label);
+            assert_eq!(
+                auth_event.principal_kind,
+                vocab::PrincipalKind::Admin,
+                "{}",
+                case.label
+            );
+            assert_eq!(auth_event.tenant_id, case.evidence_tenant, "{}", case.label);
+            assert_eq!(auth_event.resource_kind, "http_route", "{}", case.label);
+            assert_eq!(
+                auth_event.resource_id,
+                AUDIT_LIST_HTTP_SPEC.route.contract_id(),
+                "{}",
+                case.label
+            );
+            assert_eq!(auth_event.action, "httpserve:authz", "{}", case.label);
+            let expected_outcome = if case.expected_denial {
+                diport::AuditOutcome::Failure {
+                    reason: "forbidden",
+                }
+            } else {
+                diport::AuditOutcome::Success
+            };
+            assert_eq!(auth_event.outcome, expected_outcome, "{}", case.label);
+            assert_eq!(
+                authorizer.calls(),
+                case.expected_pdp_calls,
+                "{}",
+                case.label
+            );
+            assert_eq!(
+                repo_probe.list_calls(),
+                case.expected_reads,
+                "{}",
+                case.label
+            );
+            assert_eq!(
+                admin_calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{}: target LocalTx admin repo must stay excluded",
+                case.label
+            );
+            assert!(
+                domain_sink.events().is_empty(),
+                "{}: scoped handler must not publish a domain/cross-tenant audit event",
+                case.label
+            );
+            let expected_scopes = if case.expected_reads == 0 {
+                Vec::new()
+            } else {
+                vec![ambient]
+            };
+            assert_eq!(repo_probe.scopes(), expected_scopes, "{}", case.label);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn local_only_real_route_provider_write_effect_trips_typed_probe() {
+        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let repo_probe = CountingScopedReadRepo::with_forbidden_write();
+        let domain_sink = RecordingAuditSink::ok();
+        let router = finalized_scoped_router(
+            repo_probe.test_repo(),
+            CountingAdminRepo::default().boxed(),
+            domain_sink.clone(),
+            RecordingAuditSink::ok(),
+            Some(ambient),
+            vocab::PrincipalKind::Admin,
+            CANON_SUBJECT,
+            Arc::new(ProjectionAuthorizer::new(&[], true)),
+        );
+        let proof = ::httpserve::prove_local_only_state::<AuditListHandlerState>();
+        let observers = ::testkit::local_only::LocalOnlyObservers::new(
+            repo_probe.write_effects.handle(),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
+                &proof,
+            ),
+            ::testkit::local_only::StaticExclusion::<::testkit::local_only::Publish>::from_governed(
+                &proof,
+            ),
+        );
+        let request = axum::http::Request::builder()
+            .uri(AUDIT_ENTRIES_PATH)
+            .body(axum::body::Body::empty())
+            .expect("request");
+
+        let result = ::testkit::local_only::assert_local_only(observers, move || async move {
+            router.oneshot(request).await
+        })
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(
+                testkit::local_only::LocalOnlyConformanceError::ForbiddenEffects {
+                    writes: 1,
+                    outbox: 0,
+                    publishes: 0,
+                }
+            )
+        ));
+        assert_eq!(repo_probe.list_calls(), 1);
     }
 
     #[tokio::test]
@@ -3018,8 +3519,7 @@ mod tests {
     async fn admin_read_without_ctx_fails_closed() {
         let response = list_entries(
             repo().read,
-            None,
-            None,
+            ResourceProjection::default_masked(),
             AuditListEntriesRequest {
                 limit: std::num::NonZeroU32::new(10).expect("nonzero"),
                 cursor: None,

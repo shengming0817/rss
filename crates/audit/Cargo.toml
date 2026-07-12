@@ -54,3 +54,4 @@ runctx = { path = "../runctx", features = ["test-support"] }
 httpserve = { path = "../httpserve", features = ["test-util"] }
 authn = { path = "../authn", features = ["test-support"] }
 trybuild = { workspace = true }
+testkit = { path = "../testkit" }

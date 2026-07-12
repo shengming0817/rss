@@ -45,7 +45,7 @@ use tower::Service;
 use vocab::{PrincipalKind, ProjectionField, RoutePermissionId, TenantId};
 
 use crate::middleware::RequestId;
-use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope};
+use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope, RouteTenantBinding};
 
 /// service-token tenant header binding 解析错误（不携 header 值，避免 PII 进入日志）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +571,15 @@ impl PendingScopeCtx {
     pub(crate) fn into_ctx(self) -> runctx::AppCtx {
         self.0
     }
+
+    fn matches_authenticated(&self, authenticated: &Authenticated) -> bool {
+        authenticated.tenant_id() == Some(*self.0.tenant())
+            && self.0.principal().kind() == authenticated.principal_kind()
+            && self
+                .0
+                .principal()
+                .matches_subject(authenticated.self_scoped_principal_id())
+    }
 }
 
 // ── EnforceLayer ─────────────────────────────────────────────────────────────
@@ -984,11 +993,41 @@ where
         }
         let permission = route_permission(&authz);
         let route_authorizer = req.extensions().get::<Arc<dyn RouteAuthorizer>>().cloned();
+        let ambient_binding_matches =
+            req.extensions()
+                .get::<PendingScopeCtx>()
+                .is_some_and(|pending| {
+                    evidence
+                        .as_ref()
+                        .is_some_and(|authenticated| pending.matches_authenticated(authenticated))
+                });
         Box::pin(async move {
             if let Some(permission) = permission {
                 let Some(evidence_ref) = evidence.as_ref() else {
                     return reject_response(AuthDecision::Deny, &rid).await;
                 };
+                if permission.tenant_binding == RouteTenantBinding::Ambient
+                    && !ambient_binding_matches
+                {
+                    if let Err(error) = record_auth_audit(
+                        audit,
+                        AuthDecision::Deny,
+                        meta.contract_id(),
+                        rid.clone(),
+                        evidence.clone(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            contract_id = meta.contract_id(),
+                            authz.decision = AuthDecision::Deny.as_label(),
+                            error = %error,
+                            "auth audit record failed before ambient tenant reject"
+                        );
+                        return Ok(crate::error::internal_error(&rid));
+                    }
+                    return reject_response(AuthDecision::Deny, &rid).await;
+                }
                 let authorized = authorize_route_permission(
                     &mut req,
                     &meta,
