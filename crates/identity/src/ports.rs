@@ -419,8 +419,10 @@ pub trait CredentialRepoLocal: Send + Sync {
         credential: Credential,
     ) -> Result<(), IdentityError>;
 
-    /// 密码变更 CAS：仅当存储版本 == `expected` 时以 `next` 替换；版本不匹配 → `Err(VersionConflict)`，
-    /// 查无凭据 → `Err(CredentialNotFound)`（并发密码变更安全）。store key 派生自 `next`（F2）；消费方经
+    /// 密码变更的**原子 CAS**：provider 在一个不可分割的写边界内，仅当存储版本
+    /// == `expected` 时以 `next` 替换；版本不匹配 → `Err(VersionConflict)` 且零变更，查无凭据 →
+    /// `Err(CredentialNotFound)`。单次 port 调用可按 provider 的既定策略重试 transient storage 错误；
+    /// `VersionConflict` / CAS 冲突不自动重试。store key 派生自 `next`（F2）；消费方经
     /// `Credential::rotate`（保持 login/user_id/tenant、version + 1）构造 `next`。
     async fn bump_version(
         &self,

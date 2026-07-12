@@ -51,6 +51,8 @@ use crate::projection_events::ProjectionWriteRegistry;
 pub struct PgSessionLifecycle {
     pool: PgTenantPool,
     clock: Box<dyn Clock>,
+    #[cfg(all(test, feature = "integration"))]
+    revoke_post_update_hook: Option<fn() -> Result<(), IdentityError>>,
 }
 
 impl PgSessionLifecycle {
@@ -70,7 +72,16 @@ impl PgSessionLifecycle {
         Self {
             pool: PgTenantPool::with_projection_registry(store, projection_registry),
             clock,
+            #[cfg(all(test, feature = "integration"))]
+            revoke_post_update_hook: None,
         }
+    }
+
+    /// 测试专用：让 `revoke` 在真实 UPDATE 后、事务提交前返回 storage error。
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_revoke_post_update_error(mut self) -> Self {
+        self.revoke_post_update_hook = Some(revoke_post_update_error);
+        self
     }
 }
 
@@ -193,6 +204,8 @@ impl SessionLifecycle for PgSessionLifecycle {
         // `UPDATE ... SET revoked = true`。幂等：未知 / 跨租（`WHERE tenant_id` 不匹配）/ 已撤销均 0 行影响、仍
         // `Ok(())`（与 in-mem / demo provider 的幂等 no-op 语义对齐）。软撤销不删行（保留审计 + 幂等）。
         let tenant_uuid = tenant.as_uuid().to_string();
+        #[cfg(all(test, feature = "integration"))]
+        let post_update_hook = self.revoke_post_update_hook;
         self.pool
             .write(
                 scope,
@@ -205,14 +218,25 @@ impl SessionLifecycle for PgSessionLifecycle {
                         .bind(session_id.as_str())
                         .execute(conn.conn())
                         .await
-                        .map_err(storage)
-                        .map(|_| ())
+                        .map_err(storage)?;
+                        #[cfg(all(test, feature = "integration"))]
+                        if let Some(hook) = post_update_hook {
+                            hook()?;
+                        }
+                        Ok(())
                     })
                 },
                 storage,
             )
             .await
     }
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn revoke_post_update_error() -> Result<(), IdentityError> {
+    Err(IdentityError::Storage(Box::new(std::io::Error::other(
+        "forced post-update revoke failure",
+    ))))
 }
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。

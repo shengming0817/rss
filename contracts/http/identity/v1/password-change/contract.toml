@@ -1,4 +1,4 @@
-# 当前认证主体密码变更 HTTP 契约。self-scoped CAS write ⇒ L1。
+# 当前认证主体密码变更 HTTP 契约。CredentialRepo 单次原子 CAS 写入；并发冲突零写且 handler 不自动重试 ⇒ L1。
 id = "identity.password-change"
 kind = "http"
 domain = "identity"
@@ -22,7 +22,7 @@ permission = "identity:profile:write"
 
 [capabilities.localTx]
 boundary = "single-domain"
-txModel = "tenant-scoped-uow"
+txModel = "repo-atomic-cas"
 retry = "bounded-transient"
 commitUnknown = "not-retryable"
 

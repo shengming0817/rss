@@ -593,7 +593,7 @@ pub mod password_change {
         route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: ::vocab::LocalTxBoundary::SingleDomain,
-            tx_model: ::vocab::LocalTxModel::TenantScopedUow,
+            tx_model: ::vocab::LocalTxModel::RepoAtomicCas,
             retry: ::vocab::LocalTxRetry::BoundedTransient,
             commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
         }),

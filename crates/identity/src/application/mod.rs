@@ -2748,10 +2748,11 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::ports::{
-        DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
-        PolicyRule, Role,
+        Credential, DynPolicyLifecycle, Operator, Policy, PolicyCondition, PolicyEffect,
+        PolicyObligations, PolicyRule, Role,
     };
     use diport::OutboxEmitError;
     use testkit::ContractRequest;
@@ -2812,6 +2813,131 @@ mod tests {
     }
 
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：SessionLifecycle / Clock 替身在此手写。
+    #[derive(Default)]
+    struct CredentialRepoCalls {
+        find: AtomicUsize,
+        authenticate: AtomicUsize,
+        save: AtomicUsize,
+        bump_attempts: AtomicUsize,
+        bump_commits: AtomicUsize,
+        lockout_status: AtomicUsize,
+    }
+
+    /// 改密路径的最小 test-only probe：所有存储行为委托给 `InMemCredentialRepo`，
+    /// 仅记录方法计数与可选的 CAS 冲突脚本，不保存或暴露明文密码。
+    #[derive(Clone)]
+    struct CredentialRepoProbe {
+        inner: Arc<crate::internal::mem::InMemCredentialRepo>,
+        calls: Arc<CredentialRepoCalls>,
+        conflict_on_bump: bool,
+    }
+
+    impl CredentialRepoProbe {
+        #[allow(clippy::expect_used)]
+        fn seeded(conflict_on_bump: bool) -> Self {
+            Self {
+                inner: Arc::new(
+                    crate::internal::mem::InMemCredentialRepo::with_seed_credential(
+                        "alice",
+                        uid(CANON_USER),
+                        "correct-horse",
+                        tid(CANON_TENANT),
+                    )
+                    .expect("seed credential probe"),
+                ),
+                calls: Arc::new(CredentialRepoCalls::default()),
+                conflict_on_bump,
+            }
+        }
+
+        fn total_calls(&self) -> usize {
+            self.calls.find.load(Ordering::SeqCst)
+                + self.calls.authenticate.load(Ordering::SeqCst)
+                + self.calls.save.load(Ordering::SeqCst)
+                + self.calls.bump_attempts.load(Ordering::SeqCst)
+                + self.calls.lockout_status.load(Ordering::SeqCst)
+        }
+
+        fn find_calls(&self) -> usize {
+            self.calls.find.load(Ordering::SeqCst)
+        }
+
+        fn bump_attempts(&self) -> usize {
+            self.calls.bump_attempts.load(Ordering::SeqCst)
+        }
+
+        fn bump_commits(&self) -> usize {
+            self.calls.bump_commits.load(Ordering::SeqCst)
+        }
+
+        #[allow(clippy::expect_used)]
+        async fn stored_credential(&self) -> Credential {
+            self.inner
+                .find_by_user_id(tenant_repo_scope(tid(CANON_TENANT)), uid(CANON_USER))
+                .await
+                .expect("probe read succeeds")
+                .expect("seed credential remains")
+        }
+    }
+
+    impl CredentialRepo for CredentialRepoProbe {
+        async fn find_by_user_id(
+            &self,
+            scope: TenantRepoScope,
+            user_id: ids::UserId,
+        ) -> Result<Option<Credential>, IdentityError> {
+            self.calls.find.fetch_add(1, Ordering::SeqCst);
+            self.inner.find_by_user_id(scope, user_id).await
+        }
+
+        async fn authenticate(
+            &self,
+            scope: TenantRepoScope,
+            login: LoginIdentifier,
+            candidate: String,
+            now: SystemTime,
+        ) -> Result<AuthOutcome, IdentityError> {
+            self.calls.authenticate.fetch_add(1, Ordering::SeqCst);
+            self.inner.authenticate(scope, login, candidate, now).await
+        }
+
+        async fn save(
+            &self,
+            scope: TenantRepoScope,
+            credential: Credential,
+        ) -> Result<(), IdentityError> {
+            self.calls.save.fetch_add(1, Ordering::SeqCst);
+            self.inner.save(scope, credential).await
+        }
+
+        async fn bump_version(
+            &self,
+            scope: TenantRepoScope,
+            expected: u32,
+            next: Credential,
+        ) -> Result<(), IdentityError> {
+            self.calls.bump_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.conflict_on_bump {
+                return Err(IdentityError::VersionConflict);
+            }
+            let result = self.inner.bump_version(scope, expected, next).await;
+            if result.is_ok() {
+                self.calls.bump_commits.fetch_add(1, Ordering::SeqCst);
+            }
+            result
+        }
+
+        async fn lockout_status(
+            &self,
+            scope: TenantRepoScope,
+            login: LoginIdentifier,
+            now: SystemTime,
+        ) -> Result<bool, IdentityError> {
+            self.calls.lockout_status.fetch_add(1, Ordering::SeqCst);
+            self.inner.lockout_status(scope, login, now).await
+        }
+    }
+
     // CapturingSessionLifecycle 双职能：① 捕获 co-tx 写入（Session + Entry + envelope）供 outbox 断言（test 1-5）；
     // ② 复用 `InMemSessionLifecycle` 承载 session store（create 即写 → find/revoke 同源，不重写 HashMap/租户/
     // 幂等逻辑）——证明 login→logout 经**同一 store** 闭合（#1278）。`Arc` 共享：clone 与 service 持有方共享
@@ -2820,6 +2946,8 @@ mod tests {
     struct CapturingSessionLifecycle {
         writes: Arc<Mutex<Vec<(Session, EventEntry, OutboxEnvelopeParts)>>>,
         inner: crate::internal::mem::InMemSessionLifecycle,
+        find_calls: Arc<AtomicUsize>,
+        revoke_calls: Arc<AtomicUsize>,
     }
     impl SessionLifecycle for CapturingSessionLifecycle {
         async fn persist_session_and_emit(
@@ -2844,6 +2972,7 @@ mod tests {
             scope: TenantRepoScope,
             session_id: SessionId,
         ) -> Result<Option<Session>, IdentityError> {
+            self.find_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.find(scope, session_id).await
         }
         async fn revoke(
@@ -2851,6 +2980,7 @@ mod tests {
             scope: TenantRepoScope,
             session_id: SessionId,
         ) -> Result<(), IdentityError> {
+            self.revoke_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.revoke(scope, session_id).await
         }
     }
@@ -2858,6 +2988,23 @@ mod tests {
     impl CapturingSessionLifecycle {
         fn count(&self) -> usize {
             self.writes.lock().unwrap_or_else(|e| e.into_inner()).len()
+        }
+
+        fn find_count(&self) -> usize {
+            self.find_calls.load(Ordering::SeqCst)
+        }
+
+        fn revoke_count(&self) -> usize {
+            self.revoke_calls.load(Ordering::SeqCst)
+        }
+
+        #[allow(clippy::expect_used)]
+        async fn is_active(&self, tenant: TenantId, session_id: SessionId) -> bool {
+            self.inner
+                .find(tenant_repo_scope(tenant), session_id)
+                .await
+                .expect("capturing lifecycle read succeeds")
+                .is_some()
         }
     }
 
@@ -2923,6 +3070,23 @@ mod tests {
             tid(CANON_TENANT),
         )
         .expect("seed_service ok")
+    }
+
+    fn probed_service(
+        credentials: CredentialRepoProbe,
+        capture: &CapturingSessionLifecycle,
+    ) -> LoginService<TestSigner> {
+        LoginService::new(
+            Arc::from(DynCredentialRepo::new_box(credentials)),
+            Arc::from(DynSessionLifecycle::new_box(capture.clone())),
+            Arc::new(make_refresh_svc(
+                crate::internal::mem::InMemRefreshTokenStore::new(),
+                make_clock(1_000),
+                Duration::from_secs(2_592_000),
+            )),
+            make_clock(1_000),
+            Duration::from_secs(3_600),
+        )
     }
 
     /// 构造 IdentityDomain<TestSigner>（shared RefreshService）供路由声明测试使用。
@@ -3855,99 +4019,6 @@ mod tests {
         )
         .await
         .expect("login with new pw via login identifier");
-    }
-
-    // ── 测试 9：change_password CAS 冲突（用 mockall 注入） ──────────────────
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn change_password_version_conflict_propagated() {
-        use crate::ports::DynCredentialRepo;
-
-        // mockall mock for CredentialRepo。
-        mockall::mock! {
-            CasCreds {}
-            impl CredentialRepo for CasCreds {
-                async fn find_by_user_id(
-                    &self,
-                    scope: TenantRepoScope,
-                    user_id: ids::UserId,
-                ) -> Result<Option<crate::domain::Credential>, IdentityError>;
-                async fn authenticate(
-                    &self,
-                    scope: TenantRepoScope,
-                    login: LoginIdentifier,
-                    candidate: String,
-                    now: SystemTime,
-                ) -> Result<AuthOutcome, IdentityError>;
-                async fn save(
-                    &self,
-                    scope: TenantRepoScope,
-                    credential: crate::domain::Credential,
-                ) -> Result<(), IdentityError>;
-                async fn bump_version(
-                    &self,
-                    scope: TenantRepoScope,
-                    expected: u32,
-                    next: crate::domain::Credential,
-                ) -> Result<(), IdentityError>;
-                async fn lockout_status(
-                    &self,
-                    scope: TenantRepoScope,
-                    login: LoginIdentifier,
-                    now: SystemTime,
-                ) -> Result<bool, IdentityError>;
-            }
-        }
-
-        let capture = CapturingSessionLifecycle::default();
-
-        // 构造一个种子凭据（通过 InMemCredentialRepo 得到一个有效的 Credential）。
-        let cred_repo = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
-            "alice",
-            uid(CANON_USER),
-            "correct-horse",
-            tid(CANON_TENANT),
-        )
-        .expect("seed");
-        let alice_cred = cred_repo
-            .find_by_user_id(tenant_repo_scope(tid(CANON_TENANT)), uid(CANON_USER))
-            .await
-            .expect("find")
-            .expect("some");
-
-        // Mock：find_by_user_id 返回 alice_cred，bump_version 返回 VersionConflict。
-        let mut mock = MockCasCreds::new();
-        mock.expect_find_by_user_id().returning(move |_t, _u| {
-            let c = alice_cred.clone();
-            Ok(Some(c))
-        });
-        mock.expect_bump_version()
-            .returning(|_scope, _expected, _next| Err(IdentityError::VersionConflict));
-
-        let svc = LoginService::new(
-            Arc::from(DynCredentialRepo::new_box(mock)),
-            Arc::from(DynSessionLifecycle::new_box(capture)),
-            Arc::new(make_refresh_svc(
-                crate::internal::mem::InMemRefreshTokenStore::new(),
-                make_clock(1_000),
-                Duration::from_secs(2_592_000),
-            )),
-            make_clock(1_000),
-            Duration::from_secs(3_600),
-        );
-
-        let err = svc
-            .change_password(
-                tid(CANON_TENANT),
-                uid(CANON_USER),
-                "correct-horse".to_string(),
-                "new-pw".to_string(),
-            )
-            .await
-            .expect_err("version conflict must propagate");
-
-        assert!(matches!(err, ChangePasswordError::VersionConflict));
     }
 
     // ── 测试 10：login → logout 全链回归（#1278 接缝闭合）─────────────────────────
@@ -5934,9 +6005,10 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn password_change_handler_uses_authenticated_subject() {
+    async fn password_change_handler_success_commits_exactly_once() {
         let capture = CapturingSessionLifecycle::default();
-        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
+        let probe = CredentialRepoProbe::seeded(false);
+        let svc = Arc::new(probed_service(probe.clone(), &capture));
         let router = with_auth(
             axum::Router::new().route(
                 "/password/change",
@@ -5956,13 +6028,21 @@ mod tests {
         resp.ensure_status(StatusCode::OK).expect("200");
         let decoded: IdentityPasswordChangeResponse = resp.json().expect("json");
         assert!(decoded.data.changed);
+        assert_eq!(probe.find_calls(), 1);
+        assert_eq!(probe.bump_attempts(), 1);
+        assert_eq!(probe.bump_commits(), 1);
+        let stored = probe.stored_credential().await;
+        assert_eq!(stored.version(), 2);
+        assert!(stored.verify_password("new-correct-horse"));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn password_change_handler_wrong_current_password_returns_403() {
         let capture = CapturingSessionLifecycle::default();
-        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
+        let probe = CredentialRepoProbe::seeded(false);
+        let before = probe.stored_credential().await;
+        let svc = Arc::new(probed_service(probe.clone(), &capture));
         let router = with_auth(
             axum::Router::new().route(
                 "/password/change",
@@ -5981,64 +6061,129 @@ mod tests {
         .expect("call");
         resp.ensure_status(StatusCode::FORBIDDEN)
             .expect("wrong current password -> 403");
+        assert_eq!(probe.find_calls(), 1);
+        assert_eq!(probe.bump_attempts(), 0);
+        assert_eq!(probe.bump_commits(), 0);
+        let stored = probe.stored_credential().await;
+        assert_eq!(stored.version(), before.version());
+        assert!(stored.verify_password("correct-horse"));
+        assert!(!stored.verify_password("new-correct-horse"));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn password_change_handler_rejects_missing_auth_malformed_json_and_bad_subject() {
-        const _: ::vocab::HttpRouteBinding<
-            ::generated::http::identity_v1::password_change::RouteMarker,
-            ::vocab::http::LocalTx,
-        > = ::generated::http::identity_v1::password_change::ROUTE;
+        {
+            const _: ::vocab::HttpRouteBinding<
+                ::generated::http::identity_v1::password_change::RouteMarker,
+                ::vocab::http::LocalTx,
+            > = ::generated::http::identity_v1::password_change::ROUTE;
+        }
+
+        {
+            let capture = CapturingSessionLifecycle::default();
+            let probe = CredentialRepoProbe::seeded(false);
+            let svc = Arc::new(probed_service(probe.clone(), &capture));
+            let router = axum::Router::new().route(
+                PASSWORD_CHANGE_HTTP_SPEC.route.path(),
+                post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
+            );
+
+            let missing_auth = testkit::call(
+                router.clone(),
+                ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
+                    &IdentityPasswordChangeRequest {
+                        current_password: "correct-horse".to_string(),
+                        new_password: "new-correct-horse".to_string(),
+                    },
+                ),
+            )
+            .await
+            .expect("call missing auth");
+            missing_auth
+                .ensure_status(StatusCode::UNAUTHORIZED)
+                .expect("password change missing auth -> 401");
+
+            let authed = with_auth(router.clone(), user_evidence(CANON_USER));
+            let malformed = testkit::call(
+                authed,
+                ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path())
+                    .raw_json(br#"{"currentPassword":"correct-horse""#.to_vec()),
+            )
+            .await
+            .expect("call malformed");
+            malformed
+                .ensure_status(StatusCode::BAD_REQUEST)
+                .expect("password change malformed json -> 400");
+
+            let bad_subject = testkit::call(
+                with_auth(router, user_evidence("not-a-user-uuid")),
+                ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
+                    &IdentityPasswordChangeRequest {
+                        current_password: "correct-horse".to_string(),
+                        new_password: "new-correct-horse".to_string(),
+                    },
+                ),
+            )
+            .await
+            .expect("call bad subject");
+            bad_subject
+                .ensure_status(StatusCode::FORBIDDEN)
+                .expect("password change bad principal id -> 403");
+            assert_eq!(
+                probe.total_calls(),
+                0,
+                "pre-service rejections must not touch credentials"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn password_change_handler_stale_conflict_is_single_attempt_and_redacts_passwords() {
+        const CURRENT_PASSWORD: &str = "correct-horse";
+        const NEW_PASSWORD: &str = "new-correct-horse";
 
         let capture = CapturingSessionLifecycle::default();
-        let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
-        let router = axum::Router::new().route(
-            PASSWORD_CHANGE_HTTP_SPEC.route.path(),
-            post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
+        let probe = CredentialRepoProbe::seeded(true);
+        let before = probe.stored_credential().await;
+        let svc = Arc::new(probed_service(probe.clone(), &capture));
+        let router = with_auth(
+            axum::Router::new().route(
+                PASSWORD_CHANGE_HTTP_SPEC.route.path(),
+                post(password_change_handler::<TestSigner>).with_state(self_service_state(svc)),
+            ),
+            user_evidence(CANON_USER),
         );
-
-        let missing_auth = testkit::call(
-            router.clone(),
+        let resp = testkit::call(
+            router,
             ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
                 &IdentityPasswordChangeRequest {
-                    current_password: "correct-horse".to_string(),
-                    new_password: "new-correct-horse".to_string(),
+                    current_password: CURRENT_PASSWORD.to_string(),
+                    new_password: NEW_PASSWORD.to_string(),
                 },
             ),
         )
         .await
-        .expect("call missing auth");
-        missing_auth
-            .ensure_status(StatusCode::UNAUTHORIZED)
-            .expect("password change missing auth -> 401");
+        .expect("call");
 
-        let authed = with_auth(router.clone(), user_evidence(CANON_USER));
-        let malformed = testkit::call(
-            authed,
-            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path())
-                .raw_json(br#"{"currentPassword":"correct-horse""#.to_vec()),
-        )
-        .await
-        .expect("call malformed");
-        malformed
-            .ensure_status(StatusCode::BAD_REQUEST)
-            .expect("password change malformed json -> 400");
-
-        let bad_subject = testkit::call(
-            with_auth(router, user_evidence("not-a-user-uuid")),
-            ContractRequest::post(PASSWORD_CHANGE_HTTP_SPEC.route.path()).json(
-                &IdentityPasswordChangeRequest {
-                    current_password: "correct-horse".to_string(),
-                    new_password: "new-correct-horse".to_string(),
-                },
-            ),
-        )
-        .await
-        .expect("call bad subject");
-        bad_subject
-            .ensure_status(StatusCode::FORBIDDEN)
-            .expect("password change bad principal id -> 403");
+        resp.ensure_error(StatusCode::CONFLICT, "ERR_CORE_VERSION_CONFLICT")
+            .expect("stale CAS -> retryable version conflict");
+        assert!(resp.wire_error().expect("wire error").retryable);
+        assert_eq!(probe.find_calls(), 1);
+        assert_eq!(probe.bump_attempts(), 1);
+        assert_eq!(probe.bump_commits(), 0);
+        let stored = probe.stored_credential().await;
+        assert_eq!(stored.version(), before.version());
+        assert!(stored.verify_password(CURRENT_PASSWORD));
+        assert!(!stored.verify_password(NEW_PASSWORD));
+        let rendered = String::from_utf8_lossy(resp.body_bytes());
+        for secret in [CURRENT_PASSWORD, NEW_PASSWORD] {
+            assert!(
+                !rendered.contains(secret),
+                "password conflict response leaked sensitive input"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6064,17 +6209,23 @@ mod tests {
                 )
                 .await
                 .expect("login ok");
+            let session_id = SessionId::new(login_resp.data.session_id.clone());
+            assert!(
+                capture
+                    .is_active(tid(CANON_TENANT), session_id.clone())
+                    .await
+            );
             let router = with_auth(
                 axum::Router::new().route(
-                    "/logout",
+                    LOGOUT_HTTP_SPEC.route.path(),
                     post(logout_handler::<TestSigner>).with_state(self_service_state(svc)),
                 ),
                 user_evidence(CANON_USER),
             );
             let resp = testkit::call(
                 router,
-                ContractRequest::post("/logout").json(&IdentityLogoutRequest {
-                    session_id: login_resp.data.session_id.clone(),
+                ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
+                    session_id: login_resp.data.session_id,
                 }),
             )
             .await
@@ -6082,17 +6233,9 @@ mod tests {
             resp.ensure_status(StatusCode::OK).expect("200");
             let decoded: IdentityLogoutResponse = resp.json().expect("json");
             assert!(decoded.data.logged_out);
-            assert!(
-                capture
-                    .find(
-                        tenant_repo_scope(tid(CANON_TENANT)),
-                        SessionId::new(login_resp.data.session_id)
-                    )
-                    .await
-                    .expect("find revoked")
-                    .is_none(),
-                "logout 后 session find 应不可见"
-            );
+            assert_eq!(capture.find_count(), 1);
+            assert_eq!(capture.revoke_count(), 1);
+            assert!(!capture.is_active(tid(CANON_TENANT), session_id).await);
         }
     }
 
@@ -6128,15 +6271,15 @@ mod tests {
         .expect("call");
         resp.ensure_status(StatusCode::FORBIDDEN)
             .expect("other actor logout -> 403");
+        assert_eq!(capture.find_count(), 1);
+        assert_eq!(capture.revoke_count(), 0);
         assert!(
             capture
-                .find(
-                    tenant_repo_scope(tid(CANON_TENANT)),
+                .is_active(
+                    tid(CANON_TENANT),
                     SessionId::new(login_resp.data.session_id)
                 )
-                .await
-                .expect("find active")
-                .is_some(),
+                .await,
             "other actor logout 不应撤销 session"
         );
     }
@@ -6146,6 +6289,22 @@ mod tests {
     async fn logout_handler_rejects_missing_auth_malformed_json_and_bad_subject() {
         let capture = CapturingSessionLifecycle::default();
         let svc = Arc::new(seed_service(&capture, 1_000, 3_600));
+        let login_resp = svc
+            .login(
+                tid(CANON_TENANT),
+                IdentityLoginRequest {
+                    username: "alice".to_string(),
+                    password: "correct-horse".to_string(),
+                },
+            )
+            .await
+            .expect("seed active session");
+        let session_id = SessionId::new(login_resp.data.session_id.clone());
+        assert!(
+            capture
+                .is_active(tid(CANON_TENANT), session_id.clone())
+                .await
+        );
         let router = axum::Router::new().route(
             LOGOUT_HTTP_SPEC.route.path(),
             post(logout_handler::<TestSigner>).with_state(self_service_state(Arc::clone(&svc))),
@@ -6154,7 +6313,7 @@ mod tests {
         let missing_auth = testkit::call(
             router.clone(),
             ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
-                session_id: "session-1".to_string(),
+                session_id: login_resp.data.session_id.clone(),
             }),
         )
         .await
@@ -6166,7 +6325,7 @@ mod tests {
         let malformed = testkit::call(
             with_auth(router.clone(), user_evidence(CANON_USER)),
             ContractRequest::post(LOGOUT_HTTP_SPEC.route.path())
-                .raw_json(br#"{"sessionId":"session-1""#.to_vec()),
+                .raw_json(br#"{"sessionId":"malformed""#.to_vec()),
         )
         .await
         .expect("call malformed");
@@ -6177,7 +6336,7 @@ mod tests {
         let bad_subject = testkit::call(
             with_auth(router, user_evidence("not-a-user-uuid")),
             ContractRequest::post(LOGOUT_HTTP_SPEC.route.path()).json(&IdentityLogoutRequest {
-                session_id: "session-1".to_string(),
+                session_id: login_resp.data.session_id,
             }),
         )
         .await
@@ -6185,6 +6344,9 @@ mod tests {
         bad_subject
             .ensure_status(StatusCode::FORBIDDEN)
             .expect("logout bad principal id -> 403");
+        assert_eq!(capture.find_count(), 0);
+        assert_eq!(capture.revoke_count(), 0);
+        assert!(capture.is_active(tid(CANON_TENANT), session_id).await);
     }
 
     // ── RefreshService 集成测试 ────────────────────────────────────────────────

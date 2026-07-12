@@ -59,15 +59,22 @@ LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写�
 `settings.secret-publish` 使用 `repo-atomic-cas`：应用层先读最高版本并构造候选版本，最终正确性由
 `SecretRepo::save` 的单次条件写保证；并发竞争失败映射为 `VersionConflict`，不得把两次 repo 调用描述成同一 UoW。
 
+`identity.password-change` 同样使用 `repo-atomic-cas`：handler 路径为 find credential → 校验旧密码 →
+`rotate` 构造下一版本 → 单次 `CredentialRepo::bump_version` CAS；业务正确性由该次条件写保证。
+`VersionConflict` / 写入结果未知不得由 handler 自动重试；调用方须基于新版本发起新的业务请求。
+不得把 find 与 CAS 描述成同一显式 UoW。
+
 `audit.list-tenant-entries` 的 LocalTx UoW 只覆盖持久 `auth_audit_events` append。append 成功提交后才签发
 `CrossTenantReadScope` 并执行专用 admin pool read；append 与 read 不在同一事务，系统也不自动重试整条
 append+read 序列。
 
-以下 `LocalTxFinalStatus`、`cotx`、`LocalTxAttempt` 与 Postgres retry runner 的结算语义只适用于
-`tenant-scoped-uow`，不适用于 `repo-atomic-cas`。
+`LocalTxFinalStatus`、`cotx` 与 handler 级 UoW settlement 语义只描述 `tenant-scoped-uow`，不可外推为
+`repo-atomic-cas` 的业务模型（handler 不持有显式 UoW，也不按 UoW 语义重放整条 find→mutate 序列）。
+Postgres `run_pg_tx_retry` / `LocalTxAttempt` 仍可作为 **repo 内** 单次 CAS mutation 的底层事务承载：仅对
+已确认 rollback 的 transient attempt 有界重试；`VersionConflict` 与 `CommitUnknown` 不重试。
 
 `commitUnknown = "not-retryable"` 对 `tenant-scoped-uow` 的含义是：当提交结果未知时，不允许按普通 transient path
-自动重放整个副作用序列。
+自动重放整个副作用序列。对 `repo-atomic-cas` 同理：写入结果未知时不得重放同一条件写。
 `consistency::LocalTxFinalStatus` 将一次 UoW 的结算闭合为 `committed` / `rolled_back` / `rollback_failed` /
 `commit_unknown`。只有显式 rollback 成功才能报告 `rolled_back`；retry class/final status 与事务结算正交，不能据
 `TxRetryFinalStatus` 猜测 rollback 或 commit outcome。
@@ -80,7 +87,9 @@ capability 的唯一入口；`cotx` 在每次 attempt 内重新 begin、注入 `
 funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
 错误（保留 primary+rollback 因果链），不再把可重试领域冲突（如 `VersionConflict`）冒泡到 HTTP。
 `run_pg_tx_retry` 的 operation 签名只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为
-transient 时有界重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。retry engine 与两个准入 UoW
+transient 时有界重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。该 runner 既服务
+`tenant-scoped-uow` 准入路径，也可被 `repo-atomic-cas` adapter 用于单次 CAS 的底层 settlement；
+业务层 CAS 冲突仍按 `repo-atomic-cas` 规则上抛，不经 handler 自动重试。retry engine 与两个准入 UoW
 的放置继续由 `pg-tenant-tx-guard`（Medium）守住。#1705 在该 closed carrier 上补 metrics/trace，不改变
 settlement 语义。
 

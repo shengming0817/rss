@@ -28,9 +28,9 @@
 //! ref: adapters/postgres/src/session_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
 
 #[cfg(all(test, feature = "integration"))]
-use std::sync::Mutex;
-#[cfg(all(test, feature = "integration"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(all(test, feature = "integration"))]
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use identity::ports::{
@@ -58,6 +58,38 @@ static CREDENTIAL_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(No
 /// （域类型不持 clock，rust-standards §工程护栏；时间判定全经入参 `now`）。
 pub struct PgCredentialRepo {
     pool: PgTenantPool,
+    #[cfg(all(test, feature = "integration"))]
+    bump_post_update_gate: Option<Arc<CredentialCasPauseGate>>,
+}
+
+/// 实例级 CAS 编排门：第一写者完成 UPDATE 后通知测试，并等待显式放行后才返回事务闭包。
+#[cfg(all(test, feature = "integration"))]
+pub(crate) struct CredentialCasPauseGate {
+    updated: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl CredentialCasPauseGate {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            updated: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub(crate) async fn wait_until_updated(&self) {
+        self.updated.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn pause_after_update(&self) {
+        self.updated.notify_one();
+        self.release.notified().await;
+    }
 }
 
 impl PgCredentialRepo {
@@ -67,7 +99,15 @@ impl PgCredentialRepo {
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: PgTenantPool::new(store),
+            #[cfg(all(test, feature = "integration"))]
+            bump_post_update_gate: None,
         }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_bump_post_update_pause(mut self, gate: Arc<CredentialCasPauseGate>) -> Self {
+        self.bump_post_update_gate = Some(gate);
+        self
     }
 }
 
@@ -301,12 +341,16 @@ impl CredentialRepo for PgCredentialRepo {
         }
         let tenant_uuid = tenant_param(tenant);
         let login_str = next.login().as_str().to_owned();
+        #[cfg(all(test, feature = "integration"))]
+        let post_update_gate = self.bump_post_update_gate.clone();
         run_pg_tx_retry(
             IDENTITY_CREDENTIAL_BOUNDARY,
             |_attempt| {
                 let tenant_uuid = tenant_uuid.clone();
                 let login_str = login_str.clone();
                 let next = next.clone();
+                #[cfg(all(test, feature = "integration"))]
+                let post_update_gate = post_update_gate.clone();
                 async move {
                     self.pool
                         .retry_write(
@@ -320,7 +364,12 @@ impl CredentialRepo for PgCredentialRepo {
                                         expected,
                                         &next,
                                     )
-                                    .await
+                                    .await?;
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if let Some(gate) = post_update_gate {
+                                        gate.pause_after_update().await;
+                                    }
+                                    Ok(())
                                 })
                             },
                             storage,

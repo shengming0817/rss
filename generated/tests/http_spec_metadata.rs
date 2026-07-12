@@ -39,7 +39,7 @@ const EXPECTED_ACTIVE_SPECS: &[(&str, HttpConsistencyLevel)] = &[
 const EXPECTED_LOCAL_TX_SPECS: &[(&str, LocalTxModel)] = &[
     ("audit.list-tenant-entries", LocalTxModel::TenantScopedUow),
     ("identity.logout", LocalTxModel::TenantScopedUow),
-    ("identity.password-change", LocalTxModel::TenantScopedUow),
+    ("identity.password-change", LocalTxModel::RepoAtomicCas),
     ("identity.refresh", LocalTxModel::TenantScopedUow),
     ("settings.secret-publish", LocalTxModel::RepoAtomicCas),
 ];

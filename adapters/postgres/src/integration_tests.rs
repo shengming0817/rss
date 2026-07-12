@@ -11979,6 +11979,58 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
     Ok(())
 }
 
+/// revoke 的 UPDATE 成功后、提交前返回 storage error 时，tenant-scoped 事务必须回滚，active session 不得被半撤销。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: 集成测试 happy-path 构造已知合法值；item-level carve-out（error-handling.md §Carve-out）。
+async fn session_revoke_rollback_on_storage_error() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let event_id = unique_event_id("session-revoke-rollback-evt");
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let expires = created + Duration::from_secs(3_600);
+    let session = identity::test_support::session(
+        &session_id,
+        "subj-revoke-rollback",
+        tenant,
+        expires,
+        created,
+    );
+    let sid = session.id().clone();
+    let lifecycle =
+        crate::PgSessionLifecycle::new(&store, fixed_clock()).with_revoke_post_update_error();
+    lifecycle
+        .persist_session_and_emit(
+            identity_scope(tenant),
+            session,
+            session_entry(&event_id),
+            session_envelope(),
+        )
+        .await?;
+
+    let revoke_result = lifecycle.revoke(identity_scope(tenant), sid.clone()).await;
+
+    assert!(
+        matches!(revoke_result, Err(IdentityError::Storage(_))),
+        "提交前失败必须返回 IdentityError::Storage，got: {revoke_result:?}"
+    );
+    assert!(
+        lifecycle.find(identity_scope(tenant), sid).await?.is_some(),
+        "失败的 revoke 回滚后 session 仍应 active"
+    );
+    let (revoked,): (bool,) = sqlx::query_as("SELECT revoked FROM sessions WHERE session_id = $1")
+        .bind(&session_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert!(!revoked, "失败的 revoke 不得持久化 revoked=true");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// t22：跨租 revoke no-op（不撤销他租会话）+ 跨租 find None；同租 revoke 生效。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -19347,6 +19399,21 @@ async fn credential_repo_bump_version_cas() -> TestResult {
         ),
         "期望不匹配 → VersionConflict"
     );
+    let Some(after_conflict) = repo
+        .find_by_user_id(identity_scope(a), cred_uid(CRED_USER_ALICE)?)
+        .await?
+    else {
+        return Err("credential visible after stale CAS conflict".into());
+    };
+    assert_eq!(after_conflict.version(), 1, "stale CAS 不推进 version");
+    assert!(
+        secure::verify_password("pw1", after_conflict.password_hash()),
+        "stale CAS 后旧密码仍有效"
+    );
+    assert!(
+        !secure::verify_password("pw2", after_conflict.password_hash()),
+        "stale CAS 后候选密码不得生效"
+    );
     // 命中 → 替换 hash + version。
     repo.bump_version(
         identity_scope(a),
@@ -19400,6 +19467,126 @@ async fn credential_repo_bump_version_cas() -> TestResult {
         return Err("tenant A credential still present after cross-tenant bump".into());
     };
     assert_eq!(still_a.version(), 2, "跨租 bump 不动 A（仍 v2）");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 两个持有同一 v1 快照的真实并发写者只能有一个 CAS 胜出；败者冲突且不覆盖胜者。
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_repo_bump_version_concurrent_writers_one_wins() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let setup_repo = PgCredentialRepo::new(&store);
+    let tenant = cred_tenant(CRED_TENANT_A)?;
+    let user_id = cred_uid(CRED_USER_ALICE)?;
+    setup_repo
+        .save(
+            identity_scope(tenant),
+            make_cred("alice", CRED_USER_ALICE, "pw-v1", 1, tenant)?,
+        )
+        .await?;
+
+    let left = make_cred("alice", CRED_USER_ALICE, "pw-left", 2, tenant)?;
+    let right = make_cred("alice", CRED_USER_ALICE, "pw-right", 2, tenant)?;
+    let gate = crate::credential_repo::CredentialCasPauseGate::new();
+    let left_repo = PgCredentialRepo::new(&store).with_bump_post_update_pause(gate.clone());
+    let left_task = tokio::spawn(async move {
+        left_repo
+            .bump_version(identity_scope(tenant), 1, left)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_updated())
+        .await
+        .map_err(|_| "first CAS writer did not reach the post-update pause gate")?;
+
+    let right_repo = PgCredentialRepo::new(&store);
+    let right_task = tokio::spawn(async move {
+        right_repo
+            .bump_version(identity_scope(tenant), 1, right)
+            .await
+    });
+
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            poll.tick().await;
+            let (is_blocked,): (bool,) = sqlx::query_as(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND activity.pid <> pg_backend_pid()
+                      AND activity.state = 'active'
+                      AND activity.wait_event_type = 'Lock'
+                      AND position('SELECT version FROM credentials' IN activity.query) > 0
+                      AND position('FOR UPDATE' IN activity.query) > 0
+                      AND EXISTS (
+                          SELECT 1
+                          FROM pg_locks AS lock
+                          WHERE lock.pid = activity.pid AND NOT lock.granted
+                      )
+                )
+                "#,
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            if is_blocked {
+                return Ok::<(), sqlx::Error>(());
+            }
+        }
+    })
+    .await;
+    match blocked {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            gate.release();
+            return Err(error.into());
+        }
+        Err(_) => {
+            gate.release();
+            return Err("second CAS writer did not block on the credential row lock".into());
+        }
+    }
+
+    gate.release();
+    let left_result = tokio::time::timeout(std::time::Duration::from_secs(5), left_task)
+        .await
+        .map_err(|_| "left CAS task timed out after release")?
+        .map_err(|error| format!("left CAS task failed to join: {error}"))?;
+    let right_result = tokio::time::timeout(std::time::Duration::from_secs(5), right_task)
+        .await
+        .map_err(|_| "right CAS task timed out after release")?
+        .map_err(|error| format!("right CAS task failed to join: {error}"))?;
+    assert!(
+        left_result.is_ok(),
+        "持锁的第一写者必须提交：{left_result:?}"
+    );
+    assert!(
+        matches!(right_result, Err(IdentityError::VersionConflict)),
+        "等待行锁的第二写者必须观察到 VersionConflict：{right_result:?}"
+    );
+
+    let Some(final_credential) = setup_repo
+        .find_by_user_id(identity_scope(tenant), user_id)
+        .await?
+    else {
+        return Err("credential visible after concurrent CAS".into());
+    };
+    assert_eq!(final_credential.version(), 2, "并发 CAS 最终只推进至 v2");
+    assert!(
+        secure::verify_password("pw-left", final_credential.password_hash()),
+        "最终 hash 必须属于先持锁并提交的写者"
+    );
+    assert!(
+        !secure::verify_password("pw-right", final_credential.password_hash()),
+        "冲突写者不得覆盖胜出的 hash"
+    );
+    assert!(
+        !secure::verify_password("pw-v1", final_credential.password_hash()),
+        "成功 CAS 后 v1 密码必须失效"
+    );
 
     store.shutdown().await?;
     Ok(())
