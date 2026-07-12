@@ -15,8 +15,31 @@
 //!
 //! ref: docs/references/framework-comparison.md（repo conformance：oxidecomputer/omicron 手写 DI 测试范式）。
 
-use std::fmt::Debug;
+use crate::ConformanceErrorCategory;
 use std::future::Future;
+
+/// Typed provider stage used in safe diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TenantConformanceStage {
+    SaveTenantA,
+    ReadTenantA,
+    ReadTenantB,
+    SaveTenantB,
+    ReadTenantAAfterTenantB,
+}
+
+impl std::fmt::Display for TenantConformanceStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::SaveTenantA => "save tenant A",
+            Self::ReadTenantA => "read tenant A",
+            Self::ReadTenantB => "read tenant B",
+            Self::SaveTenantB => "save tenant B",
+            Self::ReadTenantAAfterTenantB => "read tenant A after tenant B write",
+        })
+    }
+}
 
 /// tenant conformance 断言失败（库错误枚举；调用方在测试侧 `?` / `expect` 暴露）。
 #[derive(Debug, thiserror::Error)]
@@ -33,9 +56,12 @@ pub enum TenantConformanceError {
         "tenant conformance: cross-tenant interference — tenant A's row vanished after B wrote"
     )]
     CrossTenantInterference,
-    /// 调用方写 / 读闭包报错（携带闭包错误 Debug 摘要）。
-    #[error("tenant conformance: provider op failed: {0}")]
-    Provider(String),
+    /// 调用方写 / 读闭包报错；只携带低敏闭值类别。
+    #[error("tenant conformance: provider op failed during {stage} ({category})")]
+    Provider {
+        stage: TenantConformanceStage,
+        category: ConformanceErrorCategory,
+    },
 }
 
 /// 断言 repo 满足最小租户隔离（round-trip + 跨租不可见 + 跨租不干扰）。
@@ -46,13 +72,15 @@ pub enum TenantConformanceError {
 /// - `tenant_a` / `tenant_b`：两个**不同**租户（调用方保证不等）。
 /// - `save(tenant)`：在该租户 scope 下写一行（多次调用安全：幂等或唯一键由调用方自理）。
 /// - `exists(tenant)`：在该租户 scope 下读「该行是否存在」（true = 可见）。
+/// - `classify_error(error)`：映射到低基数、低敏的闭值类别。
 ///
 /// 任一断言不成立 → `Err(TenantConformanceError)`。
-pub async fn assert_tenant_isolation<T, S, R, SF, RF, E>(
+pub async fn assert_tenant_isolation<T, S, R, SF, RF, E, C>(
     tenant_a: T,
     tenant_b: T,
     save: S,
     exists: R,
+    classify_error: C,
 ) -> Result<(), TenantConformanceError>
 where
     T: Copy + PartialEq,
@@ -60,7 +88,7 @@ where
     R: Fn(T) -> RF,
     SF: Future<Output = Result<(), E>>,
     RF: Future<Output = Result<bool, E>>,
-    E: Debug,
+    C: Fn(&E) -> ConformanceErrorCategory,
 {
     // 前置：两租户必须不同，否则断言 2（跨租不可见）会以误导性的 CrossTenantVisible 失败，掩盖调用方传参错误。
     debug_assert!(
@@ -68,22 +96,48 @@ where
         "assert_tenant_isolation: tenant_a 与 tenant_b 必须不同"
     );
 
-    let provider = |e: E| TenantConformanceError::Provider(format!("{e:?}"));
-
     // 1. 正例 round-trip：A 写 → A 可见。
-    save(tenant_a).await.map_err(&provider)?;
-    if !exists(tenant_a).await.map_err(&provider)? {
+    save(tenant_a)
+        .await
+        .map_err(|error| TenantConformanceError::Provider {
+            stage: TenantConformanceStage::SaveTenantA,
+            category: classify_error(&error),
+        })?;
+    if !exists(tenant_a)
+        .await
+        .map_err(|error| TenantConformanceError::Provider {
+            stage: TenantConformanceStage::ReadTenantA,
+            category: classify_error(&error),
+        })?
+    {
         return Err(TenantConformanceError::RoundTripMissing);
     }
 
     // 2. 跨租不可见：B 读不到 A 的行。
-    if exists(tenant_b).await.map_err(&provider)? {
+    if exists(tenant_b)
+        .await
+        .map_err(|error| TenantConformanceError::Provider {
+            stage: TenantConformanceStage::ReadTenantB,
+            category: classify_error(&error),
+        })?
+    {
         return Err(TenantConformanceError::CrossTenantVisible);
     }
 
     // 3. 跨租不干扰：B 在自己 scope 写 → A 仍读到自己的行（B 的写不覆盖 / 不抹除 A 可见性）。
-    save(tenant_b).await.map_err(&provider)?;
-    if !exists(tenant_a).await.map_err(&provider)? {
+    save(tenant_b)
+        .await
+        .map_err(|error| TenantConformanceError::Provider {
+            stage: TenantConformanceStage::SaveTenantB,
+            category: classify_error(&error),
+        })?;
+    if !exists(tenant_a)
+        .await
+        .map_err(|error| TenantConformanceError::Provider {
+            stage: TenantConformanceStage::ReadTenantAAfterTenantB,
+            category: classify_error(&error),
+        })?
+    {
         return Err(TenantConformanceError::CrossTenantInterference);
     }
 
@@ -116,9 +170,11 @@ mod tests {
             let store = &store;
             async move { Ok::<bool, std::convert::Infallible>(store.borrow().contains(&t)) }
         };
-        assert_tenant_isolation(TENANT_A, TENANT_B, save, exists)
-            .await
-            .expect("isolating repo passes");
+        assert_tenant_isolation(TENANT_A, TENANT_B, save, exists, |_| {
+            ConformanceErrorCategory::Other
+        })
+        .await
+        .expect("isolating repo passes");
     }
 
     /// anti-vacuity：泄漏 repo（所有租户共享一张表，B 读得到 A 的行）→ CrossTenantVisible（守卫非恒真）。
@@ -138,9 +194,11 @@ mod tests {
             let store = &store;
             async move { Ok::<bool, std::convert::Infallible>(*store.borrow()) }
         };
-        let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists)
-            .await
-            .expect_err("leaking repo must fail");
+        let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists, |_| {
+            ConformanceErrorCategory::Other
+        })
+        .await
+        .expect_err("leaking repo must fail");
         assert!(
             matches!(err, TenantConformanceError::CrossTenantVisible),
             "{err:?}"
@@ -163,12 +221,36 @@ mod tests {
             let current = &current;
             async move { Ok::<bool, std::convert::Infallible>(*current.borrow() == Some(t)) }
         };
-        let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists)
-            .await
-            .expect_err("interfering repo must fail");
+        let err = assert_tenant_isolation(TENANT_A, TENANT_B, save, exists, |_| {
+            ConformanceErrorCategory::Other
+        })
+        .await
+        .expect_err("interfering repo must fail");
         assert!(
             matches!(err, TenantConformanceError::CrossTenantInterference),
             "{err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_failure_uses_typed_stage_and_safe_category_without_debug_bound() {
+        struct SensitiveError;
+
+        let result = assert_tenant_isolation(
+            TENANT_A,
+            TENANT_B,
+            |_| async { Err::<(), _>(SensitiveError) },
+            |_| async { Ok::<_, SensitiveError>(false) },
+            |_| ConformanceErrorCategory::Storage,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(TenantConformanceError::Provider {
+                stage: TenantConformanceStage::SaveTenantA,
+                category: ConformanceErrorCategory::Storage,
+            })
+        ));
     }
 }

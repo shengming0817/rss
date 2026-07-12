@@ -1,5 +1,8 @@
-//! `cargo xtask ci` 覆盖率门 —— 跑**一次** `cargo llvm-cov nextest --workspace`（出 export JSON，**兼作
-//! nextest 门**：测试必须全绿，并留下 profdata）后评**两子门**（不重复跑测试）：
+//! `cargo xtask ci` 覆盖率门 —— 跑**一次**
+//! `cargo llvm-cov nextest --workspace --features testkit/containers`（出 export JSON，**兼作 nextest
+//! 门**：测试必须全绿，并留下 profdata）后评**两子门**（不重复跑测试）。feature 参数由
+//! [`crate::nextest::NextestInvocation::for_coverage`] 的 typed registry 单源构造，确保 feature-gated
+//! conformance 代码也被插桩：
 //!
 //! 1. **绝对地板门**（本模块）：export JSON → basis/engine 严格 crate（`vocab`/`ids`/`consistency`/
 //!    `primitives`，CLAUDE.md / rust-standards.md「引擎与基础 crate ≥90%」逐字集）per-crate 行覆盖率下限。
@@ -11,8 +14,8 @@
 //! **不入 `cargo xtask verify`**（verify 是 stable-only 本地快门；覆盖率门慢、需 `cargo-llvm-cov` 工具 +
 //! 全 workspace 跑），只在 `cargo xtask ci`（CI 超集）内、由 GitHub Actions 调用。issue #1132 验收
 //! 「cargo nextest run --workspace + cargo llvm-cov 阈值门（引擎/基础 ≥90%）」由本**一步**同时兑现——
-//! 单跑一次测试既是 nextest 门又出覆盖率（不重复跑）。集成测试 `#[cfg(feature="integration")]` 默认不
-//! 编入 ⇒ 无需 DB/broker。
+//! 单跑一次测试既是 nextest 门又出覆盖率（不重复跑）。`testkit/containers` 只显式闭合 testkit 的
+//! feature-gated conformance/fixture 代码；workspace 的 `integration` features 仍不启用 ⇒ 无需 DB/broker。
 //!
 //! 无 ratchet 例外：所有 STRICT crate 均守默认 90% 行覆盖率下限。历史 `consistency` 85% 例外已随
 //! inbox 行为模型与覆盖率补强移除。
@@ -184,8 +187,9 @@ pub(crate) fn run() -> Result<()> {
     crate::diffcov::check(&root, &lcov)
 }
 
-/// 跑 `cargo llvm-cov nextest --workspace --json --output-path <file>`（默认 feature——集成测试不编入
-/// ⇒ 无需 DB/broker）。stdio 继承（实时看测试输出）。非零退出 = 测试失败（nextest 门）⇒ `Err`。
+/// 跑 `cargo llvm-cov nextest --workspace --features testkit/containers --json --output-path <file>`；
+/// workspace 的 `integration` features 不启用，因此无需 DB/broker。stdio 继承（实时看测试输出）。
+/// 非零退出 = 测试失败（nextest 门）⇒ `Err`。
 /// profile 由 [`crate::nextest::NextestInvocation`] 闭合选择为 `ci-core`，避免与 llvm-cov 自身
 /// `--profile`（cargo build profile）的 flag 撞名。本步留下的 profdata 由
 /// [`lcov_report`] 复用出 lcov（per-diff 增量门），不重跑测试。

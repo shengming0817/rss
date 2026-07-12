@@ -79,6 +79,58 @@ Postgres `run_pg_tx_retry` / `LocalTxAttempt` 仍可作为 **repo 内** 单次 C
 `commit_unknown`。只有显式 rollback 成功才能报告 `rolled_back`；retry class/final status 与事务结算正交，不能据
 `TxRetryFinalStatus` 猜测 rollback 或 commit outcome。
 
+## Backend conformance profiles
+
+启用 `testkit/containers` 的 adapter 集成测试应按 `txModel` 组合 provider-agnostic conformance；
+`testkit` 只接受调用方注入的泛型闭包和快照，不依赖 production adapter、domain crate 或 LocalTx canonical
+enum。真实 backend marker 直接复用 `HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE` 的 Hard 类型身份；
+profile 模型与 required probes 始终由 contract manifest 的 canonical `LocalTxModel` 推导，adapter 不得用字符串、
+第二套 enum 或 allowlist 重述。`localtx-coverage` 将每个 active contract 注册到 `adapters/*` 的真实 provider tests，并按 provider 聚合 probe；
+缺 enrollment、错用较小 profile、缺 probe、伪造 dependency 或孤儿 marker 均阻断 verify。类型签名承担 Hard 的
+route 身份约束，跨 manifest/source/test 的完整闭环评级为 Medium。
+
+`tenant-scoped-uow` profile 必须组合：
+
+- `localtx::assert_commit`：成功后状态符合预期且 durable write 恰好一次。
+- `localtx::assert_rollback`：预期错误分类正确且 rollback 后 snapshot 等于 baseline。
+- `localtx::assert_rejected_no_write`：validation 与 authorization 拒绝分别证明 snapshot 不变且 mutation count 为零。
+- `tenant_conformance::assert_tenant_isolation`：同租 round-trip、跨租不可见且互不干扰；provider 错误只记录调用方
+  注入的低敏静态类别与 typed stage。
+- `repo_conformance::assert_retry_boundary_policy`：由 `TransientSuccessPath`、`ConflictPath`、`PermanentPath`、
+  `TransientExhaustionPath` 四个 nominal path 组成；transient 在预算内成功且 action-local attempts 符合预期、logical
+  durable write 恰好一次；conflict/permanent attempts 恰好一次且零写；transient exhaustion 达到非零预算、返回
+  transient 类错误且零写。成功路径 expected attempts 与 exhaustion budget 都必须至少为 2，非法 threshold 在执行
+  任一 action 前 fail-fast。
+- `localtx::assert_commit_unknown_no_replay` 与 `assert_rollback_failed_no_replay`：错误类别正确且 attempt
+  恰好一次。
+
+`repo-atomic-cas` profile 必须组合 commit、validation/authorization no-write、tenant isolation、CAS conflict、
+单次 CAS 内部 transient retry 与 unknown-result no replay。它不运行 handler-level rollback settlement，也不得把
+整条 find→mutate 序列包装成 UoW retry。既有 tenant/retry helper 是唯一实现；LocalTx conformance 不复制
+`LocalTxModel`、`LocalTxFinalStatus`、`TxRetryClass` 或其断言逻辑。
+
+`CommitUnknownCase` 与 `RollbackFailedCase` 是两个不可交叉传入公开断言的类型；二者都只接受 action、预期静态
+错误类别与 attempt probe，不接受 snapshot/write-count。commit outcome unknown 或 rollback failed 时第一次 attempt
+可能已经 durable，故只能断言 attempt = 1，禁止伪断言 no-write。所有 case 字段均私有且只能经构造器建立；
+action 是 `FnOnce`，防止 harness 自身重放。action 后才按 snapshot → count 顺序采样；count 必须是 fixture 隔离的
+action-local delta，不能使用并发测试可改写的进程全局累计值。
+
+`testkit::ConformanceErrorCategory` 是 LocalTx、tenant 与 retry profile 共享的 `#[non_exhaustive]` 闭值分类；
+`localtx::ClassifiedError` 只携带该闭值与 opaque provider error，不接受自由字符串分类。三类 profile 的安全路径均
+不要求 provider error 实现 `Debug`/`Display`，也不格式化 credential、secret、tenant/device payload。
+`RepoConformanceError` 的既有通用 helper 仍保留 raw `Debug` 诊断；retry 路径只产生 typed
+`ClassifiedProvider` / `WrongErrorCategory`。LocalTx 错误同时使用 `LocalTxStage` typed stage，避免仅有
+“provider failed”而不可行动。
+
+`testkit::localtx` 的 fake happy/anti-vacuity tests 与 workspace layer dependency guard 进入 verify/CI lane；fake
+只证明 helper 非恒真与 testkit 零内部依赖。真实 provider enrollment 必须同时位于 `adapters/*`、携带具名 typed
+`HttpRouteBinding<RouteMarker, LocalTx>` 并执行完整 helper set。Postgres profile test 使用真实事务表证明 commit、rollback、
+validation/authorization no-write、tenant isolation 与 bounded retry；unknown settlement helpers 仍只断言一次 attempt，
+不伪造 snapshot/no-write 结论。#1703/#1704 可继续扩展 SecretRepo/Identity 的领域专用矩阵，但不再承担 registry
+闭环前置。
+
+ref: sqlx sqlx-core/src/transaction.rs@v0.8.6
+
 Postgres runner 以 `cotx::settlement` 私有模块持有的 crate-private `LocalTxAttempt<T, E>` opaque 和式
 状态承载 `Committed` / `Unsettled` / `RolledBack` / `RollbackFailed` / `CommitUnknown`，非法的
 result/status 组合在类型层不可表达（Hard）。生产 mint 构造器为 `pub(super)`，仅 `cotx` settlement
@@ -134,8 +186,22 @@ block 无效，因为父 scope 的 opaque 风险会向下传播。
 `HttpRouteBinding<RouteMarker, LocalTx>` 与 generated `ROUTE`
 的身份对应由 rustc 编译期强制（`LOCALTX-TEST-MARKER-TYPED-01`，Hard）；active manifest 到
 generated/owner/route/test 的跨文件存在性由 `localtx-coverage` 在 verify/CI 阻断
-（`LOCALTX-COVERAGE-CLOSURE-01`，Medium）。该 marker 只锚定至少一个现有 route/domain 测试，不表示完整
-rollback、conflict 或 backend conformance 已兑现。
+（`LOCALTX-COVERAGE-CLOSURE-01`，Medium）。该 marker 只锚定至少一个现有 route/domain 测试，不表示
+rollback、conflict 或 backend conformance 已兑现。真实 provider 另以绝对路径 typed marker：
+
+```rust
+const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+    ::generated::http::identity_v1::logout::RouteMarker,
+    ::vocab::http::LocalTx,
+> = ::generated::http::identity_v1::logout::ROUTE;
+```
+
+该 marker 必须是 `LOCALTX_BACKEND_PROFILE_*` 具名 const、处于真实 test function，并由同一 adapter provider 的
+测试合计提供 manifest-derived required probes；helper 只有作为 test body 顶层且实际 `.await?` 才计入，未轮询
+future、分支内符号或别名调用都不构成 evidence。
+`tenant-scoped-uow` 额外要求 rollback 与 rollback-failed-no-replay，两个 profile 都要求 validation 与 authorization
+各一次 no-write（因此 `assert_rejected_no_write` 至少出现两次）。该闭环由
+`LOCALTX-BACKEND-PROFILE-CLOSURE-01` 的 synthetic red 与真实 workspace anti-vacuity 承载（Medium）。
 
 ## Follow-up boundary
 

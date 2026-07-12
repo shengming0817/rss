@@ -37,6 +37,9 @@
 //!   （`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。覆盖 `runctx/test-support`
 //!   （构造 `AppCtx`）以及 `identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`；生产构建启用即可伪造
 //!   tenant scope，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
+//! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
+//!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 testkit 为零 production-adapter、
+//!   零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交，不改变其语义。
 //! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
 //! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
 
@@ -72,6 +75,8 @@ pub(crate) enum Rule {
     /// LAYER-DEPS-09：scoped construction 的 `test-support` **feature** 被 shipped 依赖表启用（应只经
     /// `[dev-dependencies]` 启用）。
     TestSupportFeatureShipped,
+    /// LAYER-DEPS-10：test-support 库 shipped 依赖 workspace 内部成员（只准依赖外部 crate）。
+    TestSupportInternalShipped,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -138,6 +143,7 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
         findings.extend(check_test_support_confinement(&scan.edges));
+        findings.extend(check_test_support_internal_dependencies(&scan.edges));
         let shipped_deps = collect_shipped_deps(&root, &members)?;
         findings.extend(scan_shipped_testsupport_features(&shipped_deps));
 
@@ -452,6 +458,28 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
                 edge.from.clone(),
                 format!(
                     "{} {}.{} → `{}`：test-support 库禁进生产 shipped 图，只准 [dev-dependencies] 消费（INVARIANT LAYER-DEPS-08；改放 [dev-dependencies]）",
+                    edge.from_manifest, edge.section, edge.key, edge.to
+                ),
+            )
+        })
+        .collect()
+}
+
+/// LAYER-DEPS-10：test-support 库的 shipped 出边不得指向 workspace 内部成员。
+///
+/// [`Edge`] 只表示已解析的 workspace 内部 shipped 边，因此只需按 source 精确筛选
+/// [`layers::TEST_SUPPORT_CRATES`]；外部依赖不会进入 `edges`，`[dev-dependencies]` 也不在扫描范围。
+/// 该规则只约束 test-support 的**出边**，不复用或放宽 LAYER-DEPS-08 的入边检查。
+pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Finding> {
+    edges
+        .iter()
+        .filter(|edge| layers::is_test_support(&edge.from))
+        .map(|edge| {
+            finding(
+                Rule::TestSupportInternalShipped,
+                edge.from.clone(),
+                format!(
+                    "{} {}.{} → `{}`：test-support 库只准依赖外部 crate，禁止 shipped workspace 内部依赖（INVARIANT LAYER-DEPS-10）",
                     edge.from_manifest, edge.section, edge.key, edge.to
                 ),
             )
@@ -981,6 +1009,38 @@ mod tests {
         let findings = check_test_support_confinement(&[e("identity", "testkit")]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::TestSupportShipped);
+    }
+
+    /// LAYER-DEPS-10（红）：test-support 的任意 shipped workspace 内部出边均被拒绝。
+    #[test]
+    fn test_support_internal_dependencies_red_shipped_edges() {
+        let findings = check_test_support_internal_dependencies(&[
+            e("testkit", "vocab"),
+            e("testkit", "consistency"),
+        ]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::TestSupportInternalShipped),
+            "{findings:?}"
+        );
+    }
+
+    /// LAYER-DEPS-10 specificity：非 test-support 的内部出边不属于本规则。
+    #[test]
+    fn test_support_internal_dependencies_green_non_test_support_source() {
+        let findings = check_test_support_internal_dependencies(&[
+            e("identity", "vocab"),
+            e("httpserve", "consistency"),
+        ]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// LAYER-DEPS-10 anti-vacuity：无 shipped 出边时不误报；dev-dep 本来就不进入 `edges`。
+    #[test]
+    fn test_support_internal_dependencies_green_no_shipped_edge() {
+        assert!(check_test_support_internal_dependencies(&[]).is_empty());
     }
 
     // ---- LAYER-DEPS-09：scoped construction 的 test-support feature 进 shipped 依赖表 ----
@@ -1647,6 +1707,8 @@ mod tests {
         findings.extend(scan.findings);
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
+        findings.extend(check_test_support_confinement(&scan.edges));
+        findings.extend(check_test_support_internal_dependencies(&scan.edges));
         assert!(findings.is_empty(), "真实工作区应无违规: {findings:?}");
         Ok(())
     }

@@ -49,6 +49,8 @@ static CREDENTIAL_RETRY_FAIL_REMAINING: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(test, feature = "integration"))]
 static CREDENTIAL_RETRY_FAIL_HITS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(test, feature = "integration"))]
+static CREDENTIAL_RETRY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
 static CREDENTIAL_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// identity 凭据仓储的 PostgreSQL adapter。
@@ -122,12 +124,24 @@ pub(crate) fn arm_credential_retry_failpoint(target_login: &'static str, failure
         *target = Some(target_login);
     }
     CREDENTIAL_RETRY_FAIL_HITS.store(0, Ordering::Release);
+    CREDENTIAL_RETRY_ATTEMPTS.store(0, Ordering::Release);
     CREDENTIAL_RETRY_FAIL_REMAINING.store(failures, Ordering::Release);
 }
 
 #[cfg(all(test, feature = "integration"))]
-pub(crate) fn credential_retry_failpoint_hits() -> usize {
-    CREDENTIAL_RETRY_FAIL_HITS.load(Ordering::Acquire)
+pub(crate) fn credential_retry_attempts() -> usize {
+    CREDENTIAL_RETRY_ATTEMPTS.load(Ordering::Acquire)
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn record_credential_retry_attempt(login: &str) {
+    let target_matches = CREDENTIAL_RETRY_FAIL_TARGET
+        .lock()
+        .map(|target| target.is_some_and(|target| target == login))
+        .unwrap_or(false);
+    if target_matches {
+        CREDENTIAL_RETRY_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -349,6 +363,8 @@ impl CredentialRepo for PgCredentialRepo {
                 let tenant_uuid = tenant_uuid.clone();
                 let login_str = login_str.clone();
                 let next = next.clone();
+                #[cfg(all(test, feature = "integration"))]
+                record_credential_retry_attempt(&login_str);
                 #[cfg(all(test, feature = "integration"))]
                 let post_update_gate = post_update_gate.clone();
                 async move {

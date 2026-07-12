@@ -46,6 +46,10 @@ static CONFIG_RETRY_FAIL_REMAINING: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(test, feature = "integration"))]
 static CONFIG_RETRY_FAIL_HITS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(all(test, feature = "integration"))]
+static CONFIG_RETRY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
+static CONFIG_RETRY_FAIL_PERMANENT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, feature = "integration"))]
 static CONFIG_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
 
 /// settings 配置仓储 + co-tx UoW 的 PostgreSQL adapter。
@@ -397,12 +401,31 @@ pub(crate) fn arm_config_retry_failpoint(target_key: &'static str, failures: usi
         *target = Some(target_key);
     }
     CONFIG_RETRY_FAIL_HITS.store(0, Ordering::Release);
+    CONFIG_RETRY_ATTEMPTS.store(0, Ordering::Release);
+    CONFIG_RETRY_FAIL_PERMANENT.store(0, Ordering::Release);
     CONFIG_RETRY_FAIL_REMAINING.store(failures, Ordering::Release);
 }
 
 #[cfg(all(test, feature = "integration"))]
-pub(crate) fn config_retry_failpoint_hits() -> usize {
-    CONFIG_RETRY_FAIL_HITS.load(Ordering::Acquire)
+pub(crate) fn arm_config_retry_permanent_failpoint(target_key: &'static str) {
+    arm_config_retry_failpoint(target_key, 0);
+    CONFIG_RETRY_FAIL_PERMANENT.store(1, Ordering::Release);
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) fn config_retry_attempts() -> usize {
+    CONFIG_RETRY_ATTEMPTS.load(Ordering::Acquire)
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn record_config_retry_attempt(key: &SettingKey) {
+    let target_matches = CONFIG_RETRY_FAIL_TARGET
+        .lock()
+        .map(|target| target.is_some_and(|target| target == key.as_str()))
+        .unwrap_or(false);
+    if target_matches {
+        CONFIG_RETRY_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -415,6 +438,11 @@ fn maybe_fail_config_retry(key: &SettingKey) -> Result<(), ConfigRepoError> {
         return Ok(());
     }
     CONFIG_RETRY_FAIL_HITS.fetch_add(1, Ordering::AcqRel);
+    if CONFIG_RETRY_FAIL_PERMANENT.load(Ordering::Acquire) == 1 {
+        return Err(storage(sqlx::Error::Protocol(
+            "test-only permanent retry failure".to_owned(),
+        )));
+    }
     if CONFIG_RETRY_FAIL_REMAINING
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
             remaining.checked_sub(1)
@@ -1289,6 +1317,8 @@ impl ConfigUnitOfWork for PgConfigRepo {
                 let encoded = encoded.clone();
                 let outbox_entry = outbox_entry.clone();
                 let env = env.clone();
+                #[cfg(all(test, feature = "integration"))]
+                record_config_retry_attempt(mutation.key());
                 async move {
                     self.pool
                         .retry_co_tx_with_outbox(

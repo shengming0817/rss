@@ -893,6 +893,382 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalTxProfileProbeError {
+    Storage,
+    Transient,
+    Conflict,
+    Permanent,
+    Validation,
+    Authorization,
+    CommitUnknown,
+    RollbackFailed,
+}
+
+impl std::fmt::Display for LocalTxProfileProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("localtx postgres profile probe failed")
+    }
+}
+
+impl std::error::Error for LocalTxProfileProbeError {}
+
+impl From<sqlx::Error> for LocalTxProfileProbeError {
+    fn from(_: sqlx::Error) -> Self {
+        Self::Storage
+    }
+}
+
+fn localtx_profile_category(error: LocalTxProfileProbeError) -> testkit::ConformanceErrorCategory {
+    match error {
+        LocalTxProfileProbeError::Storage => testkit::ConformanceErrorCategory::Storage,
+        LocalTxProfileProbeError::Transient => testkit::ConformanceErrorCategory::Transient,
+        LocalTxProfileProbeError::Conflict => testkit::ConformanceErrorCategory::Conflict,
+        LocalTxProfileProbeError::Permanent => testkit::ConformanceErrorCategory::Permanent,
+        LocalTxProfileProbeError::Validation => testkit::ConformanceErrorCategory::Validation,
+        LocalTxProfileProbeError::Authorization => testkit::ConformanceErrorCategory::Authorization,
+        LocalTxProfileProbeError::CommitUnknown => testkit::ConformanceErrorCategory::CommitUnknown,
+        LocalTxProfileProbeError::RollbackFailed => {
+            testkit::ConformanceErrorCategory::RollbackFailed
+        }
+    }
+}
+
+fn localtx_profile_classified(
+    error: LocalTxProfileProbeError,
+) -> testkit::localtx::ClassifiedError<LocalTxProfileProbeError> {
+    testkit::localtx::ClassifiedError::new(localtx_profile_category(error), error)
+}
+
+async fn setup_localtx_profile_probe(store: &PgStore) -> Result<(), LocalTxProfileProbeError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS localtx_profile_probe (\
+         run_id text NOT NULL, tenant_id uuid NOT NULL, marker text NOT NULL, \
+         PRIMARY KEY (run_id, tenant_id, marker))",
+    )
+    .execute(&store.pool)
+    .await
+    .map_err(|_| LocalTxProfileProbeError::Storage)?;
+    Ok(())
+}
+
+async fn localtx_profile_commit_insert(
+    store: &PgStore,
+    run_id: &str,
+    tenant: vocab::TenantId,
+    marker: &str,
+) -> Result<(), LocalTxProfileProbeError> {
+    let run_id = run_id.to_string();
+    let tenant = tenant.to_string();
+    let marker = marker.to_string();
+    store
+        .run_global_transaction::<_, _, LocalTxProfileProbeError>(move |cap| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO localtx_profile_probe (run_id, tenant_id, marker) \
+                     VALUES ($1, $2::uuid, $3)",
+                )
+                .bind(run_id)
+                .bind(tenant)
+                .bind(marker)
+                .execute(cap.conn())
+                .await
+                .map_err(|_| LocalTxProfileProbeError::Storage)?;
+                Ok(())
+            })
+        })
+        .await
+}
+
+async fn localtx_profile_rollback_insert(
+    store: &PgStore,
+    run_id: &str,
+    tenant: vocab::TenantId,
+    marker: &str,
+    error: LocalTxProfileProbeError,
+) -> Result<(), LocalTxProfileProbeError> {
+    let run_id = run_id.to_string();
+    let tenant = tenant.to_string();
+    let marker = marker.to_string();
+    store
+        .run_global_transaction::<_, (), LocalTxProfileProbeError>(move |cap| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO localtx_profile_probe (run_id, tenant_id, marker) \
+                     VALUES ($1, $2::uuid, $3)",
+                )
+                .bind(run_id)
+                .bind(tenant)
+                .bind(marker)
+                .execute(cap.conn())
+                .await
+                .map_err(|_| LocalTxProfileProbeError::Storage)?;
+                Err(error)
+            })
+        })
+        .await
+}
+
+async fn localtx_profile_count(
+    store: &PgStore,
+    run_id: &str,
+    tenant: vocab::TenantId,
+    marker: &str,
+) -> Result<usize, LocalTxProfileProbeError> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM localtx_profile_probe \
+         WHERE run_id = $1 AND tenant_id = $2::uuid AND marker = $3",
+    )
+    .bind(run_id)
+    .bind(tenant.to_string())
+    .bind(marker)
+    .fetch_one(&store.pool)
+    .await
+    .map_err(|_| LocalTxProfileProbeError::Storage)?;
+    usize::try_from(count).map_err(|_| LocalTxProfileProbeError::Storage)
+}
+
+/// Real Postgres enrollment for every active LocalTx contract.
+///
+/// The five typed markers form the manifest-keyed registry. `localtx-coverage` derives each
+/// contract's canonical `txModel` and requires the corresponding exact helper set in this real
+/// adapter test; deleting a marker or probe fails the verify gate.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn localtx_postgres_backend_profiles_conformance() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::refresh::ROUTE;
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    let _typed_enrollment = (
+        LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES,
+        LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT,
+        LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH,
+        LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE,
+        LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH,
+    );
+
+    let (_pg, store) = connect_pg().await?;
+    setup_localtx_profile_probe(&store).await?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let commit_writes = AtomicUsize::new(0);
+    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+        || async {
+            localtx_profile_commit_insert(&store, &run_id, tenant_a, "commit")
+                .await
+                .map_err(localtx_profile_classified)?;
+            commit_writes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        },
+        || async {
+            localtx_profile_count(&store, &run_id, tenant_a, "commit")
+                .await
+                .map_err(localtx_profile_classified)
+        },
+        1,
+        || commit_writes.load(Ordering::Relaxed),
+    ))
+    .await?;
+
+    ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
+        || async {
+            localtx_profile_rollback_insert(
+                &store,
+                &run_id,
+                tenant_a,
+                "rollback",
+                LocalTxProfileProbeError::Transient,
+            )
+            .await
+            .map_err(localtx_profile_classified)
+        },
+        testkit::ConformanceErrorCategory::Transient,
+        || async {
+            localtx_profile_count(&store, &run_id, tenant_a, "rollback")
+                .await
+                .map_err(localtx_profile_classified)
+        },
+        0,
+    ))
+    .await?;
+
+    let rejected_mutations = AtomicUsize::new(0);
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            Err::<(), _>(localtx_profile_classified(
+                LocalTxProfileProbeError::Validation,
+            ))
+        },
+        testkit::ConformanceErrorCategory::Validation,
+        || async {
+            localtx_profile_count(&store, &run_id, tenant_a, "validation")
+                .await
+                .map_err(localtx_profile_classified)
+        },
+        0,
+        || rejected_mutations.load(Ordering::Relaxed),
+    ))
+    .await?;
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            Err::<(), _>(localtx_profile_classified(
+                LocalTxProfileProbeError::Authorization,
+            ))
+        },
+        testkit::ConformanceErrorCategory::Authorization,
+        || async {
+            localtx_profile_count(&store, &run_id, tenant_a, "authorization")
+                .await
+                .map_err(localtx_profile_classified)
+        },
+        0,
+        || rejected_mutations.load(Ordering::Relaxed),
+    ))
+    .await?;
+
+    ::testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| localtx_profile_commit_insert(&store, &run_id, tenant, "tenant-isolation"),
+        |tenant| {
+            let store = &store;
+            let run_id = &run_id;
+            async move {
+                localtx_profile_count(store, run_id, tenant, "tenant-isolation")
+                    .await
+                    .map(|count| count == 1)
+            }
+        },
+        |error| localtx_profile_category(*error),
+    )
+    .await?;
+
+    let success_attempts = AtomicUsize::new(0);
+    let conflict_attempts = AtomicUsize::new(0);
+    let permanent_attempts = AtomicUsize::new(0);
+    let exhaustion_attempts = AtomicUsize::new(0);
+    ::testkit::repo_conformance::assert_retry_boundary_policy(
+        ::testkit::repo_conformance::RetryBoundaryCase::new(
+            ::testkit::repo_conformance::TransientSuccessPath::new(
+                || async {
+                    success_attempts.fetch_add(1, Ordering::Relaxed);
+                    let _ = localtx_profile_rollback_insert(
+                        &store,
+                        &run_id,
+                        tenant_a,
+                        "retry-success",
+                        LocalTxProfileProbeError::Transient,
+                    )
+                    .await;
+                    success_attempts.fetch_add(1, Ordering::Relaxed);
+                    localtx_profile_commit_insert(&store, &run_id, tenant_a, "retry-success").await
+                },
+                || success_attempts.load(Ordering::Relaxed),
+                2,
+                || async {
+                    localtx_profile_count(&store, &run_id, tenant_a, "retry-success").await
+                },
+            ),
+            ::testkit::repo_conformance::ConflictPath::new(
+                || async {
+                    conflict_attempts.fetch_add(1, Ordering::Relaxed);
+                    Err::<(), _>(LocalTxProfileProbeError::Conflict)
+                },
+                || conflict_attempts.load(Ordering::Relaxed),
+                || async { Ok::<usize, LocalTxProfileProbeError>(0) },
+            ),
+            ::testkit::repo_conformance::PermanentPath::new(
+                || async {
+                    permanent_attempts.fetch_add(1, Ordering::Relaxed);
+                    Err::<(), _>(LocalTxProfileProbeError::Permanent)
+                },
+                || permanent_attempts.load(Ordering::Relaxed),
+                || async { Ok::<usize, LocalTxProfileProbeError>(0) },
+            ),
+            ::testkit::repo_conformance::TransientExhaustionPath::new(
+                || async {
+                    for _ in 0..3 {
+                        exhaustion_attempts.fetch_add(1, Ordering::Relaxed);
+                        let _ = localtx_profile_rollback_insert(
+                            &store,
+                            &run_id,
+                            tenant_a,
+                            "retry-exhaustion",
+                            LocalTxProfileProbeError::Transient,
+                        )
+                        .await;
+                    }
+                    Err::<(), _>(LocalTxProfileProbeError::Transient)
+                },
+                || exhaustion_attempts.load(Ordering::Relaxed),
+                3,
+                || async {
+                    localtx_profile_count(&store, &run_id, tenant_a, "retry-exhaustion").await
+                },
+            ),
+        ),
+        |error| localtx_profile_category(*error),
+    )
+    .await?;
+
+    let unknown_attempts = AtomicUsize::new(0);
+    ::testkit::localtx::assert_commit_unknown_no_replay(
+        ::testkit::localtx::CommitUnknownCase::new(
+            || async {
+                unknown_attempts.fetch_add(1, Ordering::Relaxed);
+                Err::<(), _>(localtx_profile_classified(
+                    LocalTxProfileProbeError::CommitUnknown,
+                ))
+            },
+            testkit::ConformanceErrorCategory::CommitUnknown,
+            || unknown_attempts.load(Ordering::Relaxed),
+        ),
+    )
+    .await?;
+    let rollback_failed_attempts = AtomicUsize::new(0);
+    ::testkit::localtx::assert_rollback_failed_no_replay(
+        ::testkit::localtx::RollbackFailedCase::new(
+            || async {
+                rollback_failed_attempts.fetch_add(1, Ordering::Relaxed);
+                Err::<(), _>(localtx_profile_classified(
+                    LocalTxProfileProbeError::RollbackFailed,
+                ))
+            },
+            testkit::ConformanceErrorCategory::RollbackFailed,
+            || rollback_failed_attempts.load(Ordering::Relaxed),
+        ),
+    )
+    .await?;
+
+    sqlx::query("DELETE FROM localtx_profile_probe WHERE run_id = $1")
+        .bind(&run_id)
+        .execute(&store.pool)
+        .await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// inbox_receipts claim-or-skip + 多组/租户隔离集成验证（#1118/#1650）。
 ///
 /// 唯一 event_id 法——每次运行生成新 UUID key，跨轮次无需清理旧数据，且可重复安全运行。
@@ -8001,6 +8377,7 @@ async fn dead_letter_tenant_conformance() -> TestResult {
                 Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(cnt.0 > 0)
             }
         },
+        |_| testkit::ConformanceErrorCategory::Storage,
     )
     .await?;
 
@@ -12212,7 +12589,9 @@ use settings::ports::{
     ConfigUnitOfWork, SettingKey, TenantRepoScope,
 };
 
-use crate::config_repo::{arm_config_retry_failpoint, config_retry_failpoint_hits};
+use crate::config_repo::{
+    arm_config_retry_failpoint, arm_config_retry_permanent_failpoint, config_retry_attempts,
+};
 use crate::cotx::PgTenantPool;
 use crate::tx_retry::{classify_config_repo_error, classify_identity_error};
 use crate::{
@@ -12220,6 +12599,19 @@ use crate::{
     ConfigValueMaintenanceOptions, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
     PgConfigValueMaintenance,
 };
+
+fn conformance_retry_category(
+    retry_class: consistency::TxRetryClass,
+) -> testkit::ConformanceErrorCategory {
+    match retry_class {
+        consistency::TxRetryClass::Transient => testkit::ConformanceErrorCategory::Transient,
+        consistency::TxRetryClass::Conflict => testkit::ConformanceErrorCategory::Conflict,
+        consistency::TxRetryClass::Permanent => testkit::ConformanceErrorCategory::Permanent,
+        consistency::TxRetryClass::OwnershipLost => {
+            testkit::ConformanceErrorCategory::OwnershipLost
+        }
+    }
+}
 
 /// config 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值，避免两 const 漂移）。
 const CONFIG_TENANT: &str = COTX_TENANT_A;
@@ -14260,7 +14652,7 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
     let transient_event = unique_event_id("cfg-tc7c-transient");
     let conflict_event = unique_event_id("cfg-tc7c-conflict");
     let permanent_event = unique_event_id("cfg-tc7c-permanent");
-
+    let exhaustion_event = unique_event_id("cfg-tc7c-exhaustion");
     repo.test_put(
         settings_scope(tenant),
         config_entry("app.retry-conflict", "v1", 1),
@@ -14268,108 +14660,139 @@ async fn tc7c_config_retry_boundary_conformance() -> TestResult {
     .await?;
 
     testkit::repo_conformance::assert_retry_boundary_policy(
-        testkit::repo_conformance::RetryBoundaryCase {
-            transient_then_success: || {
-                let repo = &repo;
-                let transient_event = transient_event.clone();
-                arm_config_retry_failpoint("app.retry-transient", 1);
-                async move {
-                    repo.commit(
-                        settings_scope(tenant),
-                        ConfigMutation::Put(config_entry("app.retry-transient", "v1", 1)),
-                        config_outbox_entry(&transient_event),
-                        config_envelope("app.retry-transient"),
+        testkit::repo_conformance::RetryBoundaryCase::new(
+            testkit::repo_conformance::TransientSuccessPath::new(
+                || {
+                    let repo = &repo;
+                    let transient_event = transient_event.clone();
+                    arm_config_retry_failpoint("app.retry-transient", 1);
+                    async move {
+                        repo.commit(
+                            settings_scope(tenant),
+                            ConfigMutation::Put(config_entry("app.retry-transient", "v1", 1)),
+                            config_outbox_entry(&transient_event),
+                            config_envelope("app.retry-transient"),
+                        )
+                        .await
+                    }
+                },
+                config_retry_attempts,
+                2,
+                || async {
+                    let cfg: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                            .bind("app.retry-transient")
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    let outbox: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                            .bind(&transient_event)
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    Ok::<usize, ConfigRepoError>(usize::from(cfg.0 == 1 && outbox.0 == 1))
+                },
+            ),
+            testkit::repo_conformance::ConflictPath::new(
+                || {
+                    let repo = &repo;
+                    let conflict_event = conflict_event.clone();
+                    arm_config_retry_failpoint("app.retry-conflict", 0);
+                    async move {
+                        repo.commit(
+                            settings_scope(tenant),
+                            ConfigMutation::Put(config_entry("app.retry-conflict", "stale", 1)),
+                            config_outbox_entry(&conflict_event),
+                            config_envelope("app.retry-conflict"),
+                        )
+                        .await
+                    }
+                },
+                config_retry_attempts,
+                || async {
+                    let cfg: (i64,) = sqlx::query_as(
+                        "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
                     )
+                    .bind("app.retry-conflict")
+                    .bind("stale")
+                    .fetch_one(&store.pool)
                     .await
-                }
-            },
-            transient_attempts: config_retry_failpoint_hits,
-            expected_transient_attempts: 2,
-            transient_visible: || async {
-                let cfg: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
-                        .bind("app.retry-transient")
-                        .fetch_one(&store.pool)
+                    .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    let outbox: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                            .bind(&conflict_event)
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    Ok::<usize, ConfigRepoError>(usize::from(cfg.0 != 0 || outbox.0 != 0))
+                },
+            ),
+            testkit::repo_conformance::PermanentPath::new(
+                || {
+                    arm_config_retry_permanent_failpoint("app.retry-permanent");
+                    async {
+                        repo.commit(
+                            settings_scope(tenant),
+                            ConfigMutation::Put(config_entry("app.retry-permanent", "v1", 1)),
+                            config_outbox_entry(&permanent_event),
+                            config_envelope("app.retry-permanent"),
+                        )
                         .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                let outbox: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
-                        .bind(&transient_event)
-                        .fetch_one(&store.pool)
+                    }
+                },
+                config_retry_attempts,
+                || async {
+                    let cfg: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                            .bind("app.retry-permanent")
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    let outbox: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                            .bind(&permanent_event)
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    Ok::<usize, ConfigRepoError>(usize::from(cfg.0 != 0 || outbox.0 != 0))
+                },
+            ),
+            testkit::repo_conformance::TransientExhaustionPath::new(
+                || {
+                    let repo = &repo;
+                    let exhaustion_event = exhaustion_event.clone();
+                    arm_config_retry_failpoint("app.retry-exhaustion", 3);
+                    async move {
+                        repo.commit(
+                            settings_scope(tenant),
+                            ConfigMutation::Put(config_entry("app.retry-exhaustion", "v1", 1)),
+                            config_outbox_entry(&exhaustion_event),
+                            config_envelope("app.retry-exhaustion"),
+                        )
                         .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                Ok::<bool, ConfigRepoError>(
-                    cfg.0 == 1 && outbox.0 == 1 && config_retry_failpoint_hits() == 2,
-                )
-            },
-            conflict_action: || async {
-                repo.commit(
-                    settings_scope(tenant),
-                    ConfigMutation::Put(config_entry("app.retry-conflict", "stale", 1)),
-                    config_outbox_entry(&conflict_event),
-                    config_envelope("app.retry-conflict"),
-                )
-                .await
-            },
-            conflict_visible: || async {
-                let cfg: (i64,) = sqlx::query_as(
-                    "SELECT count(*) FROM config_entries WHERE config_key = $1 AND value = $2",
-                )
-                .bind("app.retry-conflict")
-                .bind("stale")
-                .fetch_one(&store.pool)
-                .await
-                .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                let outbox: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
-                        .bind(&conflict_event)
-                        .fetch_one(&store.pool)
-                        .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                Ok::<bool, ConfigRepoError>(cfg.0 != 0 || outbox.0 != 0)
-            },
-            permanent_action: || async {
-                repo.commit(
-                    settings_scope(tenant),
-                    ConfigMutation::Put(config_entry("app.retry-permanent", "v1", 1)),
-                    config_outbox_entry(&permanent_event),
-                    OutboxEnvelopeParts::new(
-                        config_contract(),
-                        TenantId::parse(CONFIG_TENANT_B).unwrap(),
-                        subject_id("app.retry-permanent"),
-                        actor_for(TenantId::parse(CONFIG_TENANT_B).unwrap()),
-                    ),
-                )
-                .await
-            },
-            permanent_visible: || async {
-                let cfg: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
-                        .bind("app.retry-permanent")
-                        .fetch_one(&store.pool)
-                        .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                let outbox: (i64,) =
-                    sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
-                        .bind(&permanent_event)
-                        .fetch_one(&store.pool)
-                        .await
-                        .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
-                Ok::<bool, ConfigRepoError>(cfg.0 != 0 || outbox.0 != 0)
-            },
-        },
-        |e| {
-            matches!(
-                classify_config_repo_error(e),
-                consistency::TxRetryClass::Conflict
-            )
-        },
-        |e| {
-            matches!(
-                classify_config_repo_error(e),
-                consistency::TxRetryClass::Permanent
-            )
-        },
+                    }
+                },
+                config_retry_attempts,
+                3,
+                || async {
+                    let cfg: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM config_entries WHERE config_key = $1")
+                            .bind("app.retry-exhaustion")
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    let outbox: (i64,) =
+                        sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id = $1")
+                            .bind(&exhaustion_event)
+                            .fetch_one(&store.pool)
+                            .await
+                            .map_err(|e| ConfigRepoError::Storage(Box::new(e)))?;
+                    Ok::<usize, ConfigRepoError>(usize::from(cfg.0 != 0 || outbox.0 != 0))
+                },
+            ),
+        ),
+        |error| conformance_retry_category(classify_config_repo_error(error)),
     )
     .await?;
 
@@ -14502,6 +14925,7 @@ async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
             let key = &key;
             async move { repo.find(settings_scope(t), key).await.map(|o| o.is_some()) }
         },
+        |error| conformance_retry_category(classify_config_repo_error(error)),
     )
     .await?;
 
@@ -15527,6 +15951,7 @@ async fn role_repo_tenant_conformance() -> TestResult {
                     .map(|role| role.is_some())
             }
         },
+        |error| conformance_retry_category(classify_identity_error(error)),
     )
     .await?;
 
@@ -18829,7 +19254,7 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
 use identity::ports::{AuthOutcome, Credential, CredentialRepo, LoginIdentifier};
 
 use crate::PgCredentialRepo;
-use crate::credential_repo::{arm_credential_retry_failpoint, credential_retry_failpoint_hits};
+use crate::credential_repo::{arm_credential_retry_failpoint, credential_retry_attempts};
 
 const CRED_TENANT_A: &str = "a1a2a3a4-b1b2-4c3c-8d4d-e1e2e3e4e5e6";
 const CRED_TENANT_B: &str = "b9b8b7b6-c5c4-4a3a-8f2f-d1d2d3d4d5d6";
@@ -19612,8 +20037,8 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
     let bob_uid = cred_uid(CRED_USER_BOB)?;
     let transient_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-transient", 2, tenant)?;
     let conflict_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-conflict", 3, tenant)?;
+    let exhaustion_next = make_cred("retry-alice", CRED_USER_RETRY, "pw-exhausted", 3, tenant)?;
     let ghost_next = make_cred("ghost", CRED_USER_BOB, "pw-ghost", 1, tenant)?;
-
     repo.save(
         identity_scope(tenant),
         make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?,
@@ -19621,66 +20046,89 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
     .await?;
 
     testkit::repo_conformance::assert_retry_boundary_policy(
-        testkit::repo_conformance::RetryBoundaryCase {
-            transient_then_success: || {
-                let repo = &repo;
-                let transient_next = transient_next.clone();
-                arm_credential_retry_failpoint("retry-alice", 1);
-                async move {
-                    repo.bump_version(identity_scope(tenant), 1, transient_next)
-                        .await
-                }
-            },
-            transient_attempts: credential_retry_failpoint_hits,
-            expected_transient_attempts: 2,
-            transient_visible: || async {
-                let Some(got) = repo
-                    .find_by_user_id(identity_scope(tenant), retry_uid)
-                    .await?
-                else {
-                    return Ok::<bool, IdentityError>(false);
-                };
-                Ok::<bool, IdentityError>(
-                    got.version() == 2 && credential_retry_failpoint_hits() == 2,
-                )
-            },
-            conflict_action: || async {
-                repo.bump_version(identity_scope(tenant), 99, conflict_next.clone())
-                    .await
-            },
-            conflict_visible: || async {
-                let Some(got) = repo
-                    .find_by_user_id(identity_scope(tenant), retry_uid)
-                    .await?
-                else {
-                    return Ok::<bool, IdentityError>(false);
-                };
-                Ok::<bool, IdentityError>(got.version() == 3)
-            },
-            permanent_action: || async {
-                repo.bump_version(identity_scope(tenant), 1, ghost_next.clone())
-                    .await
-            },
-            permanent_visible: || async {
-                Ok::<bool, IdentityError>(
-                    repo.find_by_user_id(identity_scope(tenant), bob_uid)
+        testkit::repo_conformance::RetryBoundaryCase::new(
+            testkit::repo_conformance::TransientSuccessPath::new(
+                || {
+                    let repo = &repo;
+                    let transient_next = transient_next.clone();
+                    arm_credential_retry_failpoint("retry-alice", 1);
+                    async move {
+                        repo.bump_version(identity_scope(tenant), 1, transient_next)
+                            .await
+                    }
+                },
+                credential_retry_attempts,
+                2,
+                || async {
+                    let Some(got) = repo
+                        .find_by_user_id(identity_scope(tenant), retry_uid)
                         .await?
-                        .is_some(),
-                )
-            },
-        },
-        |e| {
-            matches!(
-                classify_identity_error(e),
-                consistency::TxRetryClass::Conflict
-            )
-        },
-        |e| {
-            matches!(
-                classify_identity_error(e),
-                consistency::TxRetryClass::Permanent
-            )
-        },
+                    else {
+                        return Ok::<usize, IdentityError>(0);
+                    };
+                    Ok::<usize, IdentityError>(usize::from(got.version() == 2))
+                },
+            ),
+            testkit::repo_conformance::ConflictPath::new(
+                || {
+                    arm_credential_retry_failpoint("retry-alice", 0);
+                    async {
+                        repo.bump_version(identity_scope(tenant), 99, conflict_next.clone())
+                            .await
+                    }
+                },
+                credential_retry_attempts,
+                || async {
+                    let Some(got) = repo
+                        .find_by_user_id(identity_scope(tenant), retry_uid)
+                        .await?
+                    else {
+                        return Ok::<usize, IdentityError>(0);
+                    };
+                    Ok::<usize, IdentityError>(usize::from(got.version() == 3))
+                },
+            ),
+            testkit::repo_conformance::PermanentPath::new(
+                || {
+                    arm_credential_retry_failpoint("ghost", 0);
+                    async {
+                        repo.bump_version(identity_scope(tenant), 1, ghost_next.clone())
+                            .await
+                    }
+                },
+                credential_retry_attempts,
+                || async {
+                    Ok::<usize, IdentityError>(usize::from(
+                        repo.find_by_user_id(identity_scope(tenant), bob_uid)
+                            .await?
+                            .is_some(),
+                    ))
+                },
+            ),
+            testkit::repo_conformance::TransientExhaustionPath::new(
+                || {
+                    let repo = &repo;
+                    let exhaustion_next = exhaustion_next.clone();
+                    arm_credential_retry_failpoint("retry-alice", 3);
+                    async move {
+                        repo.bump_version(identity_scope(tenant), 2, exhaustion_next)
+                            .await
+                    }
+                },
+                credential_retry_attempts,
+                3,
+                || async {
+                    let Some(got) = repo
+                        .find_by_user_id(identity_scope(tenant), retry_uid)
+                        .await?
+                    else {
+                        return Ok::<usize, IdentityError>(0);
+                    };
+                    Ok::<usize, IdentityError>(usize::from(got.version() != 2))
+                },
+            ),
+        ),
+        |error| conformance_retry_category(classify_identity_error(error)),
     )
     .await?;
 
@@ -20452,6 +20900,10 @@ async fn ta4b_audit_tenant_conformance() -> TestResult {
                     .await
                     .map(|page| !page.entries.is_empty())
             }
+        },
+        |error| match error {
+            audit::ports::AuditError::Storage(_) => testkit::ConformanceErrorCategory::Storage,
+            _ => testkit::ConformanceErrorCategory::Permanent,
         },
     )
     .await?;

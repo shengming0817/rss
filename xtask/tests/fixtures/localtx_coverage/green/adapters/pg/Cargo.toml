@@ -1,0 +1,10 @@
+[package]
+name = "pg"
+version = "0.0.0"
+edition = "2024"
+
+[dev-dependencies]
+generated = { path = "../../generated" }
+testkit = { path = "../../crates/testkit" }
+tokio = { version = "1", features = ["macros", "rt"] }
+vocab = { path = "../../crates/vocab" }

@@ -1,8 +1,11 @@
 //! LocalTx static coverage closure gate.
 //!
 //! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
+//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set", anti_vacuity = "actual_workspace_has_non_empty_complete_localtx_closure" }.
 
-use crate::contract::manifest::{ConsistencyLevel, ContractKind, ContractOwner, Lifecycle};
+use crate::contract::manifest::{
+    ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxModel,
+};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -29,6 +32,9 @@ pub(crate) enum Rule {
     MissingTestMarker,
     DuplicateTestMarker,
     UnexpectedTestMarker,
+    MissingBackendProfile,
+    MissingBackendProbe,
+    UnexpectedBackendProfile,
     OpaqueSourceScope,
 }
 
@@ -53,6 +59,7 @@ struct Contract {
     key: String,
     subject: String,
     valid_owner: bool,
+    tx_model: LocalTxModel,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +127,39 @@ struct MarkerOccurrence {
     ordinal: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BackendProbe {
+    Commit,
+    Rollback,
+    RejectedNoWrite,
+    TenantIsolation,
+    RetryBoundary,
+    CommitUnknownNoReplay,
+    RollbackFailedNoReplay,
+}
+
+impl BackendProbe {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Commit => "commit",
+            Self::Rollback => "rollback",
+            Self::RejectedNoWrite => "rejected-no-write",
+            Self::TenantIsolation => "tenant-isolation",
+            Self::RetryBoundary => "retry-boundary",
+            Self::CommitUnknownNoReplay => "commit-unknown-no-replay",
+            Self::RollbackFailedNoReplay => "rollback-failed-no-replay",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackendEnrollmentOccurrence {
+    key: String,
+    provider: String,
+    path: String,
+    probes: BTreeMap<BackendProbe, usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct OpaqueTrigger {
     subject: String,
@@ -152,9 +192,16 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
         .collect();
     let mut owner_evidence = BTreeMap::new();
     let mut all_markers = Vec::new();
+    let mut all_backend_enrollments = Vec::new();
+    let adapter_providers: BTreeSet<_> = workspace_crates
+        .iter()
+        .filter(|member| member.relative == Path::new("adapters").join(&member.name))
+        .map(|member| member.name.clone())
+        .collect();
     for member in &workspace_crates {
         let evidence = scan_owner(root, member, &expected_packages)?;
         all_markers.extend(evidence.markers.iter().cloned());
+        all_backend_enrollments.extend(evidence.backend_enrollments.iter().cloned());
         if member.relative == Path::new("crates").join(&member.name) {
             owner_evidence.insert(member.name.clone(), evidence);
         }
@@ -248,6 +295,12 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
                 ),
             )),
         }
+        append_backend_profile_findings(
+            &mut findings,
+            contract,
+            &all_backend_enrollments,
+            &adapter_providers,
+        );
     }
     for occurrence in all_markers
         .iter()
@@ -259,6 +312,19 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
             format!(
                 "typed marker `{}` in owner `{}` has no active LocalTx manifest",
                 occurrence.key, occurrence.owner
+            ),
+        ));
+    }
+    for occurrence in all_backend_enrollments
+        .iter()
+        .filter(|occurrence| !expected.contains_key(&occurrence.key))
+    {
+        findings.push(finding(
+            Rule::UnexpectedBackendProfile,
+            occurrence.path.clone(),
+            format!(
+                "backend profile `{}` in provider `{}` has no active LocalTx manifest",
+                occurrence.key, occurrence.provider
             ),
         ));
     }
@@ -291,6 +357,94 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
         ),
         findings,
     ))
+}
+
+fn append_backend_profile_findings(
+    findings: &mut Vec<Finding>,
+    contract: &Contract,
+    enrollments: &[BackendEnrollmentOccurrence],
+    adapter_providers: &BTreeSet<String>,
+) {
+    let matching: Vec<_> = enrollments
+        .iter()
+        .filter(|enrollment| enrollment.key == contract.key)
+        .collect();
+    if matching.is_empty() {
+        findings.push(contract_finding(
+            Rule::MissingBackendProfile,
+            contract,
+            "no typed real-backend profile enrollment",
+        ));
+        return;
+    }
+    let mut by_provider: BTreeMap<&str, Vec<&BackendEnrollmentOccurrence>> = BTreeMap::new();
+    for enrollment in matching {
+        if !adapter_providers.contains(&enrollment.provider) {
+            findings.push(finding(
+                Rule::UnexpectedBackendProfile,
+                enrollment.path.clone(),
+                format!(
+                    "backend profile `{}` must be enrolled by an adapters/* provider, got `{}`",
+                    contract.key, enrollment.provider
+                ),
+            ));
+            continue;
+        }
+        by_provider
+            .entry(&enrollment.provider)
+            .or_default()
+            .push(enrollment);
+    }
+    if by_provider.is_empty() {
+        return;
+    }
+    for (provider, provider_enrollments) in by_provider {
+        let mut probes = BTreeMap::new();
+        for enrollment in &provider_enrollments {
+            for (probe, count) in &enrollment.probes {
+                *probes.entry(*probe).or_insert(0_usize) += count;
+            }
+        }
+        for (probe, minimum) in required_backend_probes(contract.tx_model) {
+            let actual = probes.get(&probe).copied().unwrap_or_default();
+            if actual < minimum {
+                findings.push(finding(
+                    Rule::MissingBackendProbe,
+                    provider_enrollments[0].path.clone(),
+                    format!(
+                        "contract `{}` provider `{provider}` txModel `{}` requires probe `{}` at least {minimum} time(s), found {actual}",
+                        contract.id,
+                        localtx_model_label(contract.tx_model),
+                        probe.label(),
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn required_backend_probes(model: LocalTxModel) -> Vec<(BackendProbe, usize)> {
+    let mut required = vec![
+        (BackendProbe::Commit, 1),
+        (BackendProbe::RejectedNoWrite, 2),
+        (BackendProbe::TenantIsolation, 1),
+        (BackendProbe::RetryBoundary, 1),
+        (BackendProbe::CommitUnknownNoReplay, 1),
+    ];
+    if model == LocalTxModel::TenantScopedUow {
+        required.extend([
+            (BackendProbe::Rollback, 1),
+            (BackendProbe::RollbackFailedNoReplay, 1),
+        ]);
+    }
+    required
+}
+
+const fn localtx_model_label(model: LocalTxModel) -> &'static str {
+    match model {
+        LocalTxModel::TenantScopedUow => "tenant-scoped-uow",
+        LocalTxModel::RepoAtomicCas => "repo-atomic-cas",
+    }
 }
 
 fn append_relevant_opaque_findings(
@@ -474,6 +628,12 @@ fn discover(root: &Path) -> Result<Vec<Contract>> {
                     key: generated_key(&m.domain, &m.version, item.slug.as_deref()),
                     subject,
                     valid_owner: false,
+                    tx_model: m
+                        .capabilities
+                        .local_tx
+                        .as_ref()
+                        .map(|capability| capability.tx_model)
+                        .unwrap_or(LocalTxModel::TenantScopedUow),
                 });
                 continue;
             }
@@ -484,6 +644,12 @@ fn discover(root: &Path) -> Result<Vec<Contract>> {
             key: generated_key(&m.domain, &m.version, item.slug.as_deref()),
             subject: relative(root, &item.dir.join("contract.toml"))?,
             valid_owner: true,
+            tx_model: m
+                .capabilities
+                .local_tx
+                .as_ref()
+                .ok_or_else(|| anyhow!("active LocalTx contract lacks capabilities.localTx"))?
+                .tx_model,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -631,6 +797,7 @@ struct OwnerEvidence {
     canonical_mounts: BTreeMap<String, BTreeSet<CanonicalRouteMount>>,
     reachable_production_sources: BTreeSet<String>,
     markers: Vec<MarkerOccurrence>,
+    backend_enrollments: Vec<BackendEnrollmentOccurrence>,
     test_macros: BTreeSet<String>,
     production_macros: BTreeSet<String>,
     opaque_triggers: BTreeSet<OpaqueTrigger>,
@@ -689,6 +856,7 @@ struct FileUnit {
 struct Reachability {
     prod: bool,
     test: bool,
+    backend_test: bool,
     unknown: bool,
 }
 
@@ -696,11 +864,13 @@ impl Reachability {
     const BOTH: Self = Self {
         prod: true,
         test: true,
+        backend_test: true,
         unknown: false,
     };
     const TEST_ONLY: Self = Self {
         prod: false,
         test: true,
+        backend_test: true,
         unknown: false,
     };
 
@@ -711,6 +881,7 @@ impl Reachability {
                 return Self {
                     prod: false,
                     test: false,
+                    backend_test: false,
                     unknown: true,
                 };
             }
@@ -721,14 +892,17 @@ impl Reachability {
                 return Self {
                     prod: false,
                     test: false,
+                    backend_test: false,
                     unknown: true,
                 };
             };
             let prod = cfg_truth(&meta, false);
             let test = cfg_truth(&meta, true);
+            let backend_test = cfg_truth_env(&meta, true, true);
             reach.unknown |= prod == Truth::Unknown || test == Truth::Unknown;
             reach.prod &= prod == Truth::True;
             reach.test &= test == Truth::True;
+            reach.backend_test &= backend_test == Truth::True;
         }
         reach
     }
@@ -857,6 +1031,9 @@ fn scan_owner(
             .reachable_production_sources
             .extend(target_evidence.reachable_production_sources);
         evidence.markers.extend(target_evidence.markers);
+        evidence
+            .backend_enrollments
+            .extend(target_evidence.backend_enrollments);
         evidence.test_macros.extend(target_evidence.test_macros);
         evidence
             .production_macros
@@ -880,6 +1057,11 @@ fn validate_evidence_dependencies(
     }
     if !evidence.markers.is_empty() {
         for key in ["generated", "vocab"] {
+            validate_dependency(member, key, true, expected_packages)?;
+        }
+    }
+    if !evidence.backend_enrollments.is_empty() {
+        for key in ["generated", "testkit", "vocab"] {
             validate_dependency(member, key, true, expected_packages)?;
         }
     }
@@ -1598,7 +1780,10 @@ fn collect_use(
 }
 
 fn protected_root(binding: &str) -> bool {
-    matches!(binding, "bootstrap" | "generated" | "httpserve" | "vocab")
+    matches!(
+        binding,
+        "bootstrap" | "generated" | "httpserve" | "testkit" | "vocab"
+    )
 }
 
 fn local_import_identity(segments: &[String], module: &[String]) -> Option<Vec<String>> {
@@ -1922,13 +2107,31 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
         self.reachability = self.reachability.with_attrs(&node.attrs);
         self.attribute_safe &= attrs_safe_for_evidence(&node.attrs);
         let resolver = self.resolver_stack.last();
+        let recognized_test =
+            resolver.is_some_and(|resolver| is_test_with_resolver(&node.attrs, resolver));
         self.in_test_function = old_test_function
-            || (resolver.is_some_and(|resolver| is_test_with_resolver(&node.attrs, resolver))
-                && self.reachability.test
-                && !self.reachability.unknown);
+            || (recognized_test && self.reachability.test && !self.reachability.unknown);
         self.test_macro = resolver
             .and_then(|resolver| safe_test_macro_name(&node.attrs, resolver))
             .or(old_test_macro);
+        if !old_test_function
+            && recognized_test
+            && self.reachability.backend_test
+            && self.attribute_safe
+            && let Some(resolver) = resolver
+        {
+            let enrollments =
+                backend_enrollments_in_test(&node.block, resolver, self.owner, self.source);
+            if !enrollments.is_empty() {
+                if let Some(test_macro) = self.test_macro {
+                    self.evidence.test_macros.insert(test_macro.to_string());
+                }
+                self.evidence
+                    .test_macros
+                    .extend(resolver.trusted_macros.iter().cloned());
+            }
+            self.evidence.backend_enrollments.extend(enrollments);
+        }
         visit::visit_item_fn(self, node);
         self.in_test_function = old_test_function;
         self.reachability = old_reachability;
@@ -2549,6 +2752,175 @@ fn strict_test_marker_key(item: &ItemConst, resolver: &Resolver) -> Option<Strin
     (key_from_segments(&route_segments, "ROUTE").as_deref() == Some(&key)).then_some(key)
 }
 
+fn backend_enrollments_in_test(
+    block: &syn::Block,
+    resolver: &Resolver,
+    provider: &str,
+    source: &str,
+) -> Vec<BackendEnrollmentOccurrence> {
+    let keys: BTreeSet<_> = block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            Stmt::Item(Item::Const(item)) => strict_backend_profile_key(item, resolver),
+            _ => None,
+        })
+        .collect();
+    let mut probes = BTreeMap::new();
+    for probe in block
+        .stmts
+        .iter()
+        .filter_map(|statement| backend_probe_from_statement(statement, resolver))
+    {
+        *probes.entry(probe).or_insert(0) += 1;
+    }
+    keys.into_iter()
+        .map(|key| BackendEnrollmentOccurrence {
+            key,
+            provider: provider.to_string(),
+            path: source.to_string(),
+            probes: probes.clone(),
+        })
+        .collect()
+}
+
+fn backend_probe_from_statement(statement: &Stmt, resolver: &Resolver) -> Option<BackendProbe> {
+    let Stmt::Expr(expr, _) = statement else {
+        return None;
+    };
+    let Expr::Try(result) = peel_expr(expr) else {
+        return None;
+    };
+    let Expr::Await(awaited) = peel_expr(&result.expr) else {
+        return None;
+    };
+    let Expr::Call(call) = peel_expr(&awaited.base) else {
+        return None;
+    };
+    backend_probe_from_call(call, resolver)
+}
+
+fn strict_backend_profile_key(item: &ItemConst, resolver: &Resolver) -> Option<String> {
+    if !item
+        .ident
+        .to_string()
+        .starts_with("LOCALTX_BACKEND_PROFILE_")
+    {
+        return None;
+    }
+    let Type::Path(binding) = item.ty.as_ref() else {
+        return None;
+    };
+    if binding.qself.is_some()
+        || binding.path.leading_colon.is_none()
+        || raw_segments(&binding.path).as_slice() != ["vocab", "HttpRouteBinding"]
+        || canonical_backend_segments(&binding.path, resolver).as_deref()
+            != Some(["vocab".to_string(), "HttpRouteBinding".to_string()].as_slice())
+    {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &binding.path.segments.last()?.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 2 {
+        return None;
+    }
+    let GenericArgument::Type(Type::Path(marker)) = arguments.args.first()? else {
+        return None;
+    };
+    if marker.qself.is_some() || marker.path.leading_colon.is_none() {
+        return None;
+    }
+    let marker_segments = raw_segments(&marker.path);
+    if canonical_backend_segments(&marker.path, resolver).as_deref()
+        != Some(marker_segments.as_slice())
+    {
+        return None;
+    }
+    let GenericArgument::Type(Type::Path(consistency)) = arguments.args.iter().nth(1)? else {
+        return None;
+    };
+    if consistency.qself.is_some()
+        || consistency.path.leading_colon.is_none()
+        || canonical_backend_segments(&consistency.path, resolver).as_deref()
+            != Some(
+                [
+                    "vocab".to_string(),
+                    "http".to_string(),
+                    "LocalTx".to_string(),
+                ]
+                .as_slice(),
+            )
+    {
+        return None;
+    }
+    let key = key_from_segments(&marker_segments, "RouteMarker")?;
+    let Expr::Path(route) = peel_expr(&item.expr) else {
+        return None;
+    };
+    if route.qself.is_some() || route.path.leading_colon.is_none() {
+        return None;
+    }
+    let route_segments = raw_segments(&route.path);
+    if canonical_backend_segments(&route.path, resolver).as_deref()
+        != Some(route_segments.as_slice())
+    {
+        return None;
+    }
+    (key_from_segments(&route_segments, "ROUTE").as_deref() == Some(&key)).then_some(key)
+}
+
+fn backend_probe_from_call(call: &ExprCall, resolver: &Resolver) -> Option<BackendProbe> {
+    let Expr::Path(function) = peel_expr(&call.func) else {
+        return None;
+    };
+    function.path.leading_colon?;
+    let segments = raw_segments(&function.path);
+    if canonical_backend_segments(&function.path, resolver).as_deref() != Some(segments.as_slice())
+    {
+        return None;
+    }
+    match segments
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["testkit", "localtx", "assert_commit"] => Some(BackendProbe::Commit),
+        ["testkit", "localtx", "assert_rollback"] => Some(BackendProbe::Rollback),
+        ["testkit", "localtx", "assert_rejected_no_write"] => Some(BackendProbe::RejectedNoWrite),
+        ["testkit", "tenant_conformance", "assert_tenant_isolation"] => {
+            Some(BackendProbe::TenantIsolation)
+        }
+        [
+            "testkit",
+            "repo_conformance",
+            "assert_retry_boundary_policy",
+        ] => Some(BackendProbe::RetryBoundary),
+        ["testkit", "localtx", "assert_commit_unknown_no_replay"] => {
+            Some(BackendProbe::CommitUnknownNoReplay)
+        }
+        ["testkit", "localtx", "assert_rollback_failed_no_replay"] => {
+            Some(BackendProbe::RollbackFailedNoReplay)
+        }
+        _ => None,
+    }
+}
+
+/// Backend enrollment lives in large integration-test modules that may contain unrelated item
+/// macros. Exact extern-prelude absolute paths remain compiler-checked; explicit root shadows and
+/// Cargo dependency identity are rejected separately. Unlike production route evidence, an
+/// unrelated opaque macro therefore cannot erase real backend test evidence.
+fn canonical_backend_segments(path: &syn::Path, resolver: &Resolver) -> Option<Vec<String>> {
+    let raw = raw_segments(path);
+    let first = raw.first()?;
+    (path.leading_colon.is_some()
+        && protected_root(first)
+        && !resolver.shadowed_roots.contains(first)
+        && !resolver.local_aliases.contains_key(first))
+    .then_some(raw)
+}
+
 fn raw_segments(path: &syn::Path) -> Vec<String> {
     path.segments
         .iter()
@@ -2717,6 +3089,10 @@ fn cfg_expression(attr: &Attribute) -> Option<Meta> {
 }
 
 fn cfg_truth(meta: &Meta, test: bool) -> Truth {
+    cfg_truth_env(meta, test, false)
+}
+
+fn cfg_truth_env(meta: &Meta, test: bool, integration: bool) -> Truth {
     use syn::parse::Parser as _;
     match meta {
         Meta::Path(path) if path.is_ident("test") => {
@@ -2724,6 +3100,23 @@ fn cfg_truth(meta: &Meta, test: bool) -> Truth {
                 Truth::True
             } else {
                 Truth::False
+            }
+        }
+        Meta::NameValue(value) if value.path.is_ident("feature") => {
+            let Expr::Lit(literal) = &value.value else {
+                return Truth::Unknown;
+            };
+            let syn::Lit::Str(feature) = &literal.lit else {
+                return Truth::Unknown;
+            };
+            if feature.value() == "integration" {
+                if integration {
+                    Truth::True
+                } else {
+                    Truth::Unknown
+                }
+            } else {
+                Truth::Unknown
             }
         }
         Meta::Path(_) | Meta::NameValue(_) => Truth::Unknown,
@@ -2736,14 +3129,14 @@ fn cfg_truth(meta: &Meta, test: bool) -> Truth {
                 return Truth::Unknown;
             };
             if list.path.is_ident("not") && nested.len() == 1 {
-                truth_not(cfg_truth(&nested[0], test))
+                truth_not(cfg_truth_env(&nested[0], test, integration))
             } else if list.path.is_ident("all") {
                 nested.iter().fold(Truth::True, |value, item| {
-                    truth_and(value, cfg_truth(item, test))
+                    truth_and(value, cfg_truth_env(item, test, integration))
                 })
             } else if list.path.is_ident("any") {
                 nested.iter().fold(Truth::False, |value, item| {
-                    truth_or(value, cfg_truth(item, test))
+                    truth_or(value, cfg_truth_env(item, test, integration))
                 })
             } else {
                 Truth::Unknown
@@ -2896,6 +3289,198 @@ mod tests {
         let (summary, findings) = check_root(&fixture("green"))?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
         assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn active_contract_without_backend_profile_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-missing-backend-profile")?;
+        fs::write(temp.path.join("adapters/pg/src/lib.rs"), "")?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingBackendProfile),
+            "an active LocalTx contract without real backend enrollment must fail: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_missing_required_probe_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-missing-backend-probe")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source.replacen("::testkit::localtx::assert_rollback().await?;\n", "", 1),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingBackendProbe),
+            "a txModel profile missing one required probe must fail: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tenant_contract_cannot_enroll_repo_atomic_probe_set() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-wrong-backend-profile")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source
+                .replacen("::testkit::localtx::assert_rollback().await?;\n", "", 1)
+                .replacen(
+                    "::testkit::localtx::assert_rollback_failed_no_replay().await?;\n",
+                    "",
+                    1,
+                ),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        let missing = findings
+            .iter()
+            .filter(|finding| finding.rule == Rule::MissingBackendProbe)
+            .count();
+        assert_eq!(
+            missing, 2,
+            "tenant-scoped-uow must not accept the smaller repo-atomic-cas probe set: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repo_atomic_contract_derives_the_smaller_exact_profile() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-repo-atomic-profile")?;
+        let manifest = temp.path.join("contracts/http/demo/v1/write/contract.toml");
+        let source = fs::read_to_string(&manifest)?;
+        fs::write(
+            &manifest,
+            source.replace(
+                "txModel = \"tenant-scoped-uow\"",
+                "txModel = \"repo-atomic-cas\"",
+            ),
+        )?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source
+                .replacen("::testkit::localtx::assert_rollback().await?;\n", "", 1)
+                .replacen(
+                    "::testkit::localtx::assert_rollback_failed_no_replay().await?;\n",
+                    "",
+                    1,
+                ),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn unawaited_backend_probe_does_not_count() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-unawaited-backend-probe")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source.replacen(
+                "::testkit::localtx::assert_rollback().await?;",
+                "let _unpolled = ::testkit::localtx::assert_rollback();",
+                1,
+            ),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::MissingBackendProbe && finding.detail.contains("rollback")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_must_come_from_an_adapter_provider() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-owner-is-not-provider")?;
+        let manifest = temp.path.join("crates/demo/Cargo.toml");
+        let source = fs::read_to_string(&manifest)?;
+        fs::write(
+            &manifest,
+            format!("{source}\n[dev-dependencies]\ntestkit = {{ path = \"../testkit\" }}\n"),
+        )?;
+        let owner = temp.path.join("crates/demo/src/lib.rs");
+        let source = fs::read_to_string(&owner)?;
+        fs::write(
+            &owner,
+            format!(
+                "{source}\n#[cfg(test)] mod invalid_backend {{\n    #[test] fn profile() {{\n        const LOCALTX_BACKEND_PROFILE_INVALID: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE;\n    }}\n}}\n"
+            ),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::UnexpectedBackendProfile && finding.detail.contains("adapters/*")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn orphan_backend_profile_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-orphan-backend-profile")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source.replace("demo_v1::write", "demo_v1::orphan"),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::UnexpectedBackendProfile
+                && finding.detail.contains("has no active LocalTx manifest")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn validation_and_authorization_require_two_no_write_probes() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-one-rejection-probe")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source.replacen(
+                "::testkit::localtx::assert_rejected_no_write().await?;\n",
+                "",
+                1,
+            ),
+        )?;
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::MissingBackendProbe
+                && finding.detail.contains("rejected-no-write")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_parser_accepts_only_typed_absolute_evidence() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                ::testkit::localtx::assert_commit().await?;
+                Ok(())
+            }"#,
+        )?;
+        let enrollments =
+            backend_enrollments_in_test(&function.block, &Resolver::default(), "pg", "probe.rs");
+        assert_eq!(enrollments.len(), 1);
+        assert_eq!(enrollments[0].key, "demo_v1::write");
+        assert_eq!(enrollments[0].probes.get(&BackendProbe::Commit), Some(&1));
         Ok(())
     }
 

@@ -176,6 +176,35 @@ pub(crate) enum CoreTestScope {
     TestkitContainers,
 }
 
+/// Workspace coverage must opt feature-gated test support into instrumentation explicitly.
+/// Keeping package/feature pairs typed prevents the coverage lane and core test registry from
+/// drifting through duplicated raw strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageFeature {
+    TestkitContainers,
+}
+
+impl PackageFeature {
+    const fn package(self) -> &'static str {
+        match self {
+            Self::TestkitContainers => "testkit",
+        }
+    }
+
+    const fn feature(self) -> &'static str {
+        match self {
+            Self::TestkitContainers => "containers",
+        }
+    }
+
+    fn as_namespaced(self) -> String {
+        format!("{}/{}", self.package(), self.feature())
+    }
+}
+
+/// Single source for feature-gated code that the workspace llvm-cov run must instrument.
+const COVERAGE_FEATURES: [PackageFeature; 1] = [PackageFeature::TestkitContainers];
+
 impl CoreTestScope {
     #[cfg(test)]
     pub(crate) const ALL: [Self; 11] = [
@@ -217,9 +246,12 @@ impl CoreTestScope {
                 }
                 args
             }
-            Self::TestkitContainers => ["-p", "testkit", "--features", "containers"]
-                .map(str::to_owned)
-                .to_vec(),
+            Self::TestkitContainers => {
+                let feature = PackageFeature::TestkitContainers;
+                ["-p", feature.package(), "--features", feature.feature()]
+                    .map(str::to_owned)
+                    .to_vec()
+            }
         }
     }
 }
@@ -370,21 +402,24 @@ impl NextestInvocation {
         {
             bail!("coverage output path 必须是 workspace 内安全相对路径");
         }
+        let mut args = ["--workspace", "--locked"].map(str::to_owned).to_vec();
+        args.extend([
+            "--features".to_owned(),
+            COVERAGE_FEATURES
+                .iter()
+                .copied()
+                .map(PackageFeature::as_namespaced)
+                .collect::<Vec<_>>()
+                .join(","),
+        ]);
+        args.extend(["--json", "--output-path", output_path].map(str::to_owned));
         Ok(Self::new(
             NextestProfile::CiCore,
             NextestLane::Coverage,
             None,
             None,
             NextestRunner::LlvmCov,
-            [
-                "--workspace",
-                "--locked",
-                "--json",
-                "--output-path",
-                output_path,
-            ]
-            .map(str::to_owned)
-            .to_vec(),
+            args,
         ))
     }
 
@@ -1541,6 +1576,8 @@ mod tests {
                 "nextest",
                 "--workspace",
                 "--locked",
+                "--features",
+                "testkit/containers",
                 "--json",
                 "--output-path",
                 "target/coverage.json"
@@ -1549,6 +1586,25 @@ mod tests {
         );
         assert_eq!(invocation.replay_spec(), &ReplaySpec::Coverage);
         Ok(())
+    }
+
+    #[test]
+    fn coverage_feature_registry_is_non_empty_and_namespaced() {
+        assert!(
+            !COVERAGE_FEATURES.is_empty(),
+            "workspace coverage must explicitly instrument feature-gated code"
+        );
+        assert_eq!(
+            COVERAGE_FEATURES,
+            [PackageFeature::TestkitContainers],
+            "feature-gated coverage additions must be registered in the typed single source"
+        );
+        assert!(
+            COVERAGE_FEATURES
+                .iter()
+                .all(|feature| feature.as_namespaced().contains('/')),
+            "workspace coverage features must use package/feature syntax"
+        );
     }
 
     #[test]

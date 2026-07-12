@@ -6,6 +6,7 @@
 //!
 //! ref: launchbadge/sqlx examples/postgres/transaction/src/main.rs@v0.8.6
 
+use crate::ConformanceErrorCategory;
 use std::fmt::Debug;
 use std::future::Future;
 
@@ -18,6 +19,23 @@ pub enum RepoConformanceError {
     ExpectedErrorMissing { stage: &'static str },
     #[error("repo conformance: {stage} returned wrong error kind: {error}")]
     WrongErrorKind { stage: &'static str, error: String },
+    #[error("repo conformance: provider op failed during {stage} ({category})")]
+    ClassifiedProvider {
+        stage: &'static str,
+        category: ConformanceErrorCategory,
+    },
+    #[error("repo conformance: {stage} returned {actual}; expected {expected}")]
+    WrongErrorCategory {
+        stage: &'static str,
+        expected: ConformanceErrorCategory,
+        actual: ConformanceErrorCategory,
+    },
+    #[error("repo conformance: {path} retry threshold must be at least {minimum}; got {actual}")]
+    InvalidRetryThreshold {
+        path: RetryPathKind,
+        minimum: usize,
+        actual: usize,
+    },
     #[error("repo conformance: {stage} marker mismatch; expected {expected:?}, got {actual:?}")]
     MarkerMismatch {
         stage: &'static str,
@@ -40,6 +58,12 @@ pub enum RepoConformanceError {
     },
     #[error("repo conformance: {stage} attempts mismatch; expected {expected}, got {actual}")]
     AttemptMismatch {
+        stage: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("repo conformance: {stage} durable writes mismatch; expected {expected}, got {actual}")]
+    DurableWriteMismatch {
         stage: &'static str,
         expected: usize,
         actual: usize,
@@ -551,107 +575,318 @@ pub struct CotxCase<A, B, O> {
     pub outbox_exists: O,
 }
 
-/// Provider-specific retry boundary conformance scenario.
-pub struct RetryBoundaryCase<TA, TT, TV, CA, CV, PA, PV> {
-    pub transient_then_success: TA,
-    pub transient_attempts: TT,
-    pub expected_transient_attempts: usize,
-    pub transient_visible: TV,
-    pub conflict_action: CA,
-    pub conflict_visible: CV,
-    pub permanent_action: PA,
-    pub permanent_visible: PV,
+/// A retry path with one or more transient failures followed by success.
+pub struct TransientSuccessPath<A, C, W> {
+    action: A,
+    attempts: C,
+    expected_transient_attempts: usize,
+    durable_writes: W,
 }
 
-/// Retry boundary: transient may retry to success; conflict/permanent must not commit side effects.
+impl<A, C, W> TransientSuccessPath<A, C, W> {
+    pub fn new(action: A, attempts: C, expected_attempts: usize, durable_writes: W) -> Self {
+        Self {
+            action,
+            attempts,
+            expected_transient_attempts: expected_attempts,
+            durable_writes,
+        }
+    }
+}
+
+/// A conflict path, which must neither retry nor write.
+pub struct ConflictPath<A, C, W> {
+    action: A,
+    attempts: C,
+    durable_writes: W,
+}
+
+impl<A, C, W> ConflictPath<A, C, W> {
+    pub fn new(action: A, attempts: C, durable_writes: W) -> Self {
+        Self {
+            action,
+            attempts,
+            durable_writes,
+        }
+    }
+}
+
+/// A permanent-error path, which must neither retry nor write.
+pub struct PermanentPath<A, C, W> {
+    action: A,
+    attempts: C,
+    durable_writes: W,
+}
+
+impl<A, C, W> PermanentPath<A, C, W> {
+    pub fn new(action: A, attempts: C, durable_writes: W) -> Self {
+        Self {
+            action,
+            attempts,
+            durable_writes,
+        }
+    }
+}
+
+/// A transient path that consumes the complete retry budget without writing.
+pub struct TransientExhaustionPath<A, C, W> {
+    action: A,
+    attempts: C,
+    retry_budget: usize,
+    durable_writes: W,
+}
+
+impl<A, C, W> TransientExhaustionPath<A, C, W> {
+    pub fn new(action: A, attempts: C, retry_budget: usize, durable_writes: W) -> Self {
+        Self {
+            action,
+            attempts,
+            retry_budget,
+            durable_writes,
+        }
+    }
+}
+
+/// Typed retry fixture path used by invalid-threshold diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RetryPathKind {
+    TransientSuccess,
+    TransientExhaustion,
+}
+
+impl std::fmt::Display for RetryPathKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::TransientSuccess => "transient-success",
+            Self::TransientExhaustion => "transient-exhaustion",
+        })
+    }
+}
+
+/// Provider-specific retry boundary conformance scenario composed from four nominal paths.
+pub struct RetryBoundaryCase<T, C, P, E> {
+    transient_success: T,
+    conflict: C,
+    permanent: P,
+    transient_exhaustion: E,
+}
+
+impl<T, C, P, E> RetryBoundaryCase<T, C, P, E> {
+    pub fn new(transient_success: T, conflict: C, permanent: P, transient_exhaustion: E) -> Self {
+        Self {
+            transient_success,
+            conflict,
+            permanent,
+            transient_exhaustion,
+        }
+    }
+}
+
+/// Retry boundary: transient success commits once; conflict/permanent never retry; exhaustion
+/// reaches its budget, returns the expected transient category, and commits nothing.
+#[allow(clippy::type_complexity)]
 pub async fn assert_retry_boundary_policy<
     TA,
     TT,
-    TV,
+    TW,
     CA,
-    CV,
+    CT,
+    CW,
     PA,
-    PV,
+    PT,
+    PW,
+    EA,
+    ET,
+    EW,
     TAF,
-    TVF,
+    TWF,
     CAF,
-    CVF,
+    CWF,
     PAF,
-    PVF,
+    PWF,
+    EAF,
+    EWF,
     E,
-    IC,
-    IP,
+    EC,
 >(
-    case: RetryBoundaryCase<TA, TT, TV, CA, CV, PA, PV>,
-    is_conflict: IC,
-    is_permanent: IP,
+    case: RetryBoundaryCase<
+        TransientSuccessPath<TA, TT, TW>,
+        ConflictPath<CA, CT, CW>,
+        PermanentPath<PA, PT, PW>,
+        TransientExhaustionPath<EA, ET, EW>,
+    >,
+    classify_error: EC,
 ) -> Result<(), RepoConformanceError>
 where
     TA: FnOnce() -> TAF,
     TT: FnOnce() -> usize,
-    TV: FnOnce() -> TVF,
+    TW: FnOnce() -> TWF,
     CA: FnOnce() -> CAF,
-    CV: FnOnce() -> CVF,
+    CT: FnOnce() -> usize,
+    CW: FnOnce() -> CWF,
     PA: FnOnce() -> PAF,
-    PV: FnOnce() -> PVF,
+    PT: FnOnce() -> usize,
+    PW: FnOnce() -> PWF,
+    EA: FnOnce() -> EAF,
+    ET: FnOnce() -> usize,
+    EW: FnOnce() -> EWF,
     TAF: Future<Output = Result<(), E>>,
-    TVF: Future<Output = Result<bool, E>>,
+    TWF: Future<Output = Result<usize, E>>,
     CAF: Future<Output = Result<(), E>>,
-    CVF: Future<Output = Result<bool, E>>,
+    CWF: Future<Output = Result<usize, E>>,
     PAF: Future<Output = Result<(), E>>,
-    PVF: Future<Output = Result<bool, E>>,
-    E: Debug,
-    IC: Fn(&E) -> bool,
-    IP: Fn(&E) -> bool,
+    PWF: Future<Output = Result<usize, E>>,
+    EAF: Future<Output = Result<(), E>>,
+    EWF: Future<Output = Result<usize, E>>,
+    EC: Fn(&E) -> ConformanceErrorCategory,
 {
-    (case.transient_then_success)()
-        .await
-        .map_err(|e| provider("retry transient then success", e))?;
-    expect_visible(
-        "retry transient committed once",
-        (case.transient_visible)()
-            .await
-            .map_err(|e| provider("retry transient visible", e))?,
-        true,
-    )?;
-    let transient_attempts = (case.transient_attempts)();
-    if transient_attempts != case.expected_transient_attempts {
-        return Err(RepoConformanceError::AttemptMismatch {
-            stage: "retry transient attempts",
-            expected: case.expected_transient_attempts,
-            actual: transient_attempts,
+    let RetryBoundaryCase {
+        transient_success,
+        conflict,
+        permanent,
+        transient_exhaustion,
+    } = case;
+    if transient_success.expected_transient_attempts < 2 {
+        return Err(RepoConformanceError::InvalidRetryThreshold {
+            path: RetryPathKind::TransientSuccess,
+            minimum: 2,
+            actual: transient_success.expected_transient_attempts,
         });
     }
-
-    expect_conflict(
-        "retry conflict action",
-        (case.conflict_action)(),
-        &is_conflict,
-    )
-    .await?;
-    expect_visible(
-        "retry conflict side effect",
-        (case.conflict_visible)()
-            .await
-            .map_err(|e| provider("retry conflict visible", e))?,
-        false,
+    if transient_exhaustion.retry_budget < 2 {
+        return Err(RepoConformanceError::InvalidRetryThreshold {
+            path: RetryPathKind::TransientExhaustion,
+            minimum: 2,
+            actual: transient_exhaustion.retry_budget,
+        });
+    }
+    (transient_success.action)().await.map_err(|error| {
+        classified_provider("retry transient then success", &error, &classify_error)
+    })?;
+    let transient_attempts = (transient_success.attempts)();
+    expect_attempts(
+        "retry transient attempts",
+        transient_attempts,
+        transient_success.expected_transient_attempts,
     )?;
+    let transient_writes = (transient_success.durable_writes)()
+        .await
+        .map_err(|error| {
+            classified_provider("retry transient durable writes", &error, &classify_error)
+        })?;
+    expect_durable_writes("retry transient durable writes", transient_writes, 1)?;
 
-    match (case.permanent_action)().await {
-        Ok(()) => Err(RepoConformanceError::ExpectedErrorMissing {
-            stage: "retry permanent action",
+    expect_safe_error(
+        "retry conflict action",
+        (conflict.action)().await,
+        ConformanceErrorCategory::Conflict,
+        &classify_error,
+    )?;
+    expect_attempts("retry conflict attempts", (conflict.attempts)(), 1)?;
+    let conflict_writes = (conflict.durable_writes)().await.map_err(|error| {
+        classified_provider("retry conflict durable writes", &error, &classify_error)
+    })?;
+    expect_durable_writes("retry conflict durable writes", conflict_writes, 0)?;
+
+    expect_safe_error(
+        "retry permanent action",
+        (permanent.action)().await,
+        ConformanceErrorCategory::Permanent,
+        &classify_error,
+    )?;
+    expect_attempts("retry permanent attempts", (permanent.attempts)(), 1)?;
+    let permanent_writes = (permanent.durable_writes)().await.map_err(|error| {
+        classified_provider("retry permanent durable writes", &error, &classify_error)
+    })?;
+    expect_durable_writes("retry permanent durable writes", permanent_writes, 0)?;
+
+    expect_safe_error(
+        "retry transient exhaustion action",
+        (transient_exhaustion.action)().await,
+        ConformanceErrorCategory::Transient,
+        &classify_error,
+    )?;
+    expect_attempts(
+        "retry transient exhaustion attempts",
+        (transient_exhaustion.attempts)(),
+        transient_exhaustion.retry_budget,
+    )?;
+    let exhaustion_writes = (transient_exhaustion.durable_writes)()
+        .await
+        .map_err(|error| {
+            classified_provider(
+                "retry transient exhaustion durable writes",
+                &error,
+                &classify_error,
+            )
+        })?;
+    expect_durable_writes(
+        "retry transient exhaustion durable writes",
+        exhaustion_writes,
+        0,
+    )
+}
+
+fn classified_provider<E, C>(stage: &'static str, error: &E, category: &C) -> RepoConformanceError
+where
+    C: Fn(&E) -> ConformanceErrorCategory,
+{
+    RepoConformanceError::ClassifiedProvider {
+        stage,
+        category: category(error),
+    }
+}
+
+fn expect_safe_error<E, C>(
+    stage: &'static str,
+    result: Result<(), E>,
+    expected: ConformanceErrorCategory,
+    category: &C,
+) -> Result<(), RepoConformanceError>
+where
+    C: Fn(&E) -> ConformanceErrorCategory,
+{
+    match result {
+        Ok(()) => Err(RepoConformanceError::ExpectedErrorMissing { stage }),
+        Err(error) if category(&error) == expected => Ok(()),
+        Err(error) => Err(RepoConformanceError::WrongErrorCategory {
+            stage,
+            expected,
+            actual: category(&error),
         }),
-        Err(e) if is_permanent(&e) => expect_visible(
-            "retry permanent side effect",
-            (case.permanent_visible)()
-                .await
-                .map_err(|e| provider("retry permanent visible", e))?,
-            false,
-        ),
-        Err(e) => Err(RepoConformanceError::WrongErrorKind {
-            stage: "retry permanent action",
-            error: format!("{e:?}"),
-        }),
+    }
+}
+
+fn expect_attempts(
+    stage: &'static str,
+    actual: usize,
+    expected: usize,
+) -> Result<(), RepoConformanceError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(RepoConformanceError::AttemptMismatch {
+            stage,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn expect_durable_writes(
+    stage: &'static str,
+    actual: usize,
+    expected: usize,
+) -> Result<(), RepoConformanceError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(RepoConformanceError::DurableWriteMismatch {
+            stage,
+            expected,
+            actual,
+        })
     }
 }
 
@@ -833,18 +1068,54 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum FakeError {
+        Transient,
         Conflict,
+        Permanent,
         Storage,
         Other,
     }
 
     fn is_conflict(e: &FakeError) -> bool {
         matches!(e, FakeError::Conflict)
+    }
+
+    fn error_category(e: &FakeError) -> ConformanceErrorCategory {
+        match e {
+            FakeError::Transient => ConformanceErrorCategory::Transient,
+            FakeError::Conflict => ConformanceErrorCategory::Conflict,
+            FakeError::Permanent => ConformanceErrorCategory::Permanent,
+            FakeError::Storage => ConformanceErrorCategory::Storage,
+            FakeError::Other => ConformanceErrorCategory::Other,
+        }
+    }
+
+    macro_rules! retry_case {
+        ($success:expr, $success_attempts:expr, $expected_success_attempts:expr, $success_writes:expr,
+         $conflict:expr, $conflict_attempts:expr, $conflict_writes:expr,
+         $permanent:expr, $permanent_attempts:expr, $permanent_writes:expr,
+         $exhaustion:expr, $exhaustion_attempts:expr, $budget:expr, $exhaustion_writes:expr $(,)?) => {
+            RetryBoundaryCase::new(
+                TransientSuccessPath::new(
+                    $success,
+                    $success_attempts,
+                    $expected_success_attempts,
+                    $success_writes,
+                ),
+                ConflictPath::new($conflict, $conflict_attempts, $conflict_writes),
+                PermanentPath::new($permanent, $permanent_attempts, $permanent_writes),
+                TransientExhaustionPath::new(
+                    $exhaustion,
+                    $exhaustion_attempts,
+                    $budget,
+                    $exhaustion_writes,
+                ),
+            )
+        };
     }
 
     fn is_storage(e: &FakeError) -> bool {
@@ -1308,79 +1579,362 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn retry_boundary_fake_checks_classes() {
-        let transient_visible = RefCell::new(false);
-        let conflict_visible = RefCell::new(false);
-        let permanent_visible = RefCell::new(false);
-
         assert_retry_boundary_policy(
-            RetryBoundaryCase {
-                transient_then_success: || async {
-                    *transient_visible.borrow_mut() = true;
-                    Ok::<_, FakeError>(())
-                },
-                transient_attempts: || 2,
-                expected_transient_attempts: 2,
-                transient_visible: || async { Ok::<_, FakeError>(*transient_visible.borrow()) },
-                conflict_action: || async { Err::<(), _>(FakeError::Conflict) },
-                conflict_visible: || async { Ok::<_, FakeError>(*conflict_visible.borrow()) },
-                permanent_action: || async { Err::<(), _>(FakeError::Storage) },
-                permanent_visible: || async { Ok::<_, FakeError>(*permanent_visible.borrow()) },
-            },
-            is_conflict,
-            is_storage,
+            retry_case!(
+                || async { Ok::<_, FakeError>(()) },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(1) },
+                || async { Err::<(), _>(FakeError::Conflict) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Permanent) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Transient) },
+                || 3,
+                3,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            error_category,
         )
         .await
         .expect("retry boundary fake passes");
 
-        *conflict_visible.borrow_mut() = true;
         let err = assert_retry_boundary_policy(
-            RetryBoundaryCase {
-                transient_then_success: || async { Ok::<_, FakeError>(()) },
-                transient_attempts: || 2,
-                expected_transient_attempts: 2,
-                transient_visible: || async { Ok::<_, FakeError>(true) },
-                conflict_action: || async { Err::<(), _>(FakeError::Conflict) },
-                conflict_visible: || async { Ok::<_, FakeError>(*conflict_visible.borrow()) },
-                permanent_action: || async { Err::<(), _>(FakeError::Storage) },
-                permanent_visible: || async { Ok::<_, FakeError>(false) },
-            },
-            is_conflict,
-            is_storage,
+            retry_case!(
+                || async { Ok::<_, FakeError>(()) },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(1) },
+                || async { Err::<(), _>(FakeError::Conflict) },
+                || 2,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Permanent) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Transient) },
+                || 3,
+                3,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            error_category,
         )
         .await
-        .expect_err("conflict side effect must fail");
+        .expect_err("conflict retry must fail");
         assert!(matches!(
             err,
-            RepoConformanceError::VisibilityMismatch {
-                stage: "retry conflict side effect",
+            RepoConformanceError::AttemptMismatch {
+                stage: "retry conflict attempts",
+                actual: 2,
                 ..
             }
         ));
 
         let err = assert_retry_boundary_policy(
-            RetryBoundaryCase {
-                transient_then_success: || async { Ok::<_, FakeError>(()) },
-                transient_attempts: || 1,
-                expected_transient_attempts: 2,
-                transient_visible: || async { Ok::<_, FakeError>(true) },
-                conflict_action: || async { Err::<(), _>(FakeError::Conflict) },
-                conflict_visible: || async { Ok::<_, FakeError>(false) },
-                permanent_action: || async { Err::<(), _>(FakeError::Storage) },
-                permanent_visible: || async { Ok::<_, FakeError>(false) },
-            },
-            is_conflict,
-            is_storage,
+            retry_case!(
+                || async { Ok::<_, FakeError>(()) },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(2) },
+                || async { Err::<(), _>(FakeError::Conflict) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Permanent) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Transient) },
+                || 2,
+                3,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            error_category,
         )
         .await
-        .expect_err("transient case must prove retry happened");
+        .expect_err("duplicate successful write must fail");
         assert!(matches!(
             err,
-            RepoConformanceError::AttemptMismatch {
-                stage: "retry transient attempts",
-                expected: 2,
-                actual: 1,
+            RepoConformanceError::DurableWriteMismatch {
+                stage: "retry transient durable writes",
+                actual: 2,
+                ..
             }
         ));
+
+        let err = assert_retry_boundary_policy(
+            retry_case!(
+                || async { Ok::<_, FakeError>(()) },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(1) },
+                || async { Err::<(), _>(FakeError::Conflict) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Permanent) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Storage) },
+                || 3,
+                3,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            error_category,
+        )
+        .await
+        .expect_err("exhaustion must return transient error");
+        assert!(matches!(
+            err,
+            RepoConformanceError::WrongErrorCategory {
+                stage: "retry transient exhaustion action",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn retry_boundary_provider_failure_is_typed_without_debug_bound() {
+        struct SensitiveError;
+
+        let error = assert_retry_boundary_policy(
+            RetryBoundaryCase::new(
+                TransientSuccessPath::new(
+                    || async { Err::<(), _>(SensitiveError) },
+                    || 2,
+                    2,
+                    || async { Ok::<_, SensitiveError>(1) },
+                ),
+                ConflictPath::new(
+                    || async { Err::<(), _>(SensitiveError) },
+                    || 1,
+                    || async { Ok::<_, SensitiveError>(0) },
+                ),
+                PermanentPath::new(
+                    || async { Err::<(), _>(SensitiveError) },
+                    || 1,
+                    || async { Ok::<_, SensitiveError>(0) },
+                ),
+                TransientExhaustionPath::new(
+                    || async { Err::<(), _>(SensitiveError) },
+                    || 2,
+                    2,
+                    || async { Ok::<_, SensitiveError>(0) },
+                ),
+            ),
+            |_| ConformanceErrorCategory::Storage,
+        )
+        .await
+        .expect_err("provider failure must be surfaced");
+
+        assert!(matches!(
+            error,
+            RepoConformanceError::ClassifiedProvider {
+                stage: "retry transient then success",
+                category: ConformanceErrorCategory::Storage,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn retry_boundary_requires_conflict_error() {
+        let error = assert_retry_boundary_policy(
+            retry_case!(
+                || async { Ok::<_, FakeError>(()) },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(1) },
+                || async { Ok::<_, FakeError>(()) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Permanent) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+                || async { Err::<(), _>(FakeError::Transient) },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            error_category,
+        )
+        .await
+        .expect_err("conflict path must reject success");
+
+        assert!(matches!(
+            error,
+            RepoConformanceError::ExpectedErrorMissing {
+                stage: "retry conflict action",
+            }
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn retry_boundary_fake_rejects_each_forbidden_attempt_or_write() {
+        macro_rules! boundary {
+            ($conflict_writes:expr, $permanent_attempts:expr, $permanent_writes:expr,
+             $exhaustion_attempts:expr, $exhaustion_writes:expr) => {
+                retry_case!(
+                    || async { Ok::<_, FakeError>(()) },
+                    || 2,
+                    2,
+                    || async { Ok::<_, FakeError>(1) },
+                    || async { Err::<(), _>(FakeError::Conflict) },
+                    || 1,
+                    || async { Ok::<_, FakeError>($conflict_writes) },
+                    || async { Err::<(), _>(FakeError::Permanent) },
+                    || $permanent_attempts,
+                    || async { Ok::<_, FakeError>($permanent_writes) },
+                    || async { Err::<(), _>(FakeError::Transient) },
+                    || $exhaustion_attempts,
+                    3,
+                    || async { Ok::<_, FakeError>($exhaustion_writes) },
+                )
+            };
+        }
+        macro_rules! expect_failure {
+            ($case:expr, $pattern:pat, $message:literal) => {{
+                let error = assert_retry_boundary_policy($case, error_category)
+                    .await
+                    .expect_err($message);
+                assert!(matches!(error, $pattern));
+            }};
+        }
+
+        expect_failure!(
+            boundary!(1, 1, 0, 3, 0),
+            RepoConformanceError::DurableWriteMismatch {
+                stage: "retry conflict durable writes",
+                ..
+            },
+            "conflict writes must fail"
+        );
+        expect_failure!(
+            boundary!(0, 2, 0, 3, 0),
+            RepoConformanceError::AttemptMismatch {
+                stage: "retry permanent attempts",
+                ..
+            },
+            "permanent retry must fail"
+        );
+        expect_failure!(
+            boundary!(0, 1, 1, 3, 0),
+            RepoConformanceError::DurableWriteMismatch {
+                stage: "retry permanent durable writes",
+                ..
+            },
+            "permanent writes must fail"
+        );
+        expect_failure!(
+            boundary!(0, 1, 0, 2, 0),
+            RepoConformanceError::AttemptMismatch {
+                stage: "retry transient exhaustion attempts",
+                ..
+            },
+            "short exhaustion must fail"
+        );
+        expect_failure!(
+            boundary!(0, 1, 0, 3, 1),
+            RepoConformanceError::DurableWriteMismatch {
+                stage: "retry transient exhaustion durable writes",
+                ..
+            },
+            "exhaustion writes must fail"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn retry_boundary_rejects_threshold_one_before_running_actions() {
+        use crate::ConformanceErrorCategory;
+
+        let ran = Cell::new(false);
+        let case = RetryBoundaryCase::new(
+            TransientSuccessPath::new(
+                || async {
+                    ran.set(true);
+                    Ok::<_, FakeError>(())
+                },
+                || 1,
+                1,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            ConflictPath::new(
+                || async { Err::<(), _>(FakeError::Conflict) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            PermanentPath::new(
+                || async { Err::<(), _>(FakeError::Storage) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            TransientExhaustionPath::new(
+                || async { Err::<(), _>(FakeError::Transient) },
+                || 1,
+                2,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+        );
+
+        let error = assert_retry_boundary_policy(case, |_| ConformanceErrorCategory::Other)
+            .await
+            .expect_err("success threshold one must be rejected");
+        assert!(matches!(
+            error,
+            RepoConformanceError::InvalidRetryThreshold {
+                path: RetryPathKind::TransientSuccess,
+                actual: 1,
+                minimum: 2,
+            }
+        ));
+        assert!(!ran.get(), "invalid fixtures must not execute actions");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn retry_boundary_rejects_exhaustion_budget_one_before_running_actions() {
+        let ran = Cell::new(false);
+        let case = RetryBoundaryCase::new(
+            TransientSuccessPath::new(
+                || async {
+                    ran.set(true);
+                    Ok::<_, FakeError>(())
+                },
+                || 2,
+                2,
+                || async { Ok::<_, FakeError>(1) },
+            ),
+            ConflictPath::new(
+                || async { Err::<(), _>(FakeError::Conflict) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            PermanentPath::new(
+                || async { Err::<(), _>(FakeError::Permanent) },
+                || 1,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+            TransientExhaustionPath::new(
+                || async { Err::<(), _>(FakeError::Transient) },
+                || 1,
+                1,
+                || async { Ok::<_, FakeError>(0) },
+            ),
+        );
+
+        let error = assert_retry_boundary_policy(case, error_category)
+            .await
+            .expect_err("exhaustion budget one must be rejected");
+        assert!(matches!(
+            error,
+            RepoConformanceError::InvalidRetryThreshold {
+                path: RetryPathKind::TransientExhaustion,
+                actual: 1,
+                minimum: 2,
+            }
+        ));
+        assert!(!ran.get(), "invalid fixtures must not execute actions");
     }
 
     #[tokio::test]
