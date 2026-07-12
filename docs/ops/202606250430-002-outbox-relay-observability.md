@@ -151,7 +151,7 @@ funnel，未校验 config 类型层不可表达）：
 | `sample_interval` | [1s, 60s] | 0 → 采样聚合查询热轮询；>60s → 5min SLO 窗口采样不足 |
 | `domains` | 1..=64 + canonical | 空 → relay 空转；过多/非法 → metrics label 基数失控 |
 | `sweep_interval` | ≥1s | 0 → DELETE 热轮询 |
-| `retain_seconds` | ≠0（per-table 下限见下） | 0 → 删除 just-published 行；inbox_receipts 低于重投窗口 → 迟到重投误判 Fresh 重复执行 |
+| `retain_seconds` | >0（per-table 下限见下） | outbox 0/负数由 DB 函数 fail-closed；inbox_receipts 低于重投窗口 → 迟到重投误判 Fresh 重复执行 |
 
 ## 保留期清理（三张 durable 表，#1210）
 
@@ -160,7 +160,7 @@ funnel，未校验 config 类型层不可表达）：
 
 | 表 | 终结谓词（删除目标） | 时间列 | 默认保留期 | 误配风险 |
 |----|---------------------|--------|-----------|----------|
-| `outbox` | `status='published'`（dlx 保留供巡检） | `created_at` | 组合根配置（无硬下限） | retain=0 → 删 just-published 行 |
+| `outbox` | `status='published'`（dlx 保留供巡检） | `published_at` | 组合根配置（必须 >0） | 非正数 fail-closed；从真实 publish 终态起算，长期 pending 后刚发布不会提前清理 |
 | `inbox_receipts` | `status='done'`（claimed 行不删） | `committed_at` | **7 天**（`INBOX_RECEIPT_RETENTION_SECONDS`） | **必须严格大于** outbox 最坏重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律）——低于/等于即迟到重投被误判 Fresh 重复执行；编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-RECEIPT-RETENTION-FLOOR-01，单源谓词 `retention_meets_redelivery_floor`） |
 | `dead_letter` | 全部行（死信均终结） | `last_attempt_at` | **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向） | 过短 → 合规审计物料过早灭失（清理前冷存储导出见 #1536） |
 

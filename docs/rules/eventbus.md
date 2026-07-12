@@ -252,10 +252,11 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
 
 **dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽）会**阻塞**该 partition 直到运维 re-drive
 （`eventexec::DlqRedriveRequest` → 当前 tenant scope 内
-`outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL`）
+`outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL, published_at=NULL, dlx_at=NULL`）
 ——这是与「串行有序」一致的唯一选择（放行后继破坏 in-order 不变式）。`outbox.status='dlx'` 仍是 relay
 状态与 partition ordering gate；统一 DLQ 审计行写入 `dead_letter(source_kind='outbox_relay')`，不搬迁/删除
-原 outbox 行。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+ backlog `oldest_age` 增长。
+原 outbox 行；redrive 清除 `dlx_at` 后，既往 DLX 历史继续由 append-only `dead_letter` 留存。代价有界且可观测：
+dlx `error!` 日志 + 行保留（sweep 不删）+ backlog `oldest_age` 增长。
 **已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
 聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 poll-only，
 被 gate 的后继仍计入 backlog depth（否则 stalled partition 对 SLO 失明）。INVARIANT: OUTBOX-PARTITION-ORDER-01。

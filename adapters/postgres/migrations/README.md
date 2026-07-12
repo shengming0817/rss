@@ -179,6 +179,15 @@ coefficient 尾零后编码成 `<integer-coefficient>e<base10-exponent>`（例�
    config/offset、archive checksum 和 golden-vector 结果后，才恢复 producer 流量。archive 按事件数据保留
    策略存入受控对象存储；不得把 payload/metadata 写入工单或日志。
 
+`0056` 为 mutable `outbox` 增加 `published_at` / `dlx_at`。历史 terminal 行以既有 `updated_at`
+确定性回填；数据库 CHECK 双向绑定 status 与对应终态时间，使 terminal 缺时间、非 terminal 伪造时间均不可
+持久化。publish / mark-DLX 在同一条 CAS UPDATE 中写终态时间，redrive 清空两列后恢复 pending；published
+retention 只按 `published_at` 的 partial index 清理，DLX 继续保留供运维巡检。固定 SECURITY DEFINER sweeper
+拒绝 `retain_seconds <= 0`，不保留旧 `created_at` predicate 或兼容 fallback。迁移只回填 terminal 行，并以
+5 秒 lock timeout、5 分钟 statement timeout 和 10 GiB relation-size 上限 fail-fast；部署前须确认无长事务持有
+`outbox` 锁且维护窗口可覆盖 terminal 行回填、CHECK validation 与普通事务型 partial index 重建。超限时停止启动，
+扩大经评审的维护窗口后用新的 forward-only migration 调整容量边界，不绕过保护或恢复旧 sweep 路径。
+
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
 `saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，

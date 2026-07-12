@@ -1404,7 +1404,7 @@ fn log_lost_lease(event_id: &str, operation: &str) {
 // ── RetentionSweeper impl ────────────────────────────────────────────────────────
 
 impl RetentionSweeper for PgOutbox {
-    /// 删除 `status='published'` 且早于保留期的行，返回删除条数。
+    /// 删除 `status='published'` 且 `published_at` 早于保留期的行，返回删除条数。
     /// dlx 行不删（留运维巡检）。
     ///
     /// 时间谓词用 PostgreSQL `now()`（DB 事务时间）是刻意决策——见 [`PgOutbox`] 顶注。
@@ -1414,7 +1414,7 @@ impl RetentionSweeper for PgOutbox {
 }
 
 impl RetentionSweeper for PgOutboxMaintenance {
-    /// 删除 `status='published'` 且早于保留期的行，返回删除条数。
+    /// 删除 `status='published'` 且 `published_at` 早于保留期的行，返回删除条数。
     async fn sweep(&self, retain_seconds: u64) -> Result<u64, EngineError> {
         sweep_published_outbox(&self.pool, retain_seconds).await
     }
@@ -2584,6 +2584,69 @@ mod tests {
             assert!(
                 MIGRATION_0047.contains(needle),
                 "0047 drift: missing {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn outbox_terminal_timestamp_migration_locks_schema_and_transitions() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0056_add_outbox_terminal_timestamps.sql");
+        for needle in [
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '5min'",
+            "pg_total_relation_size('outbox'::regclass) > 10737418240",
+            "outbox exceeds 10 GiB terminal timestamp migration capacity limit",
+            "ALTER TABLE outbox ADD COLUMN published_at timestamptz",
+            "ALTER TABLE outbox ADD COLUMN dlx_at timestamptz",
+            "published_at = CASE WHEN status = 'published' THEN updated_at ELSE NULL END",
+            "dlx_at = CASE WHEN status = 'dlx' THEN updated_at ELSE NULL END",
+            "WHERE status IN ('published', 'dlx')",
+            "CONSTRAINT outbox_published_at_matches_status",
+            "CHECK ((status = 'published') = (published_at IS NOT NULL))",
+            "CONSTRAINT outbox_dlx_at_matches_status",
+            "CHECK ((status = 'dlx') = (dlx_at IS NOT NULL))",
+            "ON outbox (published_at)\n    WHERE status = 'published'",
+            "SET status = 'published',\n        published_at = now(),\n        dlx_at = NULL",
+            "SET status = 'dlx',\n        retry_count = p_retry_count,\n        published_at = NULL,\n        dlx_at = now()",
+            "lease_token = NULL,\n        published_at = NULL,\n        dlx_at = NULL",
+            "IF p_retain_seconds IS NULL OR p_retain_seconds <= 0 THEN",
+            "published_at <= now() - make_interval",
+        ] {
+            assert!(MIGRATION.contains(needle), "0056 drift: missing {needle}");
+        }
+        let sweep_marker = "CREATE OR REPLACE FUNCTION rss_sweep_outbox_published";
+        assert!(MIGRATION.contains(sweep_marker));
+        let current_sweep = MIGRATION.rsplit(sweep_marker).next().unwrap_or_default();
+        assert!(
+            !current_sweep.contains("created_at"),
+            "0056 current sweeper must not retain the legacy created_at predicate"
+        );
+    }
+
+    #[test]
+    fn outbox_terminal_timestamp_migration_restores_function_privileges() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0056_add_outbox_terminal_timestamps.sql");
+        for signature in [
+            "rss_outbox_settle_published(text, uuid)",
+            "rss_outbox_mark_dlx(text, int, uuid)",
+            "rss_outbox_redrive(text, uuid)",
+            "rss_sweep_outbox_published(bigint)",
+        ] {
+            assert!(
+                MIGRATION.contains(&format!(
+                    "ALTER FUNCTION {signature} OWNER TO rss_outbox_maintenance"
+                )),
+                "0056 must restore owner for {signature}"
+            );
+            assert!(
+                MIGRATION.contains(&format!("REVOKE ALL ON FUNCTION {signature} FROM PUBLIC")),
+                "0056 must revoke PUBLIC for {signature}"
+            );
+            assert!(
+                MIGRATION.contains(&format!("GRANT EXECUTE ON FUNCTION {signature} TO rss_app")),
+                "0056 must grant rss_app execute for {signature}"
             );
         }
     }

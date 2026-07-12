@@ -363,7 +363,7 @@ impl PgDlqStore {
                                    octet_length(o.payload)::bigint,
                                    COALESCE(dl.metadata ->> $4, dl.error_summary, $5),
                                    o.retry_count,
-                                   EXTRACT(EPOCH FROM o.updated_at)::bigint
+                                   EXTRACT(EPOCH FROM o.dlx_at)::bigint
                             FROM outbox o
                             LEFT JOIN LATERAL (
                                 SELECT dl.error_summary, dl.metadata
@@ -487,7 +487,7 @@ impl PgDlqStore {
                                    octet_length(o.payload)::bigint,
                                    COALESCE(dl.metadata ->> $9, dl.error_summary, $10),
                                    o.retry_count,
-                                   EXTRACT(EPOCH FROM o.updated_at)::bigint
+                                   EXTRACT(EPOCH FROM o.dlx_at)::bigint
                             FROM outbox o
                             LEFT JOIN LATERAL (
                                 SELECT dl.error_summary, dl.metadata
@@ -504,18 +504,18 @@ impl PgDlqStore {
                               AND ($4::text IS NULL OR o.contract_id = $4)
                               AND (
                                     $5::bigint IS NULL
-                                 OR EXTRACT(EPOCH FROM o.updated_at)::bigint < $5
+                                 OR EXTRACT(EPOCH FROM o.dlx_at)::bigint < $5
                                  OR (
-                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
+                                        EXTRACT(EPOCH FROM o.dlx_at)::bigint = $5
                                     AND $6::text > $7
                                     )
                                  OR (
-                                        EXTRACT(EPOCH FROM o.updated_at)::bigint = $5
+                                        EXTRACT(EPOCH FROM o.dlx_at)::bigint = $5
                                     AND $6::text = $7
                                     AND o.event_id > $8
                                     )
                               )
-                            ORDER BY EXTRACT(EPOCH FROM o.updated_at)::bigint DESC, o.event_id ASC
+                            ORDER BY EXTRACT(EPOCH FROM o.dlx_at)::bigint DESC, o.event_id ASC
                             LIMIT $12
                             "#,
                         )

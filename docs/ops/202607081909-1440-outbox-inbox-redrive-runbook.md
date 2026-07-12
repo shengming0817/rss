@@ -110,7 +110,7 @@ rss dlq list \
   --limit 20
 ```
 
-若命令尾行显示 `has_more=true`，读取 `next_cursor` 后带 `--cursor "$NEXT_CURSOR"` 续页，直到 `has_more=false`。不要用 offset，也不要假设单页覆盖完整 DLQ。
+若命令尾行显示 `has_more=true`，读取 `next_cursor` 后带 `--cursor "$NEXT_CURSOR"` 续页，直到 `has_more=false`。不要用 offset，也不要假设单页覆盖完整 DLQ。outbox DLX 的 `last_attempt` 展示、降序排序和 cursor 均以权威终态时间 `dlx_at` 为单源；后续租约或运维写入导致的 `updated_at` 变化不得改变队列顺序。
 
 3. 核对 `contract_id`、`error_summary`、attempts：
 
@@ -156,4 +156,4 @@ rss dlq redrive-outbox \
 - `PayloadKeyUnavailable` / `PayloadKeyForbidden`：恢复 Vault/key provider 后重试。
 - `Store`：检查 Postgres、RLS、SECURITY DEFINER 函数权限和 migration 版本。
 
-成功 redrive 不删除 `dead_letter` 审计行，不修改 payload/schema/seq/partition，只把 outbox DLX 行恢复为 `pending` 并清 retry/lease 字段。
+成功 redrive 不删除 `dead_letter` 审计行，不修改 payload/schema/seq/partition，只把 outbox DLX 行恢复为 `pending`，清 retry/lease，并同时清空 `published_at`、`dlx_at`；旧 DLX 历史继续由 append-only `dead_letter` 审计行保存。
