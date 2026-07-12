@@ -8,8 +8,6 @@ tools:
   - Edit
   - Write
   - Bash
-permissionMode: auto
-memory: project
 ---
 
 # Developer Agent

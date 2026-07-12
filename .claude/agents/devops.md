@@ -7,8 +7,6 @@ tools:
   - Grep
   - Write
   - Bash
-permissionMode: auto
-# isolation: worktree
 ---
 
 # DevOps Agent

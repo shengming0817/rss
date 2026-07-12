@@ -7,8 +7,6 @@ tools:
   - Grep
   - Write
   - Edit
-permissionMode: auto
-# isolation: worktree
 ---
 
 # 架构师 Agent

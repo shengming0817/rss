@@ -7,7 +7,6 @@ tools:
   - Grep
   - WebFetch
   - WebSearch
-permissionMode: auto
 ---
 
 # Explorer Agent

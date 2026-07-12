@@ -5,7 +5,6 @@ tools:
   - Read
   - Glob
   - Grep
-permissionMode: auto
 ---
 
 # Reviewer Agent
