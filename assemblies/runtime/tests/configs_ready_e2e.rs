@@ -3,11 +3,11 @@
 //! 覆盖路径：
 //! - **Down 路径**（fail-closed，不连 DB）：已迁至 `runtime::tests::configs_ready_initial_down_readyz_503`
 //!   （`#[cfg(test)]` in lib.rs），azure 非 integration 路径下即可运行。
-//! - **Ready 路径**：`PgRuntimeDeps::spawn_readiness_sampler`（短 period）→ 真实 DB tick 后 readiness handle
+//! - **Ready 路径**：owner → handle + consuming runtime parts（短 period）→ 真实 DB tick 后 readiness handle
 //!   被标记 Ready → readyz 返 200，JSON body 含 `"overall":"healthy"` + `"name":"configs_ready"`。
 //!
 //! 区别于 lib 单测的 `HealthyProbe` 替身——此处验真实 `ConfigsReadyProbe.check()` 读 `PgDbReadiness::snapshot()`。
-//! 采样驱动经 bundle 的 `spawn_readiness_sampler`（spawn+adopt 收口，#1423）；`pg_readiness_sampling_loop` 已 `pub(crate)`。
+//! 采样驱动经 bundle 的 consuming sampler factory（spawn+adopt 收口，#1423）。
 //!
 //! `integration` feature 门控；无 docker 时经 `testkit::env_or_postgres()` 取 env 外部 pg 或跳过。
 //! `cargo test -p runtime --features integration --no-run` 能编译即满足验收。
@@ -97,17 +97,18 @@ async fn provision_rss_app_login(
     Ok(())
 }
 
-/// Ready 路径：`spawn_readiness_sampler`（短 period，真实 DB）→ readyz 200。
+/// Ready 路径：consuming sampler factory（短 period，真实 DB）→ readyz 200。
 ///
-/// 流程：`setup` 连真实 DB（readiness handle 初值 Down）→ `spawn_readiness_sampler`（50ms period，spawn+adopt
-/// 收口进 bundle）→ tokio sleep 200ms 等至少一轮采样 tick 完成 → readyz 200（采样已标 Ready）→ `shutdown` 收敛。
+/// 流程：`setup` 连真实 DB（readiness handle 初值 Down）→ owner 投影 handle 后按值交接 runtime parts
+/// → tokio sleep 200ms 等至少一轮采样 tick 完成 → readyz 200（采样已标 Ready）→ `shutdown` 收敛。
 #[tokio::test(flavor = "multi_thread")]
 async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult {
-    let (_fixture, deps) = connect_pg().await?;
+    let (_fixture, owner) = connect_pg().await?;
+    let handle = owner.handle();
 
-    // 短 period（50ms）确保首 tick 快速到来；spawn+adopt 由 bundle 收口。
-    let sampler = deps.spawn_readiness_sampler(Duration::from_millis(50), CancellationToken::new());
-    let health = deps.readiness_handle();
+    let health = handle.readiness_handle();
+    let (resources, sampler_factory) = owner.into_runtime_parts(Duration::from_millis(50));
+    let sampler = sampler_factory.spawn(CancellationToken::new());
 
     // 等待至少一轮采样（200ms >> 50ms period）。
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -157,5 +158,8 @@ async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult 
 
     // 清理 sampler task。
     sampler.shutdown().await?;
+    for resource in resources.into_iter().rev() {
+        resource.shutdown().await?;
+    }
     Ok(())
 }

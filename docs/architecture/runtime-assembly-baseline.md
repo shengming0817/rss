@@ -1,6 +1,6 @@
 # Runtime Assembly Baseline
 
-This document records the current runtime assembly shape before the `runtime::run()` decomposition series. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is regenerated with:
+This document records the current runtime assembly shape after the `runtime::run()` decomposition and #1677 PG lifecycle-ownership hardening. The machine-readable inventory lives in `runtime-baseline/runtime.txt` and is regenerated with:
 
 ```bash
 cargo xtask runtime-baseline list > runtime-baseline/runtime.txt
@@ -16,6 +16,7 @@ The baseline locks static repository facts only:
 - `assemblies/runtime/src/module.rs` `SharedRuntimeDeps` fields
 - `crates/bootstrap/src/module.rs` `DomainModuleResult` fields plus `merge`
 - ordered anchors inside `assemblies/runtime/src/lib.rs` `runtime::run()`
+- the unique PG lifecycle-output helper and production call
 - ordered launch anchors inside `assemblies/runtime/src/launch.rs`
 
 Dynamic state is not asserted by this gate: environment variables, live provider health, generated event subscriptions, topology-specific routing, socket bind results, and OS signal behavior remain runtime facts.
@@ -26,7 +27,8 @@ The current production runtime assembly has these phases:
 
 1. Build provider bundles and transport handles:
    - OIDC `build_provider()`
-   - Postgres `PgRuntimeDeps::setup_with_audit_admin_config`
+   - Postgres non-Clone owner from `PgRuntimeDeps::setup_with_audit_admin_config`, then its
+     cloneable `PgRuntimeHandle` capability projection
    - Vault `build_vault_runtime_deps`
    - Redis `build_redis_runtime_deps`
    - S3 `build_s3_runtime_deps_from`
@@ -46,7 +48,9 @@ The current production runtime assembly has these phases:
 7. Call `wire_distributed`, bridge generated event subscriptions, then call `event_transport::wire_event_transport`.
 8. Drain module probes into `Registry` before `take_health_reporter`.
 9. Assemble authenticated routers and the dedicated health listener.
-10. Build `LaunchPlan` and serve listeners through `launch::launch`.
+10. Consume the retained PG owner once through `build_pg_runtime_module(owner, period)` into the
+    existing `DomainModuleResult` type, pass that required module batch to `LaunchPlan`, and serve
+    listeners through `launch::launch`.
 
 ## Provider Inventory
 
@@ -70,7 +74,7 @@ The committed baseline records the current DI provider declarations from `assemb
 
 `SharedRuntimeDeps` currently carries:
 
-- `PgRuntimeDeps`
+- `PgRuntimeHandle`
 - `RedisRuntimeDeps`
 - `S3RuntimeDeps`
 - `VaultRuntimeDeps`
@@ -80,6 +84,19 @@ The committed baseline records the current DI provider declarations from `assemb
 The infrastructure-only input boundary is enforced by `cargo xtask runtime-deps guard`
 (`WIRING-DEPS-INFRA-ONLY-01`). The baseline remains an inventory drift gate; semantic field
 allowlisting belongs to the runtime deps guard.
+
+`PgRuntimeDeps` remains local to `run()` as the non-Clone lifecycle owner; it is not a second shared
+input. The owner directly wraps the same `PgRuntimeHandle` used by capability consumers and is retained
+until launch assembly consumes it. `PgRuntimeHandle` exposes only domain/infra/readiness projections.
+Pool guards and the readiness sampler can only leave the owner through
+`into_runtime_parts(self, period)`.
+
+PG intentionally does not implement the runtime-local generic `ProviderOutput` trait. The unique
+`build_pg_runtime_module` helper converts its ordered pool guards and non-Clone sampler factory
+directly into `DomainModuleResult`; no parallel PG output type exists. `LaunchPlanParts` requires the
+PG module batch and the normal domain module batch, and both use the same resources-then-workers
+registration helper. Keeping them as ordered batches preserves the PG sampler-before-event-infra
+registration dependency without creating a second output seam.
 
 `DomainModuleResult` currently carries:
 
@@ -94,15 +111,14 @@ allowlisting belongs to the runtime deps guard.
 Authenticated listeners are built through `assemble_authed_routers`. Health and metrics use a dedicated plain listener from `health_listener`, after route groups are drained and before `run()` hands a `LaunchPlan` to `launch::launch`.
 
 `LaunchPlan::register` transfers non-listener resources into `ShutdownStack` before
-`launch_until_observed` binds listener sockets. Shutdown is registered in LIFO order:
+`launch_until` binds listener sockets. Shutdown is registered in LIFO order:
 
 1. optional OTEL exporter
-2. Postgres pool guards
-3. Postgres readiness sampler
-4. event infra guards
-5. module resources
-6. module workers
-7. listeners, registered inside `launch_until`
+2. PG `DomainModuleResult`: primary pool guard, optional audit-admin pool guard, then readiness sampler
+3. event infra guards
+4. module resources
+5. module workers
+6. listeners, registered inside `launch_until`
 
 The effective shutdown drain order is the reverse: listeners first, then workers/resources, event infra, sampler, pool guards, and finally OTEL flushing.
 
@@ -114,6 +130,9 @@ The effective shutdown drain order is the reverse: listeners first, then workers
 - regenerated baseline text differs from the committed file
 - runtime dependencies or assembly providers are empty
 - required `runtime::run()` or `launch.rs` anchors are missing or out of order
+- the unique PG helper or its unique production call is missing/duplicated, PG implements generic
+  `ProviderOutput`, lifecycle primitives escape the helper, a parallel PG output type appears, or
+  PG module registration moves after event infra
 - `DomainModuleResult::merge` is absent or stops merging a field
 
 `cargo xtask verify --fast` and `cargo xtask ci` run this gate before `archrules`, so `RUNTIME-BASELINE-DRIFT-01` is indexed by `cargo xtask archrules verify`.

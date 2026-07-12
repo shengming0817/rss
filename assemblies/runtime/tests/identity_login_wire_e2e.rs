@@ -367,7 +367,8 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
     let vault_uri = vault_server.uri();
 
     // 2. postgres fixture + credential seed（login 凭据）。
-    let (_fixture, pg) = connect_pg().await?;
+    let (_fixture, pg_owner) = connect_pg().await?;
+    let pg = pg_owner.handle();
     let tenant = TenantId::parse(CANON_TENANT)?;
     let tenant_scope = TenantRepoScope::for_test(tenant);
     let credential = Credential::hydrate(
@@ -419,7 +420,7 @@ async fn wire_identity_login_refresh_and_rotation_e2e() -> TestResult {
         _ => None,
     })?;
     let deps = SharedRuntimeDeps {
-        pg,
+        pg: pg.clone(),
         redis,
         s3,
         vault,
@@ -571,7 +572,8 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     let vault_uri = vault_server.uri();
 
     // 2. postgres fixture + RBAC seed：admin 角色、operator 角色、admin 自身 role binding。
-    let (fixture, pg) = connect_pg().await?;
+    let (fixture, pg_owner) = connect_pg().await?;
+    let pg = pg_owner.handle();
     let assertion_pool = assertion_pool(fixture.params()).await?;
     let tenant = TenantId::parse(CANON_TENANT)?;
     let actor = ids::UserId::parse(CANON_USER)?;
@@ -659,7 +661,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         _ => None,
     })?;
     let deps = SharedRuntimeDeps {
-        pg,
+        pg: pg.clone(),
         redis,
         s3,
         vault,

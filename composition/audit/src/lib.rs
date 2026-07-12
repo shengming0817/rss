@@ -110,7 +110,7 @@ pub mod test_support {
     /// Returns an error if the fixed test key violates the production strength requirement.
     pub fn binding() -> anyhow::Result<DomainBinding> {
         wire(AuditModuleDeps::new(
-            postgres::PgRuntimeDeps::for_module_test().for_domain(),
+            postgres::PgRuntimeHandle::for_module_test().for_domain(),
             TestMac,
             MacKey::from_bytes(vec![0x42; 32]),
             Arc::new(TestClock),

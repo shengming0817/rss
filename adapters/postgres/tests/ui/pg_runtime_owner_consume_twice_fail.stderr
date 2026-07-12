@@ -1,0 +1,9 @@
+error[E0382]: use of moved value: `owner`
+ --> tests/ui/pg_runtime_owner_consume_twice_fail.rs:6:19
+  |
+4 | fn owner_has_one_lifecycle_exit(owner: PgRuntimeDeps) {
+  |                                 ----- move occurs because `owner` has type `PgRuntimeDeps`, which does not implement the `Copy` trait
+5 |     let _first = owner.into_runtime_parts(Duration::from_secs(1));
+  |                  ----- value moved here
+6 |     let _second = owner.into_runtime_parts(Duration::from_secs(1));
+  |                   ^^^^^ value used here after move

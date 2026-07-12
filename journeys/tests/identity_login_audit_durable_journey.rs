@@ -41,8 +41,8 @@ use consistency::{
 use diagctx::{CorrelationId, DiagnosticCtx};
 use diport::{
     DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynDeadLetterStore, DynPublisher,
-    EnvelopeMetadata, KEY_CORRELATION, KEY_SUBJECT_ID, Message, MessageId, PublishRequest,
-    Publisher, Subscriber, Topic,
+    EnvelopeMetadata, KEY_CORRELATION, KEY_SUBJECT_ID, ManagedResource, Message, MessageId,
+    PublishRequest, Publisher, Subscriber, Topic,
 };
 use eventexec::{ConsumerMeta, LeaseConfig, TenantAuthority, TenantAuthorityBinding, run_consumer};
 use futures::future::BoxFuture;
@@ -63,6 +63,17 @@ const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
 /// #1160：注入的 correlation——经 diagctx ambient → PgSessionLifecycle emit → outbox.metadata 列 → relay
 /// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
+
+fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (body, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(body), Ok(())) => Err(body),
+        (Ok(()), Err(cleanup)) => Err(cleanup).context("shut down durable-journey postgres"),
+        (Err(body), Err(cleanup)) => {
+            Err(body).context(format!("postgres cleanup also failed: {cleanup:#}"))
+        }
+    }
+}
 
 fn durable_tenant_authority(database_now_epoch: i64) -> Result<Arc<TenantAuthority>> {
     let now_epoch_secs = Arc::new(move || database_now_epoch);
@@ -265,209 +276,254 @@ async fn login_audit_durable_topology() -> Result<()> {
         generated::event::PROJECTION_INPUTS,
     )
     .await?;
-    let id = deps.for_domain::<caps::Identity>();
+    let body_result: Result<()> = async {
+        let pg_handle = deps.handle();
+        let id = pg_handle.for_domain::<caps::Identity>();
 
-    let bus = MemBus::new();
-    let (audit_domain, audit, audit_repo) = audit_domain();
-    // relay 的 iat 来自 PostgreSQL `now()`；consumer 必须以实时钟验证同一 authority，不能复用
-    // payload 的固定业务时钟（NOW_SECS），否则所有真实 durable 消息都会被误判为未来 token。
-    let durable_authority = durable_tenant_authority(authority_epoch)?;
+        let bus = MemBus::new();
+        let (audit_domain, audit, audit_repo) = audit_domain();
+        // relay 的 iat 来自 PostgreSQL `now()`；consumer 必须以实时钟验证同一 authority，不能复用
+        // payload 的固定业务时钟（NOW_SECS），否则所有真实 durable 消息都会被误判为未来 token。
+        let durable_authority = durable_tenant_authority(authority_epoch)?;
 
-    // 组装 audit 订阅（contract/topic/group 单源自 generated SPEC.subscriptions()）。
-    let refresh_identity = identity::seed_refresh_service(
-        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-    );
-    let login_identity = Arc::new(LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(
-            id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-        )),
-        Arc::clone(&refresh_identity),
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-        LOGIN_USERNAME,
-        ids::UserId::parse(CANON_USER)?,
-        PASSWORD,
-        TenantId::parse(CANON_TENANT)?,
-    )?);
-    let identity_domain = identity_domain(login_identity, refresh_identity);
-    let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
-    let binding = session_created_subscription(registry)?;
-    anyhow::ensure!(binding.topic() == SESSION_CREATED_TOPIC);
-    let (event_contract_id, event_topic, _, group, execution) = binding.into_parts();
-    anyhow::ensure!(matches!(execution, SubscriberExecution::AdapterNative));
-    let event_domain = event_topic.split('.').next().unwrap_or(event_topic);
-
-    // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
-    let claimer = Arc::new(deps.infra().inbox());
-    let token = CancellationToken::new();
-    let stream = bus
-        .subscriber()
-        .subscribe(Topic::new(event_topic), token.clone())
-        .await?;
-    let meta = ConsumerMeta::new(
-        "audit",
-        event_topic.split('.').next().unwrap_or(event_topic),
-        event_contract_id,
-        event_topic,
-        group.as_str(),
-        Arc::clone(&durable_authority),
-    );
-    // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。
-    let captured: Arc<Mutex<Vec<EnvelopeMetadata>>> = Arc::new(Mutex::new(Vec::new()));
-    let consume = run_consumer(
-        stream,
-        claimer.clone(),
-        DynDeadLetterStore::new_box(NoopDlx),
-        meta,
-        consumer_handler(audit_repo, captured.clone()),
-        // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
-        LeaseConfig::from_ttl(claimer.lease_ttl()),
-    );
-
-    // 生产侧：login → PgSessionLifecycle **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
-    // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
-    // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
-    let tenant = TenantId::parse(CANON_TENANT)?;
-    let refresh_for_login = identity::seed_refresh_service(
-        || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-    );
-    let login = LoginService::with_seed_credential(
-        Arc::from(DynSessionLifecycle::new_box(
-            id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
-        )),
-        refresh_for_login,
-        Box::new(FixedClock::at_unix_secs(NOW_SECS)),
-        Duration::from_secs(TTL_SECS),
-        LOGIN_USERNAME,
-        ids::UserId::parse(CANON_USER)?,
-        PASSWORD,
-        tenant,
-    )?;
-    let relay = id.outbox(
-        DynPublisher::new_box(bus.publisher()),
-        Arc::clone(&durable_authority),
-        dlx_payload_protector(),
-    );
-
-    let drive = async {
-        // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient
-        // 信道盖进 outbox.metadata 列（fail-open；scope 外则省略）。
-        let response = diagctx::scope(
-            DiagnosticCtx::new(CorrelationId::parse(JOURNEY_CORR)?),
-            login.login(
-                tenant,
-                IdentityLoginRequest {
-                    username: LOGIN_USERNAME.to_string(),
-                    password: PASSWORD.to_string(),
-                },
-            ),
-        )
-        .await?;
-        // F1 后：idem_key = 独立 EventId（非 session_id）；以 payload.sessionId 关联本轮 entry（F6）。
-        let session_id = response.data.session_id.clone();
-
-        // F6：bounded 轮询（最多 50 次 × 100ms），经 payload 解码匹配本轮 session_id——
-        // 对抗 stale pending 行，不依赖 pending 数量/顺序。
-        let our = {
-            let mut found = None;
-            for _ in 0..50 {
-                let pending = OutboxSource::poll_pending(&relay, IDENTITY_DOMAIN, 64).await?;
-                for entry in &pending {
-                    let Ok(pl) =
-                        serde_json::from_slice::<IdentitySessionCreatedPayload>(entry.payload())
-                    else {
-                        continue;
-                    };
-                    if pl.session_id == session_id {
-                        found = Some(entry.clone());
-                        break;
-                    }
-                }
-                if found.is_some() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            found.ok_or_else(|| {
-                anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
-            })?
-        };
-        // relay CAS 中继 → MemBus（message_id = entry 自身的独立 EventId）。
-        let event_id = our.idem_key().as_str().to_string();
-        let payload = our.payload().to_vec();
-        let disposition = OutboxRelay::relay(&relay, &our).await?;
-        anyhow::ensure!(
-            disposition == Disposition::Ack,
-            "outbox relay 未发布：{disposition:?}"
+        // 组装 audit 订阅（contract/topic/group 单源自 generated SPEC.subscriptions()）。
+        let refresh_identity = identity::seed_refresh_service(
+            || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+            Duration::from_secs(TTL_SECS),
         );
-        wait_until_audited(&audit).await.with_context(|| {
-            let consumed = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
-            format!("audit 未落链；consumer 已观察 {consumed} 条消息")
-        })?;
+        let login_identity = Arc::new(LoginService::with_seed_credential(
+            Arc::from(DynSessionLifecycle::new_box(
+                id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+            )),
+            Arc::clone(&refresh_identity),
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+            Duration::from_secs(TTL_SECS),
+            LOGIN_USERNAME,
+            ids::UserId::parse(CANON_USER)?,
+            PASSWORD,
+            TenantId::parse(CANON_TENANT)?,
+        )?);
+        let identity_domain = identity_domain(login_identity, refresh_identity);
+        let registry = bootstrap::compose(&[&identity_domain, &audit_domain])?;
+        let binding = session_created_subscription(registry)?;
+        anyhow::ensure!(binding.topic() == SESSION_CREATED_TOPIC);
+        let (event_contract_id, event_topic, _, group, execution) = binding.into_parts();
+        anyhow::ensure!(matches!(execution, SubscriberExecution::AdapterNative));
+        let event_domain = event_topic.split('.').next().unwrap_or(event_topic);
 
-        // 重投同一 EventId（模拟 broker 重投）→ PgInbox Duplicate → audit 不重复。
-        bus.publisher()
-            .publish(
-                PublishRequest::new(
-                    Topic::new(SESSION_CREATED_TOPIC),
-                    MessageId::new(event_id.as_str()),
-                    payload,
-                )
-                .with_metadata(signed_metadata_at(
-                    &durable_authority,
-                    event_domain,
-                    event_contract_id,
-                    event_topic,
-                    event_id.as_str(),
-                )?),
+        // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
+        let claimer = Arc::new(pg_handle.infra().inbox());
+        let token = CancellationToken::new();
+        let stream = bus
+            .subscriber()
+            .subscribe(Topic::new(event_topic), token.clone())
+            .await?;
+        let meta = ConsumerMeta::new(
+            "audit",
+            event_topic.split('.').next().unwrap_or(event_topic),
+            event_contract_id,
+            event_topic,
+            group.as_str(),
+            Arc::clone(&durable_authority),
+        );
+        // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。
+        let captured: Arc<Mutex<Vec<EnvelopeMetadata>>> = Arc::new(Mutex::new(Vec::new()));
+        let consume = run_consumer(
+            stream,
+            claimer.clone(),
+            DynDeadLetterStore::new_box(NoopDlx),
+            meta,
+            consumer_handler(audit_repo, captured.clone()),
+            // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
+            LeaseConfig::from_ttl(claimer.lease_ttl()),
+        );
+
+        // 生产侧：login → PgSessionLifecycle **co-tx**（session 行 + outbox 行同事务）durable 落库；relay
+        // （MemBus 作 in-test broker）CAS 中继。session 行持久化 + co-tx 原子性由 postgres 集成测试 t11/t12 守
+        // （pool 为 pub(crate)，journey 不直查 sessions 表）；本 journey 验 co-tx provider 端到端贯通到 audit。
+        let tenant = TenantId::parse(CANON_TENANT)?;
+        let refresh_for_login = identity::seed_refresh_service(
+            || Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+            Duration::from_secs(TTL_SECS),
+        );
+        let login = LoginService::with_seed_credential(
+            Arc::from(DynSessionLifecycle::new_box(
+                id.session_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
+            )),
+            refresh_for_login,
+            Box::new(FixedClock::at_unix_secs(NOW_SECS)),
+            Duration::from_secs(TTL_SECS),
+            LOGIN_USERNAME,
+            ids::UserId::parse(CANON_USER)?,
+            PASSWORD,
+            tenant,
+        )?;
+        let relay = id.outbox(
+            DynPublisher::new_box(bus.publisher()),
+            Arc::clone(&durable_authority),
+            dlx_payload_protector(),
+        );
+
+        let drive = async {
+            // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient
+            // 信道盖进 outbox.metadata 列（fail-open；scope 外则省略）。
+            let response = diagctx::scope(
+                DiagnosticCtx::new(CorrelationId::parse(JOURNEY_CORR)?),
+                login.login(
+                    tenant,
+                    IdentityLoginRequest {
+                        username: LOGIN_USERNAME.to_string(),
+                        password: PASSWORD.to_string(),
+                    },
+                ),
             )
             .await?;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        anyhow::Ok(())
-    };
+            // F1 后：idem_key = 独立 EventId（非 session_id）；以 payload.sessionId 关联本轮 entry（F6）。
+            let session_id = response.data.session_id.clone();
 
-    tokio::pin!(consume);
-    tokio::pin!(drive);
-    let driven = tokio::select! {
-        result = &mut drive => {
-            // drive 任一路径（含 `?` 提前失败）都终止 consumer，避免永久等待并吞掉原始诊断。
-            token.cancel();
-            consume.await;
-            result
+            // F6：bounded 轮询（最多 50 次 × 100ms），经 payload 解码匹配本轮 session_id——
+            // 对抗 stale pending 行，不依赖 pending 数量/顺序。
+            let our = {
+                let mut found = None;
+                for _ in 0..50 {
+                    let pending = OutboxSource::poll_pending(&relay, IDENTITY_DOMAIN, 64).await?;
+                    for entry in &pending {
+                        let Ok(pl) = serde_json::from_slice::<IdentitySessionCreatedPayload>(
+                            entry.payload(),
+                        ) else {
+                            continue;
+                        };
+                        if pl.session_id == session_id {
+                            found = Some(entry.clone());
+                            break;
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                found.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "outbox 缺本轮 session-created entry（session_id={session_id}）"
+                    )
+                })?
+            };
+            // relay CAS 中继 → MemBus（message_id = entry 自身的独立 EventId）。
+            let event_id = our.idem_key().as_str().to_string();
+            let payload = our.payload().to_vec();
+            let disposition = OutboxRelay::relay(&relay, &our).await?;
+            anyhow::ensure!(
+                disposition == Disposition::Ack,
+                "outbox relay 未发布：{disposition:?}"
+            );
+            wait_until_audited(&audit).await.with_context(|| {
+                let consumed = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
+                format!("audit 未落链；consumer 已观察 {consumed} 条消息")
+            })?;
+
+            // 重投同一 EventId（模拟 broker 重投）→ PgInbox Duplicate → audit 不重复。
+            bus.publisher()
+                .publish(
+                    PublishRequest::new(
+                        Topic::new(SESSION_CREATED_TOPIC),
+                        MessageId::new(event_id.as_str()),
+                        payload,
+                    )
+                    .with_metadata(signed_metadata_at(
+                        &durable_authority,
+                        event_domain,
+                        event_contract_id,
+                        event_topic,
+                        event_id.as_str(),
+                    )?),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            anyhow::Ok(())
+        };
+
+        tokio::pin!(consume);
+        tokio::pin!(drive);
+        let driven = tokio::select! {
+            result = &mut drive => {
+                // drive 任一路径（含 `?` 提前失败）都终止 consumer，避免永久等待并吞掉原始诊断。
+                token.cancel();
+                consume.await;
+                result
+            }
+            () = &mut consume => Err(anyhow::anyhow!("consumer 在 durable drive 完成前退出")),
+        };
+        driven?;
+
+        anyhow::ensure!(
+            audit.audited().len() == 1,
+            "durable：登录 emit + 重投同一 EventId → audit 链仅 append 一次（PgInbox 幂等）"
+        );
+
+        // #1160 端到端 envelope metadata 保真：取首条携 metadata 的消费消息（重投是 metadata 空的 PublishRequest），
+        // 断言 broker-visible occurred_at / correlation 经 emit→outbox.metadata 列→relay hydrate→MemBus→consumer 全链保真。
+        let seen = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let md = seen
+            .iter()
+            .find(|m| !m.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("consumer 未收到任何携 envelope metadata 的消息"))?;
+        anyhow::ensure!(
+            md.occurred_at_secs() == Some(NOW_SECS as i64),
+            "occurred_at（注入 Clock）应经 outbox.metadata→relay→broker→consumer 全链保真"
+        );
+        anyhow::ensure!(
+            md.get(KEY_CORRELATION) == Some(JOURNEY_CORR),
+            "correlation 应经 diagctx ambient→emit→outbox.metadata→relay→broker→consumer 全链保真"
+        );
+        anyhow::ensure!(
+            md.get(KEY_SUBJECT_ID).is_none(),
+            "subjectId 是 persisted-only metadata，不应经 relay→broker→consumer 外发"
+        );
+        Ok(())
+    }
+    .await;
+
+    let cleanup_result: Result<()> = async {
+        let (resources, _sampler_factory) = deps.into_runtime_parts(Duration::from_secs(1));
+        for resource in resources.into_iter().rev() {
+            resource.shutdown().await?;
         }
-        () = &mut consume => Err(anyhow::anyhow!("consumer 在 durable drive 完成前退出")),
-    };
-    driven?;
+        Ok(())
+    }
+    .await;
+    finish_with_pg_cleanup(body_result, cleanup_result)
+}
 
-    assert_eq!(
-        audit.audited().len(),
-        1,
-        "durable：登录 emit + 重投同一 EventId → audit 链仅 append 一次（PgInbox 幂等）"
-    );
+#[test]
+fn pg_cleanup_result_preserves_body_error_and_reports_cleanup_failure() -> Result<()> {
+    let err = finish_with_pg_cleanup(
+        Err(anyhow::anyhow!("body failed")),
+        Err(anyhow::anyhow!("cleanup failed")),
+    )
+    .err()
+    .ok_or_else(|| anyhow::anyhow!("both failures must remain an error"))?;
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("body failed"));
+    assert!(rendered.contains("cleanup failed"));
+    Ok(())
+}
 
-    // #1160 端到端 envelope metadata 保真：取首条携 metadata 的消费消息（重投是 metadata 空的 PublishRequest），
-    // 断言 broker-visible occurred_at / correlation 经 emit→outbox.metadata 列→relay hydrate→MemBus→consumer 全链保真。
-    let seen = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let md = seen
-        .iter()
-        .find(|m| !m.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("consumer 未收到任何携 envelope metadata 的消息"))?;
-    assert_eq!(
-        md.occurred_at_secs(),
-        Some(NOW_SECS as i64),
-        "occurred_at（注入 Clock）应经 outbox.metadata→relay→broker→consumer 全链保真"
-    );
-    assert_eq!(
-        md.get(KEY_CORRELATION),
-        Some(JOURNEY_CORR),
-        "correlation 应经 diagctx ambient→emit→outbox.metadata→relay→broker→consumer 全链保真"
-    );
-    assert_eq!(
-        md.get(KEY_SUBJECT_ID),
-        None,
-        "subjectId 是 persisted-only metadata，不应经 relay→broker→consumer 外发"
-    );
+#[test]
+fn pg_cleanup_result_returns_cleanup_only_failure() -> Result<()> {
+    let err = finish_with_pg_cleanup(Ok(()), Err(anyhow::anyhow!("cleanup failed")))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("cleanup failure must be returned"))?;
+    assert!(format!("{err:#}").contains("cleanup failed"));
+    Ok(())
+}
+
+#[test]
+fn pg_cleanup_result_preserves_success_and_body_only_failure() -> Result<()> {
+    finish_with_pg_cleanup(Ok(()), Ok(()))?;
+    let err = finish_with_pg_cleanup(Err(anyhow::anyhow!("body failed")), Ok(()))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("body failure must be returned"))?;
+    assert_eq!(format!("{err:#}"), "body failed");
     Ok(())
 }

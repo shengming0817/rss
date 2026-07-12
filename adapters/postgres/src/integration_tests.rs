@@ -1774,7 +1774,7 @@ async fn command_journal_runtime_deps_serving_role_records_and_replays() -> Test
     let idempotency_key = unique_event_id("command-journal-serving-key");
     let first = command_journal_command(tenant, &idempotency_key, br#"{"op":"serving"}"#).await?;
     let fingerprint = reviewed_command_fingerprint(&first);
-    let journal = deps.infra().command_journal(fixed_clock());
+    let journal = deps.handle().infra().command_journal(fixed_clock());
 
     assert_eq!(
         CommandJournalStore::record_command(&journal, first, CommandResultSummary::ENQUEUED)
@@ -1799,7 +1799,10 @@ async fn command_journal_runtime_deps_serving_role_records_and_replays() -> Test
     .await?;
     assert_eq!(count.0, 1, "serving role path must persist one journal row");
     owner_pool.close().await;
-    deps.store_guard().shutdown().await?;
+    let (resources, _sampler_factory) = deps.into_runtime_parts(std::time::Duration::from_secs(1));
+    for resource in resources.into_iter().rev() {
+        resource.shutdown().await?;
+    }
     Ok(())
 }
 
@@ -4784,7 +4787,7 @@ async fn projection_writer_funnel_runtime_setup_mirrors_generated_bound_emit() -
         TEST_PROJECTION_INPUTS,
     )
     .await?;
-    let emitter = deps.infra().emitter(fixed_clock());
+    let emitter = deps.handle().infra().emitter(fixed_clock());
     let event_id = unique_event_id("projection-runtime-bound");
 
     emitter
@@ -4845,7 +4848,10 @@ async fn projection_writer_funnel_runtime_setup_mirrors_generated_bound_emit() -
     );
 
     pool.close().await;
-    deps.store_guard().shutdown().await?;
+    let (resources, _sampler_factory) = deps.into_runtime_parts(std::time::Duration::from_secs(1));
+    for resource in resources.into_iter().rev() {
+        resource.shutdown().await?;
+    }
     Ok(())
 }
 
@@ -13325,8 +13331,8 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_config(&store).await?;
     // 经 funnel：PgRuntimeDeps → for_domain::<Settings> → settings_bundle → into_parts（取 read config box）。
-    let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
-    let (configs, writer, _secrets) = deps
+    let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::new(store));
+    let (configs, writer, _secrets) = handle
         .for_domain::<crate::caps::Settings>()
         .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();
@@ -13361,8 +13367,8 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
     setup_config(&store).await?;
     // store 即将移入 deps（PG-BUNDLE-POOL-03 无 pool accessor）→ 先 clone pool 供验证查询。
     let pool = store.pool.clone();
-    let deps = crate::PgRuntimeDeps::from_store_for_test(std::sync::Arc::new(store));
-    let (_configs, writer, _secrets) = deps
+    let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::new(store));
+    let (_configs, writer, _secrets) = handle
         .for_domain::<crate::caps::Settings>()
         .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();

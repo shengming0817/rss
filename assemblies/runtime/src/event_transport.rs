@@ -39,7 +39,7 @@ use eventexec::{
     backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
 };
 use generated::event::{EventSpec, SubscriberReadiness, SubscriptionSpec};
-use postgres::{AuditConsumerTxEffect as _, DlxPayloadProtector, PgRuntimeDeps, caps};
+use postgres::{AuditConsumerTxEffect as _, DlxPayloadProtector, PgRuntimeHandle, caps};
 use primitives::{HealthCheck, MacKey, ProbeName};
 use vault::VaultKeyProvider;
 
@@ -432,7 +432,7 @@ fn resolve_event_decision(
 ///
 /// `cfg` 按值消费（`TransportConfig` 不 impl Clone）。
 pub async fn wire_event_transport(
-    pg: &PgRuntimeDeps,
+    pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
@@ -592,7 +592,7 @@ fn event_security_for_topology(
 // 保证 LIFO 关闭顺序（infra_guards 最后关 = AMQP 连接在 workers drain 后才断开）；
 // 拆分为子函数会把 Vec push 顺序散布到多处并隐藏 LIFO 约束，复杂度来自不可压缩的业务顺序。
 async fn wire_durable(
-    pg: &PgRuntimeDeps,
+    pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
     per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
@@ -714,7 +714,7 @@ fn wire_domain_relay(
 
 /// outbox maintenance workers：backlog sampler + published-row sweeper。
 fn wire_outbox_maintenance(
-    pg: &PgRuntimeDeps,
+    pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     security: &EventSecurity,
     timing: &RelayTiming,
@@ -868,7 +868,7 @@ where
 
 /// Consumer resource bundle 接线（PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
 fn wire_consumer_resource_bundle(
-    pg: &PgRuntimeDeps,
+    pg: &PgRuntimeHandle,
     subscribers: Vec<BridgedSubscription>,
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     security: &EventSecurity,
@@ -1030,7 +1030,7 @@ fn resolve_consumer_tx_plan(
 }
 
 fn consumer_tx_handler_for_subscription(
-    pg: &PgRuntimeDeps,
+    pg: &PgRuntimeHandle,
     subscription: &BridgedSubscription,
 ) -> anyhow::Result<ConsumerTxHandlerFn> {
     match &subscription.consumer_tx {
@@ -1074,7 +1074,7 @@ fn consumer_tx_handler_for_subscription(
 }
 
 fn wire_inbox_sweeper(
-    pg: &PgRuntimeDeps,
+    pg: &PgRuntimeHandle,
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {

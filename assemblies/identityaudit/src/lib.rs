@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use postgres::PgRuntimeDeps;
+use postgres::PgRuntimeHandle;
 use primitives::MacKey;
 
 #[path = "generated/modules_gen.rs"]
@@ -28,7 +28,7 @@ impl diport::Clock for SystemClock {
 }
 
 pub struct SharedRuntimeDeps {
-    pg: PgRuntimeDeps,
+    pg: PgRuntimeHandle,
     signer: Arc<vault::VaultSigner>,
     _pdp: Arc<oidc::OidcProvider>,
     audit_chain_key: MacKey,
@@ -37,7 +37,7 @@ pub struct SharedRuntimeDeps {
 impl SharedRuntimeDeps {
     #[must_use]
     pub fn new(
-        pg: PgRuntimeDeps,
+        pg: PgRuntimeHandle,
         signer: Arc<vault::VaultSigner>,
         pdp: Arc<oidc::OidcProvider>,
         audit_chain_key: MacKey,

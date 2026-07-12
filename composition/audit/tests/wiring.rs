@@ -3,7 +3,7 @@ use std::sync::Arc;
 use audit_composition::{AuditModuleDeps, wire};
 use bootstrap::compose_bindings;
 use diport::Clock;
-use postgres::PgRuntimeDeps;
+use postgres::PgRuntimeHandle;
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 
 #[derive(Clone)]
@@ -29,7 +29,7 @@ impl Clock for TestClock {
 
 fn deps(key_len: usize) -> AuditModuleDeps<TestMac> {
     AuditModuleDeps::new(
-        PgRuntimeDeps::for_module_test().for_domain(),
+        PgRuntimeHandle::for_module_test().for_domain(),
         TestMac,
         MacKey::from_bytes(vec![0x5a; key_len]),
         Arc::new(TestClock),

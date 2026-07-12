@@ -26,9 +26,9 @@ use consistency::{
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider,
-    KeyProviderError, KeyRef, KeyVersion, LockStore, OwnerCheckpointStore, PublishRequest,
-    Publisher, PublisherError, RedactedBytes, SagaContractId, SagaInstanceRegistration,
-    SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
+    KeyProviderError, KeyRef, KeyVersion, LockStore, ManagedResource, OwnerCheckpointStore,
+    PublishRequest, Publisher, PublisherError, RedactedBytes, SagaContractId,
+    SagaInstanceRegistration, SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
 };
 use eventexec::reconcile::{
     ReconcileScheduleStore, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
@@ -262,8 +262,13 @@ impl PgFaultMatrixHarness {
     }
 
     /// Close private postgres resources.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(self) -> FaultMatrixResult<()> {
+        let (resources, _sampler_factory) = self.deps.into_runtime_parts(Duration::from_secs(1));
         self.owner_pool.close().await;
+        for resource in resources.into_iter().rev() {
+            resource.shutdown().await?;
+        }
+        Ok(())
     }
 
     /// Seed a pending outbox row as fixture input, then drive `PgOutbox::relay`.
@@ -289,16 +294,24 @@ impl PgFaultMatrixHarness {
         let pending = pending_entry(tenant, event_id, topic, contract_id)?;
         let publisher = outcome.publisher();
         let outbox = match domain {
-            "identity" => self.deps.for_domain::<crate::caps::Identity>().outbox(
-                publisher,
-                test_tenant_authority()?,
-                test_dlx_payload_protector()?,
-            ),
-            "settings" => self.deps.for_domain::<crate::caps::Settings>().outbox(
-                publisher,
-                test_tenant_authority()?,
-                test_dlx_payload_protector()?,
-            ),
+            "identity" => self
+                .deps
+                .handle()
+                .for_domain::<crate::caps::Identity>()
+                .outbox(
+                    publisher,
+                    test_tenant_authority()?,
+                    test_dlx_payload_protector()?,
+                ),
+            "settings" => self
+                .deps
+                .handle()
+                .for_domain::<crate::caps::Settings>()
+                .outbox(
+                    publisher,
+                    test_tenant_authority()?,
+                    test_dlx_payload_protector()?,
+                ),
             _ => bail!("unsupported fault-matrix outbox domain `{domain}`"),
         };
         outbox.relay(&pending).await?;
@@ -345,16 +358,24 @@ impl PgFaultMatrixHarness {
     ) -> FaultMatrixResult<()> {
         age_outbox_publishing(&self.owner_pool, tenant, event_id).await?;
         let outbox = match domain {
-            "identity" => self.deps.for_domain::<crate::caps::Identity>().outbox(
-                publisher,
-                test_tenant_authority()?,
-                test_dlx_payload_protector()?,
-            ),
-            "settings" => self.deps.for_domain::<crate::caps::Settings>().outbox(
-                publisher,
-                test_tenant_authority()?,
-                test_dlx_payload_protector()?,
-            ),
+            "identity" => self
+                .deps
+                .handle()
+                .for_domain::<crate::caps::Identity>()
+                .outbox(
+                    publisher,
+                    test_tenant_authority()?,
+                    test_dlx_payload_protector()?,
+                ),
+            "settings" => self
+                .deps
+                .handle()
+                .for_domain::<crate::caps::Settings>()
+                .outbox(
+                    publisher,
+                    test_tenant_authority()?,
+                    test_dlx_payload_protector()?,
+                ),
             _ => bail!("unsupported fault-matrix outbox domain `{domain}`"),
         };
         let entries = outbox.poll_pending(domain, 10).await?;
@@ -414,7 +435,7 @@ impl PgFaultMatrixHarness {
         event_id: &str,
         group: &str,
     ) -> FaultMatrixResult<SeenState> {
-        let store = self.deps.infra().inbox();
+        let store = self.deps.handle().infra().inbox();
         let ctx = inbox_ctx(tenant, group)?;
         let first = LeaseToken::mint();
         let key = IdemKey::parse(event_id)?;
@@ -431,7 +452,7 @@ impl PgFaultMatrixHarness {
         event_id: &str,
         group: &str,
     ) -> FaultMatrixResult<SeenState> {
-        let store = self.deps.infra().inbox();
+        let store = self.deps.handle().infra().inbox();
         let ctx = inbox_ctx(tenant, group)?;
         let key = IdemKey::parse(event_id)?;
         let first = LeaseToken::mint();
@@ -451,7 +472,7 @@ impl PgFaultMatrixHarness {
         event_id: &str,
         group: &str,
     ) -> FaultMatrixResult<LeaseOutcome> {
-        let store = self.deps.infra().inbox();
+        let store = self.deps.handle().infra().inbox();
         let ctx = inbox_ctx(tenant, group)?;
         let key = IdemKey::parse(event_id)?;
         let lease = LeaseToken::mint();
@@ -471,7 +492,7 @@ impl PgFaultMatrixHarness {
     where
         L: LockStore + Send + Sync + 'static,
     {
-        let infra = self.deps.infra();
+        let infra = self.deps.handle().infra();
         let instances = infra.saga_instance_store();
         let journal = infra.saga_journal();
         let instance = saga_instance(tenant, saga_uuid)?;
@@ -509,7 +530,7 @@ impl PgFaultMatrixHarness {
     where
         L: LockStore + Send + Sync + 'static,
     {
-        let infra = self.deps.infra();
+        let infra = self.deps.handle().infra();
         let instances = infra.saga_instance_store();
         let journal = infra.saga_journal();
         let instance = saga_instance(tenant, saga_uuid)?;
@@ -558,9 +579,14 @@ impl PgFaultMatrixHarness {
         checkpoint_id: &str,
         tenant: vocab::TenantId,
     ) -> FaultMatrixResult<FaultMatrixProjectionProbe> {
-        let checkpoint = Arc::new(self.deps.infra().checkpoint());
+        let checkpoint = Arc::new(self.deps.handle().infra().checkpoint());
         let failing_checkpoint = Arc::new(FailOnceCheckpoint::new(checkpoint.clone()));
-        let dlx = Arc::new(self.deps.infra().dead_letter(test_dlx_payload_protector()?));
+        let dlx = Arc::new(
+            self.deps
+                .handle()
+                .infra()
+                .dead_letter(test_dlx_payload_protector()?),
+        );
         let owner = CheckpointOwner::new(owner);
         let id = CheckpointId::new(checkpoint_id);
         let projector = Arc::new(FaultMatrixProjectionProjector::default());
@@ -617,7 +643,7 @@ impl PgFaultMatrixHarness {
         owner: &str,
         checkpoint_id: &str,
     ) -> FaultMatrixResult<SaveOutcome> {
-        let store = self.deps.infra().checkpoint();
+        let store = self.deps.handle().infra().checkpoint();
         let owner = CheckpointOwner::new(owner);
         let id = CheckpointId::new(checkpoint_id);
         let _ = store
@@ -635,7 +661,7 @@ impl PgFaultMatrixHarness {
         dispatch_key: &str,
         commands: [ReviewedCommand; 2],
     ) -> FaultMatrixResult<i64> {
-        let store = self.deps.infra().reconcile();
+        let store = self.deps.handle().infra().reconcile();
         let key = crate::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
         let target = store.upsert_target(tenant, &key).await?;
         let claimed = store
@@ -715,7 +741,7 @@ impl PgFaultMatrixHarness {
         tenant: vocab::TenantId,
         target_suffix: &str,
     ) -> FaultMatrixResult<crate::ReconcileLeaseOutcome> {
-        let store = self.deps.infra().reconcile();
+        let store = self.deps.handle().infra().reconcile();
         let key = crate::ReconcileTargetKey::parse("fault-matrix", "device", target_suffix)?;
         let target = store.upsert_target(tenant, &key).await?;
         let lease = store
@@ -766,7 +792,7 @@ impl PgFaultMatrixHarness {
     where
         L: LockStore + Send + Sync + 'static,
     {
-        let infra = self.deps.infra();
+        let infra = self.deps.handle().infra();
         let config = SagaExecutorConfig::from_typed_factory(
             CheckpointOwner::new("billing"),
             "fault-matrix",

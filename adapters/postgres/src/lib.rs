@@ -81,7 +81,7 @@ pub use auth_audit_sink::PgAuthAuditSink;
 pub use bundle::PgSettingsBundle;
 pub use bundle::{
     MaintenanceAuditOutcome, PgDomain, PgDomainDeps, PgInfraDeps, PgMaintenanceDeps,
-    PgProjectionReplayStores, PgRuntimeDeps, caps,
+    PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -144,8 +144,8 @@ mod test_pg;
 
 pub use inbox::{INBOX_RECEIPT_RETENTION_SECONDS, PgInboxStore, PgInboxSweeper};
 pub use pool::{LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PoolReadiness};
-// `pg_readiness_sampling_loop` 降 `pub(crate)`（经 `PgRuntimeDeps::spawn_readiness_sampler` 收口，#1423），
-// 不再 re-export；类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / bundle 返回类型）。
+// `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
+// 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。
 pub use readiness::{PgDbReadiness, PgReadinessSampler};
 // re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。
 pub use sqlx::postgres::PgSslMode;
@@ -196,7 +196,8 @@ pub struct PgStoreGuard {
 impl PgStoreGuard {
     /// 包装 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard。
     ///
-    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅经 [`bundle::PgRuntimeDeps::store_guard`] 构造，
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅经
+    /// [`bundle::PgRuntimeDeps::into_runtime_parts`] 构造，
     /// 组合根不直接持 `Arc<PgStore>`。
     pub(crate) fn new(store: Arc<PgStore>) -> Self {
         Self {

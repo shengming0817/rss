@@ -1,0 +1,5 @@
+error[E0599]: no method named `into_runtime_parts` found for struct `PgRuntimeHandle` in the current scope
+ --> tests/ui/pg_runtime_handle_lifecycle_fail.rs:5:20
+  |
+5 |     let _ = handle.into_runtime_parts(Duration::from_secs(1));
+  |                    ^^^^^^^^^^^^^^^^^^ method not found in `PgRuntimeHandle`

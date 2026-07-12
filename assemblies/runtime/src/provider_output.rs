@@ -5,11 +5,32 @@
 //! into the sole runtime lifecycle output, [`DomainModuleResult`], before the normal merge path.
 //! The trait is crate-private so provider output policy cannot leak back into adapter crates.
 //!
+//! INVARIANT: PG-RUNTIME-OUTPUT-03 { level = "Hard", exec = "native-compile", source = "code", native = "private PgReadinessSamplerFactory fields and consuming spawn self; owned PgRuntimeDeps conversion into the existing DomainModuleResult output" }
+//!
 //! `ref: oxidecomputer/omicron nexus/src/context.rs@8eb92537bd12598dfd2c861f897a88962fabf684`
 
-use bootstrap::DomainModuleResult;
+use std::time::Duration;
+
+use bootstrap::{DomainModuleResult, WorkerSpec};
+use diport::DynManagedResource;
+use postgres::PgRuntimeDeps;
 
 use crate::SharedRuntimeDeps;
+
+/// Consumes the postgres lifecycle owner into the runtime's sole lifecycle output type.
+pub(crate) fn build_pg_runtime_module(
+    owner: PgRuntimeDeps,
+    period: Duration,
+) -> DomainModuleResult {
+    let (resources, sampler_factory) = owner.into_runtime_parts(period);
+    let readiness_sampler: WorkerSpec =
+        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));
+    DomainModuleResult {
+        resources,
+        workers: vec![readiness_sampler],
+        ..DomainModuleResult::default()
+    }
+}
 
 /// Converts one provider capability bundle into the runtime's sole lifecycle output type.
 pub(crate) trait ProviderOutput {
@@ -67,7 +88,7 @@ impl ProviderOutput for vault::VaultRuntimeDeps {
 
 #[cfg(test)]
 mod tests {
-    use super::{DomainModuleResultExt, ProviderOutput};
+    use super::{DomainModuleResultExt, ProviderOutput, build_pg_runtime_module};
 
     use bootstrap::{DomainModuleResult, HealthProbe, WorkerSpec};
     use diport::{DynManagedResource, ManagedResource, ShutdownError};
@@ -93,6 +114,23 @@ mod tests {
         assert_provider_output::<redis::RedisRuntimeDeps>();
         assert_provider_output::<s3::S3RuntimeDeps>();
         assert_provider_output::<vault::VaultRuntimeDeps>();
+    }
+
+    #[test]
+    fn pg_runtime_module_keeps_guards_before_sampler_channel() {
+        fn assert_builder(
+            _: fn(postgres::PgRuntimeDeps, std::time::Duration) -> DomainModuleResult,
+        ) {
+        }
+        assert_builder(build_pg_runtime_module);
+        let output = DomainModuleResult {
+            resources: vec![resource("postgres")],
+            workers: vec![worker("postgres-readiness-sampler")],
+            ..DomainModuleResult::default()
+        };
+
+        assert_eq!(resource_names(&output), ["postgres"]);
+        assert_eq!(worker_names(output), ["postgres-readiness-sampler"]);
     }
 
     #[test]

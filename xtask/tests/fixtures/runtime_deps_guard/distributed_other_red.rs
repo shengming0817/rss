@@ -1,4 +1,4 @@
 pub struct SharedRuntimeDeps {
-    pub pg: postgres::PgRuntimeDeps,
+    pub pg: postgres::PgRuntimeHandle,
     pub locker: distributed::Locker,
 }

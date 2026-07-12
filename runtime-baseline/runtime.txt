@@ -81,7 +81,7 @@ listeners = [primary,internal,admin,health]
 12 | port=diport::ObjectStore | provider=s3::S3Store | providerCrate=s3 | requiredFeatures=[backend] | consumer=runtime | lifecycle=active | durability=persistent | purpose=runtime-s3-readiness-canary
 
 [sharedRuntimeDeps.fields]
-pg = PgRuntimeDeps
+pg = PgRuntimeHandle
 redis = RedisRuntimeDeps
 s3 = S3RuntimeDeps
 vault = VaultRuntimeDeps
@@ -116,16 +116,15 @@ mergeExtends = probes,resources,workers
 18 | run.event.bridge | assemblies/runtime/src/lib.rs | event_transport::bridge_generated_subscriptions(registry.drain_subscribers()) | status=ok
 19 | run.event.transport | assemblies/runtime/src/lib.rs | event_transport::wire_event_transport( | status=ok
 20 | run.module.assemble | assemblies/runtime/src/lib.rs | crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs | status=ok
-21 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in module.probes | status=ok
+21 | run.probe.drain | assemblies/runtime/src/lib.rs | for (name, probe) in std::mem::take(&mut module.probes) | status=ok
 22 | run.auth.routers | assemblies/runtime/src/lib.rs | assemble_authed_routers( | status=ok
 23 | run.health.listener | assemblies/runtime/src/lib.rs | health_listener(reporter, metrics_exporter) | status=ok
-24 | run.launch | assemblies/runtime/src/lib.rs | launch::launch(launch_plan) | status=ok
-25 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
-26 | launch.shutdown.pg-store | assemblies/runtime/src/launch.rs | stack.register_detached(pg_store_guard); | status=ok
-27 | launch.shutdown.pg-audit | assemblies/runtime/src/launch.rs | if let Some(guard) = pg_audit_admin_store_guard | status=ok
-28 | launch.shutdown.pg-sampler | assemblies/runtime/src/launch.rs | stack.register_with_token(pg_readiness_sampler); | status=ok
-29 | launch.shutdown.event-infra | assemblies/runtime/src/launch.rs | for guard in event_infra_guards | status=ok
-30 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in domain_resources | status=ok
-31 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in domain_workers | status=ok
-32 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack); | status=ok
-33 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=ok
+24 | run.provider-output.pg | assemblies/runtime/src/lib.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
+25 | run.launch | assemblies/runtime/src/lib.rs | launch::launch(launch_plan) | status=ok
+26 | launch.shutdown.trace | assemblies/runtime/src/launch.rs | if let Some(exporter) = trace_exporter | status=ok
+27 | launch.shutdown.pg-output | assemblies/runtime/src/launch.rs | Self::register_module_output(stack, pg_runtime_module)?; | status=ok
+28 | launch.shutdown.event-infra | assemblies/runtime/src/launch.rs | for guard in event_infra_guards | status=ok
+29 | launch.shutdown.resources | assemblies/runtime/src/launch.rs | for resource in output.resources | status=ok
+30 | launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in output.workers | status=ok
+31 | launch.register-plan | assemblies/runtime/src/launch.rs | let listeners = plan.register(&mut stack)?; | status=ok
+32 | launch.listeners | assemblies/runtime/src/launch.rs | bind_and_register(&mut stack, listener, &addr_resolver).await?; | status=ok

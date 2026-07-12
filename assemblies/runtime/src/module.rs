@@ -1,7 +1,7 @@
 //! 运行时层共享基础设施依赖（[PERSIST-001] #1422，ADR-010 §2.6 step 2）。
 //!
 //! [`SharedRuntimeDeps`]（parameter object）把共享基础设施**流入**每个域 `wire_X`。它持
-//! `PgRuntimeDeps`（postgres 适配器 capability bundle）等 adapter 类型，故必须落组合根层
+//! `PgRuntimeHandle`（postgres 适配器 capability handle）等 adapter 类型，故必须落组合根层
 //! （`assemblies/runtime`），不能进 `bootstrap`（服务层不依赖适配器）。配对的产物出口
 //! [`bootstrap::DomainModuleResult`]（probes / resources / workers 可聚合产物）按 ADR-010 §2.2 归属
 //! `bootstrap`。adapter 的 `runtime_resources()` 只暴露 `diport` 原语；组合根以 crate-private
@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use diport::KeyName;
-use postgres::PgRuntimeDeps;
+use postgres::PgRuntimeHandle;
 use redis::RedisRuntimeDeps;
 use s3::S3RuntimeDeps;
 use vault::VaultRuntimeDeps;
@@ -45,9 +45,9 @@ use vault::VaultRuntimeDeps;
 pub struct SharedRuntimeDeps {
     /// 共享 postgres capability bundle；各域经 `for_domain::<caps::X>()` 投影受控 durable 能力句柄。
     ///
-    /// 不暴露 `Arc<PgStore>` / `PgPool`，保持 PG-BUNDLE-FUNNEL-01/03：repo、readiness、sampler、pool guard
-    /// 均经 `PgRuntimeDeps` 方法派发。
-    pub pg: PgRuntimeDeps,
+    /// 不暴露 `Arc<PgStore>` / `PgPool`，保持 PG-BUNDLE-FUNNEL-01/03：repo/readiness 只经 handle
+    /// 投影；sampler/pool guard 只经 lifecycle owner 的 consuming output 交接，不进入共享参数对象。
+    pub pg: PgRuntimeHandle,
 
     /// 共享 redis capability bundle，生产必配；distributed runtime 通过此唯一入口取得 lock provider。
     ///

@@ -151,7 +151,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
         wire_configured(
-            postgres::PgRuntimeDeps::for_module_test().for_domain(),
+            postgres::PgRuntimeHandle::for_module_test().for_domain(),
             module_env,
             true,
         )

@@ -475,7 +475,8 @@ where
 
 #[tokio::test(flavor = "multi_thread")]
 async fn settings_config_publish_durable_e2e() -> TestResult {
-    let (pg_fixture, pg) = connect_pg().await?;
+    let (pg_fixture, pg_owner) = connect_pg().await?;
+    let pg = pg_owner.handle();
     let assertion_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(owner_connect_options(pg_fixture.params()))

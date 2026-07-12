@@ -17,7 +17,11 @@ deadpool-redis = { workspace = true }
 diport = { path = "../crates/diport" }
 eventexec = { path = "../crates/eventexec" }
 generated = { path = "../generated" }
-postgres = { path = "../adapters/postgres", features = ["fault-matrix-test-support"] }
+postgres = { path = "../adapters/postgres", features = [
+    "domain-identity",
+    "domain-settings",
+    "fault-matrix-test-support",
+] }
 redis-adapter = { path = "../adapters/redis", features = ["backend"] }
 secure = { path = "../crates/secure" }
 testkit = { path = "../crates/testkit" }

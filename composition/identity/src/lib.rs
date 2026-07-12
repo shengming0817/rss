@@ -172,7 +172,7 @@ pub mod test_support {
     #[must_use]
     pub fn deps() -> IdentityModuleDeps<TestSigner> {
         IdentityModuleDeps::new(
-            postgres::PgRuntimeDeps::for_module_test().for_domain(),
+            postgres::PgRuntimeHandle::for_module_test().for_domain(),
             Arc::new(TestSigner),
             Arc::new(FixedClock),
             authn::JwtIssuerConfig {

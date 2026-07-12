@@ -6,6 +6,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
+use bootstrap::DomainModuleResult;
+#[cfg(test)]
 use bootstrap::WorkerSpec;
 use bootstrap::shutdown::ShutdownStack;
 use diport::DynManagedResource;
@@ -17,24 +19,18 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct LaunchPlanParts {
     pub(crate) listeners: Vec<routes::AssembledListener>,
     pub(crate) trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    pub(crate) pg_store_guard: Box<DynManagedResource<'static>>,
-    pub(crate) pg_audit_admin_store_guard: Option<Box<DynManagedResource<'static>>>,
-    pub(crate) pg_readiness_sampler: WorkerSpec,
+    pub(crate) pg_runtime_module: DomainModuleResult,
     pub(crate) event_infra_guards: Vec<Box<DynManagedResource<'static>>>,
-    pub(crate) domain_resources: Vec<Box<DynManagedResource<'static>>>,
-    pub(crate) domain_workers: Vec<WorkerSpec>,
+    pub(crate) domain_module: DomainModuleResult,
 }
 
 /// Launch plan consumed by [`launch`] to register shutdown resources and serve listeners.
 pub(crate) struct LaunchPlan {
     listeners: Vec<routes::AssembledListener>,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
-    pg_store_guard: Box<DynManagedResource<'static>>,
-    pg_audit_admin_store_guard: Option<Box<DynManagedResource<'static>>>,
-    pg_readiness_sampler: WorkerSpec,
+    pg_runtime_module: DomainModuleResult,
     event_infra_guards: Vec<Box<DynManagedResource<'static>>>,
-    domain_resources: Vec<Box<DynManagedResource<'static>>>,
-    domain_workers: Vec<WorkerSpec>,
+    domain_module: DomainModuleResult,
 }
 
 impl LaunchPlan {
@@ -42,12 +38,9 @@ impl LaunchPlan {
         Self {
             listeners: parts.listeners,
             trace_exporter: parts.trace_exporter,
-            pg_store_guard: parts.pg_store_guard,
-            pg_audit_admin_store_guard: parts.pg_audit_admin_store_guard,
-            pg_readiness_sampler: parts.pg_readiness_sampler,
+            pg_runtime_module: parts.pg_runtime_module,
             event_infra_guards: parts.event_infra_guards,
-            domain_resources: parts.domain_resources,
-            domain_workers: parts.domain_workers,
+            domain_module: parts.domain_module,
         }
     }
 
@@ -55,40 +48,46 @@ impl LaunchPlan {
         self.listeners.len()
     }
 
-    fn register(self, stack: &mut ShutdownStack) -> Vec<routes::AssembledListener> {
+    fn register(self, stack: &mut ShutdownStack) -> anyhow::Result<Vec<routes::AssembledListener>> {
         let Self {
             listeners,
             trace_exporter,
-            pg_store_guard,
-            pg_audit_admin_store_guard,
-            pg_readiness_sampler,
+            pg_runtime_module,
             event_infra_guards,
-            domain_resources,
-            domain_workers,
+            domain_module,
         } = self;
 
         // Trace exporter registers first so LIFO drains it last, after shutdown-period spans stop.
         if let Some(exporter) = trace_exporter {
             stack.register_detached(exporter);
         }
-        // PG guards outlive sampler and downstream workers.
-        stack.register_detached(pg_store_guard);
-        if let Some(guard) = pg_audit_admin_store_guard {
-            stack.register_detached(guard);
-        }
-        stack.register_with_token(pg_readiness_sampler);
+        // PG guards outlive their sampler and all downstream workers.
+        Self::register_module_output(stack, pg_runtime_module)?;
         // Event infra must outlive the event/domain workers that drain through it.
         for guard in event_infra_guards {
             stack.register_detached(guard);
         }
-        for resource in domain_resources {
+        Self::register_module_output(stack, domain_module)?;
+
+        Ok(listeners)
+    }
+
+    /// Registers one lifecycle output batch through the common resources-then-workers funnel.
+    fn register_module_output(
+        stack: &mut ShutdownStack,
+        output: DomainModuleResult,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            output.probes.is_empty(),
+            "launch lifecycle output still contains undrained probes"
+        );
+        for resource in output.resources {
             stack.register_detached(resource);
         }
-        for worker in domain_workers {
+        for worker in output.workers {
             stack.register_with_token(worker);
         }
-
-        listeners
+        Ok(())
     }
 }
 
@@ -134,7 +133,7 @@ where
     );
     let listener_count = plan.listener_count();
     let mut stack = ShutdownStack::new(CancellationToken::new());
-    let listeners = plan.register(&mut stack);
+    let listeners = plan.register(&mut stack)?;
     for listener in listeners {
         bind_and_register(&mut stack, listener, &addr_resolver).await?;
     }
@@ -285,6 +284,18 @@ mod tests {
         Box::new(move |_token| resource(name))
     }
 
+    fn pg_runtime_module(audit_guard: bool) -> DomainModuleResult {
+        let mut resources = vec![resource("pg-store")];
+        if audit_guard {
+            resources.push(resource("pg-audit"));
+        }
+        DomainModuleResult {
+            resources,
+            workers: vec![worker("pg-sampler")],
+            ..DomainModuleResult::default()
+        }
+    }
+
     #[allow(clippy::expect_used)] // reason: test fixture bootstrap must compose or the test setup is invalid.
     fn test_reporter() -> Arc<bootstrap::HealthReporter> {
         let mut reg = bootstrap::compose(&[]).expect("compose");
@@ -319,12 +330,9 @@ mod tests {
         LaunchPlan::new(LaunchPlanParts {
             listeners,
             trace_exporter: None,
-            pg_store_guard: resource("pg-store"),
-            pg_audit_admin_store_guard: None,
-            pg_readiness_sampler: worker("pg-sampler"),
+            pg_runtime_module: pg_runtime_module(false),
             event_infra_guards: Vec::new(),
-            domain_resources: Vec::new(),
-            domain_workers: Vec::new(),
+            domain_module: DomainModuleResult::default(),
         })
     }
 
@@ -332,12 +340,13 @@ mod tests {
         LaunchPlan::new(LaunchPlanParts {
             listeners: vec![test_health_assembled()],
             trace_exporter: trace.then(|| resource("trace-exporter")),
-            pg_store_guard: resource("pg-store"),
-            pg_audit_admin_store_guard: audit_guard.then(|| resource("pg-audit")),
-            pg_readiness_sampler: worker("pg-sampler"),
+            pg_runtime_module: pg_runtime_module(audit_guard),
             event_infra_guards: vec![resource("event-infra-a"), resource("event-infra-b")],
-            domain_resources: vec![resource("domain-resource-a"), resource("domain-resource-b")],
-            domain_workers: vec![worker("domain-worker-a"), worker("domain-worker-b")],
+            domain_module: DomainModuleResult {
+                resources: vec![resource("domain-resource-a"), resource("domain-resource-b")],
+                workers: vec![worker("domain-worker-a"), worker("domain-worker-b")],
+                ..DomainModuleResult::default()
+            },
         })
     }
 

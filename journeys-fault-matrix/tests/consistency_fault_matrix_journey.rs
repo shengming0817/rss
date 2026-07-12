@@ -17,6 +17,7 @@ use diport::{
     AckAction, AckableSubscriber, Acker, DynPublisher, EnvelopeSubjectId, MessageId, OpaqueActorId,
     OutboxActor, PublishRequest, Publisher, Topic,
 };
+use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
 use postgres::fault_matrix::{
@@ -241,7 +242,12 @@ async fn pg_harness() -> Result<PgHarness> {
         p.username.clone(),
         p.password.clone(),
     );
-    let harness = PgFaultMatrixHarness::setup(config, generated::event::PROJECTION_INPUTS).await?;
+    let harness = PgFaultMatrixHarness::setup(
+        config,
+        generated::event::PROJECTION_INPUT_GENERATION,
+        generated::event::PROJECTION_INPUTS,
+    )
+    .await?;
     Ok(PgHarness {
         _fixture: fixture,
         harness,
@@ -744,17 +750,24 @@ fn run_reconcile_dispatch_before_result_record<'a>(
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let event_id = scope.name("reconcile-dispatch-v1");
+        let keyring = CommandIdempotencyKeyring::new(
+            CommandAliasKey::new("fault-matrix", vec![0x42; 32])?,
+            Vec::new(),
+        )?;
         let command = || {
-            eventexec::ReviewedCommand::from_spec(generated::command::_seed_v1::reconcile_command(
-                generated::command::_seed_v1::SeedDoThingRequest {
-                    amount: 1,
-                    target_id: format!("resource-{event_id}"),
-                },
-                scope.tenant,
-                EnvelopeSubjectId::from_opaque(format!("resource-{event_id}"))?,
-                OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix")?),
-                event_id.clone(),
-            ))
+            eventexec::ReviewedCommand::from_spec(
+                generated::command::_seed_v1::reconcile_command(
+                    generated::command::_seed_v1::SeedDoThingRequest {
+                        amount: 1,
+                        target_id: format!("resource-{event_id}"),
+                    },
+                    scope.tenant,
+                    EnvelopeSubjectId::from_opaque(format!("resource-{event_id}"))?,
+                    OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix")?),
+                    event_id.clone(),
+                ),
+                &keyring,
+            )
             .map_err(anyhow::Error::from)
         };
         let count = pg
@@ -802,6 +815,17 @@ async fn assert_outbox_count(
     Ok(())
 }
 
+fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (body, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(body), Ok(())) => Err(body),
+        (Ok(()), Err(cleanup)) => Err(cleanup).context("shut down fault-matrix postgres"),
+        (Err(body), Err(cleanup)) => {
+            Err(body).context(format!("postgres cleanup also failed: {cleanup:#}"))
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn consistency_fault_matrix_ready_cases_execute() -> Result<()> {
     let root = workspace_root()?;
@@ -830,13 +854,49 @@ async fn consistency_fault_matrix_ready_cases_execute() -> Result<()> {
 
     let scope = RunScope::new()?;
     let pg = pg_harness().await?;
-    let rabbit = rabbit_harness().await?;
-    let redis = redis_harness().await?;
-    for case in ready {
-        run_case(case, &pg, &rabbit, &redis, &scope)
-            .await
-            .with_context(|| format!("fault matrix case `{}` failed", case.id()))?;
+    let body_result: Result<()> = async {
+        let rabbit = rabbit_harness().await?;
+        let redis = redis_harness().await?;
+        for case in ready {
+            run_case(case, &pg, &rabbit, &redis, &scope)
+                .await
+                .with_context(|| format!("fault matrix case `{}` failed", case.id()))?;
+        }
+        Ok(())
     }
-    pg.harness.shutdown().await;
+    .await;
+
+    let PgHarness { _fixture, harness } = pg;
+    let cleanup_result = harness.shutdown().await;
+    finish_with_pg_cleanup(body_result, cleanup_result)
+}
+
+#[test]
+fn pg_cleanup_result_preserves_body_error_and_reports_cleanup_failure() -> Result<()> {
+    let err = finish_with_pg_cleanup(Err(anyhow!("body failed")), Err(anyhow!("cleanup failed")))
+        .err()
+        .ok_or_else(|| anyhow!("both failures must remain an error"))?;
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("body failed"));
+    assert!(rendered.contains("cleanup failed"));
+    Ok(())
+}
+
+#[test]
+fn pg_cleanup_result_returns_cleanup_only_failure() -> Result<()> {
+    let err = finish_with_pg_cleanup(Ok(()), Err(anyhow!("cleanup failed")))
+        .err()
+        .ok_or_else(|| anyhow!("cleanup failure must be returned"))?;
+    assert!(format!("{err:#}").contains("cleanup failed"));
+    Ok(())
+}
+
+#[test]
+fn pg_cleanup_result_preserves_success_and_body_only_failure() -> Result<()> {
+    finish_with_pg_cleanup(Ok(()), Ok(()))?;
+    let err = finish_with_pg_cleanup(Err(anyhow!("body failed")), Ok(()))
+        .err()
+        .ok_or_else(|| anyhow!("body failure must be returned"))?;
+    assert_eq!(format!("{err:#}"), "body failed");
     Ok(())
 }

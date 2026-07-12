@@ -12,13 +12,14 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-PROVIDER-OUTPUTS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_outputs_reject_missing_reordered_legacy_and_bait", anti_vacuity = "tests::runtime_provider_outputs_accept_unified_live_path" } -- the sole runtime-local constructor must merge Redis, S3, and Vault in order; `run()` must build and consume that output exactly once without direct provider wiring.
+//! INVARIANT: RUNTIME-PROVIDER-OUTPUTS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_outputs_reject_missing_reordered_legacy_and_bait", anti_vacuity = "tests::runtime_provider_outputs_accept_unified_live_path" } -- the sole runtime-local constructor must merge Redis, S3, and Vault in order; postgres must remain outside that trait and cross the launch boundary exactly once as an owned `DomainModuleResult`, without lifecycle primitive bypasses or a parallel output type.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::localtx_coverage::attrs_may_be_production;
 use crate::workspace_root;
 use anyhow::{Context, Result};
 use assembly_schema::AssemblyManifest;
+use quote::ToTokens as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -491,6 +492,18 @@ fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         }
         _ => None,
     });
+    if run.is_none_or(|run| !has_canonical_pg_runtime_build(run))
+        || exact_path_call_count_in_file(
+            &file,
+            &["crate", "provider_output", "build_pg_runtime_module"],
+        ) != 1
+    {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_LIB_PATH,
+            "run() 必须恰好一次按值消费 PG owner 构造 DomainModuleResult，并恰好一次交给 LaunchPlanParts",
+        ));
+    }
     let wire_blocks = run.map(wire_domains_blocks).unwrap_or_default();
     if wire_blocks.len() != 1 {
         findings.push(finding(
@@ -560,7 +573,7 @@ fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 findings.push(finding(
                     Rule::ForbiddenWiring,
                     PROVIDER_OUTPUT_PATH,
-                    "provider_output.rs 仅允许三个 ProviderOutput impl 各调用一次 runtime_resources",
+                    "provider_output.rs 必须保留 Redis/S3/Vault 三个 ProviderOutput impl，并将 owned PG lifecycle 转换为 DomainModuleResult",
                 ));
             }
             continue;
@@ -574,11 +587,24 @@ fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         } else {
             !provider_calls.forbidden && provider_calls.amqp_runtime_resources == 0
         };
-        if !runtime_resources_allowed || provider_output_impl_count(&source_file) != 0 {
+        let pg_lifecycle = pg_lifecycle_calls(&source_file);
+        let extra_pg_builder = relative != Path::new(RUNTIME_LIB_PATH)
+            && exact_path_call_count_in_file(
+                &source_file,
+                &["crate", "provider_output", "build_pg_runtime_module"],
+            ) != 0;
+        let launch_is_canonical = relative != Path::new(RUNTIME_LAUNCH_PATH)
+            || has_canonical_pg_runtime_registration(&source_file);
+        if !runtime_resources_allowed
+            || provider_output_impl_count(&source_file) != 0
+            || pg_lifecycle.forbidden
+            || extra_pg_builder
+            || !launch_is_canonical
+        {
             findings.push(finding(
                 Rule::ForbiddenWiring,
                 relative.display().to_string(),
-                "runtime_resources/merge_provider 只能在 provider_output.rs 唯一适配层调用",
+                "provider primitive 只能经 canonical DomainModuleResult seam；PG module 必须在 LaunchPlan 中于 trace 后、event infra 前注册一次",
             ));
         }
     }
@@ -608,6 +634,29 @@ fn has_only_canonical_provider_output_calls(file: &syn::File) -> bool {
         return false;
     }
     if provider_output_impl_count(file) != 3 {
+        return false;
+    }
+    let pg_constructors = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "build_pg_runtime_module" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if pg_constructors.len() != 1 || !is_canonical_pg_runtime_constructor(pg_constructors[0]) {
+        return false;
+    }
+    let mut pg_lifecycle = PgLifecycleCalls::default();
+    pg_lifecycle.visit_file(file);
+    if pg_lifecycle.into_runtime_parts != 1 || pg_lifecycle.forbidden {
+        return false;
+    }
+    if file
+        .items
+        .iter()
+        .any(|item| matches!(item, syn::Item::Struct(item) if item.ident == "PgRuntimeOutput"))
+    {
         return false;
     }
     let traits = file
@@ -748,6 +797,504 @@ fn return_type_is(output: &syn::ReturnType, expected: &str) -> bool {
         syn::ReturnType::Type(_, ty) => type_last_ident(ty).is_some_and(|ident| ident == expected),
         syn::ReturnType::Default => false,
     }
+}
+
+fn owned_input_ident(input: &syn::FnArg, ty: &str) -> Option<String> {
+    let syn::FnArg::Typed(input) = input else {
+        return None;
+    };
+    let syn::Pat::Ident(pat) = input.pat.as_ref() else {
+        return None;
+    };
+    let syn::Type::Path(path) = input.ty.as_ref() else {
+        return None;
+    };
+    if pat.mutability.is_some()
+        || pat.by_ref.is_some()
+        || path.qself.is_some()
+        || path
+            .path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != ty)
+    {
+        return None;
+    }
+    Some(pat.ident.to_string())
+}
+
+#[derive(Default)]
+struct PgLifecycleCalls {
+    into_runtime_parts: usize,
+    factory_spawn: usize,
+    forbidden: bool,
+}
+
+impl<'ast> Visit<'ast> for PgLifecycleCalls {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        match call.method.to_string().as_str() {
+            "into_runtime_parts" => self.into_runtime_parts += 1,
+            "spawn"
+                if expr_path_last(&call.receiver)
+                    .is_some_and(|ident| ident == "sampler_factory") =>
+            {
+                self.factory_spawn += 1;
+            }
+            "store_guard" | "audit_admin_store_guard" | "spawn_readiness_sampler" => {
+                self.forbidden = true;
+            }
+            _ => {}
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let Some(method) = expr_path_last(&call.func).map(ToString::to_string) {
+            match method.as_str() {
+                "into_runtime_parts" => self.into_runtime_parts += 1,
+                "spawn_readiness_sampler" | "store_guard" | "audit_admin_store_guard" => {
+                    self.forbidden = true;
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn pg_lifecycle_calls(file: &syn::File) -> PgLifecycleCalls {
+    let mut calls = PgLifecycleCalls::default();
+    calls.visit_file(file);
+    if calls.into_runtime_parts != 0 || calls.factory_spawn != 0 {
+        calls.forbidden = true;
+    }
+    calls
+}
+
+fn is_canonical_pg_runtime_constructor(item: &syn::ItemFn) -> bool {
+    if item.sig.inputs.len() != 2 || !return_type_is(&item.sig.output, "DomainModuleResult") {
+        return false;
+    }
+    let Some(owner) = owned_input_ident(&item.sig.inputs[0], "PgRuntimeDeps") else {
+        return false;
+    };
+    let Some(period) = owned_input_ident(&item.sig.inputs[1], "Duration") else {
+        return false;
+    };
+    let Some((resources, factory)) = pg_runtime_parts_binding(item, &owner, &period) else {
+        return false;
+    };
+    let Some(worker) = pg_worker_binding(item, &factory) else {
+        return false;
+    };
+    pg_returned_module_uses(item, &resources, &worker)
+}
+
+fn pg_runtime_parts_binding(
+    item: &syn::ItemFn,
+    owner: &str,
+    period: &str,
+) -> Option<(String, String)> {
+    let bindings =
+        item.block
+            .stmts
+            .iter()
+            .filter_map(|stmt| {
+                let syn::Stmt::Local(local) = stmt else {
+                    return None;
+                };
+                let syn::Pat::Tuple(tuple) = &local.pat else {
+                    return None;
+                };
+                let mut bindings = tuple.elems.iter();
+                let (Some(syn::Pat::Ident(resources)), Some(syn::Pat::Ident(factory)), None) =
+                    (bindings.next(), bindings.next(), bindings.next())
+                else {
+                    return None;
+                };
+                let init = local.init.as_ref()?;
+                let syn::Expr::MethodCall(call) = init.expr.as_ref() else {
+                    return None;
+                };
+                (resources.by_ref.is_none()
+                    && resources.mutability.is_none()
+                    && factory.by_ref.is_none()
+                    && factory.mutability.is_none()
+                    && init.diverge.is_none()
+                    && call.method == "into_runtime_parts"
+                    && expr_path_last(&call.receiver).is_some_and(|ident| ident == owner)
+                    && call.args.len() == 1
+                    && call.args.first().is_some_and(|arg| {
+                        expr_path_last(arg).is_some_and(|ident| ident == period)
+                    }))
+                .then(|| (resources.ident.to_string(), factory.ident.to_string()))
+            })
+            .collect::<Vec<_>>();
+    (bindings.len() == 1).then(|| bindings[0].clone())
+}
+
+fn pg_worker_binding(item: &syn::ItemFn, factory: &str) -> Option<String> {
+    let bindings = item
+        .block
+        .stmts
+        .iter()
+        .filter_map(|stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return None;
+            };
+            let (pat, typed_as_worker) = match &local.pat {
+                syn::Pat::Ident(pat) => (pat, true),
+                syn::Pat::Type(typed) => {
+                    let syn::Pat::Ident(pat) = typed.pat.as_ref() else {
+                        return None;
+                    };
+                    (
+                        pat,
+                        type_last_ident(&typed.ty).is_some_and(|ident| ident == "WorkerSpec"),
+                    )
+                }
+                _ => return None,
+            };
+            let init = local.init.as_ref()?;
+            (typed_as_worker
+                && pat.by_ref.is_none()
+                && pat.mutability.is_none()
+                && worker_expr_consumes_factory(&init.expr, factory))
+            .then(|| pat.ident.to_string())
+        })
+        .collect::<Vec<_>>();
+    (bindings.len() == 1).then(|| bindings[0].clone())
+}
+
+fn worker_expr_consumes_factory(expr: &syn::Expr, factory: &str) -> bool {
+    let Some(closure) = returned_worker_closure(expr) else {
+        return false;
+    };
+    let Some(syn::Pat::Ident(token)) = closure.inputs.first() else {
+        return false;
+    };
+    closure.capture.is_some()
+        && closure.inputs.len() == 1
+        && returned_resource_spawn(&closure.body, factory, &token.ident.to_string())
+}
+
+fn returned_worker_closure(expr: &syn::Expr) -> Option<&syn::ExprClosure> {
+    match expr {
+        syn::Expr::Closure(closure) => Some(closure),
+        syn::Expr::Call(call) if call.args.len() == 1 => {
+            returned_worker_closure(call.args.first()?)
+        }
+        syn::Expr::Block(block) => block.block.stmts.last().and_then(|stmt| match stmt {
+            syn::Stmt::Expr(expr, _) => returned_worker_closure(expr),
+            _ => None,
+        }),
+        syn::Expr::Group(group) => returned_worker_closure(&group.expr),
+        syn::Expr::Paren(paren) => returned_worker_closure(&paren.expr),
+        syn::Expr::Try(expr) => returned_worker_closure(&expr.expr),
+        _ => None,
+    }
+}
+
+fn returned_resource_spawn(expr: &syn::Expr, factory: &str, token: &str) -> bool {
+    match expr {
+        syn::Expr::Call(call)
+            if is_exact_path(&call.func, &["DynManagedResource", "new_box"])
+                && call.args.len() == 1 =>
+        {
+            call.args
+                .first()
+                .is_some_and(|arg| returned_factory_spawn(arg, factory, token))
+        }
+        syn::Expr::Call(call) if call.args.len() == 1 => {
+            call.args
+                .first()
+                .is_some_and(|arg| returned_resource_spawn(arg, factory, token))
+        }
+        syn::Expr::Block(block) => block.block.stmts.last().is_some_and(|stmt| {
+            matches!(stmt, syn::Stmt::Expr(expr, _) if returned_resource_spawn(expr, factory, token))
+        }),
+        syn::Expr::Group(group) => returned_resource_spawn(&group.expr, factory, token),
+        syn::Expr::Paren(paren) => returned_resource_spawn(&paren.expr, factory, token),
+        syn::Expr::Try(expr) => returned_resource_spawn(&expr.expr, factory, token),
+        _ => false,
+    }
+}
+
+fn returned_factory_spawn(expr: &syn::Expr, factory: &str, token: &str) -> bool {
+    match expr {
+        syn::Expr::MethodCall(call) => {
+            call.method == "spawn"
+                && expr_path_last(&call.receiver).is_some_and(|ident| ident == factory)
+                && call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == token))
+        }
+        syn::Expr::Call(call) if call.args.len() == 1 => call
+            .args
+            .first()
+            .is_some_and(|arg| returned_factory_spawn(arg, factory, token)),
+        syn::Expr::Group(group) => returned_factory_spawn(&group.expr, factory, token),
+        syn::Expr::Paren(paren) => returned_factory_spawn(&paren.expr, factory, token),
+        syn::Expr::Try(expr) => returned_factory_spawn(&expr.expr, factory, token),
+        _ => false,
+    }
+}
+
+fn pg_returned_module_uses(item: &syn::ItemFn, resources: &str, worker: &str) -> bool {
+    let Some(syn::Stmt::Expr(returned, None)) = item.block.stmts.last() else {
+        return false;
+    };
+    struct OutputFlow<'a> {
+        resources: &'a str,
+        worker: &'a str,
+        outputs: usize,
+        valid: usize,
+    }
+    impl<'ast> Visit<'ast> for OutputFlow<'_> {
+        fn visit_expr_struct(&mut self, output: &'ast syn::ExprStruct) {
+            if path_last_ident(&output.path).is_some_and(|ident| ident == "DomainModuleResult") {
+                self.outputs += 1;
+                let resources = named_field_expr(output, "resources");
+                let workers = named_field_expr(output, "workers");
+                if resources.is_some_and(|expr| ident_use_count(expr, self.resources) == 1)
+                    && workers.is_some_and(|expr| ident_use_count(expr, self.worker) == 1)
+                {
+                    self.valid += 1;
+                }
+            }
+            syn::visit::visit_expr_struct(self, output);
+        }
+    }
+    fn named_field_expr<'a>(output: &'a syn::ExprStruct, name: &str) -> Option<&'a syn::Expr> {
+        output.fields.iter().find_map(|field| {
+            matches!(&field.member, syn::Member::Named(member) if member == name)
+                .then_some(&field.expr)
+        })
+    }
+    fn ident_use_count(expr: &syn::Expr, expected: &str) -> usize {
+        expr.to_token_stream()
+            .to_string()
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .filter(|token| *token == expected)
+            .count()
+    }
+    let mut flow = OutputFlow {
+        resources,
+        worker,
+        outputs: 0,
+        valid: 0,
+    };
+    flow.visit_expr(returned);
+    flow.outputs == 1 && flow.valid == 1
+}
+
+fn has_canonical_pg_runtime_build(run: &syn::ItemFn) -> bool {
+    let declarations = run
+        .block
+        .stmts
+        .iter()
+        .filter_map(|stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return None;
+            };
+            let syn::Pat::Ident(pat) = &local.pat else {
+                return None;
+            };
+            let Some(init) = &local.init else {
+                return None;
+            };
+            (pat.mutability.is_none()
+                && init.diverge.is_none()
+                && matches!(init.expr.as_ref(), syn::Expr::Call(call)
+                    if is_exact_path(&call.func, &["crate", "provider_output", "build_pg_runtime_module"])
+                        && call.args.len() == 2
+                        && call.args.iter().all(|arg| matches!(arg, syn::Expr::Path(_)))))
+            .then(|| pat.ident.to_string())
+        })
+        .collect::<Vec<_>>();
+    declarations.len() == 1
+        && exact_named_path_call_count(
+            &run.block,
+            &["crate", "provider_output", "build_pg_runtime_module"],
+        ) == 1
+        && launch_field_use_count(&run.block, "pg_runtime_module", &declarations[0]) == 1
+}
+
+fn launch_field_use_count(block: &syn::Block, field_name: &str, binding: &str) -> usize {
+    struct Counter<'a> {
+        field_name: &'a str,
+        binding: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_struct(&mut self, item: &'ast syn::ExprStruct) {
+            if item
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "LaunchPlanParts")
+            {
+                self.count += item
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        matches!(&field.member, syn::Member::Named(member) if member == self.field_name)
+                            && expr_path_last(&field.expr)
+                                .is_some_and(|ident| ident == self.binding)
+                    })
+                    .count();
+            }
+            syn::visit::visit_expr_struct(self, item);
+        }
+    }
+    let mut counter = Counter {
+        field_name,
+        binding,
+        count: 0,
+    };
+    counter.visit_block(block);
+    counter.count
+}
+
+fn has_canonical_pg_runtime_registration(file: &syn::File) -> bool {
+    let methods = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::Item::Impl(item) = item else {
+                return None;
+            };
+            if type_last_ident(&item.self_ty).is_none_or(|ident| ident != "LaunchPlan") {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "register" => Some(method),
+                _ => None,
+            })
+        })
+        .collect::<Vec<_>>();
+    if methods.len() != 1 {
+        return false;
+    }
+    let stmts = &methods[0].block.stmts;
+    let Some(pg_binding) = launch_destructured_binding(stmts, "pg_runtime_module") else {
+        return false;
+    };
+    let trace = stmts.iter().position(is_trace_registration_stmt);
+    let pg = stmts
+        .iter()
+        .position(|stmt| is_pg_runtime_registration_stmt(stmt, &pg_binding));
+    let event = stmts.iter().position(is_event_infra_registration_stmt);
+    matches!((trace, pg, event), (Some(trace), Some(pg), Some(event)) if trace < pg && pg < event)
+        && stmts
+            .iter()
+            .filter(|stmt| is_pg_runtime_registration_stmt(stmt, &pg_binding))
+            .count()
+            == 1
+        && module_registration_call_count(file, &pg_binding) == 1
+}
+
+fn launch_destructured_binding(stmts: &[syn::Stmt], field_name: &str) -> Option<String> {
+    stmts.iter().find_map(|stmt| {
+        let syn::Stmt::Local(local) = stmt else {
+            return None;
+        };
+        let syn::Pat::Struct(pat) = &local.pat else {
+            return None;
+        };
+        pat.fields.iter().find_map(|field| {
+            if !matches!(&field.member, syn::Member::Named(member) if member == field_name) {
+                return None;
+            }
+            let syn::Pat::Ident(binding) = field.pat.as_ref() else {
+                return None;
+            };
+            Some(binding.ident.to_string())
+        })
+    })
+}
+
+fn module_registration_call_count(file: &syn::File, binding: &str) -> usize {
+    struct Counter<'a> {
+        binding: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if expr_path_last(&call.func).is_some_and(|ident| ident == "register_module_output")
+                && call.args.len() == 2
+                && call.args.last().is_some_and(|arg| {
+                    expr_path_last(arg).is_some_and(|ident| ident == self.binding)
+                })
+            {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter { binding, count: 0 };
+    counter.visit_file(file);
+    counter.count
+}
+
+fn is_trace_registration_stmt(stmt: &syn::Stmt) -> bool {
+    matches!(stmt, syn::Stmt::Expr(syn::Expr::If(expr), None)
+        if matches!(expr.cond.as_ref(), syn::Expr::Let(let_)
+            if matches!(let_.expr.as_ref(), syn::Expr::Path(path)
+                if path.path.is_ident("trace_exporter"))))
+}
+
+fn is_pg_runtime_registration_stmt(stmt: &syn::Stmt, binding: &str) -> bool {
+    struct Finder<'a> {
+        binding: &'a str,
+        count: usize,
+    }
+    impl<'ast> Visit<'ast> for Finder<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if expr_path_last(&call.func).is_some_and(|ident| ident == "register_module_output")
+                && call.args.len() == 2
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "stack"))
+                && call.args.last().is_some_and(|arg| {
+                    expr_path_last(arg).is_some_and(|ident| ident == self.binding)
+                })
+            {
+                self.count += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut finder = Finder { binding, count: 0 };
+    finder.visit_stmt(stmt);
+    finder.count == 1
+}
+
+fn is_event_infra_registration_stmt(stmt: &syn::Stmt) -> bool {
+    matches!(stmt, syn::Stmt::Expr(syn::Expr::ForLoop(loop_), None)
+        if matches!(loop_.pat.as_ref(), syn::Pat::Ident(pat) if pat.ident == "guard")
+            && expr_path_last(&loop_.expr).is_some_and(|ident| ident == "event_infra_guards"))
 }
 
 #[derive(Default)]
@@ -1037,6 +1584,24 @@ fn exact_named_path_call_count(block: &syn::Block, path: &[&str]) -> usize {
     }
     let mut counter = Counter { path, calls: 0 };
     counter.visit_block(block);
+    counter.calls
+}
+
+fn exact_path_call_count_in_file(file: &syn::File, path: &[&str]) -> usize {
+    struct Counter<'a> {
+        path: &'a [&'a str],
+        calls: usize,
+    }
+    impl Visit<'_> for Counter<'_> {
+        fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+            if is_exact_path(&call.func, self.path) {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter { path, calls: 0 };
+    counter.visit_file(file);
     counter.calls
 }
 
@@ -1394,12 +1959,18 @@ fn is_protected_provider_owner(owner: &str) -> bool {
     let segments = owner.split("::").collect::<Vec<_>>();
     matches!(
         segments.as_slice(),
-        ["RedisRuntimeDeps" | "S3RuntimeDeps" | "VaultRuntimeDeps" | "AmqpRuntimeDeps"]
+        ["RedisRuntimeDeps"
+            | "S3RuntimeDeps"
+            | "VaultRuntimeDeps"
+            | "AmqpRuntimeDeps"
+            | "PgRuntimeDeps"
+            | "PgReadinessSamplerFactory"]
             | ["DomainModuleResult" | "DomainModuleResultExt"]
             | ["redis" | "redis_adapter", "RedisRuntimeDeps"]
             | ["s3", "S3RuntimeDeps"]
             | ["vault", "VaultRuntimeDeps"]
             | ["amqp", "AmqpRuntimeDeps"]
+            | ["postgres", "PgRuntimeDeps" | "PgReadinessSamplerFactory"]
             | ["bootstrap", "DomainModuleResult"]
             | ["provider_output", "DomainModuleResultExt"]
             | ["crate", "provider_output", "DomainModuleResultExt"]
@@ -1539,8 +2110,21 @@ impl<'ast> Visit<'ast> for ProviderPrimitiveVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = call.method.to_string();
-        if matches!(method.as_str(), "runtime_resources" | "merge_provider") {
-            self.classify(&method, self.expr_type(&call.receiver));
+        let owner = self.expr_type(&call.receiver);
+        if matches!(
+            method.as_str(),
+            "runtime_resources"
+                | "merge_provider"
+                | "into_runtime_parts"
+                | "store_guard"
+                | "audit_admin_store_guard"
+                | "spawn_readiness_sampler"
+        ) || method == "spawn"
+            && owner.as_deref().is_some_and(|owner| {
+                self.resolve_type(owner).rsplit("::").next() == Some("PgReadinessSamplerFactory")
+            })
+        {
+            self.classify(&method, owner);
         }
         syn::visit::visit_expr_method_call(self, call);
     }
@@ -1552,7 +2136,16 @@ impl<'ast> Visit<'ast> for ProviderPrimitiveVisitor<'_> {
                 .segments
                 .last()
                 .map(|segment| segment.ident.to_string())
-            && matches!(method.as_str(), "runtime_resources" | "merge_provider")
+            && matches!(
+                method.as_str(),
+                "runtime_resources"
+                    | "merge_provider"
+                    | "into_runtime_parts"
+                    | "store_guard"
+                    | "audit_admin_store_guard"
+                    | "spawn_readiness_sampler"
+                    | "spawn"
+            )
         {
             let segments = path.path.segments.iter().collect::<Vec<_>>();
             let owner = path
@@ -2304,7 +2897,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.probe.drain",
         path: RUNTIME_LIB_PATH,
-        pattern: "for (name, probe) in module.probes",
+        pattern: "for (name, probe) in std::mem::take(&mut module.probes)",
     },
     AnchorSpec {
         id: "run.auth.routers",
@@ -2317,6 +2910,11 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "health_listener(reporter, metrics_exporter)",
     },
     AnchorSpec {
+        id: "run.provider-output.pg",
+        path: RUNTIME_LIB_PATH,
+        pattern: "crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period)",
+    },
+    AnchorSpec {
         id: "run.launch",
         path: RUNTIME_LIB_PATH,
         pattern: "launch::launch(launch_plan)",
@@ -2327,19 +2925,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "if let Some(exporter) = trace_exporter",
     },
     AnchorSpec {
-        id: "launch.shutdown.pg-store",
+        id: "launch.shutdown.pg-output",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "stack.register_detached(pg_store_guard);",
-    },
-    AnchorSpec {
-        id: "launch.shutdown.pg-audit",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "if let Some(guard) = pg_audit_admin_store_guard",
-    },
-    AnchorSpec {
-        id: "launch.shutdown.pg-sampler",
-        path: RUNTIME_LAUNCH_PATH,
-        pattern: "stack.register_with_token(pg_readiness_sampler);",
+        pattern: "Self::register_module_output(stack, pg_runtime_module)?;",
     },
     AnchorSpec {
         id: "launch.shutdown.event-infra",
@@ -2349,17 +2937,17 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "launch.shutdown.resources",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "for resource in domain_resources",
+        pattern: "for resource in output.resources",
     },
     AnchorSpec {
         id: "launch.shutdown.workers",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "for worker in domain_workers",
+        pattern: "for worker in output.workers",
     },
     AnchorSpec {
         id: "launch.register-plan",
         path: RUNTIME_LAUNCH_PATH,
-        pattern: "let listeners = plan.register(&mut stack);",
+        pattern: "let listeners = plan.register(&mut stack)?;",
     },
     AnchorSpec {
         id: "launch.listeners",
@@ -2415,6 +3003,13 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
             .unwrap_or_else(|| empty_scope(text));
     }
     if spec.path == RUNTIME_LAUNCH_PATH {
+        if matches!(
+            spec.id,
+            "launch.shutdown.resources" | "launch.shutdown.workers"
+        ) {
+            return launch_plan_method_scope(text, "fn register_module_output(")
+                .unwrap_or_else(|| empty_scope(text));
+        }
         if spec.id.starts_with("launch.shutdown.") {
             return launch_plan_register_scope(text).unwrap_or_else(|| empty_scope(text));
         }
@@ -2433,6 +3028,14 @@ fn anchor_search_scope<'a>(spec: &AnchorSpec, text: &'a str) -> AnchorSearchScop
 fn anchor_order_key(spec: &AnchorSpec) -> (&'static str, &'static str) {
     if spec.path == RUNTIME_LIB_PATH {
         return (spec.path, "run");
+    }
+    if spec.path == RUNTIME_LAUNCH_PATH
+        && matches!(
+            spec.id,
+            "launch.shutdown.resources" | "launch.shutdown.workers"
+        )
+    {
+        return (spec.path, "register_module_output");
     }
     if spec.path == RUNTIME_LAUNCH_PATH && spec.id.starts_with("launch.shutdown.") {
         return (spec.path, "register");
@@ -2478,12 +3081,19 @@ fn extract_braced_body_at<'a>(
 }
 
 fn launch_plan_register_scope(text: &str) -> Option<AnchorSearchScope<'_>> {
+    launch_plan_method_scope(text, "fn register(")
+}
+
+fn launch_plan_method_scope<'a>(
+    text: &'a str,
+    method_needle: &str,
+) -> Option<AnchorSearchScope<'a>> {
     let mut cursor = 0usize;
     while cursor < text.len() {
         let impl_scope = extract_braced_body_at(text, cursor, "impl LaunchPlan")?;
-        if let Some(method_offset) = impl_scope.body.find("fn register(") {
+        if let Some(method_offset) = impl_scope.body.find(method_needle) {
             let method_start = impl_scope.start + method_offset;
-            if let Some(method_scope) = extract_braced_body_at(text, method_start, "fn register(")
+            if let Some(method_scope) = extract_braced_body_at(text, method_start, method_needle)
                 && method_scope.end <= impl_scope.end
             {
                 return Some(method_scope);
@@ -2900,8 +3510,9 @@ impl DomainModuleResult {
 
     fn runtime_launch_fixture(omit: Option<&str>) -> String {
         format!(
-            "impl LaunchPlan {{ fn register() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
+            "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
             launch_register_anchor_lines(omit),
+            launch_module_registration_anchor_lines(omit),
             launch_until_anchor_lines(omit)
         )
     }
@@ -2910,7 +3521,28 @@ impl DomainModuleResult {
         RUNTIME_ANCHORS
             .iter()
             .filter(|anchor| {
-                anchor.path == RUNTIME_LAUNCH_PATH && anchor.id.starts_with("launch.shutdown.")
+                anchor.path == RUNTIME_LAUNCH_PATH
+                    && anchor.id.starts_with("launch.shutdown.")
+                    && !matches!(
+                        anchor.id,
+                        "launch.shutdown.resources" | "launch.shutdown.workers"
+                    )
+            })
+            .filter(|anchor| omit != Some(anchor.id))
+            .map(|anchor| anchor.pattern)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn launch_module_registration_anchor_lines(omit: Option<&str>) -> String {
+        RUNTIME_ANCHORS
+            .iter()
+            .filter(|anchor| {
+                anchor.path == RUNTIME_LAUNCH_PATH
+                    && matches!(
+                        anchor.id,
+                        "launch.shutdown.resources" | "launch.shutdown.workers"
+                    )
             })
             .filter(|anchor| omit != Some(anchor.id))
             .map(|anchor| anchor.pattern)
@@ -3028,8 +3660,8 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("32 | launch.register-plan"));
-        assert!(report.rendered.contains("33 | launch.listeners"));
+        assert!(report.rendered.contains("31 | launch.register-plan"));
+        assert!(report.rendered.contains("32 | launch.listeners"));
         Ok(())
     }
 
@@ -3259,6 +3891,8 @@ pub async fn run() {
         provider_module,
     });
     }.await);
+    let pg_runtime_module = crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+    let _launch_plan = LaunchPlanParts { pg_runtime_module };
 }
 
 fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {
@@ -3282,6 +3916,12 @@ fn build_provider_module(deps: &SharedRuntimeDeps) -> DomainModuleResult {
     provider_module.merge_provider(&deps.vault);
     provider_module
 }
+fn build_pg_runtime_module(owner: PgRuntimeDeps, period: Duration) -> DomainModuleResult {
+    let (resources, sampler_factory) = owner.into_runtime_parts(period);
+    let readiness_sampler: WorkerSpec =
+        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));
+    DomainModuleResult { resources, workers: vec![readiness_sampler], ..DomainModuleResult::default() }
+}
 "#
     }
 
@@ -3292,7 +3932,23 @@ fn build_provider_module(deps: &SharedRuntimeDeps) -> DomainModuleResult {
         )?;
         write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
         write(&root.join(PROVIDER_OUTPUT_PATH), provider_adapter_fixture())?;
-        write(&root.join(RUNTIME_LAUNCH_PATH), "fn launch() {}\n")
+        write(
+            &root.join(RUNTIME_LAUNCH_PATH),
+            r#"
+impl LaunchPlan {
+    fn register(self, stack: &mut ShutdownStack) {
+        let Self { trace_exporter, pg_runtime_module, event_infra_guards } = self;
+        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }
+        Self::register_module_output(stack, pg_runtime_module)?;
+        for guard in event_infra_guards { stack.register_detached(guard); }
+    }
+    fn register_module_output(stack: &mut ShutdownStack, output: DomainModuleResult) {
+        for resource in output.resources { stack.register_detached(resource); }
+        for worker in output.workers { stack.register_with_token(worker); }
+    }
+}
+"#,
+        )
     }
 
     #[test]
@@ -3363,6 +4019,49 @@ async fn wire_durable() {
             assert_provider_gate_fails(&root, label)?;
         }
         write(&event_transport, &canonical)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_provider_outputs_reject_parallel_pg_output_type() -> Result<()> {
+        let root = fixture_root("runtime-provider-outputs-pg-output-red")?;
+        write_provider_fixture(&root)?;
+        let adapter =
+            fs::read_to_string(root.join(PROVIDER_OUTPUT_PATH))? + "\nstruct PgRuntimeOutput;\n";
+        write(&root.join(PROVIDER_OUTPUT_PATH), &adapter)?;
+
+        let findings = provider_outputs_live_findings(&root)?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::ForbiddenWiring
+                    && finding.detail.contains("DomainModuleResult")
+            }),
+            "PgRuntimeOutput parallel seam must be rejected: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_provider_outputs_allow_pg_local_renames_and_helper_return() -> Result<()> {
+        let root = fixture_root("runtime-provider-outputs-pg-semantic-green")?;
+        write_provider_fixture(&root)?;
+        let adapter = provider_adapter_fixture()
+            .replace("resources, sampler_factory", "guards, readiness_factory")
+            .replace("readiness_sampler", "sampler_worker")
+            .replace("sampler_factory.spawn(token)", "readiness_factory.spawn(cancel)")
+            .replace("move |token|", "move |cancel|")
+            .replace(
+                "DomainModuleResult { resources, workers: vec![sampler_worker], ..DomainModuleResult::default() }",
+                "identity(DomainModuleResult { resources: guards, workers: vec![sampler_worker], ..DomainModuleResult::default() })",
+            )
+            + "\nfn identity(output: DomainModuleResult) -> DomainModuleResult { output }\n";
+        write(&root.join(PROVIDER_OUTPUT_PATH), &adapter)?;
+
+        assert_eq!(
+            provider_outputs_live_findings(&root)?,
+            Vec::<Finding<Rule>>::new(),
+            "semantic PG lifecycle gate must not freeze local names or a transparent return helper"
+        );
         Ok(())
     }
 
@@ -3685,6 +4384,65 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             "provider_output.rs 内 UFCS 额外直连必须失败: {findings:?}"
         );
         write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
+        for (label, mutated) in [
+            (
+                "borrowed pg owner",
+                adapter.replace(
+                    "owner: PgRuntimeDeps, period: Duration",
+                    "owner: &PgRuntimeDeps, period: Duration",
+                ),
+            ),
+            (
+                "borrowed pg period",
+                adapter.replace(
+                    "owner: PgRuntimeDeps, period: Duration",
+                    "owner: PgRuntimeDeps, period: &Duration",
+                ),
+            ),
+            (
+                "missing pg constructor",
+                adapter.replace("fn build_pg_runtime_module", "fn removed_pg_runtime_module"),
+            ),
+            ("duplicate pg constructor", format!("{adapter}\n{adapter}")),
+            (
+                "legacy pg lifecycle direct call",
+                format!(
+                    "{adapter}\nfn legacy(owner: &PgRuntimeDeps) {{ owner.spawn_readiness_sampler(); }}\n"
+                ),
+            ),
+            (
+                "discard pg resources",
+                adapter.replace(
+                    "DomainModuleResult { resources, workers: vec![readiness_sampler], ..DomainModuleResult::default() }",
+                    "DomainModuleResult { resources: Vec::new(), workers: vec![readiness_sampler], ..DomainModuleResult::default() }",
+                ),
+            ),
+            (
+                "discard sampler factory result",
+                adapter.replace(
+                    "let readiness_sampler: WorkerSpec =\n        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));",
+                    "let readiness_sampler: WorkerSpec =\n        Box::new(move |token| { let _ = sampler_factory.spawn(token); DynManagedResource::new_box(fake_worker) });",
+                ),
+            ),
+            (
+                "fake readiness worker",
+                adapter.replace(
+                    "let readiness_sampler: WorkerSpec =\n        Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token)));",
+                    "let readiness_sampler: WorkerSpec = { let _bait = Box::new(move |token| DynManagedResource::new_box(sampler_factory.spawn(token))); fake_worker };",
+                ),
+            ),
+            (
+                "pg output field substitution",
+                adapter.replace(
+                    "DomainModuleResult { resources, workers: vec![readiness_sampler], ..DomainModuleResult::default() }",
+                    "DomainModuleResult { resources, workers: vec![fake_worker], ..DomainModuleResult::default() }",
+                ),
+            ),
+        ] {
+            write(&root.join(PROVIDER_OUTPUT_PATH), &mutated)?;
+            assert_provider_gate_fails(&root, label)?;
+        }
+        write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
         let missing_assembly_merge = provider_output_fixture().replace(
             "    module.merge(inputs.provider_module);",
             "    let _ = inputs.provider_module;",
@@ -3716,6 +4474,30 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
                     .any(|finding| finding.rule == Rule::MissingAnchor),
                 "constructor 后 reset/alias 必须失败: {findings:?}"
             );
+        }
+        for (label, mutated) in [
+            (
+                "borrowed pg owner at run",
+                provider_output_fixture().replace(
+                    "build_pg_runtime_module(pg_owner, pg_readiness_period)",
+                    "build_pg_runtime_module(&pg_owner, pg_readiness_period)",
+                ),
+            ),
+            (
+                "duplicate pg build outside run",
+                provider_output_fixture()
+                    + "\nfn bait() { crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period); }\n",
+            ),
+            (
+                "pg output not handed to launch plan",
+                provider_output_fixture().replace(
+                    "let _launch_plan = LaunchPlanParts { pg_runtime_module };",
+                    "let _ = pg_runtime_module;",
+                ),
+            ),
+        ] {
+            write(&root.join(RUNTIME_LIB_PATH), &mutated)?;
+            assert_provider_gate_fails(&root, label)?;
         }
         write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
         let legacy_source = root.join("assemblies/runtime/src/legacy_provider.rs");
@@ -3752,6 +4534,42 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
         }
         assert_unrelated_provider_method_names_allowed(&root, &legacy_source)?;
         assert_test_only_provider_items_allowed(&root, &legacy_source)?;
+        write(
+            &legacy_source,
+            "fn spawn(factory: postgres::PgReadinessSamplerFactory, token: CancellationToken) { factory.spawn(token); }\n",
+        )?;
+        assert_provider_gate_fails(&root, "factory spawn outside canonical helper")?;
+        fs::remove_file(&legacy_source)?;
+
+        let launch_path = root.join(RUNTIME_LAUNCH_PATH);
+        let canonical_launch = fs::read_to_string(&launch_path)?;
+        for (label, mutated) in [
+            (
+                "pg registration before trace",
+                canonical_launch.replace(
+                    "        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }\n        Self::register_module_output(stack, pg_runtime_module)?;",
+                    "        Self::register_module_output(stack, pg_runtime_module)?;\n        if let Some(exporter) = trace_exporter { stack.register_detached(exporter); }",
+                ),
+            ),
+            (
+                "duplicate pg registration",
+                canonical_launch.replace(
+                    "        Self::register_module_output(stack, pg_runtime_module)?;",
+                    "        Self::register_module_output(stack, pg_runtime_module)?;\n        Self::register_module_output(stack, pg_runtime_module)?;",
+                ),
+            ),
+            (
+                "legacy direct pg registration",
+                canonical_launch.replace(
+                    "        Self::register_module_output(stack, pg_runtime_module)?;",
+                    "        stack.register_detached(pg_store_guard);",
+                ),
+            ),
+        ] {
+            write(&launch_path, &mutated)?;
+            assert_provider_gate_fails(&root, label)?;
+        }
+        write(&launch_path, &canonical_launch)?;
         write(&root.join(RUNTIME_LIB_PATH), "pub async fn run( {\n")?;
         assert!(!provider_outputs_live_findings(&root)?.is_empty());
         write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
@@ -3857,12 +4675,12 @@ fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
             r#"
 impl LaunchPlan { fn register() {
 if let Some(exporter) = trace_exporter
-stack.register_detached(pg_store_guard);
-if let Some(guard) = pg_audit_admin_store_guard
-stack.register_with_token(pg_readiness_sampler);
+Self::register_module_output(stack, pg_runtime_module)?;
 for guard in event_infra_guards
-for worker in domain_workers
-for resource in domain_resources
+}
+fn register_module_output() {
+for worker in output.workers
+for resource in output.resources
 }}
 async fn launch_until_observed() {
 let listeners = plan.register(&mut stack);
@@ -3881,7 +4699,7 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         assert!(
             report
                 .rendered
-                .contains("launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in domain_workers | status=out-of-order"),
+                .contains("launch.shutdown.workers | assemblies/runtime/src/launch.rs | for worker in output.workers | status=out-of-order"),
             "out-of-order launch anchor must be rendered explicitly: {}",
             report.rendered
         );
@@ -3919,10 +4737,11 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         write(
             &root.join(RUNTIME_LAUNCH_PATH),
             &format!(
-                "fn register() {{\n{}\n}}\n#[cfg(test)] mod tests {{ fn register() {{\n{}\n}} }}\nimpl LaunchPlan {{ fn register() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
+                "fn register() {{\n{}\n}}\n#[cfg(test)] mod tests {{ fn register() {{\n{}\n}} }}\nimpl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\n{}\n}}\n",
                 launch_register_anchor_lines(None),
                 launch_register_anchor_lines(None),
-                launch_register_anchor_lines(Some("launch.shutdown.resources")),
+                launch_register_anchor_lines(None),
+                launch_module_registration_anchor_lines(Some("launch.shutdown.resources")),
                 launch_until_anchor_lines(None)
             ),
         )?;
@@ -3943,8 +4762,9 @@ bind_and_register(&mut stack, listener, &addr_resolver).await?;
         write(
             &root.join(RUNTIME_LAUNCH_PATH),
             &format!(
-                "impl LaunchPlan {{ fn register() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nbind_and_register(&mut stack, listener, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack);\n}}\n",
-                launch_register_anchor_lines(None)
+                "impl LaunchPlan {{ fn register() {{\n{}\n}}\nfn register_module_output() {{\n{}\n}}\n}}\nasync fn launch_until_observed() {{\nbind_and_register(&mut stack, listener, &addr_resolver).await?;\nlet listeners = plan.register(&mut stack)?;\n}}\n",
+                launch_register_anchor_lines(None),
+                launch_module_registration_anchor_lines(None)
             ),
         )?;
         let report = collect_report(&root)?;

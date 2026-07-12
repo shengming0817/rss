@@ -2,11 +2,11 @@
 //! per-domain repo 构造收口到单一 funnel，对组合根的 wire_X 暴露**受控 per-domain 能力句柄**，
 //! 绝不泄漏裸 `sqlx::PgPool`。
 //!
-//! 四个类型：
-//! - [`PgRuntimeDeps`]：组合根级集中 funnel。唯一公开构造路径 [`PgRuntimeDeps::setup`]（migrator connect →
-//!   run_migrations → serving connect → RLS gate → 新建 readiness handle）；派发 [`PgRuntimeDeps::for_domain`] /
-//!   [`PgRuntimeDeps::infra`]、产出 shutdown 资源（[`PgRuntimeDeps::store_guard`]）+ 采样 worker
-//!   （[`PgRuntimeDeps::spawn_readiness_sampler`]）。
+//! 五个核心类型：
+//! - [`PgRuntimeDeps`]：不可克隆的组合根生命周期 owner。唯一公开构造路径 [`PgRuntimeDeps::setup`]；能力只经
+//!   [`PgRuntimeDeps::handle`] 投影，生命周期只经 [`PgRuntimeDeps::into_runtime_parts`] 按值交接。
+//! - [`PgRuntimeHandle`]：可克隆的运行期能力句柄，派发 [`PgRuntimeHandle::for_domain`] /
+//!   [`PgRuntimeHandle::infra`] 与 readiness/RLS probe handle，不拥有生命周期出口。
 //! - [`PgDomainDeps<D>`]：per-domain 受控句柄（`Clone`，私有持 `Arc<PgStore>`），只暴露该域的 repo
 //!   构造方法。类型参数 `D: PgDomain`（sealed marker）使「settings 的 deps 拿去建 identity repo」=
 //!   编译错误 E0599（类型层不可表达）。
@@ -57,7 +57,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use diport::DynPublisher;
-use diport::{Clock, DynCasStore, ManagedResource};
+use diport::{Clock, DynCasStore, DynManagedResource, ManagedResource};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use eventexec::TenantAuthority;
 #[cfg(feature = "domain-settings")]
@@ -131,20 +131,52 @@ impl sealed::Sealed for caps::Audit {}
 #[cfg(feature = "domain-audit")]
 impl PgDomain for caps::Audit {}
 
-/// 组合根级 postgres 能力包：集中 connect + migration + readiness handle，派发 per-domain 受控句柄，
-/// 并产出 shutdown 资源 / 采样 worker。
+/// 组合根级 postgres 生命周期 owner：集中 connect + migration，并唯一拥有 pool 与 sampler 的关闭权。
 ///
-/// 字段私有（`store` / `readiness`）；不暴露 `&PgStore` / `PgPool`（PG-BUNDLE-POOL-03）。经
-/// [`PgRuntimeDeps::setup`] 构造（PG-BUNDLE-FUNNEL-01）。
-#[derive(Clone)]
+/// INVARIANT: PG-RUNTIME-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "non-Clone owner and consuming into_runtime_parts self receiver; trybuild rejects clone and double consumption" }
+///
+/// 该类型刻意不实现 `Clone`。能力经 [`Self::handle`] 克隆为 [`PgRuntimeHandle`]；生命周期经
+/// [`Self::into_runtime_parts`] 按值消费，类型层禁止第二次交接。
 pub struct PgRuntimeDeps {
+    handle: PgRuntimeHandle,
+}
+
+/// 可克隆的 postgres 运行期能力句柄。
+///
+/// INVARIANT: PG-RUNTIME-HANDLE-02 { level = "Hard", exec = "native-compile", source = "code", native = "private capability-only fields and no lifecycle methods; trybuild rejects lifecycle projection" }
+///
+/// 仅持 capability 投影所需共享状态；owner 直接包这一份 handle，`handle()` 只克隆其中的 Arc，因而权限分离
+/// 不会形成第二份数据源。不提供 pool guard、sampler factory 或 lifecycle output API。
+#[derive(Clone)]
+pub struct PgRuntimeHandle {
     store: Arc<PgStore>,
     audit_admin_store: Option<Arc<PgStore>>,
     projection_registry: ProjectionWriteRegistry,
     readiness: Arc<PgDbReadiness>,
-    /// 启动期 RLS 能力门结果（true = `verify_rls_capability` 通过）；供 readyz 兜底探针读。setup 失败时进程
-    /// 根本不返回 `Self`（fail-fast），故 `Self` 存在即此值为 true——探针把该不变式显式暴露到 readyz。
     rls_ready: Arc<AtomicBool>,
+}
+
+/// DB readiness sampler 的单次启动工厂。
+///
+/// `spawn(self, token)` 消费工厂；同一 owner 产生的 factory 无法启动第二个 sampler。
+pub struct PgReadinessSamplerFactory {
+    store: Arc<PgStore>,
+    readiness: Arc<PgDbReadiness>,
+    period: Duration,
+}
+
+impl PgReadinessSamplerFactory {
+    /// 使用 `ShutdownStack` 注入的 token 启动 sampler，并消费本 factory。
+    #[must_use]
+    pub fn spawn(self, token: CancellationToken) -> PgReadinessSampler {
+        let handle = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
+            self.store,
+            self.period,
+            token.clone(),
+            Arc::clone(&self.readiness),
+        ));
+        PgReadinessSampler::adopt(handle, self.readiness, token)
+    }
 }
 
 /// 离线维护用 postgres 能力包。
@@ -273,11 +305,13 @@ impl PgRuntimeDeps {
             None => None,
         };
         Ok(Self {
-            store,
-            audit_admin_store,
-            projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
-            readiness: Arc::new(PgDbReadiness::new()),
-            rls_ready: Arc::new(AtomicBool::new(true)),
+            handle: PgRuntimeHandle {
+                store,
+                audit_admin_store,
+                projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
+                readiness: Arc::new(PgDbReadiness::new()),
+                rls_ready: Arc::new(AtomicBool::new(true)),
+            },
         })
     }
 
@@ -313,6 +347,52 @@ impl PgRuntimeDeps {
         })
     }
 
+    /// 投影可克隆的运行期能力句柄；生命周期 owner 仍留在调用方并只能交接一次。
+    #[must_use]
+    pub fn handle(&self) -> PgRuntimeHandle {
+        self.handle.clone()
+    }
+
+    /// 按值交接全部 runtime 生命周期资源。
+    ///
+    /// resource 注册顺序固定为 primary pool → optional audit-admin pool；LIFO shutdown 时 sampler 先停，
+    /// 随后 audit-admin、primary 依次关池。sampler factory 也不可克隆并由调用方单次启动。
+    #[must_use]
+    pub fn into_runtime_parts(
+        self,
+        period: Duration,
+    ) -> (
+        Vec<Box<DynManagedResource<'static>>>,
+        PgReadinessSamplerFactory,
+    ) {
+        let PgRuntimeHandle {
+            store,
+            audit_admin_store,
+            projection_registry: _,
+            readiness,
+            rls_ready: _,
+        } = self.handle;
+        let mut resources = vec![DynManagedResource::new_box(PgStoreGuard::new(Arc::clone(
+            &store,
+        )))];
+        if let Some(audit_admin_store) = audit_admin_store {
+            resources.push(DynManagedResource::new_box(PgStoreGuard::new_named(
+                audit_admin_store,
+                "postgres-audit-admin",
+            )));
+        }
+        (
+            resources,
+            PgReadinessSamplerFactory {
+                store,
+                readiness,
+                period,
+            },
+        )
+    }
+}
+
+impl PgRuntimeHandle {
     /// 派发 per-domain 受控句柄（`Arc<PgStore>` clone + `PhantomData<D>`）。
     ///
     /// 对标 kube-rs `Controller::run(.., Arc<Ctx>)` 注入 shared context。
@@ -349,40 +429,7 @@ impl PgRuntimeDeps {
         Arc::clone(&self.rls_ready)
     }
 
-    /// 包装私有 `Arc<PgStore>` 为可注册进 `ShutdownStack` 的 guard——**不**泄漏 `Arc<PgStore>` 本身。
-    ///
-    /// LIFO 注册：guard 先注册 ⇒ 最后关池（listener drain → sampler 停 → pool close）。
-    #[must_use]
-    pub fn store_guard(&self) -> PgStoreGuard {
-        PgStoreGuard::new(Arc::clone(&self.store))
-    }
-
-    /// 包装 optional audit admin pool guard。未配置 admin pool 时返回 None。
-    #[must_use]
-    pub fn audit_admin_store_guard(&self) -> Option<PgStoreGuard> {
-        self.audit_admin_store
-            .as_ref()
-            .map(|store| PgStoreGuard::new_named(Arc::clone(store), "postgres-audit-admin"))
-    }
-
-    /// spawn DB readiness 采样 worker 并 adopt 为 `ManagedResource`（收口 spawn + adopt 仪式，
-    /// 私有持有 `Arc<PgStore>` 不外泄）。`token` 由 `ShutdownStack` 注入；采样 loop 写 readiness handle。
-    #[must_use]
-    pub fn spawn_readiness_sampler(
-        &self,
-        period: Duration,
-        token: CancellationToken,
-    ) -> PgReadinessSampler {
-        let handle = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
-            Arc::clone(&self.store),
-            period,
-            token.clone(),
-            Arc::clone(&self.readiness),
-        ));
-        PgReadinessSampler::adopt(handle, Arc::clone(&self.readiness), token)
-    }
-
-    /// Construct a hermetic capability bundle backed by a lazy pool.
+    /// Construct a hermetic capability handle backed by a lazy pool.
     ///
     /// This test-only funnel never opens a database connection and preserves the production
     /// capability boundary: callers can obtain only typed [`PgDomainDeps`] handles, never the
@@ -409,15 +456,32 @@ impl PgRuntimeDeps {
             rls_ready: Arc::new(AtomicBool::new(true)),
         }
     }
+}
 
-    /// 测试构造：从已建 `Arc<PgStore>`（lazy pool）旁路 `setup`（免真连 DB）。
-    /// reason: 旁路 `verify_rls_capability`，测试假定能力已就绪（`rls_ready = true`）。
-    #[cfg(all(
-        test,
-        feature = "domain-settings",
-        feature = "domain-identity",
-        feature = "domain-audit"
-    ))]
+#[cfg(all(
+    test,
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
+impl PgRuntimeDeps {
+    /// 测试构造：从 lazy store 构造唯一 owner，可选注入 audit-admin store。
+    fn from_stores_for_test(store: Arc<PgStore>, audit_admin_store: Option<Arc<PgStore>>) -> Self {
+        Self {
+            handle: PgRuntimeHandle {
+                store,
+                audit_admin_store,
+                projection_registry: ProjectionWriteRegistry::empty(),
+                readiness: Arc::new(PgDbReadiness::new()),
+                rls_ready: Arc::new(AtomicBool::new(true)),
+            },
+        }
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl PgRuntimeHandle {
+    /// 从既有 lazy store 构造 crate 内集成测试 capability handle，不铸造 lifecycle owner。
     pub(crate) fn from_store_for_test(store: Arc<PgStore>) -> Self {
         Self {
             store,
@@ -989,7 +1053,7 @@ impl PgDomainDeps<caps::Audit> {
 
 /// framework/global postgres 基建能力句柄（`Clone`，provider-agnostic、非单域）。
 ///
-/// 私有持 `Arc<PgStore>`，经 [`PgRuntimeDeps::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
+/// 私有持 `Arc<PgStore>`，经 [`PgRuntimeHandle::infra`] 派发；只暴露 emitter / dead_letter / checkpoint /
 /// saga_journal / projection_events / cas_store / session_sweeper——这些是跨域基建（非绑某个 `caps::*` 域），
 /// 故独立于 [`PgDomainDeps`]。
 /// 与 `PgDomainDeps` 一样不返回 `&PgStore` / `PgPool`（PG-BUNDLE-POOL-03）。
@@ -1279,7 +1343,7 @@ mod tests {
     }
 
     fn deps() -> PgRuntimeDeps {
-        PgRuntimeDeps::from_store_for_test(lazy_store())
+        PgRuntimeDeps::from_stores_for_test(lazy_store(), None)
     }
 
     // 这些测试经 lazy pool（`connect_lazy_with`）构造 store——sqlx 池需 Tokio context，故 `#[tokio::test]`
@@ -1288,17 +1352,18 @@ mod tests {
     #[tokio::test]
     async fn for_domain_shares_store_arc() {
         let d = deps();
-        let s: PgDomainDeps<caps::Settings> = d.for_domain();
-        // PG-BUNDLE-POOL-03：句柄内部 store 与 runtime deps 同一 Arc（in-crate 可读私有字段验证）。
+        let handle = d.handle();
+        let s: PgDomainDeps<caps::Settings> = handle.for_domain();
+        // owner 只包 handle；权限分离不复制数据源，所有 capability 投影共享同一 Arc。
         assert!(
-            Arc::ptr_eq(&s.store, &d.store),
+            Arc::ptr_eq(&s.store, &d.handle.store),
             "for_domain clone 共享 store Arc"
         );
     }
 
     #[tokio::test]
     async fn domain_deps_clone_shares_store() {
-        let s: PgDomainDeps<caps::Settings> = deps().for_domain();
+        let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
         let c = s.clone();
         assert!(
             Arc::ptr_eq(&s.store, &c.store),
@@ -1310,29 +1375,68 @@ mod tests {
     async fn readiness_handle_returns_same_arc() {
         let d = deps();
         assert!(
-            Arc::ptr_eq(&d.readiness_handle(), &d.readiness),
+            Arc::ptr_eq(&d.handle().readiness_handle(), &d.handle.readiness),
             "readiness_handle 返回内部同一 Arc"
         );
+    }
+
+    #[tokio::test]
+    async fn cloned_handles_share_every_backing_arc() {
+        let owner = PgRuntimeDeps::from_stores_for_test(lazy_store(), Some(lazy_store()));
+        let first = owner.handle();
+        let second = first.clone();
+        assert!(Arc::ptr_eq(&first.store, &second.store));
+        assert!(
+            first
+                .audit_admin_store
+                .as_ref()
+                .zip(second.audit_admin_store.as_ref())
+                .is_some_and(|(first, second)| Arc::ptr_eq(first, second)),
+            "audit-admin capability must remain present and Arc-identical"
+        );
+        assert!(Arc::ptr_eq(&first.readiness, &second.readiness));
+        assert!(Arc::ptr_eq(&first.rls_ready, &second.rls_ready));
     }
 
     #[tokio::test]
     async fn rls_ready_handle_returns_same_arc() {
         let d = deps();
         assert!(
-            Arc::ptr_eq(&d.rls_ready_handle(), &d.rls_ready),
+            Arc::ptr_eq(&d.handle().rls_ready_handle(), &d.handle.rls_ready),
             "rls_ready_handle 返回内部同一 Arc"
         );
     }
 
     #[tokio::test]
-    async fn store_guard_name_is_postgres() {
-        use diport::ManagedResource as _;
-        assert_eq!(deps().store_guard().name(), "postgres");
+    async fn runtime_parts_without_audit_have_only_primary_guard() {
+        let (resources, _factory) = deps().into_runtime_parts(Duration::from_secs(1));
+        let names: Vec<_> = resources.iter().map(|resource| resource.name()).collect();
+        assert_eq!(names, ["postgres"]);
+    }
+
+    #[tokio::test]
+    async fn runtime_parts_with_audit_preserve_registration_order_and_close_pools() {
+        let primary = lazy_store();
+        let audit_admin = lazy_store();
+        let owner = PgRuntimeDeps::from_stores_for_test(
+            Arc::clone(&primary),
+            Some(Arc::clone(&audit_admin)),
+        );
+        let (resources, _factory) = owner.into_runtime_parts(Duration::from_secs(1));
+        let names: Vec<_> = resources.iter().map(|resource| resource.name()).collect();
+        assert_eq!(names, ["postgres", "postgres-audit-admin"]);
+
+        for resource in resources.into_iter().rev() {
+            let result = resource.shutdown().await;
+            assert!(result.is_ok(), "lazy pool closes cleanly: {result:?}");
+        }
+        assert!(primary.pool.is_closed(), "primary pool must close");
+        assert!(audit_admin.pool.is_closed(), "audit-admin pool must close");
     }
 
     #[tokio::test]
     async fn settings_bundle_constructs_all_parts() {
-        let s: PgDomainDeps<caps::Settings> = deps().for_domain();
+        let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
         // 单 clock 经 Arc 扇出到 read/write 两个 config 实例；into_parts 解包三件套（纯 pool clone，无 I/O）。
         let (_configs, _writer, _secrets) = s
             .settings_bundle(Arc::new(EpochClock) as Arc<dyn Clock>, protections())
@@ -1341,7 +1445,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_bundle_fans_out_single_clock() {
-        let s: PgDomainDeps<caps::Settings> = deps().for_domain();
+        let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
         let clock: Arc<dyn Clock> = Arc::new(EpochClock);
         let before = Arc::strong_count(&clock); // 1（仅本地持有）
         let _bundle = s.settings_bundle(Arc::clone(&clock), protections());
@@ -1355,7 +1459,7 @@ mod tests {
 
     #[tokio::test]
     async fn identity_accessors_construct() {
-        let i: PgDomainDeps<caps::Identity> = deps().for_domain();
+        let i: PgDomainDeps<caps::Identity> = deps().handle().for_domain();
         let _ = i.session_lifecycle(Box::new(EpochClock));
         let _ = i.outbox(
             DynPublisher::new_box(StubPublisher),
@@ -1373,7 +1477,7 @@ mod tests {
     #[tokio::test]
     async fn infra_accessors_construct() {
         // PgInfraDeps：framework/global 基建能力（F1 补齐）——纯 pool clone，无 I/O。
-        let infra = deps().infra();
+        let infra = deps().handle().infra();
         let _ = infra.emitter(Box::new(EpochClock));
         let _ = infra.inbox();
         let _ = infra.outbox_maintenance();
@@ -1391,7 +1495,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_accessors_construct() {
-        let a: PgDomainDeps<caps::Audit> = deps().for_domain();
+        let a: PgDomainDeps<caps::Audit> = deps().handle().for_domain();
         let _ = a.auth_audit_sink();
     }
 
@@ -1462,7 +1566,7 @@ mod tests {
 
     #[tokio::test]
     async fn infra_clone_shares_store() {
-        let infra = deps().infra();
+        let infra = deps().handle().infra();
         let c = infra.clone();
         assert!(
             Arc::ptr_eq(&infra.store, &c.store),
@@ -1470,13 +1574,14 @@ mod tests {
         );
     }
 
-    /// `spawn_readiness_sampler` 立即 cancel → `shutdown` 两阶段收敛 Ok（覆盖 spawn/adopt 接线）。
+    /// consuming factory 立即 cancel → `shutdown` 两阶段收敛 Ok（覆盖 spawn/adopt 接线）。
     #[tokio::test]
-    async fn spawn_readiness_sampler_clean_shutdown() {
+    async fn readiness_sampler_factory_clean_shutdown() {
         use diport::ManagedResource as _;
         let d = deps();
         let token = CancellationToken::new();
-        let sampler = d.spawn_readiness_sampler(Duration::from_millis(50), token.clone());
+        let (_resources, factory) = d.into_runtime_parts(Duration::from_millis(50));
+        let sampler = factory.spawn(token.clone());
         token.cancel();
         assert!(
             sampler.shutdown().await.is_ok(),

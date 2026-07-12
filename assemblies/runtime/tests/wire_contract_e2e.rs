@@ -225,7 +225,7 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
     })?;
 
     let deps = SharedRuntimeDeps {
-        pg,
+        pg: pg.handle(),
         redis,
         s3,
         vault,

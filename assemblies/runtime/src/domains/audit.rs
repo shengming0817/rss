@@ -70,7 +70,7 @@ pub(crate) mod tests {
 
     pub(crate) async fn test_binding() -> anyhow::Result<DomainBinding> {
         wire(AuditModuleDeps::new(
-            postgres::PgRuntimeDeps::for_module_test().for_domain(),
+            postgres::PgRuntimeHandle::for_module_test().for_domain(),
             RustCryptoMacVerifier,
             MacKey::from_bytes(vec![0x42; 32]),
             Arc::new(SystemClock),

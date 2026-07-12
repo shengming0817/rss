@@ -1,6 +1,6 @@
 # ADR-010：持久化能力分层 — domain binding / module result / capability bundle 单源
 
-- **状态**：Accepted，2026-07-12 经 #1676 amendment（runtime-local provider output 单一路径已落）
+- **状态**：Accepted，2026-07-12 经 #1676 / #1677 amendment（provider output 与 PG 生命周期所有权单一路径已落）
 - **日期**：2026-06-27
 - **关联**：issue #1425 [PERSIST-004] · Parent Feature #1419 [PERSIST-FEA-A] · Parent Epic #1418 [PERSIST-EPIC] · 同批 #1432（defer gate 落地）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发）· **ADR-005**（域形 repo/UoW port 归属 + category line，本 ADR 复用其归属判据不重证）· **ADR-009**（typed route funnel）
@@ -49,11 +49,19 @@ Phase 4 的 settings/identity/audit `module()` 已返回 `DomainBinding::new(nam
 
 ### 2.3 Pg capability bundle — postgres 能力按运行时 / 域打包
 
-postgres adapter 把「连接池 + 一组域形 repo/UoW provider impl」打包为 **capability bundle**，而非组合根逐 port `new`。两档：
+postgres adapter 把「连接池 + 一组域形 repo/UoW provider impl」打包为 **capability bundle**，而非组合根逐 port `new`。
+#1677 把同一份 PG 状态的两个真实角色显式分开；这不是多源，而是 owner 直接包住唯一 handle：
 
-- **`PgRuntimeDeps`**（运行时级）：拥有 `Arc<Pool>` + migrations + 健康 / `ManagedResource` 接线，单次 `PgStore::connect` 产出。
-- **`PgDomainDeps`**（域级）：从 `PgRuntimeDeps` 按域投影出该域所需的 repo/UoW 句柄集（如 settings 的 `ConfigRepo` + `SecretRepo`
-  + `ConfigUnitOfWork`），交该域 `module()` 构造器。
+- **`PgRuntimeDeps`**（运行时级生命周期 owner）：不实现 `Clone`，生产 `setup*()` 构造家族产出；内部只持一份
+  `PgRuntimeHandle`，不再同时保存第二份 store/readiness 状态。`handle(&self)` 只克隆该 handle 内的 `Arc`，不会形成第二个
+  生命周期 owner。
+- **`PgRuntimeHandle`**（可克隆能力句柄）：只提供 `for_domain`、`infra`、`readiness_handle`、`rls_ready_handle` 投影；不暴露
+  pool guard、sampler factory 或 lifecycle output API。`SharedRuntimeDeps` 与无 launch assembly 只保存此 handle。
+- **`PgDomainDeps<D>`**（域级能力句柄）：由 `PgRuntimeHandle::for_domain` 按域投影所需 repo/UoW（如 settings 的
+  `ConfigRepo` + `SecretRepo` + `ConfigUnitOfWork`），交该域 `module()` 构造器。
+- 生命周期交接只能由 `PgRuntimeDeps::into_runtime_parts(self, period)` 按值完成：返回顺序固定为 primary → optional
+  audit-admin 的 pool guards，以及 non-`Clone` `PgReadinessSamplerFactory`；factory 的 `spawn(self, token)` 再按值消费，单个
+  owner/factory 均不能生成第二套关闭或 sampler 路径。
 
 对标 GoCell `PGSet.ForCell`（per-cell 投影）/ `WithPGBundle`，及 omicron `DataStore`（一个 struct 持 `Arc<Pool>`、子模块聚合
 per-resource 方法、单 `new(log, pool, ..)` 构造——见 §对标证据）。**RSS 偏离**：omicron `DataStore` 是单体全聚合，RSS 按域形
@@ -80,9 +88,12 @@ transport / vault signer）或 per-domain DomainDeps（域消费：vault resolve
 `DomainModuleResult`，并由 `DomainModuleResultExt::merge_provider` 委托 §2.2 的 `merge`。trait 不泄漏到 adapter，组合根也不再裸取
 resource channel 直接扩展；注册顺序固定为 Redis → S3 → Vault，域内资源顺序原样保留。
 
-这条窄 trait 只覆盖生命周期形状相同的三项 live provider。PG readiness 需要 interval / cancel token，并占有独立生命周期槽位，
-不适用此 seam；#1677 以携带这些参数的显式 helper 收口。AMQP 属 event-infra 生命周期。二者均不为追求表面统一而塞进
-宽泛 provider trait。
+这条窄 trait 只覆盖生命周期形状相同的三项 live provider。PG readiness 需要 interval / cancel token，
+不适用此 trait。#1677 以唯一 `build_pg_runtime_module(owner, period)` 消费 owner，把 ordered pool guards 与单个 worker
+直接转换为既有 `DomainModuleResult`，不再定义平行 PG output type。`LaunchPlanParts` 必填 PG module batch；它和普通 domain
+module batch 复用同一个 resources→workers 注册 helper，但分批位于 trace 后、event infra 前，以保留 sampler 与 event
+worker 的 LIFO 依赖。PG 不实现通用 `ProviderOutput`，helper 外也不直接调用 lifecycle primitives。AMQP 属 event-infra
+生命周期；二者均不为追求表面统一而塞进宽泛 provider trait。
 
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
@@ -104,7 +115,7 @@ resource channel 直接扩展；注册顺序固定为 Redis → S3 → Vault，�
 
 1. provider-agnostic infra port + 域形 port 归属 — **已落**（ADR-003 / ADR-005）。
 2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **已落**（#1422）；`DomainBinding` 单一所有权形状 + result `Extend` — **已落**（#1669）。
-3. Pg capability bundle（`PgRuntimeDeps` / `PgDomainDeps`）— **已落**（#1423）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；Redis / S3 / Vault runtime-local provider output 单一路径 — **已落**（#1676）。
+3. Pg capability bundle（`PgRuntimeDeps` / `PgRuntimeHandle` / `PgDomainDeps`）— **已落**（#1423 / #1677）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；Redis / S3 / Vault runtime-local provider output 单一路径 — **已落**（#1676）；PG 独立生命周期 output 单一路径 — **已落**（#1677）。
 4. L1/L2 repo/UoW conformance（CAS / rollback / tenant / co-tx both-or-neither）— session 维度**已落**（ADR-005 §9/§10），其余 W 阶段。
 5. 第一条 durable 闭环：settings module + routes / probes / resources / journey — **待落**（#1421）。
 6. defer gate — **本批落**（#1432）。
@@ -123,10 +134,16 @@ pub fn module(deps: SettingsDomainDeps) -> DomainBinding {
     )
 }
 
-// postgres capability bundle（设计意图）
-pub struct PgRuntimeDeps { /* pool: Arc<PgPool> + migrations + ManagedResource */ }
+// postgres capability bundle（#1677 已落：一个数据源、两个权限角色）
+pub struct PgRuntimeDeps { handle: PgRuntimeHandle } // non-Clone lifecycle owner
+#[derive(Clone)]
+pub struct PgRuntimeHandle { /* shared store/readiness capability state */ }
 impl PgRuntimeDeps {
-    pub fn for_settings(&self) -> SettingsDomainDeps { /* 投影 ConfigRepo / SecretRepo / ConfigUnitOfWork 句柄 */ }
+    pub fn handle(&self) -> PgRuntimeHandle { /* Arc clone only */ }
+    pub fn into_runtime_parts(self, period: Duration) -> (Vec<Box<DynManagedResource>>, PgReadinessSamplerFactory) { /* single-use */ }
+}
+impl PgRuntimeHandle {
+    pub fn for_domain<D: PgDomain>(&self) -> PgDomainDeps<D> { /* typed capability projection */ }
 }
 ```
 
@@ -135,12 +152,13 @@ impl PgRuntimeDeps {
 - **正**：横切接线压成少数 funnel；`DomainBinding` 私有字段 + `compose_bindings` 唯一 output 出口在类型/API 边界
   强制 compose 成功后才 drain，并守住 single owner、禁止重复消费；三出口保序由 bootstrap 测试锁定，runtime baseline
   检查三字段 merge 完整性；Redis / S3 / Vault 经 crate-private provider adapter 进入同一个 result merge，不引入 service locator，
-  **零新增 crate / 零新增分层**（沿用 ADR-005 域形 port + diport）。
+  PG 则由 non-`Clone` owner 直接生成既有 `DomainModuleResult` batch，并经公共注册 helper 保持 sampler/pool 依赖顺序；owner
+  只包 handle，能力投影与生命周期权限分离但数据源及 output 类型仍唯一。**零新增 crate / 零新增分层**（沿用 ADR-005 域形 port + diport）。
 - **负 / 代价**：① binding/output 含单 owner worker/resource，不提供 `Clone` 或完整 `Sync`；确需并发共享时必须拆出窄只读视图；
   ② defer gate v1 标记集窄（精度取舍——自由词散文不触发，见 §6 + `xtask/src/defergate.rs` rustdoc 盲区）。
 - **下游**：各域 W 阶段照 §2.6 顺序 + ADR-005 §8.1 同步点清单落 repo/UoW port + adapter bundle。
 
-## 5. #1669 amendment 的安全 / 威胁重评
+## 5. #1669 / #1677 amendment 的安全 / 威胁重评
 
 #1669 把原先拟议的扁平 result 修正为私有字段 `DomainBinding` + 受控 `compose_bindings`，因此本节完成 amendment 重评：
 
@@ -151,6 +169,13 @@ impl PgRuntimeDeps {
   泄漏与 service-locator 扩张面。
 - 所有权威胁收敛：外部调用方无法直接取得 domain/output；`compose_bindings` 在 compose 成功前不 drain，失败时 bindings
   与 outputs 原样保留；成功后 `FnOnce` worker 与 managed resource 只转移一次，避免提前启动、clone 后重复启动或重复关闭。
+- PG 生命周期复制威胁收敛：`PgRuntimeDeps` 与 `PgReadinessSamplerFactory` 均 non-`Clone` 且按值消费；cloneable
+  `PgRuntimeHandle` 没有生命周期 API，因此能力消费者无法取得 pool guard 或重复启动 sampler。owner 只能转换为既有
+  `DomainModuleResult`，不存在第二套 lifecycle output seam。
+- PG 关闭顺序漂移收敛：owner 交出的 guards 固定 primary → optional audit-admin，PG module batch 经公共 helper 固定
+  resources → workers 注册；LIFO 关闭时 sampler 先停，再关 audit-admin 与 primary。PG module 在 trace 后、event infra 前注册，
+  使 event/domain/listener 均先于 sampler 排空。类型系统 Hard 锁定 owner/factory 的单次消费；无法跨文件类型化证明的唯一
+  helper 调用、无平行 output 与注册相对顺序由带 synthetic-red/green 的 Medium runtime baseline 门补齐。
 
 结论：既有 adapter/domain、typed route/auth 与跨域隔离安全边界均不降级；binding/output 分离进一步强化这些边界。
 
@@ -164,12 +189,17 @@ impl PgRuntimeDeps {
 | 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |
 | result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
 | provider 输出形状与 live 集合 | **Hard（类型 + 可见性）/ Medium（精确 layer-deps deny + baseline）** | crate-private `ProviderOutput` 固定返回 `DomainModuleResult`；`LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 仅拒绝 `adapters/redis|s3|vault → bootstrap`（Cargo package 为 `redis-adapter|s3|vault`），三条 synthetic red + postgres→bootstrap/目标→diport anti-vacuity green，真实 workspace 由 `cargo xtask layer-deps` 校验；runtime baseline 锁定 Redis → S3 → Vault 集合、顺序与唯一 `provider_module` merge 路径 |
+| PG owner / handle 权限分离 | **Hard（类型 + 可见性）** | `PgRuntimeDeps` non-`Clone` 且只包 `PgRuntimeHandle`；handle `Clone` 但只暴露能力投影，生命周期字段/API 不可见；compile-fail/pass UI tests 锁 owner 不可克隆、handle 无 lifecycle API、能力投影可用 |
+| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（runtime baseline）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费（Hard）；唯一 `build_pg_runtime_module` 直接生成既有 `DomainModuleResult`，`LaunchPlanParts` 必填 PG batch，PG 不实现通用 `ProviderOutput`。公共 `register_module_output` 按 resources → workers 注册；`RUNTIME-PROVIDER-OUTPUTS-LIVE-01` 锁唯一 helper/生产调用、helper 外无 lifecycle primitive、无平行 output type，以及 PG batch 在 event infra 前注册（AcceptedMedium；synthetic red + anti-vacuity green） |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
 无 Soft 新增 enforcement。
 
 ## 7. 备选（为何不取）
 
+- **把 `PgRuntimeDeps` / `PgRuntimeHandle` 合成一个类型**：若统一类型可 `Clone`，任何能力消费者也会复制 lifecycle 权限，无法阻止
+  重复 guards/sampler；若统一类型不可 `Clone`，则 session/event/domain/probe 等并行消费者无法持有共享能力，且无 launch assembly
+  被迫保留不属于自己的生命周期 owner。两类型只分离权限角色，owner 直接包 handle，故没有引入第二数据源。
 - **散装在组合根逐 port `new`（现状）**：被 PERSIST epic 否决——横切复杂度随域数线性膨胀、易漏 `ManagedResource` / probe 接线、
   defer 无追踪。
 - **单体 `DataStore` god-struct（omicron 式全聚合）**：与 ADR-005 域形 port「按域切分 provider」冲突，god-struct 把全部域 query
@@ -177,7 +207,7 @@ impl PgRuntimeDeps {
 
 ## 8. Follow-up（落地同步点 + 后续 issue）
 
-- `DomainModuleResult` / `PgRuntimeDeps` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）；settings/identity/audit `module()`：**已落**（#1670）；live bindings、typed-handle funnel 与生成列表：**已落**（#1672）。
+- `DomainModuleResult` / `PgRuntimeDeps` / `PgRuntimeHandle` / `PgDomainDeps` 执行体：**已落**（#1422 / #1423 / #1677）；私有字段 `DomainBinding`、受控 `compose_bindings` 与 result `Extend`：**已落**（#1669）；泛化到 redis/amqp/vault bundle：**已落**（#1498，§2.4）；settings/identity/audit `module()`：**已落**（#1670）；live bindings、typed-handle funnel 与生成列表：**已落**（#1672）；PG owner/factory/output 单次消费与独立 launch slot：**已落**（#1677）。
 - settings durable 第一条闭环（routes / probes / resources / journey）：**#1421**。
 - defer gate ratchet 扩域（自由词散文 + 代码注释 `crates/*`、`xtask/*` + 历史约 6700 baseline 冻结轨道）：登记为 #1447（不阻塞本 PR）。
 - 各域 repo/UoW conformance（CAS / rollback / tenant / co-tx）：W 阶段逐域。
@@ -189,6 +219,8 @@ impl PgRuntimeDeps {
   范本，对应 §2.3 Pg capability bundle（RSS 偏离：按 ADR-005 域形 port 切分 provider，不聚 god-struct）。
 - `ref: oxidecomputer/omicron` — 组合根（`bins` / `nexus`）手工注入具体 impl 的 Rust 范本（`docs/references/framework-comparison.md`
   §域 crate 运行时 / 依赖注入），对应 §2.2 `DomainModuleResult` 组合根聚合。
+- `ref: oxidecomputer/omicron nexus/src/context.rs@3298185e6cb3f6934a581122101e52988dc81895` — 组合根持有共享 datastore
+  capability context 的对标；RSS 进一步把 cloneable capability handle 与 non-`Clone` lifecycle owner 分权，并保留 PG 独立 output 槽位。
 - `ref: Cockburn Hexagonal Ports&Adapters` / `ref: Evans DDD「Repository」` — port 属域、adapter 经 DIP 内向实现（ADR-005 承接）。
 - `ref: uber-go/fx app.go@master` — 消费侧声明接口、组合根注册具体实现的依赖反转（概念对标，framework-comparison §依赖注入）。
 - GoCell 映射：`docs/prd/rust-mapping.md`（`SharedDeps` / `CellModule`·`ModuleResult` / `PGSet.ForCell` / `WithPGBundle` 概念出处，历史快照）。

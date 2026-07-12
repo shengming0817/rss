@@ -9,7 +9,7 @@
 use std::time::SystemTime;
 
 use diport::KeyName;
-use postgres::PgRuntimeDeps;
+use postgres::PgRuntimeHandle;
 use vault::VaultRuntimeDeps;
 
 #[path = "generated/modules_gen.rs"]
@@ -31,7 +31,7 @@ impl diport::Clock for SystemClock {
 
 /// Mandatory infrastructure inputs for the settings-only composition root.
 pub struct SharedRuntimeDeps {
-    pg: PgRuntimeDeps,
+    pg: PgRuntimeHandle,
     vault: VaultRuntimeDeps,
     config_value_key_name: KeyName,
 }
@@ -39,7 +39,11 @@ pub struct SharedRuntimeDeps {
 impl SharedRuntimeDeps {
     /// Construct the complete settings-only dependency set.
     #[must_use]
-    pub fn new(pg: PgRuntimeDeps, vault: VaultRuntimeDeps, config_value_key_name: KeyName) -> Self {
+    pub fn new(
+        pg: PgRuntimeHandle,
+        vault: VaultRuntimeDeps,
+        config_value_key_name: KeyName,
+    ) -> Self {
         Self {
             pg,
             vault,
@@ -97,7 +101,7 @@ mod tests {
 
     use base64::Engine as _;
     use bootstrap::compose_bindings;
-    use postgres::PgRuntimeDeps;
+    use postgres::PgRuntimeHandle;
     use settings_composition::{CONFIGS_READY_PROBE_NAME, KEYPROVIDER_READY_PROBE_NAME};
     use vault::{TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver};
     use wiremock::matchers::{body_partial_json, method, path};
@@ -208,7 +212,7 @@ mod tests {
             .await
             .expect("vault readiness mocks");
         let deps = SharedRuntimeDeps::new(
-            PgRuntimeDeps::for_module_test(),
+            PgRuntimeHandle::for_module_test(),
             vault,
             diport::KeyName::try_new("settings-config").expect("valid key name"),
         );
@@ -257,7 +261,7 @@ mod tests {
             .expect("http key provider"),
         );
         let deps = SharedRuntimeDeps::new(
-            PgRuntimeDeps::for_module_test(),
+            PgRuntimeHandle::for_module_test(),
             vault,
             diport::KeyName::try_new("settings-config").expect("valid key name"),
         );

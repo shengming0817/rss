@@ -479,7 +479,7 @@ pub mod test_support {
     ///
     /// Returns an error if the fixed test key or settings composition cannot be constructed.
     pub async fn binding() -> anyhow::Result<DomainBinding> {
-        let pg = postgres::PgRuntimeDeps::for_module_test();
+        let pg = postgres::PgRuntimeHandle::for_module_test();
         let key_name = KeyName::try_new("settings-config")?;
         let ready = Arc::new(AtomicBool::new(true));
         let worker: WorkerSpec = Box::new(|_| DynManagedResource::new_box(NoopResource));
@@ -643,7 +643,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn production_constructor_derives_all_roles_from_one_sealed_vault_capability() {
-        let pg = postgres::PgRuntimeDeps::for_module_test();
+        let pg = postgres::PgRuntimeHandle::for_module_test();
         let stores = TenantStoreAllowlist::new(std::iter::empty()).expect("empty allowlist");
         let vault = VaultRuntimeDeps::new(
             VaultSecretResolver::new(

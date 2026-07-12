@@ -236,6 +236,7 @@ async fn provision_rss_app_login(
 fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretService {
     // settings bundle 产出 secret box（本 e2e 不消费 read/write config）。
     let (_configs, _writer, secrets) = deps
+        .handle()
         .for_domain::<caps::Settings>()
         .settings_bundle(Arc::new(FixedClock), unused_config_protections())
         .into_parts();

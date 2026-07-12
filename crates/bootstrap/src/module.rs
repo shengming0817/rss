@@ -84,8 +84,8 @@ pub type WorkerSpec = Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResourc
 /// 组合根以 crate-private `ProviderOutput` 把这些原语转换为本结构，再经
 /// [`DomainModuleResult::merge`] 进入统一生命周期路径，避免暴露裸 channel 或逐项手写
 /// `register_detached`（GoCell D5 多通道漂移根因）。PG readiness 还需要 interval / cancel token，不适用
-/// 此 seam；#1677 以独立显式 helper 收口。AMQP 归 event-infra 生命周期，不把异质输出塞进宽泛
-/// provider trait。
+/// 此 seam；#1677 已由 runtime-private、单次消费的显式 PG output 收口，且不实现通用 `ProviderOutput`。
+/// AMQP 归 event-infra 生命周期，不把异质输出塞进宽泛 provider trait。
 #[derive(Default)]
 pub struct DomainModuleResult {
     /// readiness / liveness 探针，组合根排空进 [`Registry::probe`]（须先于 `take_health_reporter`，readyz 才聚合）。

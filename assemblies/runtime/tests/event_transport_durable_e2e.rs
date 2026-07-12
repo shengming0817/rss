@@ -506,7 +506,8 @@ fn policy_updated_entry_and_envelope(
 async fn event_transport_durable_e2e() -> Result<()> {
     // ── 步骤 1：启动两个真实容器 fixture（guard 绑到测试结束，Drop 停容器）─────────────────────
 
-    let (pgfix, pg) = connect_pg().await?;
+    let (pgfix, pg_owner) = connect_pg().await?;
+    let pg = pg_owner.handle();
     let rmq = testkit::env_or_rabbitmq().await?;
 
     // ── 步骤 2：postgres capability bundle（connect + run_migrations + RLS 能力门）──────────────

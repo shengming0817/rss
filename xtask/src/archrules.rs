@@ -122,6 +122,22 @@ const FUNNELS: &[FunnelSpec] = &[
         },
     },
     FunnelSpec {
+        key: "pg-runtime-lifecycle",
+        source_issues: &[1677],
+        upstream: &[
+            invariant("PG-RUNTIME-OWNER-01"),
+            invariant("PG-RUNTIME-HANDLE-02"),
+        ],
+        downstream: &[
+            invariant("PG-RUNTIME-OUTPUT-03"),
+            invariant("RUNTIME-PROVIDER-OUTPUTS-LIVE-01"),
+        ],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "跨文件 PG lifecycle 消费与 Launch 注册顺序仍可能出现 AST visitor 未识别的新语法形态",
+            why_no_low_cost_hardening: "Rust 类型系统可锁定 owner/factory 单次消费，但无法表达跨文件唯一生产调用与相对注册顺序；synthetic-red/green AST 门覆盖已知入口",
+        },
+    },
+    FunnelSpec {
         key: "pg-capability",
         source_issues: &[1423, 1436],
         upstream: &[invariant("PG-TX-CAPABILITY-SEAL-01")],
@@ -306,7 +322,7 @@ pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
                 .with_context(|| format!("写入 matrix `{}`", path.display()))?;
             eprintln!("archrules matrix: 已写入 {MATRIX_DOC}");
         }
-        MatrixAction::Check => eprintln!("archrules matrix: 11 行与 committed 文档一致"),
+        MatrixAction::Check => eprintln!("archrules matrix: 12 行与 committed 文档一致"),
     }
     Ok(())
 }
@@ -317,15 +333,16 @@ fn validate_matrix(
     check_doc_drift: bool,
 ) -> Result<Vec<Finding<Rule>>> {
     let mut findings = Vec::new();
-    let expected_issues = (1422_u32..=1442).collect::<BTreeSet<_>>();
+    let mut expected_issues = (1422_u32..=1442).collect::<BTreeSet<_>>();
+    expected_issues.insert(1677);
     let mut actual_issues = BTreeSet::new();
     let mut seen_issues = BTreeSet::new();
     let mut keys = BTreeSet::new();
-    if FUNNELS.len() != 11 {
+    if FUNNELS.len() != 12 {
         findings.push(finding(
             Rule::MatrixCoverage,
             "FUNNELS",
-            format!("必须恰好 11 行，实际 {} 行", FUNNELS.len()),
+            format!("必须恰好 12 行，实际 {} 行", FUNNELS.len()),
         ));
     }
     for funnel in FUNNELS {
@@ -587,7 +604,7 @@ fn render_matrix(records: &[RuleRecord]) -> Result<String> {
     }
     out.push_str(
         "\n## Verification\n\n\
-`cargo xtask archrules matrix --check` 校验固定 11 行、#1422–#1442 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
+`cargo xtask archrules matrix --check` 校验固定 12 行、#1422–#1442 + #1677 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
     );
     Ok(out)
 }
@@ -3452,29 +3469,51 @@ members = ["rss_demo"]
     }
 
     #[test]
-    fn funnel_matrix_has_exact_rows_and_issue_partition() {
-        assert_eq!(FUNNELS.len(), 11);
+    fn funnel_matrix_has_exact_rows_and_issue_partition() -> Result<()> {
+        assert_eq!(FUNNELS.len(), 12);
         let issues = FUNNELS
             .iter()
             .flat_map(|funnel| funnel.source_issues.iter().copied())
             .collect::<Vec<_>>();
-        assert_eq!(issues.len(), 21, "每个来源 issue 必须且只能归属一行");
+        assert_eq!(issues.len(), 22, "每个来源 issue 必须且只能归属一行");
+        let mut expected = (1422_u32..=1442).collect::<BTreeSet<_>>();
+        expected.insert(1677);
+        assert_eq!(issues.iter().copied().collect::<BTreeSet<_>>(), expected);
+        let pg_runtime = FUNNELS
+            .iter()
+            .find(|funnel| funnel.source_issues == [1677])
+            .context("#1677 lifecycle funnel")?;
         assert_eq!(
-            issues.iter().copied().collect::<BTreeSet<_>>(),
-            (1422_u32..=1442).collect::<BTreeSet<_>>()
+            pg_runtime.upstream,
+            [
+                invariant("PG-RUNTIME-OWNER-01"),
+                invariant("PG-RUNTIME-HANDLE-02")
+            ]
         );
+        assert_eq!(
+            pg_runtime.downstream,
+            [
+                invariant("PG-RUNTIME-OUTPUT-03"),
+                invariant("RUNTIME-PROVIDER-OUTPUTS-LIVE-01")
+            ]
+        );
+        assert!(matches!(
+            pg_runtime.residual,
+            ResidualDisposition::AcceptedMedium { .. }
+        ));
         assert!(
             FUNNELS
                 .iter()
                 .all(|funnel| !funnel.upstream.is_empty() && !funnel.downstream.is_empty())
         );
+        Ok(())
     }
 
     #[test]
     fn real_workspace_archrules_and_derived_matrix_pass() -> Result<()> {
         let (summary, findings) = ArchRules.check()?;
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(summary.contains("11 行持久化 funnel"), "{summary}");
+        assert!(summary.contains("12 行持久化 funnel"), "{summary}");
         matrix(MatrixAction::Check)?;
         Ok(())
     }

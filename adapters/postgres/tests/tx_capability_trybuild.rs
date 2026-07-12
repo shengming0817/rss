@@ -17,5 +17,11 @@ fn tx_capability_ui() {
     t.compile_fail("tests/ui/pg_projection_replay_fields_private_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_capability_required_fail.rs");
     t.compile_fail("tests/ui/audit_consumer_read_erasure_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_owner_clone_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_owner_consume_twice_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_owner_legacy_api_fail.rs");
+    t.compile_fail("tests/ui/pg_runtime_handle_lifecycle_fail.rs");
+    t.compile_fail("tests/ui/pg_readiness_sampler_factory_clone_fail.rs");
+    t.compile_fail("tests/ui/pg_readiness_sampler_factory_consume_twice_fail.rs");
     t.pass("tests/ui/pg_public_funnels_pass.rs");
 }

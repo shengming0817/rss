@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use diport::KeyName;
-use postgres::PgRuntimeDeps;
+use postgres::PgRuntimeHandle;
 use redis::RedisRuntimeDeps;
 use s3::S3RuntimeDeps;
 use vault::VaultRuntimeDeps;
 
 pub struct SharedRuntimeDeps {
-    pub pg: PgRuntimeDeps,
+    pub pg: PgRuntimeHandle,
     pub redis: RedisRuntimeDeps,
     pub s3: S3RuntimeDeps,
     pub vault: VaultRuntimeDeps,

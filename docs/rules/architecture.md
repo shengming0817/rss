@@ -160,6 +160,7 @@ rss/
 | 受控 `bootstrap → httpserve` 路由类型边（组合根 typed route funnel；服务→服务唯一例外） | `xtask/src/layers.rs` `route_funnel_allows`（**只**放行 `bootstrap → httpserve` 这一对有向边，`check_layers` 在 `!allows(Service,Service)` 时叠加；反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 仍禁；rstest + 端到端 `check_layers` 正反例 anti-vacuity）。INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009 |
 | command sealed seam 编译边 | `xtask/src/layers.rs` `command_generated_seam_allows` 只放行 `eventexec → generated`；`authn/bootstrap/其它 Service → generated` 与反向边均保持 `GeneratedScope` 红。`deny.toml` generated wrapper 同步只增加 eventexec；正例、其它 Service 反例与真实 workspace green 三重 anti-vacuity。类型/可见性 Hard seal 见 ADR-016。 |
 | Redis/S3/Vault provider output 不反向依赖 bootstrap | `xtask/src/layers.rs` `provider_adapter_bootstrap_forbidden` 精确拒绝 `redis-adapter|s3|vault → bootstrap`，并在 `layerdeps::check_layers` 通用 `allows` 前应用；三目标 synthetic red、postgres→bootstrap 与目标→diport green、真实 workspace green。INVARIANT LAYER-DEPS-PROVIDER-BOOTSTRAP-01，**Medium（xtask + CI 门）**，ADR-010 |
+| PG lifecycle owner/module 单一路径 | `PgRuntimeDeps` non-Clone owner 只包 cloneable `PgRuntimeHandle`；handle 无 lifecycle API，owner/factory 均按值消费，并直接生成既有 `DomainModuleResult` batch（Hard；无平行 output type）。`RUNTIME-PROVIDER-OUTPUTS-LIVE-01` 以 synthetic red + anti-vacuity green 锁唯一 PG helper/生产调用、禁止 PG 实现通用 `ProviderOutput`、禁止 helper 外调用 lifecycle primitives，并锁定 PG batch 经公共 helper 在 event infra 前注册（AcceptedMedium）。ADR-010 #1677 amendment |
 | defer/follow-up 结构化完整性（governed docs + 根 config） | governed scope（`docs/rules`/`docs/architecture`/`.claude/rules` + 根 `deny.toml`/`clippy.toml`/`CLAUDE.md`）内 `DEFER(#NNNN)` 标签须 `owner=`/`blocked-by=<#NNNN｜trigger:..>`/`closes-when=` 齐全 + 禁裸 TODO/FIXME/XXX/HACK 注解（注解位）；`cargo xtask defer-gate`（接 verify/ci no-compile meta 步，synthetic red + anti-vacuity green）。INVARIANT DEFER-GATE-01；符号/盲区/红例见 `xtask/src/defergate.rs` rustdoc + ADR-010；v1 守结构化标签 + 经典注解，自由词散文 + 代码注释扩域 = ratchet follow-up |
 
 ### 三档 · Cargo 替不了,框架自建(RSS 真差异化)
@@ -216,7 +217,7 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   是 `bootstrap` 子模块(按 `Topology` 单源选型 eventbus / claimer / nonce / saga instance/journal 依赖)。
 - **持久化能力分层**:`DomainBinding`(域实例+生命周期输出的单一 owner) / `DomainModuleResult`(仅聚合
   probes/resources/workers,不承载 domain service/routes/generic bag) / Pg
-  capability bundle(`PgRuntimeDeps`·`PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
+  capability bundle(`PgRuntimeDeps` owner · `PgRuntimeHandle` capability · `PgDomainDeps`) / adapter bundle / defer gate 实施顺序的**设计单源**见 **ADR-010**
   (`docs/architecture/202606270148-010-persistence-capability-layering.md`);执行体随 #1419(runtime base) / #1421(settings
   闭环) / W 阶段落地,本处不复制未强制细节。
 - **运行时接线契约首切([PERSIST-001] #1422,ADR-010 §2.6 step 2 的 `DomainModuleResult` + `SharedRuntimeDeps` 聚合)**:

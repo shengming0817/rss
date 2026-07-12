@@ -399,10 +399,41 @@ fn is_allowed_field_type(ty: &Type, resolver: &TypeResolver, policy: &RuntimeDep
     {
         return true;
     }
+    if let Some(segments) = resolved_type_path_segments(ty, resolver, &mut Vec::new())
+        && segments.first().is_some_and(|root| root == "postgres")
+    {
+        return policy.allows_root("postgres") && segments == ["postgres", "PgRuntimeHandle"];
+    }
     if contains_forbidden_runtime_dep_type(ty, resolver, &mut Vec::new()) {
         return false;
     }
     canonical_type_root(ty, resolver, &mut Vec::new()).is_some_and(|root| policy.allows_root(&root))
+}
+
+fn resolved_type_path_segments(
+    ty: &Type,
+    resolver: &TypeResolver,
+    alias_stack: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    match resolver.type_alias_target(type_path, alias_stack) {
+        TypeAliasTarget::Found {
+            name,
+            ty: aliased_ty,
+        } => {
+            alias_stack.push(name);
+            let segments = resolved_type_path_segments(aliased_ty, resolver, alias_stack);
+            alias_stack.pop();
+            segments
+        }
+        TypeAliasTarget::Cycle => None,
+        TypeAliasTarget::NotAlias if type_path.qself.is_none() => {
+            Some(canonical_path_segments(&type_path.path, resolver))
+        }
+        TypeAliasTarget::NotAlias => None,
+    }
 }
 
 fn is_exact_arc_of_path(
@@ -674,12 +705,8 @@ fn local_type_alias_name(path: &syn::Path) -> Option<String> {
 }
 
 fn resolved_type_summary(ty: &Type, resolver: &TypeResolver) -> String {
-    match ty {
-        Type::Path(type_path) if type_path.qself.is_none() => {
-            canonical_path_segments(&type_path.path, resolver).join("::")
-        }
-        _ => render_type(ty),
-    }
+    resolved_type_path_segments(ty, resolver, &mut Vec::new())
+        .map_or_else(|| render_type(ty), |segments| segments.join("::"))
 }
 
 fn render_type(ty: &Type) -> String {
@@ -886,6 +913,39 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
             "../tests/fixtures/runtime_deps_guard/current_pass.rs"
         ))?;
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_lifecycle_owner_is_rejected_through_qualified_imported_and_type_aliases()
+    -> Result<()> {
+        for (label, source) in [
+            (
+                "qualified owner",
+                "pub struct SharedRuntimeDeps { pub pg: postgres::PgRuntimeDeps }\n",
+            ),
+            (
+                "imported owner",
+                "use postgres::PgRuntimeDeps;\npub struct SharedRuntimeDeps { pub pg: PgRuntimeDeps }\n",
+            ),
+            (
+                "renamed import owner",
+                "use postgres::PgRuntimeDeps as PgOwner;\npub struct SharedRuntimeDeps { pub pg: PgOwner }\n",
+            ),
+            (
+                "type alias owner",
+                "type PgOwner = postgres::PgRuntimeDeps;\npub struct SharedRuntimeDeps { pub pg: PgOwner }\n",
+            ),
+        ] {
+            let findings = findings(source)?;
+            assert_eq!(findings.len(), 1, "{label}: {findings:?}");
+            assert_eq!(findings[0].rule, Rule::DisallowedFieldType, "{label}");
+            assert!(
+                findings[0].detail.contains("PgRuntimeDeps"),
+                "{label}: {:?}",
+                findings[0]
+            );
+        }
         Ok(())
     }
 

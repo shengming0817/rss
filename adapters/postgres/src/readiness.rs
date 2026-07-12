@@ -47,7 +47,7 @@ impl PgDbReadiness {
     ///
     /// 保持 `pub`（#1423）：`PgDbReadiness` 是 provider-agnostic 状态原子（**非** pool/store/repo），
     /// 封闭其构造无 funnel 价值、且破坏 hermetic probe 单测（probe→503 路径不需真 DB）；生产编排路径仍是
-    /// [`crate::PgRuntimeDeps::setup`] 建 + [`crate::PgRuntimeDeps::readiness_handle`] 派发。
+    /// [`crate::PgRuntimeDeps::setup`] 建 + [`crate::PgRuntimeHandle::readiness_handle`] 派发。
     pub fn new() -> Self {
         Self(AtomicU8::new(READINESS_DOWN))
     }
@@ -113,7 +113,8 @@ fn log_readiness_transition(cur: PoolReadiness, last: Option<PoolReadiness>) {
 ///
 /// **状态转移日志**：仅在状态转移时记日志（`Down`/`Saturated` → warn，`Ready` 恢复 → info；由 [`log_readiness_transition`] 负责）。
 ///
-/// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：spawn 仪式收口进 [`crate::PgRuntimeDeps::spawn_readiness_sampler`]。
+/// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：spawn 仪式收口进
+/// [`crate::PgReadinessSamplerFactory::spawn`]。
 pub(crate) async fn pg_readiness_sampling_loop(
     store: Arc<PgStore>,
     period: Duration,
@@ -158,7 +159,8 @@ pub struct PgReadinessSampler {
 impl PgReadinessSampler {
     /// 先 `tokio::spawn(pg_readiness_sampling_loop(具体 store, ...))` 再 adopt。
     ///
-    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgRuntimeDeps::spawn_readiness_sampler`] 收口。
+    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅由
+    /// [`crate::PgReadinessSamplerFactory::spawn`] 收口调用。
     pub(crate) fn adopt(
         handle: JoinHandle<()>,
         health: Arc<PgDbReadiness>,
