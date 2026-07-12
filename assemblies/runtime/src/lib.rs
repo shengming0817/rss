@@ -33,6 +33,7 @@ pub mod module;
 mod modules_gen;
 pub mod phase;
 pub mod plan;
+mod provider_output;
 pub mod routes;
 pub mod saga_runtime;
 
@@ -3769,9 +3770,7 @@ struct RuntimeModuleAssemblyInputs {
     domains_module: DomainModuleResult,
     session_sweeper_module: DomainModuleResult,
     s3_canary_module: DomainModuleResult,
-    redis_resources: Vec<Box<DynManagedResource<'static>>>,
-    s3_resources: Vec<Box<DynManagedResource<'static>>>,
-    vault_resources: Vec<Box<DynManagedResource<'static>>>,
+    provider_module: DomainModuleResult,
     oidc_resource: Box<DynManagedResource<'static>>,
     domain_transport_module: DomainModuleResult,
     event_module: DomainModuleResult,
@@ -3783,9 +3782,7 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
     module.merge(inputs.domains_module);
     module.merge(inputs.session_sweeper_module);
     module.merge(inputs.s3_canary_module);
-    module.resources.extend(inputs.redis_resources);
-    module.resources.extend(inputs.s3_resources);
-    module.resources.extend(inputs.vault_resources);
+    module.merge(inputs.provider_module);
     module.resources.push(inputs.oidc_resource);
     module.merge(inputs.domain_transport_module);
     module.merge(inputs.event_module);
@@ -3949,11 +3946,9 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                     wire_session_sweeper(&pg).context("wire session sweeper")?;
                 let s3_canary_module =
                     wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
-                // provider capability bundle 单源装配（#1498）：Redis / vault guards 经 runtime_resources() 单源排进
-                // module.resources，组合根不再逐 channel 手写 register_detached（D5）。
-                let redis_resources = deps.redis.runtime_resources();
-                let s3_resources = deps.s3.runtime_resources();
-                let vault_resources = deps.vault.runtime_resources();
+                // provider capability bundle 单源装配：adapter 保持 diport-only 原语，runtime 本地适配为唯一
+                // DomainModuleResult，并按 Redis → S3 → Vault 固定顺序进入统一 merge 路径。
+                let provider_module = crate::provider_output::build_provider_module(&deps);
                 let oidc_resource = runtime_oidc.managed_resource();
                 let pg_readiness_period = build_readiness_interval();
                 let redis_readiness_period = build_redis_readiness_interval();
@@ -4015,13 +4010,11 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                         Arc::clone(&redis_ready),
                     ))
                 });
-                let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+                let module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
                     domains_module,
                     session_sweeper_module,
                     s3_canary_module,
-                    redis_resources,
-                    s3_resources,
-                    vault_resources,
+                    provider_module,
                     oidc_resource,
                     domain_transport_module,
                     event_module: event_runtime.module,
@@ -4215,12 +4208,11 @@ mod tests {
                 &[],
                 &["s3-canary-sampler"],
             ),
-            redis_resources: vec![harness_resource("redis")],
-            s3_resources: vec![harness_resource("s3")],
-            vault_resources: vec![
-                harness_resource("vault-secret-resolver"),
-                harness_resource("vault-key-provider"),
-            ],
+            provider_module: harness_module(
+                &[],
+                &["redis", "s3", "vault-secret-resolver", "vault-key-provider"],
+                &[],
+            ),
             oidc_resource: harness_resource("oidc-jwks"),
             domain_transport_module: harness_module(
                 &[DOMAIN_TRANSPORT_READY_PROBE_NAME],

@@ -225,6 +225,17 @@ pub(crate) fn route_funnel_allows(from_crate: &str, to_crate: &str) -> bool {
     (from_crate, to_crate) == ("bootstrap", "httpserve")
 }
 
+/// Redis/S3/Vault provider adapter 的 runtime output 边界。
+///
+/// INVARIANT: LAYER-DEPS-PROVIDER-BOOTSTRAP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "provider_adapter_bootstrap_forbidden_red_three_edges", anti_vacuity = "provider_adapter_bootstrap_forbidden_green_non_target_edges" }
+/// —— 精确拒绝 `redis-adapter|s3|vault → bootstrap` 三条 Cargo package 有向边，防止 adapter 直接取得
+/// `DomainModuleResult` 并绕过 runtime-local `ProviderOutput`。这是 [`allows`] 的窄化规则：一般
+/// `Adapter → Service` 仍合法（例如 postgres → bootstrap），目标 adapters → `diport` 等下行边也不受影响。
+/// `layerdeps::check_layers` 必须在通用 [`allows`] 之前应用该 deny，避免允许矩阵短路。
+pub(crate) fn provider_adapter_bootstrap_forbidden(from_crate: &str, to_crate: &str) -> bool {
+    matches!(from_crate, "redis-adapter" | "s3" | "vault") && to_crate == "bootstrap"
+}
+
 /// Command authoring seam 的精确 crate edge：只允许 `eventexec → generated`。
 ///
 /// `generated::command::{CommandEmit, CommandJournal}` 接受字段私有、仅 generated 可构造的
@@ -368,6 +379,26 @@ mod tests {
         #[case] want: bool,
     ) {
         assert_eq!(route_funnel_allows(from, to), want);
+    }
+
+    /// Provider adapter 不得反向取得 runtime 聚合类型：只拒绝 Redis/S3/Vault → bootstrap，
+    /// 不扩大成一般 Adapter→Service 禁令（LAYER-DEPS-PROVIDER-BOOTSTRAP-01 anti-vacuity）。
+    #[test]
+    fn provider_adapter_bootstrap_forbidden_red_three_edges() {
+        for adapter in ["redis-adapter", "s3", "vault"] {
+            assert!(provider_adapter_bootstrap_forbidden(adapter, "bootstrap"));
+        }
+    }
+
+    #[test]
+    fn provider_adapter_bootstrap_forbidden_green_non_target_edges() {
+        for (from, to) in [
+            ("postgres", "bootstrap"),
+            ("redis-adapter", "diport"),
+            ("bootstrap", "redis-adapter"),
+        ] {
+            assert!(!provider_adapter_bootstrap_forbidden(from, to));
+        }
     }
 
     #[rstest]

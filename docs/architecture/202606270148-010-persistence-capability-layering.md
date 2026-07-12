@@ -1,6 +1,6 @@
 # ADR-010：持久化能力分层 — domain binding / module result / capability bundle 单源
 
-- **状态**：Accepted，2026-07-11 经 #1672 amendment（`DomainBinding` + `DomainModuleResult` + generated live composition 已落）
+- **状态**：Accepted，2026-07-12 经 #1676 amendment（runtime-local provider output 单一路径已落）
 - **日期**：2026-06-27
 - **关联**：issue #1425 [PERSIST-004] · Parent Feature #1419 [PERSIST-FEA-A] · Parent Epic #1418 [PERSIST-EPIC] · 同批 #1432（defer gate 落地）
 - **依赖 ADR**：**ADR-003**（DI dynosaur 派发）· **ADR-005**（域形 repo/UoW port 归属 + category line，本 ADR 复用其归属判据不重证）· **ADR-009**（typed route funnel）
@@ -72,15 +72,17 @@ adapter bundle 是 §2.3 的一般化：任一 adapter（不止 postgres）经�
 VAULT-BUNDLE-DOMAIN-01/RESOLVER-02）。各 provider 能力按真实能力面落 InfraDeps（provider-agnostic：redis inbox claimer / amqp
 transport / vault signer）或 per-domain DomainDeps（域消费：vault resolver→settings）；不造空壳层。
 
-**层序修正（adapter 不依赖 bootstrap）**：`DomainModuleResult` 在服务层 `bootstrap`，adapter 不依赖它（pg adapter 亦然）。
+**provider output 层序修正（Redis/S3/Vault 不依赖 bootstrap）**：`DomainModuleResult` 在服务层 `bootstrap`；通用
+`Adapter → Service` 依赖仍按分层矩阵合法（包括 postgres → bootstrap），但 Redis/S3/Vault 三个 provider adapter 被精确禁止
+依赖 bootstrap，不能取得该 runtime 聚合类型。
 故 bundle 的 managed-resource/rollback 单源**不**返回 `DomainModuleResult`，而经 `runtime_resources(&self) -> Vec<Box<DynManagedResource>>`
-（仅 `diport` 类型）派生；组合根 `module.resources.extend(bundle.runtime_resources())` 装配进 §2.2 的 `DomainModuleResult.resources`。
-本三 provider 当前只产 resource guard（probe/worker＝syshealth 独立任务），故 `runtime_resources()` 即完整单源。vault 已 live
-（`assemblies/runtime::run`，resolver guard 经此单源排入）；redis/amqp live durable 接线随各自 body（#1116-1120）。
+（仅 `diport` 类型）派生。`assemblies/runtime` 以 crate-private `ProviderOutput` 显式适配 Redis / S3 / Vault，固定返回唯一的
+`DomainModuleResult`，并由 `DomainModuleResultExt::merge_provider` 委托 §2.2 的 `merge`。trait 不泄漏到 adapter，组合根也不再裸取
+resource channel 直接扩展；注册顺序固定为 Redis → S3 → Vault，域内资源顺序原样保留。
 
-**pg 回填 follow-up（#1541）**：pg 自身在 `run()` 仍手写 `store_guard`（detached）/ `spawn_readiness_sampler`（worker）登记——其 worker
-需 `bootstrap::WorkerSpec`（cancel token），不能纯经 `runtime_resources()` 出。把 pg 这两通道也收口到单源导出（消灭其残留手写）
-跟踪于 **#1541**（用户裁定，不在 #1498 内做），本 ADR §2.2/§2.4 的单源装配语义不变。
+这条窄 trait 只覆盖生命周期形状相同的三项 live provider。PG readiness 需要 interval / cancel token，并占有独立生命周期槽位，
+不适用此 seam；#1677 以携带这些参数的显式 helper 收口。AMQP 属 event-infra 生命周期。二者均不为追求表面统一而塞进
+宽泛 provider trait。
 
 ### 2.5 defer gate — 散装 defer 受机器门约束
 
@@ -102,7 +104,7 @@ transport / vault signer）或 per-domain DomainDeps（域消费：vault resolve
 
 1. provider-agnostic infra port + 域形 port 归属 — **已落**（ADR-003 / ADR-005）。
 2. `DomainModuleResult` + `SharedRuntimeDeps` 聚合 — **已落**（#1422）；`DomainBinding` 单一所有权形状 + result `Extend` — **已落**（#1669）。
-3. Pg capability bundle（`PgRuntimeDeps` / `PgDomainDeps`）— **已落**（#1423）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；redis/amqp live durable 接入 — **待后续**（#1116-1120）。
+3. Pg capability bundle（`PgRuntimeDeps` / `PgDomainDeps`）— **已落**（#1423）；adapter bundle 泛化到 redis/amqp/vault — **已落**（#1498，见 §2.4）；Redis / S3 / Vault runtime-local provider output 单一路径 — **已落**（#1676）。
 4. L1/L2 repo/UoW conformance（CAS / rollback / tenant / co-tx both-or-neither）— session 维度**已落**（ADR-005 §9/§10），其余 W 阶段。
 5. 第一条 durable 闭环：settings module + routes / probes / resources / journey — **待落**（#1421）。
 6. defer gate — **本批落**（#1432）。
@@ -132,7 +134,7 @@ impl PgRuntimeDeps {
 
 - **正**：横切接线压成少数 funnel；`DomainBinding` 私有字段 + `compose_bindings` 唯一 output 出口在类型/API 边界
   强制 compose 成功后才 drain，并守住 single owner、禁止重复消费；三出口保序由 bootstrap 测试锁定，runtime baseline
-  检查三字段 merge 完整性；不引入 service locator，
+  检查三字段 merge 完整性；Redis / S3 / Vault 经 crate-private provider adapter 进入同一个 result merge，不引入 service locator，
   **零新增 crate / 零新增分层**（沿用 ADR-005 域形 port + diport）。
 - **负 / 代价**：① binding/output 含单 owner worker/resource，不提供 `Clone` 或完整 `Sync`；确需并发共享时必须拆出窄只读视图；
   ② defer gate v1 标记集窄（精度取舍——自由词散文不触发，见 §6 + `xtask/src/defergate.rs` rustdoc 盲区）。
@@ -161,6 +163,7 @@ impl PgRuntimeDeps {
 | compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
 | 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |
 | result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
+| provider 输出形状与 live 集合 | **Hard（类型 + 可见性）/ Medium（精确 layer-deps deny + baseline）** | crate-private `ProviderOutput` 固定返回 `DomainModuleResult`；`LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 仅拒绝 `adapters/redis|s3|vault → bootstrap`（Cargo package 为 `redis-adapter|s3|vault`），三条 synthetic red + postgres→bootstrap/目标→diport anti-vacuity green，真实 workspace 由 `cargo xtask layer-deps` 校验；runtime baseline 锁定 Redis → S3 → Vault 集合、顺序与唯一 `provider_module` merge 路径 |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
 无 Soft 新增 enforcement。

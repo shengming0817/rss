@@ -4,7 +4,8 @@
 //! `PgRuntimeDeps`（postgres 适配器 capability bundle）等 adapter 类型，故必须落组合根层
 //! （`assemblies/runtime`），不能进 `bootstrap`（服务层不依赖适配器）。配对的产物出口
 //! [`bootstrap::DomainModuleResult`]（probes / resources / workers 可聚合产物）按 ADR-010 §2.2 归属
-//! `bootstrap`，组合根经 `merge` 聚合后排空到 sink。
+//! `bootstrap`。adapter 的 `runtime_resources()` 只暴露 `diport` 原语；组合根以 crate-private
+//! `ProviderOutput` 转换 Redis / S3 / Vault 输出，再经 `DomainModuleResult::merge` 聚合并排空到 sink。
 //!
 //! # 不变式
 //!
@@ -51,16 +52,19 @@ pub struct SharedRuntimeDeps {
     /// 共享 redis capability bundle，生产必配；distributed runtime 通过此唯一入口取得 lock provider。
     ///
     /// 不暴露 `deadpool_redis::Pool`，保持 REDIS-BUNDLE-FUNNEL-01：pool guard、distlock、CAS、idempotency
-    /// 均经 `RedisRuntimeDeps::infra()` / `runtime_resources()` 派发。
+    /// 均经 `RedisRuntimeDeps::infra()` / `runtime_resources()` 派发；后者由 runtime-local
+    /// `ProviderOutput` 转换后进入 `DomainModuleResult::merge`。
     pub redis: RedisRuntimeDeps,
 
     /// 共享 S3 object-store capability bundle。runtime canary 与后续对象消费方只能经此 bundle 取得
     /// `S3Store`，endpoint/TLS/credentials 仍由组合根启动期 fail-fast 构造。
+    /// 其 `runtime_resources()` 由 runtime-local `ProviderOutput` 转换后进入 `DomainModuleResult::merge`。
     pub s3: S3RuntimeDeps,
 
     /// 共享 vault capability bundle（#1498）；settings 域经 `vault.for_domain::<caps::Settings>().secret_resolver()`
     /// / `key_provider()` 投影受控 Vault 句柄，拿不到 signer 或裸 `reqwest::Client`（VAULT-BUNDLE-RESOLVER-02）。
-    /// 其 `runtime_resources()` 单源派生 resolver/key-provider guard，组合根 `merge` 进 `DomainModuleResult.resources`。
+    /// 其 `runtime_resources()` 单源派生 resolver/key-provider guard，由 runtime-local `ProviderOutput`
+    /// 转换为完整 `DomainModuleResult` 后进入统一 `merge` 路径。
     pub vault: VaultRuntimeDeps,
 
     /// settings `ConfigValue` 加密使用的 Vault Transit key name。组合根启动期从

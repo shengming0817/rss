@@ -11,12 +11,15 @@
 //! required wiring anchors. Synthetic red/green tests cover every failure class.
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- `run()` must consume the committed generated domain list through `compose_bindings`, must merge its output, and must not restore per-domain handwritten wiring.
+//!
+//! INVARIANT: RUNTIME-PROVIDER-OUTPUTS-LIVE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::runtime_provider_outputs_reject_missing_reordered_legacy_and_bait", anti_vacuity = "tests::runtime_provider_outputs_accept_unified_live_path" } -- the sole runtime-local constructor must merge Redis, S3, and Vault in order; `run()` must build and consume that output exactly once without direct provider wiring.
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
+use crate::localtx_coverage::attrs_may_be_production;
 use crate::workspace_root;
 use anyhow::{Context, Result};
 use assembly_schema::AssemblyManifest;
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
@@ -28,6 +31,8 @@ const SHARED_RUNTIME_DEPS_PATH: &str = "assemblies/runtime/src/module.rs";
 const BOOTSTRAP_MODULE_PATH: &str = "crates/bootstrap/src/module.rs";
 const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
 const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
+const PROVIDER_OUTPUT_PATH: &str = "assemblies/runtime/src/provider_output.rs";
+const PROVIDER_OUTPUT_FIXTURE_MARKER: &str = ".runtime-provider-output-fixture";
 const GENERATED_MODULES_PATH: &str = "assemblies/runtime/src/generated/modules_gen.rs";
 const RUNTIME_LAUNCH_PATH: &str = "assemblies/runtime/src/launch.rs";
 
@@ -182,6 +187,7 @@ fn collect_report(root: &Path) -> Result<Report> {
         }
     }
     findings.extend(generated_domains_live_findings(root)?);
+    findings.extend(provider_outputs_live_findings(root)?);
 
     Ok(Report {
         rendered: render_baseline(
@@ -269,7 +275,11 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     }
     let mut runtime_sources = Vec::new();
     collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut runtime_sources)?;
+    let production_sources = production_module_sources(&runtime_sources)?;
     for source_path in runtime_sources {
+        if !production_sources.contains(&normalize_path(&source_path)) {
+            continue;
+        }
         let relative = source_path.strip_prefix(root).unwrap_or(&source_path);
         if relative == Path::new(GENERATED_MODULES_PATH) {
             continue;
@@ -311,6 +321,1394 @@ fn generated_domains_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
         }
     }
     Ok(findings)
+}
+
+fn production_module_sources(sources: &[PathBuf]) -> Result<BTreeSet<PathBuf>> {
+    let source_set = sources
+        .iter()
+        .map(|source| normalize_path(source))
+        .collect::<BTreeSet<_>>();
+    let mut edges: BTreeMap<PathBuf, Vec<(PathBuf, bool)>> = BTreeMap::new();
+    let mut referenced = BTreeSet::new();
+    for source in sources {
+        let text =
+            fs::read_to_string(source).with_context(|| format!("读 {} 失败", source.display()))?;
+        let Ok(file) = syn::parse_file(&text) else {
+            continue;
+        };
+        let source = normalize_path(source);
+        let base = module_base(&source);
+        collect_module_edges(
+            &file.items,
+            &source,
+            &base,
+            true,
+            &source_set,
+            &mut edges,
+            &mut referenced,
+        );
+    }
+    let mut production = source_set
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.file_stem().and_then(|stem| stem.to_str()),
+                Some("lib" | "main")
+            ) || !referenced.contains(*source)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut queue = production.iter().cloned().collect::<VecDeque<_>>();
+    while let Some(source) = queue.pop_front() {
+        for (target, child_is_production) in edges.get(&source).into_iter().flatten() {
+            if *child_is_production && production.insert(target.clone()) {
+                queue.push_back(target.clone());
+            }
+        }
+    }
+    Ok(production)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_module_edges(
+    items: &[syn::Item],
+    source: &Path,
+    base: &Path,
+    parent_is_production: bool,
+    sources: &BTreeSet<PathBuf>,
+    edges: &mut BTreeMap<PathBuf, Vec<(PathBuf, bool)>>,
+    referenced: &mut BTreeSet<PathBuf>,
+) {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        let module_is_production = parent_is_production && attrs_may_be_production(&module.attrs);
+        if let Some((_, nested)) = &module.content {
+            collect_module_edges(
+                nested,
+                source,
+                &base.join(module.ident.to_string()),
+                module_is_production,
+                sources,
+                edges,
+                referenced,
+            );
+            continue;
+        }
+        for candidate in out_of_line_module_candidates(base, module) {
+            let candidate = normalize_path(&candidate);
+            if !sources.contains(&candidate) {
+                continue;
+            }
+            referenced.insert(candidate.clone());
+            edges
+                .entry(source.to_path_buf())
+                .or_default()
+                .push((candidate, module_is_production));
+        }
+    }
+}
+
+fn module_base(source: &Path) -> PathBuf {
+    let parent = source.parent().unwrap_or_else(|| Path::new(""));
+    match source.file_stem().and_then(|stem| stem.to_str()) {
+        Some("lib" | "main" | "mod") => parent.to_path_buf(),
+        Some(stem) => parent.join(stem),
+        None => parent.to_path_buf(),
+    }
+}
+
+fn out_of_line_module_candidates(base: &Path, module: &syn::ItemMod) -> Vec<PathBuf> {
+    if let Some(path) = module.attrs.iter().find_map(|attr| {
+        if !attr.path().is_ident("path") {
+            return None;
+        }
+        let syn::Meta::NameValue(meta) = &attr.meta else {
+            return None;
+        };
+        let syn::Expr::Lit(expr) = &meta.value else {
+            return None;
+        };
+        let syn::Lit::Str(path) = &expr.lit else {
+            return None;
+        };
+        Some(path.value())
+    }) {
+        return vec![base.join(path)];
+    }
+    let name = module.ident.to_string();
+    vec![
+        base.join(format!("{name}.rs")),
+        base.join(name).join("mod.rs"),
+    ]
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn provider_outputs_live_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    if !root.join("Cargo.toml").exists() && !root.join(PROVIDER_OUTPUT_FIXTURE_MARKER).exists() {
+        // 通用 runtime-baseline fixture 只承载文本 anchor；专属 provider fixture 用显式 marker
+        // 启用 AST 门。真实 workspace 总有根 Cargo.toml，不能借此跳过 fail-closed 检查。
+        return Ok(Vec::new());
+    }
+    if !root.join(PROVIDER_OUTPUT_PATH).exists() {
+        return Ok(vec![finding(
+            Rule::MissingAnchor,
+            PROVIDER_OUTPUT_PATH,
+            "缺 runtime-local provider output 唯一适配层",
+        )]);
+    }
+    let path = root.join(RUNTIME_LIB_PATH);
+    let text = fs::read_to_string(&path).with_context(|| format!("读 {} 失败", path.display()))?;
+    let mut findings = Vec::new();
+    let file = match syn::parse_file(&text) {
+        Ok(file) => file,
+        Err(error) => {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                RUNTIME_LIB_PATH,
+                format!("runtime provider gate 无法解析生产 Rust: {error}"),
+            ));
+            return Ok(findings);
+        }
+    };
+    let run = file.items.iter().find_map(|item| match item {
+        syn::Item::Fn(item) if item.sig.ident == "run" && item.sig.asyncness.is_some() => {
+            Some(item)
+        }
+        _ => None,
+    });
+    let wire_blocks = run.map(wire_domains_blocks).unwrap_or_default();
+    if wire_blocks.len() != 1 {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_LIB_PATH,
+            "run() 必须恰好包含一个 RuntimePhase::WireDomains async block",
+        ));
+    } else if let Some(block) = wire_blocks.first() {
+        if direct_provider_constructors(block) != 1
+            || direct_provider_declarations(block) != 1
+            || exact_named_path_call_count(
+                block,
+                &["crate", "provider_output", "build_provider_module"],
+            ) != 1
+            || provider_module_path_uses(block) != 1
+        {
+            findings.push(finding(
+                Rule::MissingAnchor,
+                RUNTIME_LIB_PATH,
+                "WireDomains 必须恰好一次不可变声明 `let provider_module = crate::provider_output::build_provider_module(&deps)` 并且只消费一次",
+            ));
+        }
+        if direct_provider_registrations(block) != 1
+            || exact_named_path_call_count(block, &["crate", "assemble_runtime_module_outputs"])
+                != 1
+        {
+            findings.push(finding(
+                Rule::MissingAnchor,
+                RUNTIME_LIB_PATH,
+                "provider_module 必须恰好一次进入 RuntimeModuleAssemblyInputs",
+            ));
+        }
+    }
+
+    let assembly = file.items.iter().find_map(|item| match item {
+        syn::Item::Fn(item) if item.sig.ident == "assemble_runtime_module_outputs" => Some(item),
+        _ => None,
+    });
+    if assembly.is_none_or(|item| direct_assembly_provider_merges(&item.block) != 1) {
+        findings.push(finding(
+            Rule::MissingAnchor,
+            RUNTIME_LIB_PATH,
+            "assemble_runtime_module_outputs() 必须直接且恰好一次 merge inputs.provider_module",
+        ));
+    }
+
+    let mut runtime_sources = Vec::new();
+    collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut runtime_sources)?;
+    let production_sources = production_module_sources(&runtime_sources)?;
+    for source_path in runtime_sources {
+        if !production_sources.contains(&normalize_path(&source_path)) {
+            continue;
+        }
+        let relative = source_path.strip_prefix(root).unwrap_or(&source_path);
+        let source = fs::read_to_string(&source_path)
+            .with_context(|| format!("读 {} 失败", source_path.display()))?;
+        let Ok(source_file) = syn::parse_file(&source) else {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                relative.display().to_string(),
+                "runtime provider gate 无法解析生产 Rust",
+            ));
+            continue;
+        };
+        if relative == Path::new(PROVIDER_OUTPUT_PATH) {
+            if !has_only_canonical_provider_output_calls(&source_file) {
+                findings.push(finding(
+                    Rule::ForbiddenWiring,
+                    PROVIDER_OUTPUT_PATH,
+                    "provider_output.rs 仅允许三个 ProviderOutput impl 各调用一次 runtime_resources",
+                ));
+            }
+            continue;
+        }
+        let is_event_transport = relative == Path::new("assemblies/runtime/src/event_transport.rs");
+        let provider_calls = provider_primitive_calls(&source_file, is_event_transport);
+        let runtime_resources_allowed = if is_event_transport {
+            !provider_calls.forbidden
+                && provider_calls.amqp_runtime_resources == 1
+                && has_only_canonical_amqp_runtime_resources(&source_file)
+        } else {
+            !provider_calls.forbidden && provider_calls.amqp_runtime_resources == 0
+        };
+        if !runtime_resources_allowed || provider_output_impl_count(&source_file) != 0 {
+            findings.push(finding(
+                Rule::ForbiddenWiring,
+                relative.display().to_string(),
+                "runtime_resources/merge_provider 只能在 provider_output.rs 唯一适配层调用",
+            ));
+        }
+    }
+    Ok(findings)
+}
+
+fn has_only_canonical_provider_output_calls(file: &syn::File) -> bool {
+    let mut all_calls = RuntimeResourcesCallCounter::default();
+    all_calls.visit_file(file);
+    if all_calls.calls != 3 {
+        return false;
+    }
+    let constructors = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "build_provider_module" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if constructors.len() != 1 || !is_canonical_provider_constructor(constructors[0]) {
+        return false;
+    }
+    let mut all_merges = MergeProviderCallCounter::default();
+    all_merges.visit_file(file);
+    if all_merges.calls != 3 {
+        return false;
+    }
+    if provider_output_impl_count(file) != 3 {
+        return false;
+    }
+    let traits = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Trait(item) if item.ident == "ProviderOutput" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if traits.len() != 1 || !is_canonical_provider_output_trait(traits[0]) {
+        return false;
+    }
+    let mut providers = BTreeMap::new();
+    for item in &file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        let Some((_, trait_path, _)) = &item.trait_ else {
+            continue;
+        };
+        if trait_path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "ProviderOutput")
+        {
+            continue;
+        }
+        let Some(provider) = type_last_ident(&item.self_ty).map(ToString::to_string) else {
+            return false;
+        };
+        if !matches!(
+            provider.as_str(),
+            "RedisRuntimeDeps" | "S3RuntimeDeps" | "VaultRuntimeDeps"
+        ) {
+            return false;
+        }
+        let canonical = item.items.len() == 1
+            && item.items.first().is_some_and(|impl_item| {
+                matches!(impl_item, syn::ImplItem::Fn(method)
+                    if is_canonical_provider_output_method(method))
+            });
+        if providers.insert(provider, canonical).is_some() {
+            return false;
+        }
+    }
+    providers
+        == BTreeMap::from([
+            ("RedisRuntimeDeps".to_string(), true),
+            ("S3RuntimeDeps".to_string(), true),
+            ("VaultRuntimeDeps".to_string(), true),
+        ])
+}
+
+fn provider_output_impl_count(file: &syn::File) -> usize {
+    #[derive(Default)]
+    struct Counter(usize);
+    impl<'ast> Visit<'ast> for Counter {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if attrs_may_be_production(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            if !attrs_may_be_production(&item.attrs) {
+                return;
+            }
+            if item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "ProviderOutput")
+            }) {
+                self.0 += 1;
+            }
+            syn::visit::visit_item_impl(self, item);
+        }
+    }
+    let mut counter = Counter::default();
+    counter.visit_file(file);
+    counter.0
+}
+
+fn is_canonical_provider_output_trait(item: &syn::ItemTrait) -> bool {
+    item.items.len() == 1
+        && item.items.first().is_some_and(|trait_item| {
+            matches!(trait_item, syn::TraitItem::Fn(method)
+                if method.sig.ident == "provider_output"
+                    && method.sig.inputs.len() == 1
+                    && matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+                        if receiver.reference.is_some() && receiver.mutability.is_none())
+                    && return_type_is(&method.sig.output, "DomainModuleResult")
+                    && method.default.is_none())
+        })
+}
+
+fn is_canonical_provider_output_method(method: &syn::ImplItemFn) -> bool {
+    if method.sig.ident != "provider_output"
+        || method.sig.inputs.len() != 1
+        || !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver))
+            if receiver.reference.is_some() && receiver.mutability.is_none())
+        || !return_type_is(&method.sig.output, "DomainModuleResult")
+        || method.block.stmts.len() != 1
+    {
+        return false;
+    }
+    let syn::Stmt::Expr(syn::Expr::Struct(output), None) = &method.block.stmts[0] else {
+        return false;
+    };
+    if path_last_ident(&output.path).is_none_or(|ident| ident != "DomainModuleResult") {
+        return false;
+    }
+    let resource_fields = output
+        .fields
+        .iter()
+        .filter(|field| matches!(&field.member, syn::Member::Named(name) if name == "resources"))
+        .collect::<Vec<_>>();
+    if resource_fields.len() != 1
+        || !matches!(&resource_fields[0].expr, syn::Expr::MethodCall(call)
+            if call.method == "runtime_resources"
+                && call.args.is_empty()
+                && expr_path_last(&call.receiver).is_some_and(|name| name == "self"))
+        || output.fields.iter().any(|field| {
+            !matches!(&field.member, syn::Member::Named(name)
+                if matches!(name.to_string().as_str(), "probes" | "resources" | "workers"))
+        })
+    {
+        return false;
+    }
+    output.rest.is_none()
+        || matches!(&output.rest, Some(rest)
+        if matches!(rest.as_ref(), syn::Expr::Call(call)
+            if call.args.is_empty() && is_exact_path(&call.func, &["DomainModuleResult", "default"])))
+}
+
+fn return_type_is(output: &syn::ReturnType, expected: &str) -> bool {
+    match output {
+        syn::ReturnType::Type(_, ty) => type_last_ident(ty).is_some_and(|ident| ident == expected),
+        syn::ReturnType::Default => false,
+    }
+}
+
+#[derive(Default)]
+struct RuntimeResourcesCallCounter {
+    calls: usize,
+}
+
+impl<'ast> Visit<'ast> for RuntimeResourcesCallCounter {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "runtime_resources" {
+            self.calls += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if expr_path_last(&call.func).is_some_and(|ident| ident == "runtime_resources") {
+            self.calls += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+#[derive(Default)]
+struct MergeProviderCallCounter {
+    calls: usize,
+}
+
+impl<'ast> Visit<'ast> for MergeProviderCallCounter {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if attrs_may_be_production(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "merge_provider" {
+            self.calls += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if expr_path_last(&call.func).is_some_and(|ident| ident == "merge_provider") {
+            self.calls += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn wire_domains_blocks(run: &syn::ItemFn) -> Vec<&syn::Block> {
+    let mut finder = WireDomainsBlockFinder::default();
+    finder.visit_block(&run.block);
+    finder.blocks
+}
+
+#[derive(Default)]
+struct WireDomainsBlockFinder<'ast> {
+    blocks: Vec<&'ast syn::Block>,
+}
+
+impl<'ast> Visit<'ast> for WireDomainsBlockFinder<'ast> {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        let is_phase_result =
+            expr_path_last(&call.func).is_some_and(|ident| ident == "phase_result");
+        let is_wire_domains = call
+            .args
+            .first()
+            .and_then(expr_path_last)
+            .is_some_and(|ident| ident == "WireDomains");
+        if is_phase_result
+            && is_wire_domains
+            && let Some(block) = call.args.iter().nth(1).and_then(async_expr_block)
+        {
+            self.blocks.push(block);
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn async_expr_block(expr: &syn::Expr) -> Option<&syn::Block> {
+    match expr {
+        syn::Expr::Async(expr) => Some(&expr.block),
+        syn::Expr::Await(expr) => match expr.base.as_ref() {
+            syn::Expr::Async(expr) => Some(&expr.block),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn expr_path_last(expr: &syn::Expr) -> Option<&syn::Ident> {
+    let syn::Expr::Path(path) = expr else {
+        return None;
+    };
+    path.path.segments.last().map(|segment| &segment.ident)
+}
+
+fn path_last_ident(path: &syn::Path) -> Option<&syn::Ident> {
+    path.segments.last().map(|segment| &segment.ident)
+}
+
+fn is_exact_path(expr: &syn::Expr, expected: &[&str]) -> bool {
+    let syn::Expr::Path(path) = expr else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.leading_colon.is_none()
+        && path.path.segments.len() == expected.len()
+        && path
+            .path
+            .segments
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected)| segment.ident == *expected)
+}
+
+fn is_canonical_provider_constructor(item: &syn::ItemFn) -> bool {
+    item.sig.inputs.len() == 1
+        && matches!(item.sig.inputs.first(), Some(syn::FnArg::Typed(input))
+            if matches!(input.pat.as_ref(), syn::Pat::Ident(pat)
+                if pat.ident == "deps" && pat.mutability.is_none() && pat.by_ref.is_none())
+                && matches!(input.ty.as_ref(), syn::Type::Reference(reference)
+                    if reference.mutability.is_none()
+                        && type_last_ident(&reference.elem).is_some_and(|ident| ident == "SharedRuntimeDeps")))
+        && return_type_is(&item.sig.output, "DomainModuleResult")
+        && item.block.stmts.len() == 5
+        && is_provider_module_init(&item.block.stmts[0])
+        && is_provider_merge_stmt(&item.block.stmts[1], "redis")
+        && is_provider_merge_stmt(&item.block.stmts[2], "s3")
+        && is_provider_merge_stmt(&item.block.stmts[3], "vault")
+        && matches!(&item.block.stmts[4], syn::Stmt::Expr(expr, None)
+            if expr_path_last(expr).is_some_and(|ident| ident == "provider_module"))
+}
+
+fn is_provider_module_init(stmt: &syn::Stmt) -> bool {
+    let syn::Stmt::Local(local) = stmt else {
+        return false;
+    };
+    let syn::Pat::Ident(pat) = &local.pat else {
+        return false;
+    };
+    let Some(init) = &local.init else {
+        return false;
+    };
+    pat.ident == "provider_module"
+        && pat.mutability.is_some()
+        && pat.by_ref.is_none()
+        && init.diverge.is_none()
+        && matches!(init.expr.as_ref(), syn::Expr::Call(call)
+            if call.args.is_empty() && is_exact_path(&call.func, &["DomainModuleResult", "default"]))
+}
+
+fn is_provider_merge_stmt(stmt: &syn::Stmt, provider: &str) -> bool {
+    let syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)) = stmt else {
+        return false;
+    };
+    call.method == "merge_provider"
+        && expr_path_last(&call.receiver).is_some_and(|ident| ident == "provider_module")
+        && call.args.len() == 1
+        && call.args.first().is_some_and(|arg| {
+            let syn::Expr::Reference(reference) = arg else {
+                return false;
+            };
+            matches!(reference.expr.as_ref(), syn::Expr::Field(field)
+                if expr_path_last(&field.base).is_some_and(|ident| ident == "deps")
+                    && matches!(&field.member, syn::Member::Named(member) if member == provider))
+        })
+}
+
+fn direct_provider_registrations(block: &syn::Block) -> usize {
+    block
+        .stmts
+        .iter()
+        .filter(|stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return false;
+            };
+            let Some(init) = &local.init else {
+                return false;
+            };
+            is_provider_assembly_call(&init.expr)
+        })
+        .count()
+}
+
+fn direct_provider_constructors(block: &syn::Block) -> usize {
+    block
+        .stmts
+        .iter()
+        .filter(|stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return false;
+            };
+            let syn::Pat::Ident(pat) = &local.pat else {
+                return false;
+            };
+            let Some(init) = &local.init else {
+                return false;
+            };
+            pat.ident == "provider_module"
+                && pat.mutability.is_none()
+                && pat.by_ref.is_none()
+                && init.diverge.is_none()
+                && matches!(init.expr.as_ref(), syn::Expr::Call(call)
+                    if is_exact_path(&call.func, &["crate", "provider_output", "build_provider_module"])
+                        && call.args.len() == 1
+                        && call.args.first().is_some_and(|arg| matches!(arg, syn::Expr::Reference(reference)
+                            if reference.mutability.is_none()
+                                && expr_path_last(&reference.expr).is_some_and(|ident| ident == "deps"))))
+        })
+        .count()
+}
+
+fn direct_provider_declarations(block: &syn::Block) -> usize {
+    block
+        .stmts
+        .iter()
+        .filter(|stmt| {
+            matches!(stmt, syn::Stmt::Local(local)
+                if matches!(&local.pat, syn::Pat::Ident(pat) if pat.ident == "provider_module"))
+        })
+        .count()
+}
+
+fn provider_module_path_uses(block: &syn::Block) -> usize {
+    struct Counter(usize);
+    impl<'ast> Visit<'ast> for Counter {
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if path.qself.is_none()
+                && path.path.leading_colon.is_none()
+                && path.path.segments.len() == 1
+                && path.path.segments[0].ident == "provider_module"
+            {
+                self.0 += 1;
+            }
+            syn::visit::visit_expr_path(self, path);
+        }
+    }
+    let mut counter = Counter(0);
+    counter.visit_block(block);
+    counter.0
+}
+
+fn exact_named_path_call_count(block: &syn::Block, path: &[&str]) -> usize {
+    struct Counter<'a> {
+        path: &'a [&'a str],
+        calls: usize,
+    }
+    impl Visit<'_> for Counter<'_> {
+        fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+            if is_exact_path(&call.func, self.path) {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter { path, calls: 0 };
+    counter.visit_block(block);
+    counter.calls
+}
+
+fn is_provider_assembly_call(expr: &syn::Expr) -> bool {
+    let syn::Expr::Call(call) = expr else {
+        return false;
+    };
+    if !is_exact_path(&call.func, &["crate", "assemble_runtime_module_outputs"]) {
+        return false;
+    }
+    call.args.iter().any(|arg| {
+        let syn::Expr::Struct(struct_expr) = arg else {
+            return false;
+        };
+        struct_expr
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "RuntimeModuleAssemblyInputs")
+            && struct_expr.fields.iter().any(|field| {
+                matches!(&field.member, syn::Member::Named(member) if member == "provider_module")
+                    && expr_path_last(&field.expr).is_some_and(|ident| ident == "provider_module")
+            })
+    })
+}
+
+fn direct_assembly_provider_merges(block: &syn::Block) -> usize {
+    block
+        .stmts
+        .iter()
+        .filter(|stmt| {
+            let syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_)) = stmt else {
+                return false;
+            };
+            call.method == "merge"
+                && expr_path_last(&call.receiver).is_some_and(|ident| ident == "module")
+                && call.args.first().is_some_and(|arg| {
+                    matches!(arg, syn::Expr::Field(field)
+                        if expr_path_last(&field.base).is_some_and(|ident| ident == "inputs")
+                            && matches!(&field.member, syn::Member::Named(member) if member == "provider_module"))
+                })
+        })
+        .count()
+}
+
+#[derive(Default)]
+struct ProviderPrimitiveCalls {
+    forbidden: bool,
+    amqp_runtime_resources: usize,
+}
+
+#[derive(Default)]
+struct LocalProviderSymbols {
+    aliases: BTreeMap<String, String>,
+    fields: BTreeMap<(String, String), String>,
+    returns: BTreeMap<String, String>,
+}
+
+impl LocalProviderSymbols {
+    const AMBIGUOUS: &'static str = "__AMBIGUOUS_PROVIDER_TYPE__";
+
+    fn insert_unique(map: &mut BTreeMap<String, String>, name: String, target: String) {
+        match map.entry(name) {
+            Entry::Vacant(entry) => {
+                entry.insert(target);
+            }
+            Entry::Occupied(mut entry) if entry.get() != &target => {
+                entry.insert(Self::AMBIGUOUS.to_string());
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+
+    fn resolve_type(&self, ty: &str) -> String {
+        let mut current = ty.to_string();
+        let mut seen = BTreeSet::new();
+        while seen.insert(current.clone()) {
+            let segments = current.split("::").collect::<Vec<_>>();
+            let Some((prefix_len, next)) = (1..=segments.len()).rev().find_map(|prefix_len| {
+                self.aliases
+                    .get(&segments[..prefix_len].join("::"))
+                    .map(|next| (prefix_len, next))
+            }) else {
+                break;
+            };
+            let suffix = &segments[prefix_len..];
+            current = if suffix.is_empty() {
+                next.clone()
+            } else {
+                format!("{next}::{}", suffix.join("::"))
+            };
+        }
+        current
+    }
+
+    fn collect(file: &syn::File) -> Self {
+        #[derive(Default)]
+        struct Collector(LocalProviderSymbols);
+        impl Collector {
+            fn collect_use(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
+                match tree {
+                    syn::UseTree::Path(path) => {
+                        prefix.push(path.ident.to_string());
+                        self.collect_use(&path.tree, prefix);
+                        prefix.pop();
+                    }
+                    syn::UseTree::Rename(rename) => {
+                        let is_self = rename.ident == "self";
+                        if !is_self {
+                            prefix.push(rename.ident.to_string());
+                        }
+                        LocalProviderSymbols::insert_unique(
+                            &mut self.0.aliases,
+                            rename.rename.to_string(),
+                            prefix.join("::"),
+                        );
+                        if !is_self {
+                            prefix.pop();
+                        }
+                    }
+                    syn::UseTree::Name(name) => {
+                        prefix.push(name.ident.to_string());
+                        LocalProviderSymbols::insert_unique(
+                            &mut self.0.aliases,
+                            name.ident.to_string(),
+                            prefix.join("::"),
+                        );
+                        prefix.pop();
+                    }
+                    syn::UseTree::Group(group) => {
+                        for item in &group.items {
+                            self.collect_use(item, prefix);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        impl<'ast> Visit<'ast> for Collector {
+            fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+                if attrs_may_be_production(&item.attrs) {
+                    syn::visit::visit_item_mod(self, item);
+                }
+            }
+
+            fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+                if attrs_may_be_production(&item.attrs) {
+                    let target = if item.generics.params.is_empty() {
+                        type_identity(&item.ty)
+                            .unwrap_or_else(|| LocalProviderSymbols::AMBIGUOUS.to_string())
+                    } else {
+                        LocalProviderSymbols::AMBIGUOUS.to_string()
+                    };
+                    LocalProviderSymbols::insert_unique(
+                        &mut self.0.aliases,
+                        item.ident.to_string(),
+                        target,
+                    );
+                }
+            }
+
+            fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+                if attrs_may_be_production(&item.attrs) {
+                    self.collect_use(&item.tree, &mut Vec::new());
+                }
+            }
+
+            fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+                if attrs_may_be_production(&item.attrs) {
+                    let alias = item
+                        .rename
+                        .as_ref()
+                        .map_or_else(|| item.ident.to_string(), |(_, alias)| alias.to_string());
+                    LocalProviderSymbols::insert_unique(
+                        &mut self.0.aliases,
+                        alias,
+                        item.ident.to_string(),
+                    );
+                }
+            }
+
+            fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+                if attrs_may_be_production(&item.attrs) {
+                    for field in &item.fields {
+                        if let (Some(name), Some(ty)) = (&field.ident, type_identity(&field.ty)) {
+                            let target = if item.generics.params.is_empty() {
+                                ty
+                            } else {
+                                LocalProviderSymbols::AMBIGUOUS.to_string()
+                            };
+                            let key = (item.ident.to_string(), name.to_string());
+                            match self.0.fields.entry(key) {
+                                Entry::Vacant(entry) => {
+                                    entry.insert(target);
+                                }
+                                Entry::Occupied(mut entry) if entry.get() != &target => {
+                                    entry.insert(LocalProviderSymbols::AMBIGUOUS.to_string());
+                                }
+                                Entry::Occupied(_) => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+                if !attrs_may_be_production(&item.attrs) {
+                    return;
+                }
+                if let syn::ReturnType::Type(_, ty) = &item.sig.output
+                    && let Some(return_ty) = type_identity(ty)
+                    && !item.sig.generics.params.iter().any(|param| {
+                        matches!(param, syn::GenericParam::Type(param) if param.ident == return_ty)
+                    })
+                {
+                    LocalProviderSymbols::insert_unique(
+                        &mut self.0.returns,
+                        item.sig.ident.to_string(),
+                        return_ty,
+                    );
+                }
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+        let mut collector = Collector::default();
+        collector.visit_file(file);
+        for item in &file.items {
+            if let syn::Item::Struct(item) = item
+                && is_protected_provider_owner(&item.ident.to_string())
+            {
+                LocalProviderSymbols::insert_unique(
+                    &mut collector.0.aliases,
+                    item.ident.to_string(),
+                    format!("__LOCAL__::{}", item.ident),
+                );
+            }
+        }
+        collector.0
+    }
+}
+
+struct ProviderPrimitiveVisitor<'a> {
+    symbols: &'a LocalProviderSymbols,
+    bindings: BTreeMap<String, String>,
+    local_shadows: BTreeSet<String>,
+    self_type: Option<String>,
+    allow_amqp: bool,
+    calls: ProviderPrimitiveCalls,
+}
+
+impl ProviderPrimitiveVisitor<'_> {
+    fn resolve_type(&self, ty: &str) -> String {
+        let resolved = self.symbols.resolve_type(ty);
+        if !resolved.contains("::") && self.local_shadows.contains(&resolved) {
+            format!("__LOCAL__::{resolved}")
+        } else {
+            resolved
+        }
+    }
+
+    fn add_item_shadows(&mut self, items: &[syn::Item]) {
+        for item in items {
+            if let syn::Item::Struct(item) = item
+                && is_protected_provider_owner(&item.ident.to_string())
+            {
+                self.local_shadows.insert(item.ident.to_string());
+            }
+        }
+    }
+
+    fn expr_type(&self, expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Path(path) => path
+                .path
+                .segments
+                .last()
+                .and_then(|segment| self.bindings.get(&segment.ident.to_string()))
+                .map(|ty| self.resolve_type(ty)),
+            syn::Expr::Reference(reference) => self.expr_type(&reference.expr),
+            syn::Expr::Paren(paren) => self.expr_type(&paren.expr),
+            syn::Expr::Field(field) => {
+                let base = self.expr_type(&field.base)?;
+                let syn::Member::Named(member) = &field.member else {
+                    return None;
+                };
+                if base.rsplit("::").next() == Some("SharedRuntimeDeps") {
+                    return match member.to_string().as_str() {
+                        "redis" => Some("redis::RedisRuntimeDeps".to_string()),
+                        "s3" => Some("s3::S3RuntimeDeps".to_string()),
+                        "vault" => Some("vault::VaultRuntimeDeps".to_string()),
+                        _ => None,
+                    };
+                }
+                self.symbols
+                    .fields
+                    .get(&(base, member.to_string()))
+                    .map(|ty| self.resolve_type(ty))
+            }
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                let segments = path.path.segments.iter().collect::<Vec<_>>();
+                if segments.len() >= 2
+                    && segments.last().is_some_and(|segment| {
+                        matches!(
+                            segment.ident.to_string().as_str(),
+                            "new" | "default" | "connect"
+                        )
+                    })
+                {
+                    Some(
+                        self.resolve_type(
+                            &segments[..segments.len() - 1]
+                                .iter()
+                                .map(|segment| segment.ident.to_string())
+                                .collect::<Vec<_>>()
+                                .join("::"),
+                        ),
+                    )
+                } else {
+                    segments
+                        .last()
+                        .and_then(|segment| self.symbols.returns.get(&segment.ident.to_string()))
+                        .map(|ty| self.resolve_type(ty))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn classify(&mut self, method: &str, owner: Option<String>) {
+        let owner = owner.map(|ty| self.resolve_type(&ty));
+        if method == "runtime_resources"
+            && owner.as_deref() == Some("AmqpRuntimeDeps")
+            && self.allow_amqp
+        {
+            self.calls.amqp_runtime_resources += 1;
+            return;
+        }
+        if owner
+            .as_deref()
+            .is_some_and(|owner| !is_protected_provider_owner(owner))
+        {
+            return;
+        }
+        self.calls.forbidden = true;
+    }
+}
+
+fn is_protected_provider_owner(owner: &str) -> bool {
+    if owner == LocalProviderSymbols::AMBIGUOUS {
+        return true;
+    }
+    let segments = owner.split("::").collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        ["RedisRuntimeDeps" | "S3RuntimeDeps" | "VaultRuntimeDeps" | "AmqpRuntimeDeps"]
+            | ["DomainModuleResult" | "DomainModuleResultExt"]
+            | ["redis" | "redis_adapter", "RedisRuntimeDeps"]
+            | ["s3", "S3RuntimeDeps"]
+            | ["vault", "VaultRuntimeDeps"]
+            | ["amqp", "AmqpRuntimeDeps"]
+            | ["bootstrap", "DomainModuleResult"]
+            | ["provider_output", "DomainModuleResultExt"]
+            | ["crate", "provider_output", "DomainModuleResultExt"]
+    )
+}
+
+impl<'ast> Visit<'ast> for ProviderPrimitiveVisitor<'_> {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        let saved = self.local_shadows.clone();
+        self.add_item_shadows(&file.items);
+        for item in &file.items {
+            self.visit_item(item);
+        }
+        self.local_shadows = saved;
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        if let Some((_, items)) = &item.content {
+            let saved = self.local_shadows.clone();
+            self.add_item_shadows(items);
+            for item in items {
+                self.visit_item(item);
+            }
+            self.local_shadows = saved;
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        let saved = self.bindings.clone();
+        for input in &item.sig.inputs {
+            if let syn::FnArg::Typed(input) = input
+                && let syn::Pat::Ident(pat) = input.pat.as_ref()
+                && let Some(ty) = type_identity(&input.ty)
+            {
+                self.bindings
+                    .insert(pat.ident.to_string(), self.resolve_type(&ty));
+            }
+        }
+        self.visit_block(&item.block);
+        self.bindings = saved;
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        let saved = self.self_type.clone();
+        self.self_type = type_identity(&item.self_ty);
+        syn::visit::visit_item_impl(self, item);
+        self.self_type = saved;
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !attrs_may_be_production(&item.attrs) {
+            return;
+        }
+        let saved = self.bindings.clone();
+        if let Some(self_type) = &self.self_type {
+            self.bindings
+                .insert("self".to_string(), self.resolve_type(self_type));
+        }
+        for input in &item.sig.inputs {
+            if let syn::FnArg::Typed(input) = input
+                && let syn::Pat::Ident(pat) = input.pat.as_ref()
+                && let Some(ty) = type_identity(&input.ty)
+            {
+                self.bindings
+                    .insert(pat.ident.to_string(), self.resolve_type(&ty));
+            }
+        }
+        self.visit_block(&item.block);
+        self.bindings = saved;
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        let saved = self.bindings.clone();
+        let saved_shadows = self.local_shadows.clone();
+        for stmt in &block.stmts {
+            if let syn::Stmt::Item(syn::Item::Struct(item)) = stmt
+                && is_protected_provider_owner(&item.ident.to_string())
+            {
+                self.local_shadows.insert(item.ident.to_string());
+            }
+        }
+        for stmt in &block.stmts {
+            self.visit_stmt(stmt);
+        }
+        self.bindings = saved;
+        self.local_shadows = saved_shadows;
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let Some(init) = &local.init {
+            self.visit_expr(&init.expr);
+        }
+        let (name, declared_ty) = match &local.pat {
+            syn::Pat::Ident(pat) => (Some(pat.ident.to_string()), None),
+            syn::Pat::Type(pat) => {
+                let name = match pat.pat.as_ref() {
+                    syn::Pat::Ident(ident) => Some(ident.ident.to_string()),
+                    _ => None,
+                };
+                (name, type_identity(&pat.ty))
+            }
+            _ => (None, None),
+        };
+        if let Some(name) = name {
+            let inferred = declared_ty
+                .or_else(|| {
+                    local
+                        .init
+                        .as_ref()
+                        .and_then(|init| self.expr_type(&init.expr))
+                })
+                .or_else(|| {
+                    local.init.as_ref().and_then(|init| {
+                        (exact_path_call_count_in_expr(
+                            &init.expr,
+                            &["amqp", "AmqpRuntimeDeps", "connect"],
+                        ) == 1)
+                            .then(|| "AmqpRuntimeDeps".to_string())
+                    })
+                });
+            if let Some(ty) = inferred {
+                self.bindings.insert(name, self.resolve_type(&ty));
+            } else {
+                self.bindings.remove(&name);
+            }
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let method = call.method.to_string();
+        if matches!(method.as_str(), "runtime_resources" | "merge_provider") {
+            self.classify(&method, self.expr_type(&call.receiver));
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref()
+            && let Some(method) = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+            && matches!(method.as_str(), "runtime_resources" | "merge_provider")
+        {
+            let segments = path.path.segments.iter().collect::<Vec<_>>();
+            let owner = path
+                .qself
+                .as_ref()
+                .and_then(|qself| type_identity(&qself.ty))
+                .or_else(|| {
+                    (segments.len() >= 2).then(|| {
+                        segments[..segments.len() - 1]
+                            .iter()
+                            .map(|segment| segment.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::")
+                    })
+                });
+            if owner.is_some() {
+                self.classify(&method, owner);
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn provider_primitive_calls(file: &syn::File, allow_amqp: bool) -> ProviderPrimitiveCalls {
+    let symbols = LocalProviderSymbols::collect(file);
+    let mut visitor = ProviderPrimitiveVisitor {
+        symbols: &symbols,
+        bindings: BTreeMap::new(),
+        local_shadows: BTreeSet::new(),
+        self_type: None,
+        allow_amqp,
+        calls: ProviderPrimitiveCalls::default(),
+    };
+    visitor.visit_file(file);
+    visitor.calls
+}
+
+fn has_only_canonical_amqp_runtime_resources(file: &syn::File) -> bool {
+    let wire_durable = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(item) if item.sig.ident == "wire_durable" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if wire_durable.len() != 1 {
+        return false;
+    }
+    wire_durable[0]
+        .block
+        .stmts
+        .iter()
+        .filter(|stmt| {
+            matches!(stmt, syn::Stmt::Expr(syn::Expr::ForLoop(loop_), None)
+            if is_canonical_amqp_connection_loop(loop_))
+        })
+        .count()
+        == 1
+}
+
+fn is_canonical_amqp_connection_loop(loop_: &syn::ExprForLoop) -> bool {
+    let canonical_pattern = matches!(loop_.pat.as_ref(), syn::Pat::Tuple(tuple)
+        if tuple.elems.len() == 2
+            && matches!(&tuple.elems[0], syn::Pat::Ident(pat) if pat.ident == "domain_upper")
+            && matches!(&tuple.elems[1], syn::Pat::Ident(pat) if pat.ident == "url"));
+    let canonical_iter = matches!(loop_.expr.as_ref(), syn::Expr::Reference(reference)
+        if reference.mutability.is_none()
+            && expr_path_last(&reference.expr).is_some_and(|ident| ident == "per_domain"));
+    if !canonical_pattern || !canonical_iter {
+        return false;
+    }
+
+    let connect = loop_.body.stmts.iter().position(|stmt| {
+        let syn::Stmt::Local(local) = stmt else {
+            return false;
+        };
+        matches!(&local.pat, syn::Pat::Ident(pat) if pat.ident == "amqp_deps")
+            && local.init.as_ref().is_some_and(|init| {
+                exact_path_call_count_in_expr(&init.expr, &["amqp", "AmqpRuntimeDeps", "connect"])
+                    == 1
+            })
+    });
+    let extend = loop_
+        .body
+        .stmts
+        .iter()
+        .position(is_canonical_amqp_runtime_resources_stmt);
+    let insert = loop_.body.stmts.iter().position(|stmt| {
+        matches!(stmt, syn::Stmt::Expr(syn::Expr::MethodCall(call), Some(_))
+            if call.method == "insert"
+                && expr_path_last(&call.receiver).is_some_and(|ident| ident == "amqp_map")
+                && call.args.len() == 2
+                && call.args.first().is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "domain"))
+                && call.args.last().is_some_and(|arg| expr_path_last(arg).is_some_and(|ident| ident == "amqp_deps")))
+    });
+    matches!((connect, extend, insert), (Some(connect), Some(extend), Some(insert))
+        if connect < extend && extend < insert)
+}
+
+fn exact_path_call_count_in_expr(expr: &syn::Expr, expected: &[&str]) -> usize {
+    struct Counter<'a> {
+        expected: &'a [&'a str],
+        calls: usize,
+    }
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if is_exact_path(&call.func, self.expected) {
+                self.calls += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut counter = Counter { expected, calls: 0 };
+    counter.visit_expr(expr);
+    counter.calls
+}
+
+fn is_canonical_amqp_runtime_resources_stmt(stmt: &syn::Stmt) -> bool {
+    let syn::Stmt::Expr(syn::Expr::MethodCall(extend), Some(_)) = stmt else {
+        return false;
+    };
+    extend.method == "extend"
+        && extend.args.len() == 1
+        && expr_path_last(&extend.receiver).is_some_and(|ident| ident == "infra_guards")
+        && extend.args.first().is_some_and(|arg| {
+            matches!(arg, syn::Expr::MethodCall(resources)
+                if resources.method == "runtime_resources"
+                    && resources.args.is_empty()
+                    && expr_path_last(&resources.receiver)
+                        .is_some_and(|ident| ident == "amqp_deps"))
+        })
+}
+
+fn type_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
+    match ty {
+        syn::Type::Path(path) => path.path.segments.last().map(|segment| &segment.ident),
+        syn::Type::Reference(reference) => type_last_ident(&reference.elem),
+        _ => None,
+    }
+}
+
+fn type_identity(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(path) if path.qself.is_none() => Some(
+            path.path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::"),
+        ),
+        syn::Type::Reference(reference) => type_identity(&reference.elem),
+        syn::Type::Paren(paren) => type_identity(&paren.elem),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -376,13 +1774,13 @@ struct DomainFactoryImportVisitor {
 
 impl<'ast> Visit<'ast> for DomainFactoryImportVisitor {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if !is_cfg_test(&item.attrs) {
+        if attrs_may_be_production(&item.attrs) {
             syn::visit::visit_item_mod(self, item);
         }
     }
 
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if !is_cfg_test(&item.attrs) {
+        if attrs_may_be_production(&item.attrs) {
             syn::visit::visit_item_fn(self, item);
         }
     }
@@ -402,13 +1800,13 @@ struct DomainFactoryPathVisitor<'a> {
 
 impl<'ast> Visit<'ast> for DomainFactoryPathVisitor<'_> {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if !is_cfg_test(&item.attrs) {
+        if attrs_may_be_production(&item.attrs) {
             syn::visit::visit_item_mod(self, item);
         }
     }
 
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if !is_cfg_test(&item.attrs) {
+        if attrs_may_be_production(&item.attrs) {
             syn::visit::visit_item_fn(self, item);
         }
     }
@@ -501,19 +1899,6 @@ fn canonical_runtime_path(path: &[String], crate_root: bool) -> Option<&[String]
         _ if crate_root => Some(path),
         _ => None,
     }
-}
-
-fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        let syn::Meta::List(meta) = &attr.meta else {
-            return false;
-        };
-        if !meta.path.is_ident("cfg") {
-            return false;
-        }
-        let cfg = meta.tokens.to_string().replace(' ', "");
-        cfg == "test" || cfg.starts_with("any(test,") || cfg.contains(",test")
-    })
 }
 
 fn collect_rust_sources(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -877,19 +2262,9 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
         pattern: "let s3_canary_module =",
     },
     AnchorSpec {
-        id: "run.resources.redis",
+        id: "run.provider-output.module",
         path: RUNTIME_LIB_PATH,
-        pattern: "let redis_resources = deps.redis.runtime_resources()",
-    },
-    AnchorSpec {
-        id: "run.resources.s3",
-        path: RUNTIME_LIB_PATH,
-        pattern: "let s3_resources = deps.s3.runtime_resources()",
-    },
-    AnchorSpec {
-        id: "run.resources.vault",
-        path: RUNTIME_LIB_PATH,
-        pattern: "let vault_resources = deps.vault.runtime_resources()",
+        pattern: "let provider_module = crate::provider_output::build_provider_module(&deps)",
     },
     AnchorSpec {
         id: "run.resources.oidc",
@@ -924,7 +2299,7 @@ const RUNTIME_ANCHORS: &[AnchorSpec] = &[
     AnchorSpec {
         id: "run.module.assemble",
         path: RUNTIME_LIB_PATH,
-        pattern: "assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs",
+        pattern: "crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs",
     },
     AnchorSpec {
         id: "run.probe.drain",
@@ -1487,6 +2862,7 @@ impl DomainModuleResult {
 "#,
         )?;
         write(&root.join(RUNTIME_LIB_PATH), &runtime_lib_fixture(None))?;
+        write(&root.join(PROVIDER_OUTPUT_PATH), provider_adapter_fixture())?;
         write(
             &root.join(RUNTIME_LAUNCH_PATH),
             &runtime_launch_fixture(None),
@@ -1496,7 +2872,7 @@ impl DomainModuleResult {
 
     fn runtime_lib_fixture(omit: Option<&str>) -> String {
         format!(
-            "pub async fn run() {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\n}}\n",
+            "pub async fn run() {{\n{}\n}}\nfn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {{\nlet mut module = DomainModuleResult::default();\nmodule.merge(inputs.domains_module);\nmodule.merge(inputs.provider_module);\n}}\n",
             runtime_anchor_lines(omit)
         )
     }
@@ -1652,8 +3028,8 @@ serde = workspace=true; features=[derive]
                 .rendered
                 .contains("mergeExtends = probes,resources,workers")
         );
-        assert!(report.rendered.contains("34 | launch.register-plan"));
-        assert!(report.rendered.contains("35 | launch.listeners"));
+        assert!(report.rendered.contains("32 | launch.register-plan"));
+        assert!(report.rendered.contains("33 | launch.listeners"));
         Ok(())
     }
 
@@ -1871,6 +3247,516 @@ kind = "health"
             finding.rule == Rule::MissingAnchor
                 && finding.detail.contains("generated domains output")
         }));
+        Ok(())
+    }
+
+    fn provider_output_fixture() -> String {
+        r#"
+pub async fn run() {
+    let _wire = phase_result(RuntimePhase::WireDomains, async {
+    let provider_module = crate::provider_output::build_provider_module(&deps);
+    let _module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+        provider_module,
+    });
+    }.await);
+}
+
+fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) {
+    let mut module = DomainModuleResult::default();
+    module.merge(inputs.provider_module);
+}
+"#
+        .to_string()
+    }
+
+    fn provider_adapter_fixture() -> &'static str {
+        r#"
+trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult; }
+impl ProviderOutput for RedisRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
+impl ProviderOutput for S3RuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
+impl ProviderOutput for VaultRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
+fn build_provider_module(deps: &SharedRuntimeDeps) -> DomainModuleResult {
+    let mut provider_module = DomainModuleResult::default();
+    provider_module.merge_provider(&deps.redis);
+    provider_module.merge_provider(&deps.s3);
+    provider_module.merge_provider(&deps.vault);
+    provider_module
+}
+"#
+    }
+
+    fn write_provider_fixture(root: &Path) -> Result<()> {
+        write(
+            &root.join(PROVIDER_OUTPUT_FIXTURE_MARKER),
+            "provider-output\n",
+        )?;
+        write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
+        write(&root.join(PROVIDER_OUTPUT_PATH), provider_adapter_fixture())?;
+        write(&root.join(RUNTIME_LAUNCH_PATH), "fn launch() {}\n")
+    }
+
+    #[test]
+    fn runtime_provider_outputs_accept_unified_live_path() -> Result<()> {
+        let root = fixture_root("runtime-provider-outputs-green")?;
+        write_provider_fixture(&root)?;
+
+        write(
+            &root.join("assemblies/runtime/src/event_transport.rs"),
+            r#"
+async fn wire_durable() {
+    for (domain_upper, url) in &per_domain {
+        let domain = domain_upper.to_ascii_lowercase();
+        let amqp_deps = amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain).await?;
+        infra_guards.extend(amqp_deps.runtime_resources());
+        amqp_map.insert(domain, amqp_deps);
+    }
+}
+"#,
+        )?;
+
+        assert_eq!(
+            provider_outputs_live_findings(&root)?,
+            Vec::<Finding<Rule>>::new()
+        );
+
+        let provider_output = root.join(PROVIDER_OUTPUT_PATH);
+        let canonical_provider = fs::read_to_string(&provider_output)?;
+        let three_channel_provider = canonical_provider.replacen(
+            "DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() }",
+            "DomainModuleResult { probes: Vec::new(), resources: self.runtime_resources(), workers: Vec::new(), ..DomainModuleResult::default() }",
+            1,
+        );
+        write(&provider_output, &three_channel_provider)?;
+        assert_eq!(
+            provider_outputs_live_findings(&root)?,
+            Vec::<Finding<Rule>>::new(),
+            "ProviderOutput gate 不得把 DomainModuleResult 冻结成 resources-only"
+        );
+        write(&provider_output, &canonical_provider)?;
+
+        let event_transport = root.join("assemblies/runtime/src/event_transport.rs");
+        let canonical = fs::read_to_string(&event_transport)?;
+        for (label, mutated) in [
+            (
+                "dead branch",
+                canonical.replace(
+                    "        infra_guards.extend(amqp_deps.runtime_resources());",
+                    "        if false { infra_guards.extend(amqp_deps.runtime_resources()); }",
+                ),
+            ),
+            (
+                "dead closure",
+                canonical.replace(
+                    "        infra_guards.extend(amqp_deps.runtime_resources());",
+                    "        let _dead = || infra_guards.extend(amqp_deps.runtime_resources());",
+                ),
+            ),
+            (
+                "outside connection loop",
+                canonical.replace(
+                    "        infra_guards.extend(amqp_deps.runtime_resources());",
+                    "",
+                ) + "\nfn bypass() { infra_guards.extend(amqp_deps.runtime_resources()); }\n",
+            ),
+        ] {
+            write(&event_transport, &mutated)?;
+            assert_provider_gate_fails(&root, label)?;
+        }
+        write(&event_transport, &canonical)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_provider_outputs_reject_noncanonical_ast_shapes() -> Result<()> {
+        let root = fixture_root("runtime-provider-outputs-ast-red")?;
+        write_provider_fixture(&root)?;
+        fs::remove_file(root.join(PROVIDER_OUTPUT_PATH))?;
+        assert_provider_gate_fails(&root, "missing provider_output.rs")?;
+
+        let adapter = provider_adapter_fixture();
+        for (label, mutated) in [
+            (
+                "helper return",
+                adapter.replace(
+                    "    provider_module\n}",
+                    "    identity(provider_module)\n}\nfn identity(output: DomainModuleResult) -> DomainModuleResult { output }",
+                ),
+            ),
+            (
+                "builder reset",
+                adapter.replace(
+                    "    provider_module\n}",
+                    "    provider_module = DomainModuleResult::default();\n    provider_module\n}",
+                ),
+            ),
+            (
+                "builder clear",
+                adapter.replace(
+                    "    provider_module\n}",
+                    "    provider_module.resources.clear();\n    provider_module\n}",
+                ),
+            ),
+            (
+                "wrong constructor return",
+                adapter.replace(
+                    "    provider_module\n}",
+                    "    DomainModuleResult::default()\n}",
+                ),
+            ),
+            (
+                "discard runtime resources",
+                adapter.replacen(
+                    "resources: self.runtime_resources()",
+                    "resources: { let _ = self.runtime_resources(); Vec::new() }",
+                    1,
+                ),
+            ),
+            (
+                "identity wrapped runtime resources",
+                adapter.replacen(
+                    "resources: self.runtime_resources()",
+                    "resources: identity(self.runtime_resources())",
+                    1,
+                ) + "\nfn identity<T>(value: T) -> T { value }\n",
+            ),
+            (
+                "wrong provider output",
+                adapter.replacen(
+                    "resources: self.runtime_resources()",
+                    "resources: Vec::new()",
+                    1,
+                ),
+            ),
+            (
+                "default trait method",
+                adapter.replace(
+                    "trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult; }",
+                    "trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }",
+                ),
+            ),
+            (
+                "extra provider impl",
+                adapter.to_string()
+                    + "\nimpl ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
+            ),
+            (
+                "nested extra provider impl",
+                adapter.to_string()
+                    + "\nmod extra { impl ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } } }\n",
+            ),
+        ] {
+            write(&root.join(PROVIDER_OUTPUT_PATH), &mutated)?;
+            assert_provider_gate_fails(&root, label)?;
+        }
+        write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
+
+        let runtime = provider_output_fixture();
+        for (label, mutated) in [
+            (
+                "destructured constructor",
+                runtime.replace(
+                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
+                    "let (provider_module,) = (crate::provider_output::build_provider_module(&deps),);",
+                ),
+            ),
+            (
+                "mutable run binding",
+                runtime.replace("let provider_module =", "let mut provider_module ="),
+            ),
+            (
+                "assigned run binding",
+                runtime.replace(
+                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
+                    "let provider_module = crate::provider_output::build_provider_module(&deps);\nprovider_module = DomainModuleResult::default();",
+                ),
+            ),
+            (
+                "local shadow constructor",
+                runtime.replace(
+                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
+                    "fn build_provider_module(_: &SharedRuntimeDeps) -> DomainModuleResult { DomainModuleResult::default() }\nlet provider_module = build_provider_module(&deps);",
+                ),
+            ),
+            (
+                "local module shadow constructor",
+                runtime.replace(
+                    "let provider_module = crate::provider_output::build_provider_module(&deps);",
+                    "mod provider_output { pub(super) fn build_provider_module(_: &super::SharedRuntimeDeps) -> super::DomainModuleResult { super::DomainModuleResult::default() } }\nlet provider_module = provider_output::build_provider_module(&deps);",
+                ),
+            ),
+            (
+                "local shadow assembler",
+                runtime.replace(
+                    "let _module = crate::assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {",
+                    "fn assemble_runtime_module_outputs(_: RuntimeModuleAssemblyInputs) -> DomainModuleResult { DomainModuleResult::default() }\nlet _module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {",
+                ),
+            ),
+        ] {
+            write(&root.join(RUNTIME_LIB_PATH), &mutated)?;
+            assert_provider_gate_fails(&root, label)?;
+        }
+        Ok(())
+    }
+
+    fn assert_provider_gate_fails(root: &Path, label: &str) -> Result<()> {
+        let findings = provider_outputs_live_findings(root)?;
+        assert!(!findings.is_empty(), "{label} 必须失败");
+        Ok(())
+    }
+
+    fn assert_unrelated_provider_method_names_allowed(
+        root: &Path,
+        source_path: &Path,
+    ) -> Result<()> {
+        for (source, message) in [
+            (
+                "fn runtime_resources() {}\nfn unrelated() { runtime_resources(); }\n",
+                "无关同名本地函数不得误报",
+            ),
+            (
+                r#"
+struct LocalResources;
+impl LocalResources {
+    fn runtime_resources(&self) {}
+    fn delegates(&self) { self.runtime_resources(); }
+}
+struct LocalModule;
+impl LocalModule { fn merge_provider(&mut self) {} }
+struct Wrapper { redis: LocalResources }
+fn local_resources() -> LocalResources { LocalResources }
+fn unrelated(resources: &LocalResources, module: &mut LocalModule, wrapper: &Wrapper) {
+    resources.runtime_resources();
+    LocalResources::runtime_resources(resources);
+    local_resources().runtime_resources();
+    wrapper.redis.runtime_resources();
+    module.merge_provider();
+}
+fn external_unrelated(resources: &ExternalResources) { resources.runtime_resources(); }
+mod fake { pub struct RedisRuntimeDeps; }
+use fake::RedisRuntimeDeps as FakeRedis;
+fn qualified_same_name(resources: &fake::RedisRuntimeDeps, alias: &FakeRedis) {
+    resources.runtime_resources();
+    alias.runtime_resources();
+}
+"#,
+                "有本地类型/方法来源的同名 API 不得误报",
+            ),
+            (
+                "mod fake { pub struct RedisRuntimeDeps; }\nuse fake::RedisRuntimeDeps;\nfn unrelated(resources: &RedisRuntimeDeps) { resources.runtime_resources(); }\n",
+                "非 provider 模块的未重命名同名类型不得误报",
+            ),
+            (
+                "struct RedisRuntimeDeps;\nimpl RedisRuntimeDeps { fn runtime_resources(&self) {} }\nfn unrelated(resources: &RedisRuntimeDeps) { resources.runtime_resources(); }\n",
+                "本地同名类型声明必须遮蔽 provider 裸名",
+            ),
+            (
+                "mod local { struct RedisRuntimeDeps; impl RedisRuntimeDeps { fn runtime_resources(&self) {} } fn unrelated(resources: &RedisRuntimeDeps) { resources.runtime_resources(); } }\n",
+                "inline module 的本地同名类型必须按作用域遮蔽",
+            ),
+            (
+                "fn unrelated() { struct RedisRuntimeDeps; impl RedisRuntimeDeps { fn runtime_resources(&self) {} } let resources: RedisRuntimeDeps = todo!(); resources.runtime_resources(); }\n",
+                "block-local 同名类型必须按作用域遮蔽",
+            ),
+        ] {
+            write(source_path, source)?;
+            let findings = provider_outputs_live_findings(root)?;
+            assert!(
+                findings.iter().all(|finding| {
+                    finding.subject != "assemblies/runtime/src/legacy_provider.rs"
+                }),
+                "{message}: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_test_only_provider_items_allowed(root: &Path, source_path: &Path) -> Result<()> {
+        for source in [
+            "#[cfg(test)] fn test_only(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { module.merge_provider(&deps.redis); }\n",
+            "#[cfg(test)] impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
+            "#[cfg(all(test, feature = \"fixture\"))] impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
+            "#[cfg(test)] mod tests;\n",
+        ] {
+            write(source_path, source)?;
+            let findings = provider_outputs_live_findings(root)?;
+            assert!(
+                findings.iter().all(|finding| {
+                    finding.subject != "assemblies/runtime/src/legacy_provider.rs"
+                }),
+                "test=false 时恒假的 cfg 必须排除生产扫描: {findings:?}"
+            );
+        }
+        let out_of_line = source_path
+            .parent()
+            .context("legacy provider fixture parent")?
+            .join("legacy_provider/tests.rs");
+        write(
+            &out_of_line,
+            "fn test_only(deps: &SharedRuntimeDeps) { deps.redis.runtime_resources(); }\n",
+        )?;
+        write(source_path, "#[cfg(test)] mod tests;\n")?;
+        let mut sources = Vec::new();
+        collect_rust_sources(&root.join(RUNTIME_SRC_PATH), &mut sources)?;
+        let production = production_module_sources(&sources)?;
+        assert!(
+            !production.contains(&normalize_path(&out_of_line)),
+            "out-of-line test module 仍被判为生产可达: source={} child={} production={production:?}",
+            source_path.display(),
+            out_of_line.display()
+        );
+        let findings = provider_outputs_live_findings(root)?;
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.subject != "assemblies/runtime/src/legacy_provider/tests.rs"),
+            "test-only out-of-line module 必须排除生产扫描: {findings:?}"
+        );
+        fs::remove_file(out_of_line)?;
+
+        let inline_test_child = source_path
+            .parent()
+            .context("legacy provider fixture parent")?
+            .join("legacy_provider/tests/helper.rs");
+        write(
+            &inline_test_child,
+            "fn test_only(deps: &SharedRuntimeDeps) { deps.redis.runtime_resources(); }\n",
+        )?;
+        write(source_path, "#[cfg(test)] mod tests { mod helper; }\n")?;
+        let findings = provider_outputs_live_findings(root)?;
+        assert!(
+            findings.iter().all(|finding| {
+                finding.subject != "assemblies/runtime/src/legacy_provider/tests/helper.rs"
+            }),
+            "inline test module 的 out-of-line child 必须继承 test-only: {findings:?}"
+        );
+        fs::remove_file(inline_test_child)?;
+
+        let shared = source_path
+            .parent()
+            .context("legacy provider fixture parent")?
+            .join("legacy_provider/prod/shared.rs");
+        write(
+            &shared,
+            "fn bypass(deps: &SharedRuntimeDeps) { deps.redis.runtime_resources(); }\n",
+        )?;
+        write(
+            source_path,
+            "mod prod { #[path = \"shared.rs\"] mod helper; }\n#[cfg(test)] #[path = \"prod/shared.rs\"] mod bait;\n",
+        )?;
+        let findings = provider_outputs_live_findings(root)?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "assemblies/runtime/src/legacy_provider/prod/shared.rs"
+                    && finding.rule == Rule::ForbiddenWiring
+            }),
+            "同一文件兼具 production/test 路径时 production 可达必须优先: {findings:?}"
+        );
+        fs::remove_file(shared)?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_provider_outputs_reject_missing_reordered_legacy_and_bait() -> Result<()> {
+        let root = fixture_root("runtime-provider-outputs-red")?;
+        write_provider_fixture(&root)?;
+        let adapter = provider_adapter_fixture();
+        let reordered = adapter.replace(
+            "    provider_module.merge_provider(&deps.redis);\n    provider_module.merge_provider(&deps.s3);",
+            "    provider_module.merge_provider(&deps.s3);\n    provider_module.merge_provider(&deps.redis);",
+        );
+        write(&root.join(PROVIDER_OUTPUT_PATH), &reordered)?;
+        let findings = provider_outputs_live_findings(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring),
+            "Redis/S3/Vault 顺序漂移必须失败: {findings:?}"
+        );
+        write(
+            &root.join(PROVIDER_OUTPUT_PATH),
+            &(adapter.to_string()
+                + "\nfn extra(deps: &RedisRuntimeDeps) { RedisRuntimeDeps::runtime_resources(deps); }\n"),
+        )?;
+        let findings = provider_outputs_live_findings(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ForbiddenWiring),
+            "provider_output.rs 内 UFCS 额外直连必须失败: {findings:?}"
+        );
+        write(&root.join(PROVIDER_OUTPUT_PATH), adapter)?;
+        let missing_assembly_merge = provider_output_fixture().replace(
+            "    module.merge(inputs.provider_module);",
+            "    let _ = inputs.provider_module;",
+        );
+        write(&root.join(RUNTIME_LIB_PATH), &missing_assembly_merge)?;
+        let findings = provider_outputs_live_findings(&root)?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::MissingAnchor && finding.detail.contains("provider_module")
+            }),
+            "assemble 函数外的 merge bait 不能满足门禁: {findings:?}"
+        );
+
+        for extra in [
+            "    let provider_module = DomainModuleResult::default();\n",
+            "    let provider_alias = crate::provider_output::build_provider_module(&deps);\n",
+        ] {
+            let reset = provider_output_fixture().replace(
+                "    let provider_module = crate::provider_output::build_provider_module(&deps);\n",
+                &format!(
+                    "    let provider_module = crate::provider_output::build_provider_module(&deps);\n{extra}"
+                ),
+            );
+            write(&root.join(RUNTIME_LIB_PATH), &reset)?;
+            let findings = provider_outputs_live_findings(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::MissingAnchor),
+                "constructor 后 reset/alias 必须失败: {findings:?}"
+            );
+        }
+        write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
+        let legacy_source = root.join("assemblies/runtime/src/legacy_provider.rs");
+        for source in [
+            "fn legacy(deps: &SharedRuntimeDeps) { let redis = &deps.redis; redis.runtime_resources(); }\n",
+            "fn typed() { let redis: RedisRuntimeDeps = todo!(); redis.runtime_resources(); }\n",
+            "fn ufcs(redis: &RedisRuntimeDeps) { RedisRuntimeDeps::runtime_resources(redis); }\n",
+            "fn qualified_self_ufcs(redis: &redis_adapter::RedisRuntimeDeps) { <redis_adapter::RedisRuntimeDeps>::runtime_resources(redis); }\n",
+            "fn get(deps: &SharedRuntimeDeps) -> &RedisRuntimeDeps { &deps.redis }\nfn helper_return(deps: &SharedRuntimeDeps) { get(deps).runtime_resources(); }\n",
+            "fn identity<T>(value: T) -> T { value }\nfn generic_helper(deps: &SharedRuntimeDeps) { identity(&deps.redis).runtime_resources(); }\n",
+            "mod helpers { fn get(deps: &SharedRuntimeDeps) -> &RedisRuntimeDeps { &deps.redis } }\nfn qualified_helper(deps: &SharedRuntimeDeps) { helpers::get(deps).runtime_resources(); }\n",
+            "type Cache<T> = T;\nfn generic_alias(deps: &SharedRuntimeDeps) { let redis: Cache<&RedisRuntimeDeps> = &deps.redis; redis.runtime_resources(); }\n",
+            "fn merge(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { module.merge_provider(&deps.redis); }\n",
+            "fn merge_ufcs(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { DomainModuleResultExt::merge_provider(module, &deps.redis); }\n",
+            "fn merge_qualified(module: &mut DomainModuleResult, deps: &SharedRuntimeDeps) { crate::provider_output::DomainModuleResultExt::merge_provider(module, &deps.redis); }\n",
+            "impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
+            "#[cfg(any(test, unix))] impl crate::provider_output::ProviderOutput for PgRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }\n",
+            concat!(
+                "use redis_adapter::RedisRuntimeDeps as CacheDeps;\n",
+                "fn legacy_alias(deps: &CacheDeps) { deps.runtime_resources(); }\n",
+            ),
+            "use redis_adapter as cache;\nfn module_alias(deps: &cache::RedisRuntimeDeps) { deps.runtime_resources(); }\n",
+            "use redis_adapter::{self as cache};\nfn grouped_module_alias(deps: &cache::RedisRuntimeDeps) { deps.runtime_resources(); }\n",
+            "extern crate redis_adapter as cache;\nfn extern_crate_alias(deps: &cache::RedisRuntimeDeps) { deps.runtime_resources(); }\n",
+        ] {
+            write(&legacy_source, source)?;
+            let findings = provider_outputs_live_findings(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ForbiddenWiring),
+                "production helper/alias 中的 runtime_resources 直连必须失败: {findings:?}"
+            );
+        }
+        assert_unrelated_provider_method_names_allowed(&root, &legacy_source)?;
+        assert_test_only_provider_items_allowed(&root, &legacy_source)?;
+        write(&root.join(RUNTIME_LIB_PATH), "pub async fn run( {\n")?;
+        assert!(!provider_outputs_live_findings(&root)?.is_empty());
+        write(&root.join(RUNTIME_LIB_PATH), &provider_output_fixture())?;
+        write(&legacy_source, "fn broken( {\n")?;
+        assert!(!provider_outputs_live_findings(&root)?.is_empty());
         Ok(())
     }
 

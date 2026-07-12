@@ -29,8 +29,9 @@
 //!
 //! adapter **不依赖 `bootstrap`**（与 pg adapter 一致），故经
 //! [`VaultRuntimeDeps::runtime_resources`] 单源派生 `Vec<Box<DynManagedResource>>`（仅 `diport` 类型），
-//! 组合根 `module.resources.extend(deps.vault.runtime_resources())` 装配进 `DomainModuleResult.resources`。
-//! resolver shutdown 是 noop（reqwest 无显式 close），但仍经单源出口注册——与 pg 同纪律、作 D5 live 样板。
+//! 组合根以 crate-private `ProviderOutput` 将该原语转换为完整 `DomainModuleResult`，再经统一 `merge`
+//! 路径装配。trait 策略留在 runtime，adapter 不命名也不依赖 `bootstrap`。
+//! resolver / key-provider shutdown 是 noop（reqwest 无显式 close），但仍经单源出口注册——与 pg 同纪律、作 D5 live 样板。
 //!
 //! ## 开源对标
 //!
@@ -107,9 +108,9 @@ impl VaultRuntimeDeps {
         }
     }
 
-    /// **单源** managed-resource/rollback 派生：组合根
-    /// `module.resources.extend(deps.vault.runtime_resources())` 即装配 vault 全部受管资源
-    /// （当前仅 resolver guard），杜绝逐 channel 手写 `register_detached`（D5）。
+    /// **单源** managed-resource/rollback 原语：runtime-local `ProviderOutput` 消费本方法的完整结果，
+    /// 转换为 `DomainModuleResult` 后进入统一 `merge` 路径，杜绝逐 channel 手写
+    /// `register_detached`（D5）。
     #[must_use]
     pub fn runtime_resources(&self) -> Vec<Box<DynManagedResource<'static>>> {
         vec![

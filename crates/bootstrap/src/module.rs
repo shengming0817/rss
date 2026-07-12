@@ -77,14 +77,15 @@ pub type WorkerSpec = Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResourc
 /// `assemblies/runtime` 的 `wire_X(deps: &SharedRuntimeDeps) -> Result<DomainModuleResult>` 签名
 /// （INVARIANT WIRING-DEPS-NO-HANDOFF-01，Hard）杜绝跨 module value handoff。
 ///
-/// # provider 单源装配（#1498）
+/// # provider 单源装配（#1498 / #1676）
 ///
-/// per-provider capability bundle（`PgRuntimeDeps` / `RedisRuntimeDeps` / `AmqpRuntimeDeps` /
-/// `VaultRuntimeDeps`）是 managed-resource/rollback 的**唯一装配出口**。adapter **不依赖 bootstrap**，
-/// 故 bundle 经 `runtime_resources(&self) -> Vec<Box<DynManagedResource>>`（仅 `diport` 类型）单源派生其
-/// 受管资源，组合根 `module.resources.extend(bundle.runtime_resources())` 装配进本结构——消灭组合根逐
-/// channel 手写 `register_detached`（GoCell D5 多通道漂移根因）。redis/amqp 待各自 durable body 接入；
-/// vault 已 live（`assemblies/runtime::run`）。pg 残留 `store_guard`/`sampler` 手写接线回填见 follow-up #1541。
+/// Redis / S3 / Vault capability bundle 经 `runtime_resources(&self) ->
+/// Vec<Box<DynManagedResource>>`（仅 `diport` 类型）单源派生受管资源；adapter **不依赖 bootstrap**。
+/// 组合根以 crate-private `ProviderOutput` 把这些原语转换为本结构，再经
+/// [`DomainModuleResult::merge`] 进入统一生命周期路径，避免暴露裸 channel 或逐项手写
+/// `register_detached`（GoCell D5 多通道漂移根因）。PG readiness 还需要 interval / cancel token，不适用
+/// 此 seam；#1677 以独立显式 helper 收口。AMQP 归 event-infra 生命周期，不把异质输出塞进宽泛
+/// provider trait。
 #[derive(Default)]
 pub struct DomainModuleResult {
     /// readiness / liveness 探针，组合根排空进 [`Registry::probe`]（须先于 `take_health_reporter`，readyz 才聚合）。

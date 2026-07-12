@@ -253,7 +253,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         KEYPROVIDER_READY_PROBE_NAME,
         "探针名 = keyprovider_ready"
     );
-    // settings wire_X 产物本身无 detached 资源（vault guard 经 run() 的 deps.vault.runtime_resources() 单源排入）。
+    // settings wire_X 产物本身无 detached 资源；vault guard 由 runtime-local ProviderOutput 汇入
+    // provider_module，再经 assembly 的 DomainModuleResult::merge 单源排入。
     assert!(
         result.resources.is_empty(),
         "settings wire_X 产物无 detached 资源"
@@ -264,7 +265,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         "settings 产出 keyprovider readiness worker"
     );
 
-    // #1498 单源装配：vault bundle runtime_resources 派生 resolver + key-provider guard。
+    // #1676 单源装配：vault bundle 的 diport-only runtime_resources 由 runtime-local
+    // ProviderOutput 转为 provider_module，再经 DomainModuleResult::merge 统一消费。
     let vault_resources = deps.vault.runtime_resources();
     assert_eq!(vault_resources.len(), 2, "vault 单源派生两条 guard");
     assert_eq!(

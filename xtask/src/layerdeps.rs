@@ -37,6 +37,8 @@
 //!   （`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。覆盖 `runctx/test-support`
 //!   （构造 `AppCtx`）以及 `identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`；生产构建启用即可伪造
 //!   tenant scope，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
+//! `LAYER-DEPS-PROVIDER-BOOTSTRAP-01` 的精确 deny 与元数据单源见 `layers.rs`；本 lint 在通用允许矩阵
+//! 之前应用它，并以 Redis/S3/Vault synthetic red + postgres/diport anti-vacuity green 承载。
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -180,17 +182,25 @@ pub(crate) fn check_layers(members: &[Member], edges: &[Edge]) -> Vec<Finding> {
         // 基础同层横向默认禁，唯一例外 = intra-base DAG 前向边（BASE-INTRADAG-01，如 runctx → vocab）；
         // Service 同层横向默认禁，唯一例外 = 受控 bootstrap → httpserve 路由类型边（LAYER-DEPS-ROUTE-FUNNEL-01，ADR-009）。
         // Service→Generated 默认禁；唯一例外 = eventexec 实现 generated command sealed seam。
-        if !layers::allows(from, to)
-            && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
-            && !layers::route_funnel_allows(&edge.from, &edge.to)
-            && !layers::command_generated_seam_allows(&edge.from, &edge.to)
+        let provider_bootstrap_forbidden =
+            layers::provider_adapter_bootstrap_forbidden(&edge.from, &edge.to);
+        if provider_bootstrap_forbidden
+            || (!layers::allows(from, to)
+                && !layers::basis_intra_dag_allows(&edge.from, &edge.to)
+                && !layers::route_funnel_allows(&edge.from, &edge.to)
+                && !layers::command_generated_seam_allows(&edge.from, &edge.to))
         {
+            let reason = if provider_bootstrap_forbidden {
+                "违反 Redis/S3/Vault provider output 边界（禁止 adapter → bootstrap）".to_string()
+            } else {
+                format!("违反 {from:?}→{to:?} 分层矩阵")
+            };
             findings.push(finding(
                 violation_rule(from, to),
                 edge.from.clone(),
                 format!(
-                    "{} {}.{} → `{}`（{to:?}）违反 {from:?}→{to:?} 分层矩阵",
-                    edge.from_manifest, edge.section, edge.key, edge.to
+                    "{} {}.{} → `{}`（{to:?}）{reason}",
+                    edge.from_manifest, edge.section, edge.key, edge.to,
                 ),
             ));
         }
@@ -1101,6 +1111,51 @@ mod tests {
             m("identity", "crates/identity", Some(Layer::Domain)),
         ];
         assert!(check_layers(&members, &[e("postgres", "identity")]).is_empty());
+    }
+
+    /// #1676：Redis/S3/Vault 的 provider output 必须只在 runtime 组合根适配；三条
+    /// Adapter→bootstrap 反向边均须被精确拒绝（synthetic red）。
+    #[test]
+    fn check_layers_red_provider_adapter_to_bootstrap() {
+        for adapter in ["redis-adapter", "s3", "vault"] {
+            let members = vec![
+                m(
+                    adapter,
+                    &format!("adapters/{adapter}"),
+                    Some(Layer::Adapter),
+                ),
+                m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
+            ];
+            let findings = check_layers(&members, &[e(adapter, "bootstrap")]);
+            assert_eq!(findings.len(), 1, "{adapter} → bootstrap must fail");
+            assert_eq!(findings[0].rule, Rule::BackPath);
+            assert!(
+                findings[0].detail.contains("provider output 边界"),
+                "finding 应明确报告窄化规则: {}",
+                findings[0].detail
+            );
+        }
+    }
+
+    /// 精确 deny 不改变一般 Adapter→Service：postgres→bootstrap 仍合法；目标 provider
+    /// 依赖 diport 也仍合法（anti-vacuity green）。
+    #[test]
+    fn check_layers_green_provider_boundary_keeps_sanctioned_edges() {
+        let members = vec![
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+            m("redis-adapter", "adapters/redis", Some(Layer::Adapter)),
+            m("s3", "adapters/s3", Some(Layer::Adapter)),
+            m("vault", "adapters/vault", Some(Layer::Adapter)),
+            m("bootstrap", "crates/bootstrap", Some(Layer::Service)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
+        ];
+        let edges = vec![
+            e("postgres", "bootstrap"),
+            e("redis-adapter", "diport"),
+            e("s3", "diport"),
+            e("vault", "diport"),
+        ];
+        assert!(check_layers(&members, &edges).is_empty());
     }
 
     /// ADR-009：受控 `bootstrap → httpserve` 路由类型边在 `check_layers` 端到端**不报** finding（anti-vacuity
