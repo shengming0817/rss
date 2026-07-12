@@ -7,8 +7,6 @@ tools:
   - Grep
   - Write
   - Bash
-model: opus
-effort: high
 permissionMode: auto
 # isolation: worktree
 ---

@@ -7,8 +7,6 @@ tools:
   - Grep
   - Write
   - Bash
-model: sonnet
-effort: high
 permissionMode: auto
 # isolation: worktree
 ---

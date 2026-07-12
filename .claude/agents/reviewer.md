@@ -5,8 +5,6 @@ tools:
   - Read
   - Glob
   - Grep
-model: sonnet
-effort: high
 permissionMode: auto
 ---
 

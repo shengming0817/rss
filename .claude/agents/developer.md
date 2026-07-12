@@ -8,8 +8,6 @@ tools:
   - Edit
   - Write
   - Bash
-model: sonnet
-effort: high
 permissionMode: auto
 memory: project
 ---

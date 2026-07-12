@@ -7,8 +7,6 @@ tools:
   - Grep
   - WebFetch
   - WebSearch
-model: sonnet
-effort: high
 permissionMode: auto
 ---
 
