@@ -736,6 +736,28 @@ fn scan_xtask(root: &Path, index: &mut Index) -> Result<()> {
             }
             continue;
         }
+        if path.ends_with("xtask/src/ci_slo.rs") {
+            let found_invariants = extract_invariants(root, &path)?;
+            record_invalid_invariants(index, &found_invariants);
+            validate_closed_invariant_bindings(
+                index,
+                &path,
+                &found_invariants,
+                CI_SLO_INVARIANT_BINDINGS,
+            );
+            for binding in CI_SLO_INVARIANT_BINDINGS {
+                scan_extracted_invariant_rules_filtered(
+                    root,
+                    index,
+                    &found_invariants,
+                    binding.carrier,
+                    binding.evidence,
+                    Some(binding.gates),
+                    |rule| binding.matches(rule) && binding.accepts(rule),
+                )?;
+            }
+            continue;
+        }
         let gate = xtask_gate(root, &path);
         scan_invariant_file(root, index, &path, "xtask", xtask_evidence(&path), gate)?;
     }
@@ -788,6 +810,33 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "xtask",
         evidence: "bound synthetic red and anti-vacuity tests",
         gates: "verify,ci,ci-core,ci-coverage",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_lanes.rs",
+        id: "CI-SLO-JOB-TYPE-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed exhaustive CI SLO job enum and workflow-parts constructor",
+        gates: "native-compile",
+    },
+];
+
+const CI_SLO_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_slo.rs",
+        id: "CI-SLO-CONFIG-SCHEMA-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "strict config synthetic reds and committed complete catalog anti-vacuity",
+        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_slo.rs",
+        id: "CI-SLO-EVALUATION-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "strict config and evidence synthetic reds with committed fixture and summary golden",
+        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
     },
 ];
 
@@ -3554,6 +3603,33 @@ fn unrelated_green_accepted() { assert!(true); }
             finding.rule == Rule::CarrierBindingMismatch
                 && finding.detail.contains("metadata 不兼容")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn ci_slo_config_schema_uses_runtime_validation_carrier() -> Result<()> {
+        let index = build_index(&crate::workspace_root()?)?;
+        let config = index
+            .records
+            .iter()
+            .find(|record| {
+                record.id == "CI-SLO-CONFIG-SCHEMA-01" && record.source.contains("ci_slo.rs")
+            })
+            .context("missing CI-SLO-CONFIG-SCHEMA-01")?;
+        assert_eq!(config.level, RuleLevel::Medium);
+        assert_eq!(config.carrier, "xtask");
+        assert_eq!(
+            config.gate,
+            "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration"
+        );
+        assert_eq!(
+            config.synthetic_red.as_deref(),
+            Some("config_rejects_schema_drift_and_incomplete_catalog")
+        );
+        assert_eq!(
+            config.anti_vacuity.as_deref(),
+            Some("ci_slo_config_is_complete_and_has_expected_limits")
+        );
         Ok(())
     }
 

@@ -56,11 +56,17 @@
 //!   `cargo xtask ci-integration --shard <name> [--partition M/N] [--allow-missing-tools]`
 //!                                      按 capability shard 运行真集成 target；typed registry 单源派生
 //!                                      target filter、资源门与串/并行批次。
+//!   `cargo xtask ci-slo evaluate --lane <lane> [--shard <shard>] [--partition M/N]
+//!      --run-id <N> --run-attempt <N> --upload-outcome <success|failure|cancelled|skipped>
+//!      [--github-summary]`
+//!                                      严格消费 staged evidence；本地输出 Markdown，GitHub 模式把 annotation
+//!                                      写 stdout、Markdown 写 runner 的 Job Summary 文件。
 mod archrules;
 mod assembly;
 mod assembly_codegen;
 mod cdc_config;
 mod ci_lanes;
+mod ci_slo;
 mod cmd;
 pub(crate) use cmd::nextest;
 mod codegen;
@@ -100,7 +106,7 @@ mod testutil;
 mod verify;
 mod wsdeps;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
@@ -167,6 +173,13 @@ enum Command {
         allow_missing_tools: bool,
         partition: Option<nextest::HashPartition>,
     },
+    CiSloEvaluate {
+        job: ci_lanes::CiJobKey,
+        run_id: String,
+        run_attempt: String,
+        upload_outcome: ci_slo::UploadOutcome,
+        summary_mode: ci_slo::SummaryMode,
+    },
     NextestEvidenceStage,
     NextestEvidenceInspect {
         artifact_root: PathBuf,
@@ -225,6 +238,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["ci-coverage", rest @ ..] => parse_ci_lane(ci_lanes::CiLane::Coverage, rest),
         ["audit", rest @ ..] => parse_audit(rest),
         ["ci-integration", rest @ ..] => parse_ci_integration(rest),
+        ["ci-slo", rest @ ..] => parse_ci_slo(rest),
         ["nextest-evidence", "stage"] => Ok(Command::NextestEvidenceStage),
         ["nextest-evidence", "inspect", artifact_root] => Ok(Command::NextestEvidenceInspect {
             artifact_root: PathBuf::from(artifact_root),
@@ -247,6 +261,71 @@ fn parse_command(args: &[String]) -> Result<Command> {
             )
         }
     }
+}
+
+/// 解析闭合 CI SLO evaluator CLI；路径固定在 workspace 内，不接受路径参数。
+fn parse_ci_slo(args: &[&str]) -> Result<Command> {
+    let ["evaluate", rest @ ..] = args else {
+        bail!(
+            "未知 ci-slo 子命令；用法: cargo xtask ci-slo evaluate --lane <lane> [--shard <shard>] [--partition M/N] --run-id <N> --run-attempt <N> --upload-outcome <outcome> [--github-summary]"
+        );
+    };
+    let mut lane = None;
+    let mut shard = None;
+    let mut partition = None;
+    let mut run_id = None;
+    let mut run_attempt = None;
+    let mut upload_outcome = None;
+    let mut summary_mode = ci_slo::SummaryMode::Stdout;
+    let mut iter = rest.iter().copied();
+    while let Some(flag) = iter.next() {
+        if flag == "--github-summary" {
+            if summary_mode == ci_slo::SummaryMode::Github {
+                bail!("ci-slo 未知或重复参数: {flag}");
+            }
+            summary_mode = ci_slo::SummaryMode::Github;
+            continue;
+        }
+        let value = iter
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("ci-slo 参数 {flag} 缺少值"))?;
+        match flag {
+            "--lane" if lane.is_none() => lane = Some(value),
+            "--shard" if shard.is_none() => shard = Some(value.parse()?),
+            "--partition" if partition.is_none() => partition = Some(value.parse()?),
+            "--run-id" if run_id.is_none() => {
+                validate_decimal_cli(value, "--run-id")?;
+                run_id = Some(value.to_owned());
+            }
+            "--run-attempt" if run_attempt.is_none() => {
+                validate_decimal_cli(value, "--run-attempt")?;
+                run_attempt = Some(value.to_owned());
+            }
+            "--upload-outcome" if upload_outcome.is_none() => {
+                upload_outcome = Some(value.parse()?);
+            }
+            _ => bail!("ci-slo 未知或重复参数: {flag}"),
+        }
+    }
+    let lane = lane.context("ci-slo 缺少 --lane")?;
+    let job = ci_lanes::CiJobKey::from_workflow_parts(lane, shard, partition)?;
+    Ok(Command::CiSloEvaluate {
+        job,
+        run_id: run_id.context("ci-slo 缺少 --run-id")?,
+        run_attempt: run_attempt.context("ci-slo 缺少 --run-attempt")?,
+        upload_outcome: upload_outcome.context("ci-slo 缺少 --upload-outcome")?,
+        summary_mode,
+    })
+}
+
+fn validate_decimal_cli(value: &str, flag: &str) -> Result<()> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("{flag} 必须是十进制整数");
+    }
+    value
+        .parse::<u64>()
+        .with_context(|| format!("{flag} 超出 u64 范围"))?;
+    Ok(())
 }
 
 /// 解析 `consistency <sub>`（fail-closed：只接受 `local-only-effects`，无 alias/尾参）。
@@ -580,6 +659,27 @@ fn dispatch(args: &[String]) -> Result<()> {
             allow_missing_tools,
             partition,
         } => verify::run_ci_integration(shard, allow_missing_tools, partition),
+        Command::CiSloEvaluate {
+            job,
+            run_id,
+            run_attempt,
+            upload_outcome,
+            summary_mode,
+        } => complete_ci_slo(
+            ci_slo::run_with_mode(
+                &workspace_root()?,
+                job,
+                &run_id,
+                &run_attempt,
+                upload_outcome,
+                summary_mode,
+            ),
+            job,
+            &run_id,
+            &run_attempt,
+            upload_outcome,
+            summary_mode,
+        ),
         Command::NextestEvidenceStage => nextest::stage(&workspace_root()?),
         Command::NextestEvidenceInspect { artifact_root } => nextest::inspect(&artifact_root),
         Command::NextestEvidenceReplay { sidecar } => nextest::replay(&sidecar, &workspace_root()?),
@@ -596,6 +696,26 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
         Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
+    }
+}
+
+fn complete_ci_slo(
+    result: std::result::Result<ci_slo::Verdict, ci_slo::OperationalFailure>,
+    job: ci_lanes::CiJobKey,
+    run_id: &str,
+    run_attempt: &str,
+    upload: ci_slo::UploadOutcome,
+    summary_mode: ci_slo::SummaryMode,
+) -> Result<()> {
+    match result {
+        Ok(ci_slo::Verdict::Pass | ci_slo::Verdict::Warn) => Ok(()),
+        Ok(ci_slo::Verdict::Fail) => bail!("CI SLO critical disk budget failed"),
+        Err(error) => {
+            let summary =
+                ci_slo::render_operational_error(job, run_id, run_attempt, upload, error.kind());
+            ci_slo::emit_summary(&summary, summary_mode)?;
+            Err(error.into())
+        }
     }
 }
 
@@ -1229,6 +1349,224 @@ mod tests {
         ] {
             assert!(parse_command(&s(&args)).is_err());
         }
+    }
+
+    #[test]
+    fn ci_slo_command_is_exact_typed_and_fail_closed() {
+        let meta = parse_command(&s(&[
+            "ci-slo",
+            "evaluate",
+            "--lane",
+            "ci-meta",
+            "--run-id",
+            "42",
+            "--run-attempt",
+            "3",
+            "--upload-outcome",
+            "success",
+        ]));
+        assert!(matches!(
+            meta,
+            Ok(Command::CiSloEvaluate {
+                job: ci_lanes::CiJobKey::CiMeta,
+                ..
+            })
+        ));
+        let integration = parse_command(&s(&[
+            "ci-slo",
+            "evaluate",
+            "--lane",
+            "integration",
+            "--shard",
+            "event-transport",
+            "--partition",
+            "1/2",
+            "--run-id",
+            "42",
+            "--run-attempt",
+            "3",
+            "--upload-outcome",
+            "failure",
+            "--github-summary",
+        ]));
+        assert!(matches!(
+            integration,
+            Ok(Command::CiSloEvaluate {
+                job: ci_lanes::CiJobKey::IntegrationEventTransport1Of2,
+                summary_mode: ci_slo::SummaryMode::Github,
+                ..
+            })
+        ));
+        for args in [
+            vec!["ci-slo"],
+            vec!["ci-slo", "evaluate"],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "ci-meta",
+                "--run-id",
+                "x",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "success",
+            ],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "ci-meta",
+                "--run-id",
+                "42",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "success",
+                "--github-summary",
+                "--github-summary",
+            ],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "ci-meta",
+                "--shard",
+                "postgres-domain",
+                "--run-id",
+                "42",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "success",
+            ],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "integration",
+                "--shard",
+                "event-transport",
+                "--run-id",
+                "42",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "success",
+            ],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "ci-meta",
+                "--run-id",
+                "42",
+                "--run-id",
+                "43",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "success",
+            ],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "ci-meta",
+                "--run-id",
+                "42",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "unknown",
+            ],
+            vec![
+                "ci-slo",
+                "evaluate",
+                "--lane",
+                "ci-meta",
+                "--run-id",
+                "42",
+                "--run-attempt",
+                "3",
+                "--upload-outcome",
+                "success",
+                "--config",
+                "other.toml",
+            ],
+        ] {
+            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
+        }
+    }
+
+    #[test]
+    fn ci_slo_dispatch_and_operational_summary_cover_all_outcomes() {
+        let job = ci_lanes::CiJobKey::CiMeta;
+        for verdict in [ci_slo::Verdict::Pass, ci_slo::Verdict::Warn] {
+            assert!(
+                complete_ci_slo(
+                    Ok(verdict),
+                    job,
+                    "42",
+                    "3",
+                    ci_slo::UploadOutcome::Success,
+                    ci_slo::SummaryMode::Stdout,
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            complete_ci_slo(
+                Ok(ci_slo::Verdict::Fail),
+                job,
+                "42",
+                "3",
+                ci_slo::UploadOutcome::Success,
+                ci_slo::SummaryMode::Stdout,
+            )
+            .is_err()
+        );
+        assert!(
+            complete_ci_slo(
+                Err(ci_slo::OperationalFailure::new(
+                    ci_slo::OperationalErrorKind::Evidence,
+                    anyhow::anyhow!("synthetic operational failure"),
+                )),
+                job,
+                "42",
+                "3",
+                ci_slo::UploadOutcome::Failure,
+                ci_slo::SummaryMode::Stdout,
+            )
+            .is_err()
+        );
+
+        for outcome in [
+            ci_slo::UploadOutcome::Failure,
+            ci_slo::UploadOutcome::Cancelled,
+            ci_slo::UploadOutcome::Skipped,
+        ] {
+            let summary = ci_slo::render_operational_error(
+                job,
+                "42",
+                "3",
+                outcome,
+                ci_slo::OperationalErrorKind::Evidence,
+            );
+            assert!(summary.contains("Evidence artifact: unavailable"));
+            assert!(!summary.contains("ci-evidence-ci-meta"));
+        }
+        let uploaded = ci_slo::render_operational_error(
+            job,
+            "42",
+            "3",
+            ci_slo::UploadOutcome::Success,
+            ci_slo::OperationalErrorKind::Evidence,
+        );
+        assert!(
+            uploaded
+                .contains("Evidence artifact: `ci-evidence-ci-meta-workspace-unpartitioned-42-3`")
+        );
     }
 
     #[test]

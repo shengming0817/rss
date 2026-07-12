@@ -51,6 +51,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.cache/cargo-target"
           save_mode=read-only
           if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
           .github/scripts/ci-evidence.sh snapshot start --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode "$save_mode" --tools-candidate-size-bytes 0 --tools-save-outcome unknown
@@ -351,6 +352,7 @@ jobs:
           cargo run --locked -p xtask -- nextest-evidence stage
 
       - name: Upload CI evidence
+        id: upload-evidence
         timeout-minutes: 10
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -359,3 +361,19 @@ jobs:
           path: target/job-evidence
           if-no-files-found: error
           retention-days: 7
+
+      - name: Evaluate CI SLO and write summary
+        timeout-minutes: 3
+        if: ${{ always() }}
+        env:
+          RSS_LANE: ${{ inputs.lane }}
+          RSS_SHARD: ${{ inputs.shard }}
+          RSS_PARTITION: ${{ inputs.partition }}
+        run: |
+          set -euo pipefail
+          args=(ci-slo evaluate --lane "$RSS_LANE")
+          if [ "$RSS_LANE" = integration ]; then args+=(--shard "$RSS_SHARD"); fi
+          if [ -n "$RSS_PARTITION" ]; then args+=(--partition "$RSS_PARTITION"); fi
+          args+=(--run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --upload-outcome "${{ steps.upload-evidence.outcome }}")
+          args+=(--github-summary)
+          cargo run --locked -p xtask -- "${args[@]}"

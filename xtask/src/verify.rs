@@ -52,6 +52,7 @@
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
 //! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须是闭合、无重复的 committed matrix。
 //! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
+//! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；四个 live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
 //! INVARIANT: CI-INTEGRATION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_matrix_predicate_green_and_red", anti_vacuity = "github_integration_workflow_has_integration_shard_matrix" }—— Integration caller 必须是精确七行 typed matrix，逐 shard 委托 reusable workflow，不内联低层门。
 //! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
 //! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，四类 fixture、四个 context env、四种 service、五个 ownership label 与精确 partition 闭集须和 shell/workflow 同步。
@@ -4493,7 +4494,8 @@ jobs:
         });
         let stage_ok = stage.is_some_and(|index| {
             let step = &steps[index];
-            step.if_expr.as_deref() == Some("${{ always() }}")
+            step.timeout_minutes.as_deref() == Some("5")
+                && step.if_expr.as_deref() == Some("${{ always() }}")
                 && step.run_has_line("if [ \"${{ inputs.lane }}\" = integration ]; then")
                 && step.run_has_line("test -f \"$RUNNER_TEMP/integration-lifecycle.json\"")
                 && step.run_has_line(
@@ -4538,7 +4540,7 @@ jobs:
 
         prepare_ok
             && yaml.matches("timeout-minutes: 240").count() == 1
-            && total_step_budget == Some(220)
+            && total_step_budget == Some(223)
             && xtask_ok
             && collect_ok
             && snapshot_ok
@@ -4862,6 +4864,110 @@ jobs:
                     if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && g < h && h < i && i < j && j < k && k < l && l < m)
     }
 
+    fn reusable_rust_lane_slo_contract(yaml: &str) -> bool {
+        let steps = yaml_typed_steps(yaml);
+        let unique_name_index = |name: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+        let after_save = unique_name_index("Capture after-save evidence");
+        let stage = unique_name_index("Stage job evidence");
+        let upload = unique_name_index("Upload CI evidence");
+        let evaluate = unique_name_index("Evaluate CI SLO and write summary");
+
+        let upload_ok = upload.is_some_and(|index| {
+            let step = &steps[index];
+            step.id.as_deref() == Some("upload-evidence")
+                && step.if_expr.as_deref() == Some("${{ always() }}")
+                && step.continue_on_error.is_none()
+                && step.uses.as_deref() == Some("actions/upload-artifact@v4")
+        });
+        let evaluate_ok = evaluate.is_some_and(|index| {
+            let step = &steps[index];
+            step.timeout_minutes.as_deref() == Some("3")
+                && step.if_expr.as_deref() == Some("${{ always() }}")
+                && step.continue_on_error.is_none()
+                && step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
+                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
+                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
+                && step.run_has_line("set -euo pipefail")
+                && step.run_has_line("args=(ci-slo evaluate --lane \"$RSS_LANE\")")
+                && step.run_has_line("if [ \"$RSS_LANE\" = integration ]; then args+=(--shard \"$RSS_SHARD\"); fi")
+                && step.run_has_line("if [ -n \"$RSS_PARTITION\" ]; then args+=(--partition \"$RSS_PARTITION\"); fi")
+                && step.run_has_line("args+=(--run-id \"$GITHUB_RUN_ID\" --run-attempt \"$GITHUB_RUN_ATTEMPT\" --upload-outcome \"${{ steps.upload-evidence.outcome }}\")")
+                && step.run_has_line("args+=(--github-summary)")
+                && step.run_has_line("cargo run --locked -p xtask -- \"${args[@]}\"")
+                && !step.run_contains(">> \"$GITHUB_STEP_SUMMARY\"")
+        });
+        let disk_guard_lines = steps
+            .iter()
+            .flat_map(|step| step.run.iter())
+            .filter(|line| line.contains(".github/scripts/ci-disk-budget.sh"))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let disk_guards_ok = disk_guard_lines
+            == [
+                ".github/scripts/ci-disk-budget.sh --stage start --path \"$GITHUB_WORKSPACE\"",
+                ".github/scripts/ci-disk-budget.sh --stage before-save --path \"$GITHUB_WORKSPACE\"",
+                ".github/scripts/ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
+                "if .github/scripts/ci-disk-budget.sh --stage before-save --path \"$GITHUB_WORKSPACE\"; then budget_conclusion=success; else budget_conclusion=failure; fi",
+            ]
+            && steps
+                .iter()
+                .filter(|step| {
+                    step.run_contains(".github/scripts/ci-disk-budget.sh")
+                        && step.continue_on_error.is_some()
+                })
+                .count()
+                == 0;
+
+        matches!((after_save, stage, upload, evaluate),
+            (Some(a), Some(b), Some(c), Some(d)) if b == a + 1 && c == b + 1 && d == c + 1)
+            && upload_ok
+            && evaluate_ok
+            && disk_guards_ok
+    }
+
+    fn reusable_rust_lane_prepares_target_before_start_snapshot(yaml: &str) -> bool {
+        const PREPARE_TARGET: &str = "mkdir -p \"$GITHUB_WORKSPACE/.cache/cargo-target\"";
+        const SNAPSHOT_PREFIX: &str = ".github/scripts/ci-evidence.sh snapshot start ";
+        let steps = yaml_typed_steps(yaml);
+        let starts = steps
+            .iter()
+            .filter(|step| step.name.as_deref() == Some("Capture start evidence"))
+            .collect::<Vec<_>>();
+        if starts.len() != 1 {
+            return false;
+        }
+        let run = &starts[0].run;
+        let positions = |matches: &dyn Fn(&str) -> bool| {
+            run.iter()
+                .enumerate()
+                .filter_map(|(index, line)| matches(line).then_some(index))
+                .collect::<Vec<_>>()
+        };
+        let strict = positions(&|line| line == "set -euo pipefail");
+        let prepare = positions(&|line| line == PREPARE_TARGET);
+        let snapshot = positions(&|line| line.starts_with(SNAPSHOT_PREFIX));
+        matches!(
+            (strict.as_slice(), prepare.as_slice(), snapshot.as_slice()),
+            ([strict], [prepare], [snapshot]) if strict < prepare && prepare < snapshot
+        )
+    }
+
+    fn ci_disk_budget_uses_fixed_config_threshold(shell: &str) -> bool {
+        shell.contains("config_path=$path/.config/ci-slo.toml")
+            && shell.contains("min_free_gib=$(awk '")
+            && shell.contains("if (count == 1 && valid == 1) print value; else exit 1")
+            && shell.contains("reason=config-invalid")
+            && !shell.contains("--min-free-gib")
+            && !shell.contains("min_free_gib=5")
+    }
+
     fn camouflage_step_run(yaml: &str, id: &str, field: &str) -> anyhow::Result<String> {
         camouflage_step_run_marker(yaml, &format!("id: {id}"), field)
     }
@@ -4991,6 +5097,215 @@ jobs:
         ] {
             assert!(!reusable_rust_lane_is_hardened(&red));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn reusable_rust_lane_slo_contract_accepts_committed_workflow() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let green = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
+        let disk_guard = std::fs::read_to_string(root.join(".github/scripts/ci-disk-budget.sh"))?;
+        assert!(
+            reusable_rust_lane_slo_contract(&green),
+            "committed reusable workflow must enforce the complete CI SLO lifecycle"
+        );
+        assert!(
+            ci_disk_budget_uses_fixed_config_threshold(&disk_guard),
+            "live disk guard must consume the fixed SLO config threshold"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reusable_rust_lane_prepares_canonical_target_before_start_snapshot() -> anyhow::Result<()> {
+        const PREPARE_TARGET: &str = "          mkdir -p \"$GITHUB_WORKSPACE/.cache/cargo-target\"";
+        let green =
+            std::fs::read_to_string(workspace_root()?.join(".github/workflows/rss-rust-lane.yml"))?;
+        assert!(
+            reusable_rust_lane_prepares_target_before_start_snapshot(&green),
+            "clean runner must create the canonical target before its start snapshot"
+        );
+
+        let removed = green.replacen(&format!("{PREPARE_TARGET}\n"), "", 1);
+        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
+            &removed
+        ));
+        let changed = green.replacen(
+            PREPARE_TARGET,
+            "          mkdir -p \"$GITHUB_WORKSPACE/target\"",
+            1,
+        );
+        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
+            &changed
+        ));
+        let without_prepare = green.replacen(&format!("{PREPARE_TARGET}\n"), "", 1);
+        let moved = without_prepare.replacen(
+            "          .github/scripts/ci-disk-budget.sh --stage start --path \"$GITHUB_WORKSPACE\"",
+            &format!(
+                "          .github/scripts/ci-disk-budget.sh --stage start --path \"$GITHUB_WORKSPACE\"\n{PREPARE_TARGET}"
+            ),
+            1,
+        );
+        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
+            &moved
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reusable_rust_lane_slo_contract_rejects_semantic_weakening() -> anyhow::Result<()> {
+        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
+        let green = std::fs::read_to_string(path)?;
+        assert!(reusable_rust_lane_slo_contract(&green));
+        let disk_guard =
+            std::fs::read_to_string(workspace_root()?.join(".github/scripts/ci-disk-budget.sh"))?;
+        assert!(ci_disk_budget_uses_fixed_config_threshold(&disk_guard));
+        assert!(
+            !ci_disk_budget_uses_fixed_config_threshold(&disk_guard.replacen(
+                "config_path=$path/.config/ci-slo.toml",
+                "config_path=$path/.config/other.toml",
+                1,
+            )),
+            "changed config source must fail closed"
+        );
+        assert!(
+            !ci_disk_budget_uses_fixed_config_threshold(&format!("{disk_guard}\nmin_free_gib=5\n")),
+            "reintroduced threshold default must fail closed"
+        );
+        assert!(
+            !ci_disk_budget_uses_fixed_config_threshold(&format!(
+                "{disk_guard}\n# legacy --min-free-gib override\n"
+            )),
+            "reintroduced threshold override must fail closed"
+        );
+        let replace_last = |source: &str, from: &str, to: &str| -> anyhow::Result<String> {
+            let (prefix, suffix) = source
+                .rsplit_once(from)
+                .ok_or_else(|| anyhow::anyhow!("committed green lacks evaluator line"))?;
+            Ok(format!("{prefix}{to}{suffix}"))
+        };
+        for (label, red) in [
+            (
+                "renamed evaluator",
+                green.replacen(
+                    "name: Evaluate CI SLO and write summary",
+                    "name: Report CI metrics",
+                    1,
+                ),
+            ),
+            (
+                "evaluator no longer always",
+                green.replacen(
+                    "name: Evaluate CI SLO and write summary\n        timeout-minutes: 3\n        if: ${{ always() }}",
+                    "name: Evaluate CI SLO and write summary\n        timeout-minutes: 3\n        if: ${{ success() }}",
+                    1,
+                ),
+            ),
+            (
+                "upload no longer always",
+                green.replacen(
+                    "id: upload-evidence\n        timeout-minutes: 10\n        if: ${{ always() }}",
+                    "id: upload-evidence\n        timeout-minutes: 10\n        if: ${{ success() }}",
+                    1,
+                ),
+            ),
+            (
+                "upload id removed",
+                green.replacen("        id: upload-evidence\n", "", 1),
+            ),
+            (
+                "github summary mode removed",
+                green.replacen("          args+=(--github-summary)\n", "", 1),
+            ),
+            (
+                "stdout redirected into summary",
+                replace_last(
+                    &green,
+                    "cargo run --locked -p xtask -- \"${args[@]}\"",
+                    "cargo run --locked -p xtask -- \"${args[@]}\" >> \"$GITHUB_STEP_SUMMARY\"",
+                )?,
+            ),
+            (
+                "lane omitted",
+                green.replacen(" --lane \"$RSS_LANE\"", "", 1),
+            ),
+            (
+                "integration shard omitted",
+                green.replacen(" args+=(--shard \"$RSS_SHARD\")", "", 1),
+            ),
+            (
+                "partition omitted",
+                replace_last(
+                    &green,
+                    "if [ -n \"$RSS_PARTITION\" ]; then args+=(--partition \"$RSS_PARTITION\"); fi",
+                    "if [ -n \"$RSS_PARTITION\" ]; then :; fi",
+                )?,
+            ),
+            (
+                "run id omitted",
+                green.replacen("--run-id \"$GITHUB_RUN_ID\" ", "", 1),
+            ),
+            (
+                "run identity omitted",
+                green.replacen(
+                    " --run-attempt \"$GITHUB_RUN_ATTEMPT\"",
+                    "",
+                    1,
+                ),
+            ),
+            (
+                "upload outcome omitted",
+                green.replacen(
+                    " --upload-outcome \"${{ steps.upload-evidence.outcome }}\"",
+                    "",
+                    1,
+                ),
+            ),
+            (
+                "disk threshold overridden",
+                green.replacen(
+                    "--stage start --path \"$GITHUB_WORKSPACE\"",
+                    "--stage start --path \"$GITHUB_WORKSPACE\" --min-free-gib 1",
+                    1,
+                ),
+            ),
+            (
+                "disk guard weakened",
+                green.replacen(
+                    ".github/scripts/ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
+                    ".github/scripts/ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\" || true",
+                    1,
+                ),
+            ),
+        ] {
+            assert!(
+                !reusable_rust_lane_slo_contract(&red),
+                "{label} must fail closed"
+            );
+        }
+        let evaluator_start = green
+            .find("      - name: Evaluate CI SLO and write summary")
+            .ok_or_else(|| anyhow::anyhow!("committed green lacks evaluator step"))?;
+        assert!(
+            !reusable_rust_lane_slo_contract(&green[..evaluator_start]),
+            "deleted evaluator step must fail closed"
+        );
+        let moved_before_stage = green
+            .replacen(
+                "name: Evaluate CI SLO and write summary",
+                "name: TEMP SLO",
+                1,
+            )
+            .replacen(
+                "name: Stage job evidence",
+                "name: Evaluate CI SLO and write summary",
+                1,
+            )
+            .replacen("name: TEMP SLO", "name: Stage job evidence", 1);
+        assert!(
+            !reusable_rust_lane_slo_contract(&moved_before_stage),
+            "evaluator before stage/upload must fail closed"
+        );
         Ok(())
     }
 

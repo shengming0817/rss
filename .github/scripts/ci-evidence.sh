@@ -210,7 +210,9 @@ EOF
 append_directory() {
   logical_path=$1
   physical_path=$2
-  if [ ! -d "$physical_path" ]; then
+  if [ ! -e "$physical_path" ] && [ ! -L "$physical_path" ]; then
+    size_json=0
+  elif [ -L "$physical_path" ] || [ ! -d "$physical_path" ]; then
     append_error "directory unavailable: $logical_path"
     size_json=null
   elif ! command -v du >/dev/null 2>&1; then

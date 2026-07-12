@@ -6,6 +6,174 @@
 //! or out-of-order entries.
 //! INVARIANT: CI-LANE-PLAN-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_lane_registry_rejects_duplicate_and_missing_red", anti_vacuity = "ci_lane_registry_accepts_canonical_green" } —— lane and
 //! compatibility plans are derived from this registry and guarded by non-vacuous red/green tests.
+//! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
+
+use anyhow::Result;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
+use std::str::FromStr;
+
+use crate::integration_shards::IntegrationShard;
+use crate::nextest::HashPartition;
+
+#[derive(Debug, Clone, Copy)]
+struct CiJobDescriptor {
+    key: CiJobKey,
+    name: &'static str,
+    lane: &'static str,
+    shard: Option<&'static str>,
+    partition: Option<&'static str>,
+}
+
+macro_rules! ci_job_catalog {
+    ($( $variant:ident => ($name:literal, $lane:literal, $shard:expr, $partition:expr) ),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub(crate) enum CiJobKey {
+            $( $variant, )+
+        }
+
+        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; 14] = [
+            $(CiJobDescriptor {
+                key: CiJobKey::$variant,
+                name: $name,
+                lane: $lane,
+                shard: $shard,
+                partition: $partition,
+            },)+
+        ];
+
+        impl CiJobKey {
+            pub(crate) const ALL: [Self; 14] = [$(Self::$variant),+];
+
+            const fn descriptor(self) -> &'static CiJobDescriptor {
+                match self {
+                    $(Self::$variant => &CI_JOB_DESCRIPTORS[Self::$variant as usize],)+
+                }
+            }
+
+            pub(crate) const fn as_str(self) -> &'static str {
+                self.descriptor().name
+            }
+        }
+    };
+}
+
+ci_job_catalog! {
+    CiMeta => ("ci-meta", "ci-meta", None, None),
+    CiCorePrerequisites => ("ci-core-prerequisites", "ci-core-prerequisites", None, None),
+    CiCoreTests1Of2 => ("ci-core-tests/1-of-2", "ci-core-tests", None, Some("1/2")),
+    CiCoreTests2Of2 => ("ci-core-tests/2-of-2", "ci-core-tests", None, Some("2/2")),
+    CiSecurity => ("ci-security", "ci-security", None, None),
+    CiCoverage => ("ci-coverage", "ci-coverage", None, None),
+    IntegrationPostgresDomain => (
+        "integration/postgres-domain",
+        "integration",
+        Some("postgres-domain"),
+        None
+    ),
+    IntegrationEventTransport1Of2 => (
+        "integration/event-transport/1-of-2",
+        "integration",
+        Some("event-transport"),
+        Some("1/2")
+    ),
+    IntegrationEventTransport2Of2 => (
+        "integration/event-transport/2-of-2",
+        "integration",
+        Some("event-transport"),
+        Some("2/2")
+    ),
+    IntegrationRuntimeHttpAuth1Of2 => (
+        "integration/runtime-http-auth/1-of-2",
+        "integration",
+        Some("runtime-http-auth"),
+        Some("1/2")
+    ),
+    IntegrationRuntimeHttpAuth2Of2 => (
+        "integration/runtime-http-auth/2-of-2",
+        "integration",
+        Some("runtime-http-auth"),
+        Some("2/2")
+    ),
+    IntegrationConsistencyFault => (
+        "integration/consistency-fault",
+        "integration",
+        Some("consistency-fault"),
+        None
+    ),
+    IntegrationCdcProjectionSaga => (
+        "integration/cdc-projection-saga",
+        "integration",
+        Some("cdc-projection-saga"),
+        None
+    ),
+    Audit => ("audit", "audit", None, None),
+}
+
+impl CiJobKey {
+    pub(crate) fn from_workflow_parts(
+        lane: &str,
+        shard: Option<IntegrationShard>,
+        partition: Option<HashPartition>,
+    ) -> Result<Self> {
+        let shard = shard.map(IntegrationShard::as_str);
+        let partition = partition.map(|value| value.to_string());
+        CI_JOB_DESCRIPTORS
+            .iter()
+            .find(|descriptor| {
+                descriptor.lane == lane
+                    && descriptor.shard == shard
+                    && descriptor.partition == partition.as_deref()
+            })
+            .map(|descriptor| descriptor.key)
+            .ok_or_else(|| {
+                anyhow::anyhow!("invalid closed CI job lane/shard/partition combination")
+            })
+    }
+
+    pub(crate) fn artifact_parts(self) -> (&'static str, &'static str, &'static str) {
+        let descriptor = self.descriptor();
+        let shard = descriptor.shard.unwrap_or("workspace");
+        let partition = match descriptor.partition {
+            Some("1/2") => "1-of-2",
+            Some("2/2") => "2-of-2",
+            Some(_) => unreachable!(),
+            None => "unpartitioned",
+        };
+        (descriptor.lane, shard, partition)
+    }
+}
+
+impl fmt::Display for CiJobKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CiJobKey {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|job| job.as_str() == value)
+            .ok_or_else(|| anyhow::anyhow!("unknown CI SLO job"))
+    }
+}
+
+impl Serialize for CiJobKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CiJobKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CiLane {
@@ -969,6 +1137,34 @@ pub(crate) fn specs_for_lane(lane: CiLane) -> impl Iterator<Item = &'static Gate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_slo_job_catalog_roundtrips_every_workflow_job() -> anyhow::Result<()> {
+        let one_of_two = HashPartition::new(1, 2)?;
+        assert_eq!(CI_JOB_DESCRIPTORS.len(), CiJobKey::ALL.len());
+        for (index, descriptor) in CI_JOB_DESCRIPTORS.iter().enumerate() {
+            assert_eq!(descriptor.key, CiJobKey::ALL[index]);
+            let shard = descriptor.shard.map(str::parse).transpose()?;
+            let partition = descriptor.partition.map(str::parse).transpose()?;
+            let job = CiJobKey::from_workflow_parts(descriptor.lane, shard, partition)?;
+            assert_eq!(job, descriptor.key);
+            assert_eq!(job.to_string(), job.as_str());
+            assert_eq!(job.as_str().parse::<CiJobKey>()?, job);
+            let json = serde_json::to_string(&job)?;
+            assert_eq!(serde_json::from_str::<CiJobKey>(&json)?, job);
+        }
+        assert!(CiJobKey::from_workflow_parts("ci-meta", None, Some(one_of_two)).is_err());
+        assert!(
+            CiJobKey::from_workflow_parts(
+                "integration",
+                Some(IntegrationShard::PostgresDomain),
+                Some(one_of_two)
+            )
+            .is_err()
+        );
+        assert!("unknown".parse::<CiJobKey>().is_err());
+        Ok(())
+    }
 
     #[test]
     fn ci_lane_registry_accepts_canonical_green() {

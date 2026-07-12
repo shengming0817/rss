@@ -39,8 +39,15 @@ WORKSPACE="$TMP_ROOT/workspace"
 HOME_DIR="$TMP_ROOT/home"
 OUTPUT="$TMP_ROOT/evidence.json"
 mkdir -p "$WORKSPACE/a/nested" "$WORKSPACE/space dir" \
+  "$WORKSPACE/.config" \
   "$WORKSPACE/.cache/cargo-target/incremental/depth-two" \
   "$HOME_DIR/.cargo/registry" "$HOME_DIR/.cargo/git" "$HOME_DIR/.rustup"
+cp "$SCRIPT_DIR/../../.config/ci-slo.toml" "$WORKSPACE/.config/ci-slo.toml"
+set_disk_budget() {
+  value=$1
+  sed "s/^min_disk_free_gib = .*/min_disk_free_gib = $value/" \
+    "$SCRIPT_DIR/../../.config/ci-slo.toml" >"$WORKSPACE/.config/ci-slo.toml"
+}
 newline_dir=$(printf 'line\nbreak')
 mkdir -p "$WORKSPACE/$newline_dir"
 ln -s "$TMP_ROOT" "$WORKSPACE/outside-link"
@@ -134,9 +141,11 @@ expect_success 'budget fixture records cache restore' run_evidence snapshot afte
 expect_success 'budget fixture records successful build' run_evidence snapshot after-build --output "$BUDGET_FAILURE_OUTPUT" --outcome success
 record_budget_failure() {
   budget_conclusion=success
-  if ! "$BUDGET" --stage before-save --path "$WORKSPACE" --min-free-gib 999999999; then
+  set_disk_budget 999999999
+  if ! "$BUDGET" --stage before-save --path "$WORKSPACE"; then
     budget_conclusion=failure
   fi
+  set_disk_budget 5
   TEST_BUILD_SAVE_OUTCOME=ineligible TEST_TOOLS_SAVE_OUTCOME=ineligible \
     run_evidence snapshot before-save --output "$BUDGET_FAILURE_OUTPUT"
   [ "$budget_conclusion" = success ]
@@ -226,27 +235,60 @@ done
 expect_success 'missing du degrades to recorded errors' env -i PATH="$NO_DU_BIN" HOME="$HOME_DIR" CARGO_HOME="$HOME_DIR/.cargo" RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/no-du.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
 assert_jq 'du degradation remains schema-valid' "$TMP_ROOT/no-du.json" '(.snapshots[0].errors | length) >= 5 and ([.snapshots[0].directories[].sizeBytes] | all(. == null))'
 
+CLEAN_HOME="$TMP_ROOT/clean-home"
+CLEAN_WORKSPACE="$TMP_ROOT/clean-workspace"
+mkdir -p "$CLEAN_HOME" "$CLEAN_WORKSPACE/.cache/cargo-target"
+expect_success 'controlled clean start measures canonical target' env -i PATH="$TOOL_BIN" HOME="$CLEAN_HOME" CARGO_HOME="$CLEAN_HOME/.cargo" RUSTUP_HOME="$CLEAN_HOME/.rustup" GITHUB_WORKSPACE="$CLEAN_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/clean-start.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
+assert_jq 'controlled clean start has complete measurements' "$TMP_ROOT/clean-start.json" '
+  ([.snapshots[0].directories[].sizeBytes] | all(. != null)) and
+  ([.snapshots[0].directories[] | select(.path == "cargo-registry" or .path == "cargo-git" or .path == "rustup") | .sizeBytes] | all(. == 0)) and
+  (.snapshots[0].errors | length) == 0'
+
 EMPTY_HOME="$TMP_ROOT/empty-home"
 EMPTY_WORKSPACE="$TMP_ROOT/empty-workspace"
 mkdir "$EMPTY_HOME" "$EMPTY_WORKSPACE"
-expect_success 'missing logical directories degrade to recorded errors' env -i PATH="$TOOL_BIN" HOME="$EMPTY_HOME" GITHUB_WORKSPACE="$EMPTY_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/missing-dirs.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
-assert_jq 'missing directory degradation retains fixed logical entries' "$TMP_ROOT/missing-dirs.json" '
-  [.snapshots[0].directories[] | select(.sizeBytes == null) | .path] == ["target","cargo-registry","cargo-git","rustup"] and
-  (.snapshots[0].errors | length) == 4'
+expect_success 'missing logical directories are measured as zero' env -i PATH="$TOOL_BIN" HOME="$EMPTY_HOME" GITHUB_WORKSPACE="$EMPTY_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/missing-dirs.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
+assert_jq 'missing directories retain fixed zero-valued logical entries' "$TMP_ROOT/missing-dirs.json" '
+  ([.snapshots[0].directories[] | select(.path == "target" or .path == "cargo-registry" or .path == "cargo-git" or .path == "rustup") | .sizeBytes] | all(. == 0)) and
+  (.snapshots[0].errors | length) == 0'
 
-expect_success 'disk budget accepts available space' "$BUDGET" --stage start --path "$WORKSPACE" --min-free-gib 1
-expect_failure 'disk budget rejects synthetic high threshold' "$BUDGET" --stage before-build --path "$WORKSPACE" --min-free-gib 999999999
+INVALID_HOME="$TMP_ROOT/invalid-home"
+mkdir -p "$INVALID_HOME/.cargo"
+printf 'not a directory\n' >"$INVALID_HOME/.cargo/registry"
+ln -s "$WORKSPACE" "$INVALID_HOME/.cargo/git"
+expect_success 'invalid logical directories remain recorded errors' env -i PATH="$TOOL_BIN" HOME="$INVALID_HOME" CARGO_HOME="$INVALID_HOME/.cargo" RUSTUP_HOME="$INVALID_HOME/.rustup" GITHUB_WORKSPACE="$WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/invalid-dirs.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
+assert_jq 'non-directory and symlink inputs fail loud while absence remains zero' "$TMP_ROOT/invalid-dirs.json" '
+  [.snapshots[0].directories[] | select(.sizeBytes == null) | .path] == ["cargo-registry","cargo-git"] and
+  (.snapshots[0].directories[] | select(.path == "rustup") | .sizeBytes) == 0 and
+  (.snapshots[0].errors | length) == 2'
+
+set_disk_budget 1
+expect_success 'disk budget accepts config threshold' "$BUDGET" --stage start --path "$WORKSPACE"
+set_disk_budget 999999999
+expect_failure 'disk budget rejects synthetic high config threshold' "$BUDGET" --stage before-build --path "$WORKSPACE"
 if grep -F '::error title=ci-disk-budget::' "$TMP_ROOT/stderr" >/dev/null; then pass 'budget failure emits stable annotation'; else fail 'budget failure emits stable annotation'; fi
 if grep -F 'stage=before-build' "$TMP_ROOT/stderr" >/dev/null; then pass 'budget diagnostic identifies stage'; else fail 'budget diagnostic identifies stage'; fi
 for bad in 0 -1 nope 1.5; do
-  expect_failure "invalid threshold $bad is rejected" "$BUDGET" --stage test --path "$WORKSPACE" --min-free-gib "$bad"
+  set_disk_budget "$bad"
+  expect_failure "invalid config threshold $bad is rejected" "$BUDGET" --stage test --path "$WORKSPACE"
 done
-expect_failure 'overflowing threshold is rejected with usage' "$BUDGET" --stage test --path "$WORKSPACE" --min-free-gib 999999999999999999999999
+set_disk_budget 999999999999999999999999
+expect_failure 'overflowing config threshold is rejected with usage' "$BUDGET" --stage test --path "$WORKSPACE"
 if grep -E 'value too great|integer expression|unbound variable' "$TMP_ROOT/stderr" >/dev/null 2>&1; then
   fail 'overflowing threshold avoids raw arithmetic diagnostics'
 else
   pass 'overflowing threshold avoids raw arithmetic diagnostics'
 fi
+set_disk_budget 5
+expect_failure 'threshold CLI override is rejected' "$BUDGET" --stage test --path "$WORKSPACE" --min-free-gib 1
+printf '\nmin_disk_free_gib = 5\n' >>"$WORKSPACE/.config/ci-slo.toml"
+expect_failure 'duplicate config threshold is rejected' "$BUDGET" --stage test --path "$WORKSPACE"
+set_disk_budget 5
+mv "$WORKSPACE/.config/ci-slo.toml" "$WORKSPACE/.config/ci-slo.real.toml"
+ln -s ci-slo.real.toml "$WORKSPACE/.config/ci-slo.toml"
+expect_failure 'symlinked config threshold is rejected' "$BUDGET" --stage test --path "$WORKSPACE"
+rm "$WORKSPACE/.config/ci-slo.toml"
+mv "$WORKSPACE/.config/ci-slo.real.toml" "$WORKSPACE/.config/ci-slo.toml"
 
 FAKE_DF_BIN="$TMP_ROOT/fake-df-bin"
 mkdir "$FAKE_DF_BIN"
@@ -258,29 +300,38 @@ printf 'fixture 20971520 4194304 %s 20%% /fixture\n' "$available"
 EOF
 chmod +x "$FAKE_DF_BIN/df"
 for padded in 01 08 09; do
-  expect_success "zero-padded threshold $padded is decimal" env FAKE_AVAILABLE_KIB=10485760 PATH="$FAKE_DF_BIN:$PATH" "$BUDGET" --stage padded --path "$WORKSPACE" --min-free-gib "$padded"
+  set_disk_budget "$padded"
+  expect_success "zero-padded config threshold $padded is decimal" env FAKE_AVAILABLE_KIB=10485760 PATH="$FAKE_DF_BIN:$PATH" "$BUDGET" --stage padded --path "$WORKSPACE"
 done
-expect_failure 'default disk budget rejects four GiB' env PATH="$FAKE_DF_BIN:$PATH" "$BUDGET" --stage default --path "$WORKSPACE"
+set_disk_budget 5
+expect_failure 'configured disk budget rejects four GiB' env PATH="$FAKE_DF_BIN:$PATH" "$BUDGET" --stage configured --path "$WORKSPACE"
 if grep -F 'requiredGiB=5 reason=' "$TMP_ROOT/stderr" >/dev/null; then
-  pass 'default disk budget reports five GiB requirement'
+  pass 'config-driven disk budget reports five GiB requirement'
 else
-  fail 'default disk budget reports five GiB requirement'
+  fail 'config-driven disk budget reports five GiB requirement'
 fi
+set_disk_budget 9
+expect_failure 'live guard consumes changed config threshold' env FAKE_AVAILABLE_KIB=6291456 PATH="$FAKE_DF_BIN:$PATH" "$BUDGET" --stage changed --path "$WORKSPACE"
 available_kib=$(df -Pk "$WORKSPACE" | awk 'END { print $4 }')
 boundary_gib=$((available_kib / 1048576))
 if [ "$boundary_gib" -gt 0 ]; then
-  expect_success 'exact integer GiB floor is accepted' "$BUDGET" --stage boundary --path "$WORKSPACE" --min-free-gib "$boundary_gib"
-  expect_failure 'next integer GiB above available space is rejected' "$BUDGET" --stage boundary --path "$WORKSPACE" --min-free-gib "$((boundary_gib + 1))"
+  set_disk_budget "$boundary_gib"
+  expect_success 'exact integer GiB floor is accepted' "$BUDGET" --stage boundary --path "$WORKSPACE"
+  set_disk_budget "$((boundary_gib + 1))"
+  expect_failure 'next integer GiB above available space is rejected' "$BUDGET" --stage boundary --path "$WORKSPACE"
 fi
-expect_failure 'missing budget path is rejected' "$BUDGET" --stage test --path "$TMP_ROOT/missing" --min-free-gib 1
+set_disk_budget 5
+expect_failure 'missing budget path is rejected' "$BUDGET" --stage test --path "$TMP_ROOT/missing"
 expect_failure 'unknown budget argument is rejected' "$BUDGET" --stage test --wat
 
 NO_DF_BIN="$TMP_ROOT/no-df-bin"
 mkdir "$NO_DF_BIN"
-expect_failure 'missing df fails closed' env PATH="$NO_DF_BIN" /bin/bash "$BUDGET" --stage test --path "$WORKSPACE" --min-free-gib 1
+ln -s "$(command -v awk)" "$NO_DF_BIN/awk"
+expect_failure 'missing df fails closed' env PATH="$NO_DF_BIN" /bin/bash "$BUDGET" --stage test --path "$WORKSPACE"
 
 sentinel="$TMP_ROOT/expensive-ran"
-if "$BUDGET" --stage before-build --path "$WORKSPACE" --min-free-gib 999999999 >/dev/null 2>&1 && : >"$sentinel"; then :; fi
+set_disk_budget 999999999
+if "$BUDGET" --stage before-build --path "$WORKSPACE" >/dev/null 2>&1 && : >"$sentinel"; then :; fi
 if [ ! -e "$sentinel" ]; then pass 'budget failure prevents expensive command sentinel'; else fail 'budget failure prevents expensive command sentinel'; fi
 
 if [ "$FAILURES" -ne 0 ]; then

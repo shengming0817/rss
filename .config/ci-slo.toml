@@ -1,0 +1,64 @@
+schema_version = 1
+
+[limits]
+min_disk_free_gib = 5
+max_target_gib = 6
+max_build_cache_gib = 8
+max_tool_cache_gib = 2
+max_artifact_gib = 1
+
+[[duration_budgets]]
+job = "ci-meta"
+max_duration_seconds = 90
+
+[[duration_budgets]]
+job = "ci-core-prerequisites"
+max_duration_seconds = 600
+
+[[duration_budgets]]
+job = "ci-core-tests/1-of-2"
+max_duration_seconds = 600
+
+[[duration_budgets]]
+job = "ci-core-tests/2-of-2"
+max_duration_seconds = 600
+
+[[duration_budgets]]
+job = "ci-security"
+max_duration_seconds = 300
+
+[[duration_budgets]]
+job = "ci-coverage"
+max_duration_seconds = 480
+
+[[duration_budgets]]
+job = "integration/postgres-domain"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "integration/event-transport/1-of-2"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "integration/event-transport/2-of-2"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "integration/runtime-http-auth/1-of-2"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "integration/runtime-http-auth/2-of-2"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "integration/consistency-fault"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "integration/cdc-projection-saga"
+max_duration_seconds = 900
+
+[[duration_budgets]]
+job = "audit"
+max_duration_seconds = 300
