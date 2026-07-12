@@ -217,7 +217,7 @@
               "issue": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Filed backlog issue ref (e.g. '#1234' or full URL). Present when ship/fix auto-filed this finding via the issues B1 gh issue create. Exactly one of `issue` or `deferred` must be set per item (XOR enforced in pr-meta.sh validate_kind_facts)."
+                "description": "Filed backlog issue ref (e.g. '#1234' or full URL). Present when ship/fix auto-filed this finding after issue-labels validation via forge.sh issue-create. Exactly one of `issue` or `deferred` must be set per item (XOR enforced in pr-meta.sh validate_kind_facts)."
               },
               "deferred": {
                 "enum": ["pri-p0-incident", "labels-underivable"],

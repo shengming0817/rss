@@ -2,7 +2,7 @@
 
 > 何时贴 / 留痕约定 / 标记规则见 `PROJECT.md` §5；P + Cx 评级见 §3。
 > **footer 必填**（每个模板末尾那行）：AI 自填 `<Claude Code|Codex>`、PR 号、head 分支、**worktree 路径**（当前工作目录；develop 直改填 `—`）、**session 会话id**（AI 想办法拿到，如 `$CLAUDE_CODE_SESSION_ID` / codex 等价；拿不到填 `—`）。
-> **贴完回显评论 URL**：`bash hack/automation/forge.sh pr-comment <N> <body-file>` 的 stdout 返回评论 URL（含定位锚点），贴完必须捕获并回显给用户（命令形态单源见 `issues` Part B4）。
+> **贴完回显评论 URL**：`bash hack/automation/forge.sh pr-comment <N> <body-file>` 的 stdout 返回评论 URL（含定位锚点），贴完必须捕获并回显给用户。
 
 > **评论即 review 结果，无损（关键约定）**：评论是 `/fix <PR#>` 提取 findings 的**唯一来源**。
 > 每条 Finding **必带 `file:line`**（fix 据此定位，不重新 review），根因 + 证据 + 建议 + 三级方案种子写进 `<details>`（人看摘要、fix 读详表，两不丢）。
@@ -22,7 +22,7 @@
 > - **标准 base64（非 url）**：CommonMark 禁 HTML 注释正文含 `--`；标准 base64 字母表 `A-Za-z0-9+/=` 无 `-`，结构上不可能产 `--`/`-->`（base64url 含 `-`，会破块）。
 > - schema 单源 = `hack/automation/schema/pr-meta.v1.json`；helper = `hack/automation/pr-meta.sh`（`emit-block`/`decode`/`extract`/`round`/`selftest`）。消费侧只接受 canonical 块（派生字段必须 = emit-block 由块自身 facts 重算结果，防伪造）+ 仅信 `bash hack/automation/forge.sh pr-comments-json` 已过滤的受信 pm 评论（各 backend 信任来源：github=author_association OWNER/MEMBER/COLLABORATOR；azure/gitlab=`*_TRUSTED_AUTHORS` allowlist；过滤逻辑单源在 `forge.sh` 各 backend）。**人读 footer 不动其格式**——footer 人读、机器块 dispatch，二者并存。
 > - **kind 列表**：`ship`（pm:ship）/ `fix`（pm:fix）/ `pr-review`（pm:pr-review）/ `ci`（pm:ci）/ `oos`（pm:oos）。phase/verdict/round 派生见上方 `derive_facts` 单源条。ci 类型 capability-gated：激活 forge=azure 无 CI（Pipelines 额度有限、不迁移），ci-* 返回 no-ci，不贴 pm:ci。
-> - **protocol 健全性测试**：`bash hack/automation/pr-meta.sh selftest` 可直接运行。`make verify`（= `cargo xtask verify`）聚合入口已落地（#1023，聚合 Rust 代码门）；bash automation selftest（pr-meta / pr-handoff-contract-selftest.sh）折入 verify 仍 backlog——它们守 PR 协议、非 Rust 代码，独立运行。
+> - **protocol 健全性测试**：`bash hack/automation/pr-meta.sh selftest` 可直接运行；它守 PR 协议、独立于 Rust 代码验证门。
 
 ## ship 评论（`<!-- pm:ship -->`）
 
@@ -125,7 +125,7 @@
 
 ## pm:ci 评论（`<!-- pm:ci -->`）
 
-> CI 检查结果记录。capability-gated：激活 forge=azure 无 CI（Pipelines 额度有限、不迁移），ci-* 返回 no-ci，CI 收敛降级本地 `make verify`，不贴 pm:ci（pm:ci 仅 CI-capable forge 适配器有效）。`ci-green` 是终态（`next.agent=null`）；`ci-failed` 路由至 `next.agent=human`（CI fix 由 ship/fix 自身内置 3 轮循环处理，pm:ci 仅做记录，不触发自动 /fix）。
+> 外部 CI-capable producer 的检查结果记录；ship/fix 默认执行本地 `make verify-fast` + workspace check + 定向 test/clippy，不生产或等待 pm:ci。`ci-green` 是终态（`next.agent=null`），`ci-failed` 路由至 `next.agent=human`，本评论只记录外部检查结果。
 
 ```markdown
 <!-- pm:ci -->
@@ -144,7 +144,7 @@
 
 ## pm:oos 评论（`<!-- pm:oos -->`）
 
-> Out-of-scope findings 的**无损**独立记录。ship/fix 在贴本评论前已**自动** `bash hack/automation/forge.sh issue-create` 把每条 finding 落为 backlog issue（建单单源见 `issues` B1），正文回填 issue 号；无法自动建（`pri-p0` incident / area·type 判不定）的标 `deferred` 并回退草稿。每条 finding 为一个 lossless item（file:line + 三维根因 + 三级方案种子 + 处置 `issue`｜`deferred`），机器块中以 `oos.items[]` 数组携带（详见 schema `pr-meta.v1.json`）。与 pm:ship / pm:fix 解耦：OOS finding 移出主评论详表，改为一行指针（`→ 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）`）。
+> Out-of-scope findings 的**无损**独立记录。ship/fix 在贴本评论前按 `backlog.md` 成文、经 `issue-labels.sh validate` 后用 `forge.sh issue-create` 把每条 finding 落为 backlog issue，正文回填 issue 号；无法自动建（`pri-p0` incident / area·type 判不定）的标 `deferred` 并回退草稿。每条 finding 为一个 lossless item（file:line + 三维根因 + 三级方案种子 + 处置 `issue`｜`deferred`），机器块中以 `oos.items[]` 数组携带（详见 schema `pr-meta.v1.json`）。与 pm:ship / pm:fix 解耦：OOS finding 移出主评论详表，改为一行指针（`→ 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）`）。
 
 ```markdown
 <!-- pm:oos -->

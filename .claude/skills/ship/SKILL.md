@@ -76,7 +76,7 @@ git worktree add worktrees/<type>/<issue#-short-name> -b <type>/<issue#-short-na
 
 ## 阶段 4：TDD — 先写测试
 
-在 worktree 中先写 `#[cfg(test)]` 测试（或 `tests/` 集成测试），覆盖正常/边界/错误路径（底座 crate `consistency` / `primitives` / `vocab` ≥ 90%，其余 ≥ 80%）。运行 `cargo nextest run --manifest-path worktrees/<wt>/Cargo.toml --workspace`（或 `cargo test --manifest-path worktrees/<wt>/Cargo.toml --workspace`）确认测试先 **FAIL**，再进入实施。
+在 worktree 中先写 `#[cfg(test)]` 测试（或 `tests/` 集成测试），覆盖正常/边界/错误路径（底座 crate `consistency` / `primitives` / `vocab` ≥ 90%，其余 ≥ 80%）。运行目标 crate / 测试的最小命令（如 `cargo test --manifest-path worktrees/<wt>/Cargo.toml -p <crate> <test-filter>`）确认测试先 **FAIL**，再进入实施；不为单点改动默认跑 workspace 全量测试。
 
 ---
 
@@ -98,20 +98,15 @@ git worktree add worktrees/<type>/<issue#-short-name> -b <type>/<issue#-short-na
 每个 developer sub-agent prompt 必须包含：
 - worktree 路径（`worktrees/<wt>`）
 - 分配的任务列表（文件路径 + 改动描述）
-- cargo 命令格式：`cargo test --manifest-path worktrees/<wt>/Cargo.toml --workspace`
+- cargo 命令格式：`cargo test --manifest-path worktrees/<wt>/Cargo.toml -p <目标 crate> [测试过滤条件]`
 - CLAUDE.md 关键约束（分层规则、覆盖率要求）
 - commit 格式：`<type>(<scope>): <描述>`
 
-每个 sub-agent 在自己负责的任务上**串行**执行 Edit-Test Loop，完成后跑 `cargo clippy --manifest-path worktrees/<wt>/Cargo.toml --workspace --all-targets -- -D warnings`（0 warnings 才 commit）。
+每个 sub-agent 在自己负责的任务上**串行**执行 Edit-Test Loop，完成后对目标 crate 跑 build / test / clippy（0 warnings 才 commit）。
 
 ### 5.2 主 agent 汇总（所有并行 agent 完成后）
 
-```bash
-cargo build --manifest-path worktrees/<wt>/Cargo.toml --workspace
-cargo test --manifest-path worktrees/<wt>/Cargo.toml --workspace
-cargo fmt --manifest-path worktrees/<wt>/Cargo.toml --all -- --check
-cargo clippy --manifest-path worktrees/<wt>/Cargo.toml --workspace --all-targets -- -D warnings   # 0 warnings 才进阶段 6
-```
+汇总各 agent 的 commit / 目标测试结果，检查文件归属与批次依赖是否完整，不在此重复跑最终本地验证。完整漏斗统一在阶段 8 **切 label 后**执行。
 
 ---
 
@@ -153,18 +148,18 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 
 ## 阶段 8：Fix（内置审 findings）+ 收尾
 
-> **pm:* 评论统一**：填 `pr-comment.md` 模板（无损 `file:line` + 详表入 `<details>`）+ `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块到 body 末尾 + `issues` B4 贴（回显 URL）。
+> **pm:* 评论统一**：填 `.github/project-template/pr-comment.md` 模板（无损 `file:line` + 详表入 `<details>`），用 `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的评论 URL。
 
 1. **打印**：窗口完整打印内置 findings 表（P/Cx + IN_SCOPE/OOS 归属 + `file:line`，输出纪律见 `PROJECT.md` §5）。pm:ship 留痕在步骤 5 唯一贴（不在此重复贴）。
-2. **Cx3 处置门（阻塞，先于直接修与切 label）**：每条 IN_SCOPE Cx3/Cx4 用 AskUserQuestion 判「当前 PR 修」or「defer」——判修（pm:ship 记 `✅ 已修`）；判 defer → **自动**按 `issues` B1 建 issue 跟踪（pm:ship 记 `⏸ defer`，**不再二次确认**）；Cx4 默认 defer。处置完再 Cx1/Cx2 IN_SCOPE 直接修（派 `developer` agent Edit-Test 修，不逐条问）。归属/取舍没把握仍 AskUserQuestion。
-3. **推送 + 冲突预检（阻塞）**：`git -C worktrees/<wt> push`，按 `issues` B5 ① 验冲突（冲突则 `git merge "$(bash hack/automation/forge.sh remote)/develop" --no-edit` 再 push），过则立即进 4（不等 CI）。
-4. **OOS → 建 issue + pm:oos**（有 OOS 时；artifact 先于 pm:ship）：逐条按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，派生注 `Discovered via /ship`）；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿；贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
-5. **pm:ship**（`--kind=ship`，OOS artifact 已存在、指针有效）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
-6. **切 label**：`bash hack/automation/forge.sh pr-set-labels <PR#> --add pr-status/needs-review-again --remove pr-status/in-progress`。
-7. **CI 异步收敛（非阻塞）**：`bash hack/automation/forge.sh ci-watch <PR#>`（azure 无 CI 返回 `no-ci` → 降级本地 `make verify`，不贴 pm:ci）；有 CI 按 `issues` B5 ② 熔断、失败回 `fix` 再推，贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
-8. **延迟启监控（必做）**：评论 + label 完成后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 监听 `needs-review-again` 跑 review，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。
+2. **Cx3 处置门（阻塞，先于直接修与切 label）**：每条 IN_SCOPE Cx3/Cx4 用 AskUserQuestion 判「当前 PR 修」or「defer」——判修（pm:ship 记 `✅ 已修`）；判 defer → **自动**按 `backlog.md` 成文，并严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序建 issue 跟踪（pm:ship 记 `⏸ defer`，**不再二次确认**）；Cx4 默认 defer。处置完再 Cx1/Cx2 IN_SCOPE 直接修（派 `developer` agent Edit-Test 修，不逐条问）。归属/取舍没把握仍 AskUserQuestion。
+3. **推送 + 冲突预检（阻塞）**：push 后先 `REMOTE=$(bash hack/automation/forge.sh remote)` 与 `git -C worktrees/<wt> fetch "$REMOTE"`，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）等待 `MERGEABLE` / `CONFLICTING`；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 `$REMOTE/develop`、push 后按同一上限重检。
+4. **OOS → 建 issue + pm:oos**（有 OOS 时；artifact 先于 pm:ship）：逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签校验/创建顺序并注明 `Discovered via /ship`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿；贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
+5. **pm:ship**（`--kind=ship`，OOS artifact 已存在、指针有效）：IN_SCOPE findings 无损写入（reviewer 数 / 已修 Cx1-Cx2 / Cx3 处置）；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
+6. **切 label**：按 `PROJECT.md` §5 执行 `bash hack/automation/forge.sh pr-set-labels <PR#> --add pr-status/needs-review-again --remove pr-status/in-progress`。
+7. **本地验证（label 后执行）**：运行 `make -C worktrees/<wt> verify-fast` → `cargo check --manifest-path worktrees/<wt>/Cargo.toml --workspace --all-targets` → 按 diff 选出的 crate / feature / 行为定向 test / clippy。`verify-fast` 不执行编译，也不等价完整 GitHub CI；workspace check 在 #1752 落地前闭合反向依赖编译面。失败则回实施/fix，修复 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
+8. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（review-side）；外部 app 可在 `needs-review-again` 后先行 review，pr-monitor 只做一次性交接兜底。
 
-> **收尾不变式（artifact-before-summary/trigger）**：OOS issue + pm:oos（步骤 4）+ 处置门判 defer 的 IN_SCOPE Cx3/Cx4 issue（步骤 2）必须先于 pm:ship（步骤 5）落地——pm:ship 的 OOS 指针指向已存在的 pm:oos，不悬空；再切 `needs-review-again`（步骤 6）；CI（步骤 7）异步在后。
+> **收尾不变式（artifact-before-summary/trigger）**：OOS issue + pm:oos（步骤 4）+ 处置门判 defer 的 IN_SCOPE Cx3/Cx4 issue（步骤 2）必须先于 pm:ship（步骤 5）落地——pm:ship 的 OOS 指针指向已存在的 pm:oos，不悬空；再切 `needs-review-again`（步骤 6），最后跑本地验证（步骤 7）。
 > ship 到此结束。再审（codex / `/pr-review`）后续修走 `/fix <PR#>`。
 
 ---
@@ -173,8 +168,8 @@ RSS 六维度 = 架构合规 / 安全 / 测试 / 运维可观测 / DX / 产品�
 
 ```
 PR: #<编号> <URL>
-评论: <pm:ship 评论 URL，含 #issuecomment-<id>（来自 issues B4 回显）>
-已完成：TDD / 实施 / PR / review（实跑 reviewer 数：按 diff 1/2/3/6 自动） / Cx1-Cx2 fix / CI 绿
+评论: <pm:ship 评论 URL，含 comment 定位锚点（来自 forge.sh pr-comment stdout）>
+已完成：TDD / 实施 / PR / review（实跑 reviewer 数：按 diff 1/2/3/6 自动） / Cx1-Cx2 fix / verify-fast + workspace check + 定向测试
 
 已处置问题——处置门已判修/defer，**defer 项已自动建 issue 跟踪**；本表仅摘要 + 指针；完整无损详表（证据/三维根因/三级方案种子）见 pm:ship
 评论的 `<details>`；OOS + 判 defer 的 Cx3+/RELATED 的 issue #N / 原因见本 PR 的 pm:oos / pm:ship 评论：
@@ -186,5 +181,5 @@ PR: #<编号> <URL>
 
 ## 约束
 
-- lint 0 issues 才 push；不 `--no-verify`；不 amend 已 push commit
+- 最终收尾前目标 crate clippy 0 warnings 且 verify-fast + workspace check + 定向测试必须通过；不 `--no-verify`；不 amend 已 push commit
 - worktree merge 后提示用户手动 `git worktree remove`，不自动删除

@@ -16,7 +16,8 @@
 
 ## Test plan
 
-- [ ] `cargo build --workspace` 本地通过
-- [ ] `cargo test --workspace`（或修改的 crate）本地通过（涉及逻辑变更时）
-- [ ] `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` 0 warnings
+- [ ] `make verify-fast` 本地通过（fmt + meta + deny；不等价完整 GitHub CI）
+- [ ] `cargo check --workspace --all-targets` 本地通过（反向依赖消费者编译兜底）
+- [ ] 已列出并通过修改 crate / feature / 行为边界的定向测试命令
+- [ ] 已列出并通过修改 crate 的定向 clippy 命令（0 warnings）
 - [ ] `cargo audit` 无新增漏洞（涉及依赖变更时）

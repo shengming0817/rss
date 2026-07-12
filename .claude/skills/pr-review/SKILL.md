@@ -140,7 +140,7 @@ pr-review 的 `diff < 200` 约定：不派发 sub-agent，主 agent 在阶段 3 
 
 阶段 5 的五块**已打印到窗口后**，把**同一份内容**写进 `.github/project-template/pr-comment.md` 的 `<!-- pm:pr-review -->` 模板，**额外**贴成 PR 评论留痕（输出纪律 + 无损约定单源见 `PROJECT.md` §5 与 `pr-comment.md`：窗口=主输出、评论=留痕两者都做，每条 Finding 带 `file:line` + 详表入 `<details>` 供 `/fix` 无损提取），贴到 PR：
 
-贴评论命令 + **回显 comment URL/id** 的单源见 `issues` B4：
+评论 body 使用 `.github/project-template/pr-comment.md`，发布命令直接使用 forge 适配器：
 
 ```bash
 URL=$(bash hack/automation/forge.sh pr-comment <N> <填好的 pm:pr-review 模板>)   # stdout = 评论 URL/id

@@ -14,12 +14,18 @@
 | 条目内容 / 状态描述 | forge issue/work-item body | 人 / 自动化 |
 | 领域 / 类型 / 优先级 / 复杂度 | Issue label（area / type / pri / cx） | CLI 显式 `--label` |
 | 进度状态 | 激活 forge 看板字段（Status；azure=Boards 状态列 / github=Project v2 Status / gitlab=board 列） | 看板 UI / 自动化 |
-| epic 实施顺序 | 最新 `pm:epic-wave`（可见 token）issue 评论 | `issues` 技能 |
+| epic 实施顺序 | 最新 `pm:epic-wave`（可见 token）issue 评论 | AI / 自动化 |
 | 父子关系 | 激活 forge 的父子关系（azure work-item parent/child / github sub-issue / gitlab parent），经 `forge.sh subissue-link` | 人 / 自动化 |
 
 > 本仓 issue/PR 全程经 forge 适配器 / 技能创建，body 读 `.github/project-template/` 下对应模版（`--body-file`）。
 
-**新建 backlog**：`bash hack/automation/forge.sh issue-create "[<ID>] ..." <填好的 backlog.md> "backlog,pri-pX,area-XX,type-XX,cx-X"`。area/type/pri/cx 四轴必须显式贴（cx 取值见 §2.6/§3.2，无 unknown sentinel）；建单前先经 `hack/automation/issue-labels.sh validate` 校验完整性（`issues` B1 强制门）。
+**新建 backlog**：area/type/pri/cx 四轴必须显式贴（cx 取值见 §2.6/§3.2，无 unknown sentinel），同一份标签先校验、再创建：
+
+```bash
+LABELS="backlog,pri-pX,area-XX,type-XX,cx-X"
+bash hack/automation/issue-labels.sh validate --labels "$LABELS"
+bash hack/automation/forge.sh issue-create "[<ID>] ..." <填好的 backlog.md> "$LABELS"
+```
 
 **新建 epic / feature**（容器层）：见 §1.1 三层映射。Epic / Feature 按当前流程在 Azure Boards UI 手工建（脚本化时 `issue-create` 第 4 参传 Work Item Type，body 读 `epic.md` / `feature.md`）；子任务经 `forge.sh subissue-link` 关联原生父子关系。容器不贴 `cx` / `type`（跨多 PR、无单一 diff）。
 
@@ -90,7 +96,7 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 
 ### 2.6 cx-XX（复杂度，1 个，必填 CLI 贴）
 
-`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic / feature 容器不贴（跨多 PR、无单一 diff，§1.1）。PBI 叶子的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫（`issues` B1 建单前强制门；selftest 直接运行：`bash hack/automation/issue-labels.sh selftest`；`make verify` 聚合入口已落地（#1023，聚合 Rust 代码门），bash selftest 折入仍 backlog）。
+`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic / feature 容器不贴（跨多 PR、无单一 diff，§1.1）。PBI 叶子的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫；selftest 直接运行 `bash hack/automation/issue-labels.sh selftest`。
 
 ---
 
@@ -133,7 +139,7 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 | 字段 | 类型 | 取值 | 写入方 |
 |------|------|------|--------|
 | **Status** | single-select | Backlog / Ready / In progress / In review / Done | 人（看板内置 workflow + 手动） |
-| **Wave** | single-select | Wave 1 / 2 / 3 / 4（**仅 4 档**） | 保留字段；epic 排序结果只写 issue 评论（算法见 `issues` Part A），不再由技能写字段 |
+| **Wave** | single-select | Wave 1 / 2 / 3 / 4（**仅 4 档**） | 保留字段；epic 排序结果只写 issue 评论，不写本字段 |
 | **Parent issue** | built-in | 自动派生（激活 forge 父子关系） | forge |
 | **Sub-issues progress** | built-in | 自动派生（子 issue close 比例） | forge |
 
@@ -152,14 +158,13 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 | `pr-status/needs-check-fix` | `kind=fix` + `verdict=needs-check-fix` + `next.triggerLabel=pr-status/needs-check-fix` | `/pr-review --check` |
 | `pr-status/needs-fix` | `kind=pr-review` + `verdict=changes-requested` + `next.triggerLabel=pr-status/needs-fix` | `/fix`（`/pr-monitor` 过 handoff 门——fresh canonical block + verdict + same-head + next 一致——才接力；Cx / scope 判定下放 `/fix`，读 finding 文件 + `byCx`） |
 
-离线契约测试直接运行：`bash hack/automation/pr-meta.sh selftest`（离线，无网络）；`make verify` 聚合入口已落地（#1023，聚合 Rust 代码门），bash selftest（`pr-handoff-contract-selftest.sh` 等）折入仍 backlog。
+离线契约测试直接运行 `bash hack/automation/pr-meta.sh selftest`（离线，无网络）；该协议 selftest 独立于 Rust 代码验证门。
 
 ```
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
-  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 判「当前 PR 修」or「defer」，判 defer 后自动建 issue、不二次确认）→ /fix Cx1/Cx2 → 贴 pm:ship（含处置结果）+ deferred 留痕 → 冲突预检
-  → 切 pr-status/needs-review-again（首审唯一使用点）→ 外部 app 实时监听并执行 review
-  → 切 label 后 CI 异步收敛（非阻塞；capability-gated：激活 forge=azure 无 CI，ci-* 返回 no-ci，CI 收敛降级本地 make verify，不贴 pm:ci）
+  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 处置门（每条 AskUserQuestion 判「当前 PR 修」or「defer」，判 defer 后自动建 issue、不二次确认）→ /fix Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
+  → 切 pr-status/needs-review-again（首审唯一使用点）→ verify-fast + workspace check + 定向测试；外部 app 可先行 review
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
@@ -169,10 +174,9 @@ crate 依赖图·deny.toml·clippy/dylint typed funnel / ≥3 域 crate；或 AI
 
 /fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
   → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
-  → triage + IN_SCOPE Cx3/Cx4 处置门（AskUserQuestion 判修/defer，defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → 贴 pm:fix（含处置结果）→ 冲突预检
-  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix（待验证）
-  → 外部 app 实时监听并执行 /pr-review --check
-  → 切 label 后 CI 异步收敛（非阻塞；capability-gated，同上）
+  → triage + IN_SCOPE Cx3/Cx4 处置门（AskUserQuestion 判修/defer，defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
+  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → verify-fast + workspace check + 定向测试
+  → 外部 app 可在 label 后先行执行 /pr-review --check
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听 check 交接
 
 /pr-review <PR#> --check（验证上一轮 findings 是否修复 + 抓回归）

@@ -90,7 +90,7 @@ stale 块 / 旧 head review / 手工错贴 label → 门不过 → 不 dispatch�
 - **无 `pr-status/needs-fix`**：窗口打印 "PR #N 暂无待修 label，本次接力结束"。
 - **needs-fix 在但 handoff 门不过**（stale 块 / 旧 head / verdict·next 不一致）：窗口打印 "PR #N 有 needs-fix 但最新机器块 stale 或与 live head/label 不一致，不自动接力——等外部 app 对当前 head 重新 review"。
 
-### §3.4 冲突解（复用 issues B5）
+### §3.4 冲突解
 
 ```bash
 MERGEABLE=$(bash hack/automation/forge.sh pr-mergeable "$PR")

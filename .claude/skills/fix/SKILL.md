@@ -7,7 +7,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 # 问题诊断与修复
 
-> 真源 = 激活 forge 的 issue/work-item tracker + 看板（GitHub Issues+Project v2 / Azure Boards / GitLab issues，经 `forge.sh` 适配）；label / 评级 rubric（P + Cx）见 `.github/project-template/PROJECT.md`；issue/PR/label/评论原子操作规范见 `issues`（Part B）。
+> 真源 = 激活 forge 的 issue/work-item tracker + 看板（经 `forge.sh` 适配）；label / 评级 rubric 与 PR 流转见 `.github/project-template/PROJECT.md`，issue / PR 评论 body 见 `backlog.md` / `pr-comment.md`，协议块由 `pr-meta.sh` 生成。
 
 ---
 
@@ -97,7 +97,7 @@ CONFIRMED 后、修复前，先构造一个能**复现问题**的测试用例：
 |------|---------|--------|
 | **IN_SCOPE** | finding 文件在当前分支 diff 中，或 PR 描述含该 finding ID | 在当前分支修复 |
 | **RELATED** | 不在 diff 中但同包 / 同子系统遗留 | 建议搭车修，标注"搭车" |
-| **OUT_OF_SCOPE** | 完全不同的包 / 模块 | 不在当前分支修；自动建 backlog issue（4.6 step 4；pri-p0/标签判不定除外） |
+| **OUT_OF_SCOPE** | 完全不同的包 / 模块 | 不在当前分支修；自动建 backlog issue（4.6 step 3；pri-p0/标签判不定除外） |
 
 输出含：代码/架构/历史三维度根因、复杂度、当前分支归属（含理由）、影响范围（直接/间接/同类）、历史修复。
 
@@ -143,7 +143,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 **必须给出明确的时机建议**，回答三个问题：
 
-**Q0: 是否属于当前分支？** 取 2.4 归属结果：**OUT_OF_SCOPE** → 自动建 backlog issue（4.6 step 4；pri-p0/标签判不定除外），跳过 Q1-Q3；**IN_SCOPE / RELATED** → 进 Q1（RELATED 改动量大可 defer）。
+**Q0: 是否属于当前分支？** 取 2.4 归属结果：**OUT_OF_SCOPE** → 自动建 backlog issue（4.6 step 3；pri-p0/标签判不定除外），跳过 Q1-Q3；**IN_SCOPE / RELATED** → 进 Q1（RELATED 改动量大可 defer）。
 
 **Q1: 推荐现在做还是后面做？**（仅 IN_SCOPE / RELATED 继续）
 
@@ -160,7 +160,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 ### 3.3 详细修复计划
 
-文件级改动清单 + 验证命令（`cargo build` / `cargo test` / `cargo test`（涉及并发时配 `--features integration` 或 `loom`））。
+文件级改动清单 + 目标 crate 的 build / test / clippy 命令；涉及并发时补 `--features integration` 或 `loom`。收尾固定 `make verify-fast` + `cargo check --workspace --all-targets`，再补改动范围定向测试。
 
 ### 3.4 执行决策
 
@@ -170,7 +170,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | Cx2 + IN_SCOPE + 触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
 | **Cx3/Cx4 IN_SCOPE** | 任何 | 经处置门 AskUserQuestion 判「当前 PR 修」or「defer」：判修记 `✅ 已修`、纳入本轮；判 defer 后自动建 issue（不二次确认）、记 `⏸ defer`。Cx4 默认 defer |
-| 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 4；pri-p0/判不定除外） |
+| 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 3；pri-p0/判不定除外） |
 
 **不可直接修（须经处置门或推荐方案）**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
@@ -183,7 +183,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 **用 TaskCreate 注册每项任务**，执行时 TaskUpdate 更新状态（✔/◼/◻）。
 
 规则：
-- 所有 finding 都创建 task，OUT_OF_SCOPE 标注 `[→ 自动建 issue（4.6 step 4）；pri-p0/判不定除外]`
+- 所有 finding 都创建 task，OUT_OF_SCOPE 标注 `[→ 自动建 issue（4.6 step 3）；pri-p0/判不定除外]`
 - 单条 Cx1 IN_SCOPE → 跳过清单直接修；批量或 Cx2+ → 必须创建
 - 最后两项固定：`commit + push` + `闭合/创建 GitHub issues`
 - 创建后立即执行，不等确认
@@ -216,7 +216,7 @@ scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `iden
 1. **TaskUpdate → in_progress**（开始处理当前任务）
 2. Read 目标文件
 3. Edit / Write 修改代码
-4. `cargo build --workspace` — 编译检查
+4. `cargo build -p <修改的 crate>` — 只编译当前 crate，快速检查
 5. `cargo test -p <修改的 crate>` — **立即运行测试**（含阶段 1.4 的复现测试）
 6. 如果测试失败：
    - 分析失败原因
@@ -224,16 +224,9 @@ scope 按 crate 名（扁平 workspace，如 `consistency` / `httpserve` / `iden
    - 如果是暴露了后续步骤的依赖 → 记录，继续下一步骤
 7. 测试通过 → **TaskUpdate → completed** → 进入下一个任务
 
-### 4.3 最终测试
+### 4.3 编辑循环收敛
 
-全部修改完成后，运行完整测试：
-
-```bash
-cargo build --workspace
-cargo test -p <修改的 crate>
-cargo test -p <修改的 crate> --features integration   # 涉及并发 / 集成时
-cargo test -p consistency -p primitives -p vocab        # 改了底座 crate 时
-```
+确认每条 finding 的复现测试与目标 crate Edit-Test Loop 已通过；不在此重复跑最终本地漏斗。完整 `verify-fast + workspace check + 定向 test/clippy` 统一在 4.6 **切 label 后**执行。
 
 ### 4.4 测试失败处理（分层回退）
 
@@ -250,17 +243,17 @@ cargo test -p consistency -p primitives -p vocab        # 改了底座 crate 时
 - 数据流已正确保护
 - 测试覆盖了问题场景
 
-### 4.6 Git 收尾（测试通过后自动执行）
+### 4.6 Git 收尾
 
-> **pm:* 评论统一**：填 `pr-comment.md` 模板（无损 `file:line` + 详表入 `<details>`）+ `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块到 body 末尾 + `issues` B4 贴（回显 URL）。
+> **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），用 `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
 
-1. **提交**：`git add` 修复文件 → 按 4.1 commit/push；无 PR 才 `forge.sh pr-create "<title>" <body-file> develop <branch>`。
-2. **冲突预检（阻塞）**：`issues` B5 ① 验冲突，过则立即进 3（不等 CI）。
-3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 处置门判定 defer 的 IN_SCOPE Cx3+/RELATED——**逐条自动**按 `issues` B1 建 backlog issue（无损填 `backlog.md` + 四轴标签 `cx/area/type/pri`，`issue-labels.sh validate` 过门，留 open，**判定 defer 后直接建、不再二次确认**，派生注 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿）。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
-4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`。
-5. **切 label**：`forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
-6. **CI 异步收敛（非阻塞）**：`issues` B5 ② 等 CI（失败回阶段 1-4 再推），贴 pm:ci（`--kind=ci`，全绿 `ci-green` / 熔断仍红 `ci-failed` + 失败摘要）。
-7. **延迟启监控（必做）**：评论 + label 完成后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 监听 `needs-check-fix` 跑 `/pr-review --check`，pr-monitor 检测 `needs-fix` 即接力 `/fix`（判定由 fix 自理）。完成后 **TaskUpdate → completed**。
+1. **提交 + push**：仅 `git add` 修复文件，按 4.1 commit/push；无 PR 才用填好的 `pull_request_template.md` 调 `forge.sh pr-create`。
+2. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。
+3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 处置门判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→停 AskUserQuestion、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
+4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
+5. **切 label**：按 `PROJECT.md` §5 执行 `forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
+6. **本地验证（label 后执行）**：运行 `make verify-fast` → `cargo check --workspace --all-targets` → 按 diff 选择的 crate / feature / 行为定向 test / clippy。`verify-fast` 不执行编译，也不等价完整 GitHub CI；workspace check 在 #1752 落地前闭合反向依赖编译面。失败则回阶段 1-4，修复 push 后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
+7. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）停 AskUserQuestion。
 
@@ -283,5 +276,5 @@ Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri
 **默认按分析结果自动决策。** 仅以下情况用 AskUserQuestion：
 - 无法定位问题代码
 - 测试失败且 4 轮回退后仍无法修正
-- **OUT_OF_SCOPE / 处置门判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 4：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。处置门「修/defer」的判断仍 AskUserQuestion；**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）→ 停下 AskUserQuestion，或 area/type 判不定（`validate` 失败）→ 标 `deferred=labels-underivable` 回退草稿。
+- **OUT_OF_SCOPE / 处置门判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 3：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。处置门「修/defer」的判断仍 AskUserQuestion；**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）→ 停下 AskUserQuestion，或 area/type 判不定（`validate` 失败）→ 标 `deferred=labels-underivable` 回退草稿。
 - pri-p0 红线升级（incident-driven 或安全 CVE）

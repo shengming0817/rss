@@ -82,7 +82,7 @@ feature 模块是域 crate 内的子单元；`adapters/`、`contracts/`、`bins/
 ## 修改代码前
 
 1. 先 `Read` 目标文件，`Grep` 搜索已有实现
-2. 改完 `cargo build --workspace`，涉及逻辑 `cargo test --workspace`，提交前 `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
+2. 编辑循环对修改 crate 跑 build / test / clippy；收尾依次运行 `make verify-fast`、`cargo check --workspace --all-targets`，再按改动 crate、feature 与行为边界补定向 test / clippy（fast 不编译且不等价完整 GitHub CI）
 3. 只改需要改的
 
 ## AI-robust 治理章程

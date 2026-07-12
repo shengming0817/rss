@@ -8,11 +8,11 @@
 # scope (return ok).
 #
 # INVARIANT: non-epic backlog ⇒ exactly-one {area,type,pri,cx}; epic ⇒
-# exactly-one {area,pri} ∧ zero cx. Enforcement is a skill-side pre-create gate
-# (issues B1 runs `validate --labels` and only creates the issue on exit 0).
+# exactly-one {area,pri} ∧ zero cx. Callers must run `validate --labels`
+# successfully before invoking `forge.sh issue-create`.
 # Funnel strength (honest, per .claude/rules/rss/ai-robust.md): overall Medium.
-# Downstream logic Medium (single decision point; selftest is the golden gate, run
-# in CI via make verify — not compile-time un-expressible, so not Hard). Upstream
+# Downstream logic Medium (single decision point; run the golden selftest directly
+# with `bash hack/automation/issue-labels.sh selftest`). Upstream
 # callsite weak-Medium (skill-routed; a raw forge CLI / web-UI create bypasses it).
 # True Hard (违反不可表达) is structurally unreachable — issue/work-item labels (tags)
 # are external mutable state no repo-side mechanism can constrain. The unconditional `on: issues`
@@ -113,7 +113,7 @@ _require_one() {
 # TIER (PROJECT.md §1.1 Work Item Type 三层映射): pbi|feature|epic|"" — the structure
 # axis. Container tiers (epic/feature) carry area+pri only and forbid type/cx; the PBI
 # leaf requires area+type+pri+cx. Empty TIER infers from the `epic` label (else pbi) so
-# the label-only callers (B1 PBI gate, epic-label create) keep working; Feature has no
+# the label-only callers (PBI pre-create gate, epic-label create) keep working; Feature has no
 # label marker by design (tier is the native Work Item Type), so it needs `--tier feature`.
 _validate_labels() {
     local labels tier="${2:-}"

@@ -72,8 +72,6 @@ tools:
 
 ### 5. 验证与收尾
 
-- 最终一次完整 `cargo build --workspace && cargo test -p <修改的 crate>`，提交前 `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
-- 涉及底座 crate（`consistency`/`primitives`/`vocab` 等）→ 额外跑 `cargo test -p <底座 crate>`
 - **单任务报告**：改了什么文件、测试结果、遗留项（如有）
 - **批量任务报告**：逐条列状态表（✅ FIXED / ⚠ ESCALATE / ⏭ SKIPPED-Cx3+），末尾给改动文件汇总与统一测试结果
 
