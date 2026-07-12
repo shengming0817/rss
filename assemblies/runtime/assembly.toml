@@ -5,15 +5,19 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = ["settings", "identity"]
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = ["audit"]
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::RevocationStore"
@@ -23,6 +27,7 @@ consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
+outputs = []
 
 # eventbus 真传输 topology-gated 接线（#1251）：durable 拓扑下注入真 amqp publisher/subscriber（lapin，
 # backend feature）。consistency-engine port（OutboxSource/Relay、InboxStore）经 topology resolver
@@ -38,6 +43,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox-relay-amqp-publish"
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 port = "diport::AckableSubscriber"
@@ -48,6 +54,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "event-consume-at-least-once"
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 port = "diport::Signer"
@@ -58,6 +65,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+outputs = ["resources"]
 
 [[diportProviders]]
 port = "diport::KeyProvider"
@@ -68,6 +76,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
+outputs = ["resources"]
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -78,6 +87,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = ["resources"]
 
 # HTTP auth 决策审计 sink：runtime 经 audit domain 注入 postgres durable flat sink（PgAuthAuditSink）。
 [[diportProviders]]
@@ -88,6 +98,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
+outputs = ["resources", "workers"]
 
 # edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
@@ -98,6 +109,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+outputs = []
 
 # distributed lock/CAS providers（#1571 go-live）：runtime 经 `wire_distributed(&SharedRuntimeDeps)` 从
 # `deps.redis.infra().lock_store()` + `deps.pg.infra().cas_store()` 构造 `DistributedRuntimeDeps`，并作为
@@ -110,6 +122,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = ["resources"]
 
 [[diportProviders]]
 port = "diport::CasStore"
@@ -119,6 +132,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
+outputs = ["resources", "workers"]
 
 [[diportProviders]]
 port = "diport::CasStore"
@@ -128,6 +142,7 @@ consumer = "distributed"
 lifecycle = "draft"
 durability = "persistent"
 purpose = "distributed-state-cas-redis-alternative"
+outputs = ["resources"]
 
 # S3 object-store provider（#1164）：runtime canary 对真实 bucket 执行 put/get/delete/get-miss，
 # readiness 失败即摘流；adapter 经 backend feature 启 AWS SDK 真身。
@@ -140,3 +155,4 @@ consumer = "runtime"
 lifecycle = "active"
 durability = "persistent"
 purpose = "runtime-s3-readiness-canary"
+outputs = ["resources"]

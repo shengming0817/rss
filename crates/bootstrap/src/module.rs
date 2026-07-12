@@ -69,6 +69,21 @@ impl DomainBinding {
 /// [`ShutdownStack::register_with_token`]: crate::shutdown::ShutdownStack::register_with_token
 pub type WorkerSpec = Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LifecycleChannel {
+    Probes,
+    Resources,
+    Workers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderOutputBinding {
+    pub port: &'static str,
+    pub provider: &'static str,
+    pub consumer: &'static str,
+    pub channels: &'static [LifecycleChannel],
+}
+
 /// 域能力的标准装配出口（ADR-010 §2.2）：`module()` / `wire_X` 的可聚合产物，组合根经
 /// [`DomainModuleResult::merge`] 聚合各域 result 后逐 `Vec` 排空到 sink，不再逐项手工接线。
 ///
@@ -128,13 +143,10 @@ impl Extend<DomainModuleResult> for DomainModuleResult {
 pub fn compose_bindings(
     bindings: &mut Vec<DomainBinding>,
 ) -> Result<(crate::registry::Registry, DomainModuleResult), crate::domain::KernelError> {
-    let registry = {
-        let domains: Vec<&dyn Domain> = bindings
-            .iter()
-            .map(|binding| binding.domain.as_ref())
-            .collect();
-        crate::domain::compose(&domains)?
-    };
+    let mut registry = crate::registry::Registry::new();
+    for binding in bindings.iter() {
+        registry.init_domain(binding.name, binding.domain.as_ref())?;
+    }
 
     let mut output = DomainModuleResult::default();
     output.extend(bindings.drain(..).map(|binding| binding.output));
@@ -207,6 +219,14 @@ mod result_tests {
     impl Domain for FailingDomain {
         fn init(&self, _reg: &mut crate::Registry) -> Result<(), KernelError> {
             Err(KernelError::Invariant)
+        }
+    }
+
+    struct RoutingDomain;
+
+    impl Domain for RoutingDomain {
+        fn init(&self, reg: &mut crate::Registry) -> Result<(), KernelError> {
+            reg.route_group::<httpserve::Primary>("/test", Ok)
         }
     }
 
@@ -328,6 +348,24 @@ mod result_tests {
             .map(|(name, _)| name.as_str())
             .collect();
         assert_eq!(output_order, ["first.output", "second.output"]);
+    }
+
+    #[test]
+    fn compose_bindings_records_typed_domain_listener_ownership() -> Result<(), KernelError> {
+        let mut bindings = vec![DomainBinding::new(
+            "identity",
+            Box::new(RoutingDomain),
+            DomainModuleResult::default(),
+        )];
+        let (registry, _) = compose_bindings(&mut bindings)?;
+        assert_eq!(
+            registry.domain_listener_bindings(),
+            vec![crate::DomainListenerBinding {
+                domain: "identity",
+                listener: primitives::ListenerKind::Primary,
+            }]
+        );
+        Ok(())
     }
 
     #[test]

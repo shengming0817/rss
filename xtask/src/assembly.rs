@@ -115,6 +115,36 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     Ok((assemblies.len(), findings))
 }
 
+/// 对单个目标执行与 aggregate gate 相同的完整验证，不读取其它 assembly。
+pub(crate) fn validate_target(root: &Path, name: &str) -> Result<Vec<Finding>> {
+    let assembly = load_target(root, &root.join("assemblies").join(name))?;
+    let mut findings = validate_assembly(&assembly);
+    if let Some(metadata) = load_workspace_metadata(root)? {
+        findings.extend(validate_target_domain_closure(root, &assembly, &metadata)?);
+    }
+    Ok(findings)
+}
+
+fn load_target(root: &Path, dir: &Path) -> Result<DiscoveredAssembly> {
+    let manifest_path = dir.join("assembly.toml");
+    let cargo_path = dir.join("Cargo.toml");
+    let manifest_src = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读 {} 失败", manifest_path.display()))?;
+    let cargo_src = std::fs::read_to_string(&cargo_path)
+        .with_context(|| format!("读 {} 失败", cargo_path.display()))?;
+    Ok(DiscoveredAssembly {
+        dir: dir.to_path_buf(),
+        cargo_path: cargo_path.clone(),
+        manifest_label: rel_label(root, &manifest_path),
+        cargo_label: rel_label(root, &cargo_path),
+        manifest: AssemblyManifest::from_toml_str(&manifest_src)
+            .with_context(|| format!("解析 {} 失败", manifest_path.display()))?,
+        cargo_toml: toml::from_str(&cargo_src)
+            .with_context(|| format!("解析 {} 失败", cargo_path.display()))?,
+        manifest_src,
+    })
+}
+
 fn validate_target_domain_closure(
     root: &Path,
     assembly: &DiscoveredAssembly,
@@ -197,25 +227,7 @@ fn discover(root: &Path) -> Result<(Vec<DiscoveredAssembly>, Vec<Finding>)> {
             }
             continue;
         }
-        let manifest_src = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("读 {} 失败", manifest_path.display()))?;
-        let cargo_src = std::fs::read_to_string(&cargo_path)
-            .with_context(|| format!("读 {} 失败", cargo_path.display()))?;
-        let manifest = AssemblyManifest::from_toml_str(&manifest_src)
-            .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-        let cargo_toml: toml::Value = toml::from_str(&cargo_src)
-            .with_context(|| format!("解析 {} 失败", cargo_path.display()))?;
-        let manifest_label = rel_label(root, &manifest_path);
-        let cargo_label = rel_label(root, &cargo_path);
-        assemblies.push(DiscoveredAssembly {
-            dir,
-            cargo_path,
-            manifest_label,
-            cargo_label,
-            manifest_src,
-            manifest,
-            cargo_toml,
-        });
+        assemblies.push(load_target(root, &dir)?);
     }
     Ok((assemblies, findings))
 }
@@ -1761,15 +1773,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::RevocationStore"
@@ -1777,6 +1793,7 @@ provider = "softca::InMemRevocationLedger"
 providerCrate = "softca"
 consumer = "deviceloop"
 purpose = "device-certificate-revocation"
+outputs = []
 {provider_extra}
 "#
         )
@@ -1795,15 +1812,19 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::RevocationStore"
@@ -1813,6 +1834,7 @@ consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
+outputs = []
 "#
         .to_string()
     }
@@ -1954,15 +1976,19 @@ topology = "{topology}"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 "#
         );
         if include_oidc {
@@ -1976,6 +2002,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#,
             );
         }
@@ -1990,6 +2017,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+outputs = []
 "#,
             );
         }
@@ -2004,6 +2032,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
+outputs = []
 "#,
             );
         }
@@ -2017,6 +2046,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
+outputs = []
 "#,
         );
         if profile == "production" {
@@ -2031,6 +2061,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox event publishing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::AckableSubscriber"
@@ -2041,6 +2072,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "manual-ack event subscriber workers"
+outputs = []
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -2050,6 +2082,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::CasStore"
@@ -2059,6 +2092,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
+outputs = []
 "#,
             );
         }
@@ -2103,15 +2137,19 @@ topology = "{topology}"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 {providers}
 "#
         )
@@ -2139,6 +2177,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::KeyProvider"
@@ -2149,6 +2188,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
+outputs = []
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -2159,6 +2199,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 
 [[diportProviders]]
 port = "diport::AuditSink"
@@ -2168,6 +2209,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
+outputs = []
 "#;
 
     const IDENTITYAUDIT_MANIFEST: &str =
@@ -2186,6 +2228,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "outbox event publishing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::AckableSubscriber"
@@ -2196,6 +2239,7 @@ consumer = "eventexec"
 lifecycle = "active"
 durability = "persistent"
 purpose = "manual-ack event subscriber workers"
+outputs = []
 "#;
 
     const CAPABILITY_DISTRIBUTED_PROVIDERS: &str = r#"
@@ -2207,6 +2251,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::CasStore"
@@ -2216,6 +2261,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
+outputs = []
 "#;
 
     fn required_capability_findings(manifest: &str, cargo: &str) -> anyhow::Result<Vec<Finding>> {
@@ -2382,6 +2428,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#,
         );
         let findings = required_capability_findings(
@@ -2413,6 +2460,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
+outputs = []
 "#,
         );
         let findings = required_capability_findings(
@@ -2461,6 +2509,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -2471,6 +2520,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#,
         );
         let findings = required_capability_findings(
@@ -2548,6 +2598,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::CasStore"
@@ -2557,6 +2608,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas-redis-alternative"
+outputs = []
 "#
             ),
         );
@@ -2602,6 +2654,7 @@ consumer = "settings"
 lifecycle = "{lifecycle}"
 durability = "{durability}"
 purpose = "settings-configvalue-at-rest-encryption"
+outputs = []
 "#
                 ),
             );
@@ -2865,6 +2918,7 @@ consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
+outputs = []
 "#
             )
             .is_err()
@@ -3208,15 +3262,19 @@ audit = { path = "../../crates/audit" }
             r#"
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 "#,
             "listeners = []\n",
         );
@@ -3311,15 +3369,19 @@ diportProviders = []
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 "#,
             r#"[package]
 name = "runtime"
@@ -3800,15 +3862,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::RevocationStore"
@@ -3818,6 +3884,7 @@ consumer = "deviceloop"
 lifecycle = "draft"
 durability = "ephemeral-memory"
 purpose = "device-certificate-revocation"
+outputs = []
 
 [[diportProviders]]
 port = "diport::RateLimiter"
@@ -3827,6 +3894,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -3860,15 +3928,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -3878,6 +3950,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = []
 
 [[diportProviders]]
 port = "diport::CasStore"
@@ -3887,6 +3960,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-state-cas"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -3936,15 +4010,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -3954,6 +4032,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4011,15 +4090,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::LockStore"
@@ -4029,6 +4112,7 @@ consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4063,15 +4147,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::RateLimiter"
@@ -4081,6 +4169,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "per-peer-IP request rate limiting"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4115,15 +4204,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::RateLimiter"
@@ -4133,6 +4226,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "per-peer-IP request rate limiting"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4186,15 +4280,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "{port}"
@@ -4205,6 +4303,7 @@ consumer = "eventexec"
 lifecycle = "{lifecycle}"
 durability = "{durability}"
 purpose = "eventbus-transport"
+outputs = []
 "#
         )
     }
@@ -4274,15 +4373,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::Signer"
@@ -4293,6 +4396,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4321,15 +4425,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::KeyProvider"
@@ -4340,6 +4448,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4367,15 +4476,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -4386,6 +4499,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"
@@ -4414,15 +4528,19 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::ObjectStore"
@@ -4433,6 +4551,7 @@ consumer = "runtime"
 lifecycle = "active"
 durability = "persistent"
 purpose = "runtime-s3-readiness-canary"
+outputs = []
 "#,
             r#"[package]
 name = "runtime"

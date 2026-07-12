@@ -3801,6 +3801,44 @@ fn assemble_runtime_module_outputs(inputs: RuntimeModuleAssemblyInputs) -> Domai
     module
 }
 
+fn validate_domain_listener_evidence(
+    actual: &[bootstrap::DomainListenerBinding],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        actual == modules_gen::DOMAIN_LISTENER_BINDINGS,
+        "runtime domain-listener evidence drift: expected {}, observed {}",
+        modules_gen::DOMAIN_LISTENER_BINDINGS.len(),
+        actual.len()
+    );
+    Ok(())
+}
+
+fn validate_provider_output_evidence() -> anyhow::Result<()> {
+    let mut actual = provider_output::provider_output_bindings();
+    actual.extend_from_slice(event_transport::PROVIDER_OUTPUT_BINDINGS);
+    validate_provider_output_bindings(&actual)
+}
+
+fn validate_provider_output_bindings(
+    actual: &[bootstrap::ProviderOutputBinding],
+) -> anyhow::Result<()> {
+    let mut actual = actual.to_vec();
+    actual.sort_by_key(|binding| (binding.port, binding.provider, binding.consumer));
+    let mut expected: Vec<_> = modules_gen::PROVIDER_OUTPUT_BINDINGS
+        .iter()
+        .copied()
+        .filter(|binding| !binding.channels.is_empty())
+        .collect();
+    expected.sort_by_key(|binding| (binding.port, binding.provider, binding.consumer));
+    anyhow::ensure!(
+        actual == expected,
+        "runtime provider-output evidence drift: expected {}, observed {}",
+        expected.len(),
+        actual.len()
+    );
+    Ok(())
+}
+
 /// 生产组合根入口：构造共享基础设施 → generated domains → `compose_bindings`
 /// → 聚合 readiness/lifecycle outputs → 装配认证接线 → 挂 Health listener
 /// → bind + serve + 信号优雅关停。
@@ -3951,6 +3989,8 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
                 .context("wire generated domains")?;
             let (mut registry, domains_module) = bootstrap::compose_bindings(&mut domain_bindings)
                 .context("compose generated domains")?;
+            validate_domain_listener_evidence(&registry.domain_listener_bindings())
+                .context("validate runtime domain-listener evidence")?;
 
             let session_sweeper_module =
                 wire_session_sweeper(&deps.pg).context("wire session sweeper")?;
@@ -3959,6 +3999,8 @@ pub async fn run(trace_export: Option<otel::OtelExporter>) -> anyhow::Result<()>
             // provider capability bundle 单源装配：adapter 保持 diport-only 原语，runtime 本地适配为唯一
             // DomainModuleResult，并按 Redis → S3 → Vault 固定顺序进入统一 merge 路径。
             let provider_module = crate::provider_output::build_provider_module(&deps);
+            validate_provider_output_evidence()
+                .context("validate runtime provider-output evidence")?;
             let oidc_resource = runtime_oidc.managed_resource();
             let pg_readiness_period = build_readiness_interval();
             let redis_readiness_period = build_redis_readiness_interval();
@@ -4120,6 +4162,15 @@ mod tests {
 
     const B64: base64::engine::general_purpose::GeneralPurpose =
         base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[test]
+    fn generated_graph_evidence_matches_live_runtime_carriers() {
+        assert!(validate_provider_output_evidence().is_ok());
+
+        let missing_provider = provider_output::provider_output_bindings();
+        assert!(validate_provider_output_bindings(&missing_provider).is_err());
+        assert!(validate_domain_listener_evidence(&[]).is_err());
+    }
 
     #[test]
     fn runtime_module_output_harness_captures_merge_and_probe_drain_order() {

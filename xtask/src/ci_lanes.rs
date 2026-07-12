@@ -317,6 +317,17 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            AssemblyGraphCheck => (step_assembly_graph_check, Some("xtask/src/graph.rs"),
+                gate(
+                        GateId::AssemblyGraphCheck,
+                        "assembly-graph-check",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             ContractBreaking => (step_contract_breaking, Some("xtask/src/contract/breaking.rs"),
                 gate(
                         GateId::ContractBreaking,

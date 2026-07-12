@@ -28,9 +28,16 @@ type RouteRegisterFn =
 /// finalize 后不可重入；多次 finalize 见幂等 drain 说明）由
 /// [`Registry::finalize_routes`] 在 W 阶段按 listener 分组折叠驱动（auth finalize / socket bind 归组合根）。
 pub(crate) struct RouteGroupDecl {
+    pub(crate) domain: Option<&'static str>,
     pub(crate) listener: ListenerKind,
     pub(crate) prefix: &'static str,
     pub(crate) register: RouteRegisterFn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainListenerBinding {
+    pub domain: &'static str,
+    pub listener: ListenerKind,
 }
 
 /// 事件订阅声明（由 [`Registry::subscriber`] 收集）。
@@ -209,6 +216,7 @@ pub struct Registry {
     subscribers: Vec<SubscriberDecl>,
     probes: Vec<ProbeDecl>,
     primary_authorizer: Option<Arc<dyn httpserve::RouteAuthorizer>>,
+    current_domain: Option<&'static str>,
 }
 
 impl Registry {
@@ -219,6 +227,7 @@ impl Registry {
             subscribers: Vec::new(),
             probes: Vec::new(),
             primary_authorizer: None,
+            current_domain: None,
         }
     }
 
@@ -246,6 +255,7 @@ impl Registry {
         L: Listener,
     {
         self.route_groups.push(RouteGroupDecl {
+            domain: self.current_domain,
             listener: L::KIND,
             prefix,
             // 擦除 L：box 内 `nest_group::<L>` 把本组路由 nest 进 listener 累加器（裸 Router 不出 httpserve）。
@@ -341,6 +351,39 @@ impl Registry {
             .iter()
             .map(|d| (d.listener, d.prefix))
             .collect()
+    }
+
+    pub fn domain_listener_bindings(&self) -> Vec<DomainListenerBinding> {
+        let bindings: Vec<_> = self
+            .route_groups
+            .iter()
+            .filter_map(|decl| {
+                decl.domain.map(|domain| DomainListenerBinding {
+                    domain,
+                    listener: decl.listener,
+                })
+            })
+            .collect();
+        let mut unique = Vec::new();
+        for binding in bindings {
+            if !unique.contains(&binding) {
+                unique.push(binding);
+            }
+        }
+        unique
+    }
+
+    pub(crate) fn init_domain(
+        &mut self,
+        name: &'static str,
+        domain: &dyn crate::Domain,
+    ) -> Result<(), KernelError> {
+        if self.current_domain.replace(name).is_some() {
+            return Err(KernelError::Invariant);
+        }
+        let result = domain.init(self);
+        self.current_domain = None;
+        result
     }
 
     /// 已声明的健康探针数（供 journey 断言收集计数；聚合求值见 [`readyz_report`](Self::readyz_report)）。

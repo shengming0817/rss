@@ -2216,6 +2216,11 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
+        path: "xtask/src/graph.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
         path: "xtask/src/codegen.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,

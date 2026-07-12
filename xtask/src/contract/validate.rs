@@ -225,7 +225,7 @@ fn validate_workspace(root: &Path) -> Result<(usize, Vec<Finding>)> {
 }
 
 /// 校验给定根下全部契约，返回（契约数, findings）。根可注入便于测试。
-#[cfg(test)]
+/// 同时供 standalone graph source closure 在消费契约前 fail-closed 复用。
 pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding>)> {
     let contracts = discover(contracts_root)?;
     let findings = validate_discovered_contracts(&contracts);

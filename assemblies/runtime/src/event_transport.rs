@@ -27,7 +27,10 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
 use base64::Engine as _;
-use bootstrap::{DomainModuleResult, SubscriberBinding, SubscriberExecution, WorkerSpec};
+use bootstrap::{
+    DomainModuleResult, LifecycleChannel, ProviderOutputBinding, SubscriberBinding,
+    SubscriberExecution, WorkerSpec,
+};
 use consistency::{ConsumerGroup, RetentionSweeper};
 use crypto::RustCryptoMacVerifier;
 use diport::{
@@ -51,6 +54,27 @@ use crate::distributed_runtime::{
 };
 use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
+
+const EVENT_CHANNELS: &[LifecycleChannel] = &[
+    LifecycleChannel::Probes,
+    LifecycleChannel::Resources,
+    LifecycleChannel::Workers,
+];
+
+pub(crate) const PROVIDER_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
+    ProviderOutputBinding {
+        port: "diport::Publisher",
+        provider: "amqp::AmqpPublisher",
+        consumer: "eventexec",
+        channels: EVENT_CHANNELS,
+    },
+    ProviderOutputBinding {
+        port: "diport::AckableSubscriber",
+        provider: "amqp::AmqpSubscriber",
+        consumer: "eventexec",
+        channels: EVENT_CHANNELS,
+    },
+];
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 

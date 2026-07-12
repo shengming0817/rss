@@ -14,6 +14,7 @@ use vault::VaultRuntimeDeps;
 
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
+pub use modules_gen::{DOMAIN_LISTENER_BINDINGS, PROVIDER_OUTPUT_BINDINGS};
 
 /// Production system clock for the settings-only composition root.
 ///

@@ -1,0 +1,641 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "cargo xtask graph assembly",
+  "assembly": {
+    "name": "runtime",
+    "profile": "demo",
+    "topology": "durable-shared"
+  },
+  "sources": [
+    {
+      "path": "assemblies/runtime/assembly.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "ebeeab82b19e90dcbe83d8592a196299662e7eec6de893067f4737edbaf923ad"
+      }
+    },
+    {
+      "path": "assemblies/runtime/src/generated/modules_gen.rs",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "1977fe626906c6a9deaa45121a0adc3552130309bb282b0366b5e560e72f2bc3"
+      }
+    },
+    {
+      "path": "contracts/event/identity/v1/policy-updated/contract.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "afc291bdc4a6ae4cc96f251e77f2ccd1dd668b083a5b110a7fee0824569af67c"
+      }
+    },
+    {
+      "path": "contracts/event/identity/v1/role-assigned/contract.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "652179c9f9bf676c85198c411cf065d36cb6872f29741b76f05a402411fdeb05"
+      }
+    },
+    {
+      "path": "contracts/event/identity/v1/role-revoked/contract.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "608fbc31dc73bf29a3d09873d2d8d3d9dc10064b1a8e8d8dd691f76cedb7589a"
+      }
+    },
+    {
+      "path": "contracts/event/identity/v1/session-created/contract.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "d5676ecca3f75507b757efaebd0714e3ed3295883a7c2e2bf721e7cadeebc63c"
+      }
+    },
+    {
+      "path": "contracts/event/settings/v1/contract.toml",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "f9d08894d02ea1c7238fb9936afeb44887ed5da3c7d4a41845d885e8077b6a02"
+      }
+    },
+    {
+      "path": "crates/bootstrap/src/module.rs",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "b07f50178357ac91f1e42ee8a445f6dc412354f6dabae16bb5151f1ceac54d74"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n_d954278a62814c4c97d6a2ee",
+      "kind": "assembly",
+      "label": "runtime"
+    },
+    {
+      "id": "n_c0dd9c5f658d1d6da9113e7c",
+      "kind": "domain",
+      "label": "settings"
+    },
+    {
+      "id": "n_99822bcaecc5c17cf471b808",
+      "kind": "domain",
+      "label": "identity"
+    },
+    {
+      "id": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "domain",
+      "label": "audit"
+    },
+    {
+      "id": "n_acde320f4b8918e8f26c71d5",
+      "kind": "listener-surface",
+      "label": "primary listener surface"
+    },
+    {
+      "id": "n_71423f5f56d2da62453ce649",
+      "kind": "listener-surface",
+      "label": "internal listener surface"
+    },
+    {
+      "id": "n_7f087803aa419c7abf534703",
+      "kind": "listener-surface",
+      "label": "admin listener surface"
+    },
+    {
+      "id": "n_d1b73fe982c041e566559adc",
+      "kind": "listener-surface",
+      "label": "health listener surface"
+    },
+    {
+      "id": "n_4f748dfdcbbf55383791d6f2",
+      "kind": "output-shape",
+      "label": "DomainModuleResult declared shape"
+    },
+    {
+      "id": "n_2cccb5238d48d945bddd07c4",
+      "kind": "resource-channel",
+      "label": "resources channel"
+    },
+    {
+      "id": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "worker-channel",
+      "label": "workers channel"
+    },
+    {
+      "id": "n_0bd47314bdfe98b017027a32",
+      "kind": "probe-channel",
+      "label": "probes channel"
+    },
+    {
+      "id": "n_fd5ba12eb0baefb73664149f",
+      "kind": "provider",
+      "label": "softca::InMemRevocationLedger (softca)",
+      "port": "diport::RevocationStore",
+      "lifecycle": "draft",
+      "durability": "ephemeral-memory",
+      "purpose": "device-certificate-revocation"
+    },
+    {
+      "id": "n_3faf7a7cf7b7c75bd2462f92",
+      "kind": "component",
+      "label": "deviceloop",
+      "inAssembly": true
+    },
+    {
+      "id": "n_22cba548272cc06e17fef36a",
+      "kind": "provider",
+      "label": "amqp::AmqpPublisher (amqp)",
+      "port": "diport::Publisher",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "outbox-relay-amqp-publish",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_2d40160c3e8818e1b7b6ae73",
+      "kind": "component",
+      "label": "eventexec",
+      "inAssembly": true
+    },
+    {
+      "id": "n_81a3196c453ba0d0c84989d2",
+      "kind": "provider",
+      "label": "amqp::AmqpSubscriber (amqp)",
+      "port": "diport::AckableSubscriber",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "event-consume-at-least-once",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_f1dbca5fb388baaa413988f8",
+      "kind": "provider",
+      "label": "vault::VaultSigner (vault)",
+      "port": "diport::Signer",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "jwt-access-token-signing",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_9c6899a1908cf425a8116055",
+      "kind": "provider",
+      "label": "vault::VaultKeyProvider (vault)",
+      "port": "diport::KeyProvider",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "settings-configvalue-at-rest-encryption",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_dcc76ad522f7375035bd3dbc",
+      "kind": "provider",
+      "label": "oidc::OidcProvider (oidc)",
+      "port": "diport::Pdp",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "jwt-credential-verification",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_f19e907a3e57f5b7e7deb34c",
+      "kind": "component",
+      "label": "httpserve",
+      "inAssembly": true
+    },
+    {
+      "id": "n_5300d802758f3183f772badf",
+      "kind": "provider",
+      "label": "postgres::PgAuthAuditSink (postgres)",
+      "port": "diport::AuditSink",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "http-auth-decision-audit"
+    },
+    {
+      "id": "n_5c724f207600d6bdcf9fab27",
+      "kind": "provider",
+      "label": "ratelimit::GovernorLimiter (ratelimit)",
+      "port": "diport::RateLimiter",
+      "lifecycle": "active",
+      "durability": "ephemeral-memory",
+      "purpose": "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+    },
+    {
+      "id": "n_fb2fbc8ca89d116b164660ae",
+      "kind": "provider",
+      "label": "redis::RedisLockStore (redis)",
+      "port": "diport::LockStore",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "distributed-lock-fencing"
+    },
+    {
+      "id": "n_51af174d851d072ffc196829",
+      "kind": "component",
+      "label": "distributed",
+      "inAssembly": true
+    },
+    {
+      "id": "n_f1d77e993c69992a1b2a567b",
+      "kind": "provider",
+      "label": "postgres::PgCasStore (postgres)",
+      "port": "diport::CasStore",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "distributed-state-cas"
+    },
+    {
+      "id": "n_b277a61c44859cde99f276bf",
+      "kind": "provider",
+      "label": "redis::RedisCasStore (redis)",
+      "port": "diport::CasStore",
+      "lifecycle": "draft",
+      "durability": "persistent",
+      "purpose": "distributed-state-cas-redis-alternative"
+    },
+    {
+      "id": "n_6df5db0fdf560b20204cbbd8",
+      "kind": "provider",
+      "label": "s3::S3Store (s3)",
+      "port": "diport::ObjectStore",
+      "lifecycle": "active",
+      "durability": "persistent",
+      "purpose": "runtime-s3-readiness-canary",
+      "requiredFeatures": [
+        "backend"
+      ]
+    },
+    {
+      "id": "n_9a96e12898cf3907c8b0499b",
+      "kind": "contract",
+      "label": "identity.policy-updated",
+      "source": {
+        "path": "contracts/event/identity/v1/policy-updated/contract.toml"
+      }
+    },
+    {
+      "id": "n_ac651717fc808c06527c87f7",
+      "kind": "contract",
+      "label": "identity.role-assigned",
+      "source": {
+        "path": "contracts/event/identity/v1/role-assigned/contract.toml"
+      }
+    },
+    {
+      "id": "n_684f35c7299cdecb0da586f4",
+      "kind": "contract",
+      "label": "identity.role-revoked",
+      "source": {
+        "path": "contracts/event/identity/v1/role-revoked/contract.toml"
+      }
+    },
+    {
+      "id": "n_6c475719e57b4a4934e7ae63",
+      "kind": "contract",
+      "label": "identity.session-created",
+      "source": {
+        "path": "contracts/event/identity/v1/session-created/contract.toml"
+      }
+    },
+    {
+      "id": "n_8bea3cf2095cfeba9ba52af4",
+      "kind": "contract",
+      "label": "settings.config-version-changed",
+      "source": {
+        "path": "contracts/event/settings/v1/contract.toml"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_c0dd9c5f658d1d6da9113e7c",
+      "kind": "contains"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_99822bcaecc5c17cf471b808",
+      "kind": "contains"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "contains"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_acde320f4b8918e8f26c71d5",
+      "kind": "exposes"
+    },
+    {
+      "from": "n_c0dd9c5f658d1d6da9113e7c",
+      "to": "n_acde320f4b8918e8f26c71d5",
+      "kind": "binds-listener"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_acde320f4b8918e8f26c71d5",
+      "kind": "binds-listener"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_71423f5f56d2da62453ce649",
+      "kind": "exposes"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_7f087803aa419c7abf534703",
+      "kind": "exposes"
+    },
+    {
+      "from": "n_898c5c10c9bb5231abbd9afb",
+      "to": "n_7f087803aa419c7abf534703",
+      "kind": "binds-listener"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_d1b73fe982c041e566559adc",
+      "kind": "exposes"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_4f748dfdcbbf55383791d6f2",
+      "kind": "declares-shape"
+    },
+    {
+      "from": "n_4f748dfdcbbf55383791d6f2",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "shape-includes"
+    },
+    {
+      "from": "n_4f748dfdcbbf55383791d6f2",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "shape-includes"
+    },
+    {
+      "from": "n_4f748dfdcbbf55383791d6f2",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "shape-includes"
+    },
+    {
+      "from": "n_3faf7a7cf7b7c75bd2462f92",
+      "to": "n_fd5ba12eb0baefb73664149f",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_fd5ba12eb0baefb73664149f",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_2d40160c3e8818e1b7b6ae73",
+      "to": "n_22cba548272cc06e17fef36a",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_22cba548272cc06e17fef36a",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_22cba548272cc06e17fef36a",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_22cba548272cc06e17fef36a",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_22cba548272cc06e17fef36a",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_2d40160c3e8818e1b7b6ae73",
+      "to": "n_81a3196c453ba0d0c84989d2",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_81a3196c453ba0d0c84989d2",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_81a3196c453ba0d0c84989d2",
+      "to": "n_0bd47314bdfe98b017027a32",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_81a3196c453ba0d0c84989d2",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_81a3196c453ba0d0c84989d2",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_f1dbca5fb388baaa413988f8",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_f1dbca5fb388baaa413988f8",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_f1dbca5fb388baaa413988f8",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_c0dd9c5f658d1d6da9113e7c",
+      "to": "n_9c6899a1908cf425a8116055",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_9c6899a1908cf425a8116055",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_9c6899a1908cf425a8116055",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_f19e907a3e57f5b7e7deb34c",
+      "to": "n_dcc76ad522f7375035bd3dbc",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_dcc76ad522f7375035bd3dbc",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_dcc76ad522f7375035bd3dbc",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_f19e907a3e57f5b7e7deb34c",
+      "to": "n_5300d802758f3183f772badf",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_5300d802758f3183f772badf",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_5300d802758f3183f772badf",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_5300d802758f3183f772badf",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_f19e907a3e57f5b7e7deb34c",
+      "to": "n_5c724f207600d6bdcf9fab27",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_5c724f207600d6bdcf9fab27",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_51af174d851d072ffc196829",
+      "to": "n_fb2fbc8ca89d116b164660ae",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_fb2fbc8ca89d116b164660ae",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_fb2fbc8ca89d116b164660ae",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_51af174d851d072ffc196829",
+      "to": "n_f1d77e993c69992a1b2a567b",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_f1d77e993c69992a1b2a567b",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_f1d77e993c69992a1b2a567b",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_f1d77e993c69992a1b2a567b",
+      "to": "n_b07dcd04ac2a96bb91f67966",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_51af174d851d072ffc196829",
+      "to": "n_b277a61c44859cde99f276bf",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_b277a61c44859cde99f276bf",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_b277a61c44859cde99f276bf",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_6df5db0fdf560b20204cbbd8",
+      "kind": "requires-capability"
+    },
+    {
+      "from": "n_d954278a62814c4c97d6a2ee",
+      "to": "n_6df5db0fdf560b20204cbbd8",
+      "kind": "declares-provider"
+    },
+    {
+      "from": "n_6df5db0fdf560b20204cbbd8",
+      "to": "n_2cccb5238d48d945bddd07c4",
+      "kind": "contributes-output"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_9a96e12898cf3907c8b0499b",
+      "kind": "publishes"
+    },
+    {
+      "from": "n_9a96e12898cf3907c8b0499b",
+      "to": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "subscribes"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_ac651717fc808c06527c87f7",
+      "kind": "publishes"
+    },
+    {
+      "from": "n_ac651717fc808c06527c87f7",
+      "to": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "subscribes"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_684f35c7299cdecb0da586f4",
+      "kind": "publishes"
+    },
+    {
+      "from": "n_684f35c7299cdecb0da586f4",
+      "to": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "subscribes"
+    },
+    {
+      "from": "n_99822bcaecc5c17cf471b808",
+      "to": "n_6c475719e57b4a4934e7ae63",
+      "kind": "publishes"
+    },
+    {
+      "from": "n_6c475719e57b4a4934e7ae63",
+      "to": "n_898c5c10c9bb5231abbd9afb",
+      "kind": "subscribes"
+    },
+    {
+      "from": "n_c0dd9c5f658d1d6da9113e7c",
+      "to": "n_8bea3cf2095cfeba9ba52af4",
+      "kind": "publishes"
+    },
+    {
+      "from": "n_8bea3cf2095cfeba9ba52af4",
+      "to": "n_c0dd9c5f658d1d6da9113e7c",
+      "kind": "subscribes"
+    }
+  ]
+}

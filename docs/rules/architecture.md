@@ -111,11 +111,19 @@ rss/
 - **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。通用 `Adapter→Service` 合法；#1676 仅对 provider output 边界增加精确 deny：`adapters/redis|s3|vault → bootstrap` 禁止（package 名为 `redis-adapter|s3|vault`），postgres→bootstrap 与目标 adapter→diport 不受影响（`LAYER-DEPS-PROVIDER-BOOTSTRAP-01`）。`postgres` 的域形实现由无默认值的 `domain-settings` / `domain-identity` / `domain-audit` Cargo feature 精确启用；assembly 必须显式选择，未选择的域依赖不进入目标 package 图。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
 - **bins/**、**xtask/**、**assemblies/**、**composition/**、**journeys/**:组合根,可依赖所有库 crate(`journeys` 为验收 journey 组合根——demo 组装根 + 端到端集成测试；`composition/*` 为多个 assembly 复用的 typed domain wiring，不含 manifest 或启动入口)。**examples/** 为收窄示例层,只准依赖基础/引擎/DI-infra/服务,不直接依赖域、adapters 或 generated。`assemblies/{name}/assembly.toml`
   是 static assembly intent + DI provider 声明源：`name`/`profile`/`domains`/`topology`/`listeners`
-  声明组合根 intent/surface，`[[diportProviders]]` 声明 provider 的 port / providerCrate /
-  requiredFeatures / consumer / lifecycle / durability / purpose；字段细则见 `docs/rules/runtime-assembly-plan.md`
+  声明组合根 intent/surface，`listeners.domains` 以闭合 domain/listener enum 声明 route surface 归属；
+  `[[diportProviders]]` 声明 provider 的 port / providerCrate / requiredFeatures / consumer / lifecycle /
+  durability / purpose，并以闭合 `outputs = [probes|resources|workers]` 声明 lifecycle channel 贡献；字段细则见 `docs/rules/runtime-assembly-plan.md`
   Phase 3。`cargo xtask assembly validate` 守 manifest intent 非空/闭值/去重、active provider 的依赖 /
   feature 与安全边界（例如 production `diport::RevocationStore` 必须持久）。assembly intent / provider 声明不替代
   `contracts/**/contract.toml`、env/secrets、listener bind 配置或 Rust 构造器接线；跨域 wire contract 单源仍是 contracts。
+  `cargo xtask graph assembly` 从该 manifest、匹配的 committed `modules_gen.rs` carrier 与 active event
+  contract/subscription 派生同一 typed model 的 Mermaid/JSON。默认 runtime 双产物提交在
+  `docs/architecture/generated/runtime-assembly.{mmd,json}`，`--check` 作为字节级漂移门；显式
+  `--assembly <name>` 的临时图只写 `target/xtask/`。`modules_gen.rs` 同时携 typed domain-listener / provider-output
+  evidence；runtime 将 observed domain route registration 与 colocated provider output metadata 对照该 carrier，漂移 fail-closed。
+  图证明 domain→listener surface 与 provider→lifecycle channel kind，不证明具体 route path、授权、网络可达性、
+  provider 实例数量、资源名、关停次序或运行健康状态，也不读取环境变量、endpoint 或 secret。
 - **generated/**:contract 派生,被域依赖。
 - 强制:cargo 拒绝循环依赖(分层无环天然成立);`cargo-deny`(deny.toml) 表达禁依赖;`cargo-udeps` 抓多余/未声明;
   `cargo public-api` 守封装面。

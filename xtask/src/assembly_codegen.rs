@@ -3,7 +3,10 @@
 //! INVARIANT: ASSEMBLY-MODULES-CODEGEN-01 { level = "Hard", exec = "verify", source = "codegen", golden = "assemblies/runtime/src/generated/modules_gen.rs", synthetic_red = "assembly_codegen::tests::check_rejects_manifest_domain_drift", anti_vacuity = "assembly_codegen::tests::generated_runtime_modules_are_non_empty_and_check_clean" } —— `assembly.toml` 是 domain 组合顺序单源；生成物 committed 并由 verify 字节级守漂移，red/green 测试证明门不恒真。
 
 use anyhow::{Context, Result, bail};
-use assembly_schema::{AssemblyDomain, AssemblyManifest, ManifestValidationError};
+use assembly_schema::{
+    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, LifecycleChannel,
+    ManifestValidationError,
+};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -31,7 +34,7 @@ pub(crate) fn run(check: bool) -> Result<()> {
     generate_root(&crate::workspace_root()?, check)
 }
 
-fn generate_root(root: &Path, check: bool) -> Result<()> {
+pub(crate) fn generate_root(root: &Path, check: bool) -> Result<()> {
     let plan = plan_generation(root)?;
     let drift: Vec<&Path> = plan
         .targets
@@ -74,6 +77,16 @@ fn generate_root(root: &Path, check: bool) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn check_target(root: &Path, assembly_name: &str) -> Result<()> {
+    let assembly_dir = root.join("assemblies").join(assembly_name);
+    let target = plan_target(root, &assembly_dir)?
+        .with_context(|| format!("assembly `{assembly_name}` 缺 {MANIFEST_NAME}"))?;
+    if target.actual.as_deref() != Some(target.content.as_slice()) {
+        bail!("assembly `{assembly_name}` modules carrier 漂移");
+    }
+    Ok(())
+}
+
 fn plan_generation(root: &Path) -> Result<GenerationPlan> {
     let assemblies_root = root.join("assemblies");
     let mut entries = fs::read_dir(&assemblies_root)
@@ -95,33 +108,14 @@ fn plan_generation(root: &Path) -> Result<GenerationPlan> {
         }
 
         let assembly_dir = entry.path();
-        let manifest_path = assembly_dir.join(MANIFEST_NAME);
         let output_path = assembly_dir.join(GENERATED_REL);
-        reject_symlink(&manifest_path)?;
-        ensure_output_path_has_no_symlinks(&output_path)?;
-        if !manifest_path.is_file() {
+        let Some(target) = plan_target(root, &assembly_dir)? else {
             if output_path.is_file() {
                 orphan_candidates.push(output_path);
             }
             continue;
-        }
-
-        let source = fs::read(&manifest_path)
-            .with_context(|| format!("读取 {} 失败", manifest_path.display()))?;
-        let source_text = std::str::from_utf8(&source)
-            .with_context(|| format!("{} 不是 UTF-8", manifest_path.display()))?;
-        let manifest = AssemblyManifest::from_toml_str(source_text)
-            .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-        let source_label = relative_label(root, &manifest_path);
-        ensure_safe_source_label(&source_label)?;
-        validate_manifest(&manifest, &source_label)?;
-        let content = render_modules(&manifest, &source_label, &source)?;
-        let actual = read_owned_target(&output_path)?;
-        targets.push(Target {
-            path: output_path,
-            content: content.into_bytes(),
-            actual,
-        });
+        };
+        targets.push(target);
     }
 
     let mut owned_orphans = Vec::new();
@@ -137,6 +131,32 @@ fn plan_generation(root: &Path) -> Result<GenerationPlan> {
     })
 }
 
+fn plan_target(root: &Path, assembly_dir: &Path) -> Result<Option<Target>> {
+    let manifest_path = assembly_dir.join(MANIFEST_NAME);
+    let output_path = assembly_dir.join(GENERATED_REL);
+    reject_symlink(&manifest_path)?;
+    ensure_output_path_has_no_symlinks(&output_path)?;
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let source = fs::read(&manifest_path)
+        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?;
+    let source_text = std::str::from_utf8(&source)
+        .with_context(|| format!("{} 不是 UTF-8", manifest_path.display()))?;
+    let manifest = AssemblyManifest::from_toml_str(source_text)
+        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+    let source_label = relative_label(root, &manifest_path);
+    ensure_safe_source_label(&source_label)?;
+    validate_manifest(&manifest, &source_label)?;
+    let content = render_modules(&manifest, &source_label, &source)?;
+    let actual = read_owned_target(&output_path)?;
+    Ok(Some(Target {
+        path: output_path,
+        content: content.into_bytes(),
+        actual,
+    }))
+}
+
 fn ensure_safe_source_label(source_label: &str) -> Result<()> {
     if source_label.chars().any(char::is_control) {
         bail!("manifest source path 含控制字符，拒绝渲染 generated Rust");
@@ -145,23 +165,25 @@ fn ensure_safe_source_label(source_label: &str) -> Result<()> {
 }
 
 fn validate_manifest(manifest: &AssemblyManifest, source_label: &str) -> Result<()> {
-    let Err(errors) = manifest.validate_basic() else {
-        return Ok(());
-    };
-    let details = errors
-        .as_slice()
-        .iter()
-        .map(|error| match error {
-            ManifestValidationError::Empty { field } => {
-                format!("field={field} empty declaration")
-            }
-            ManifestValidationError::Duplicate { field } => {
-                format!("field={field} duplicate declaration")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    bail!("校验 {source_label} 失败：{details}")
+    if let Err(errors) = manifest.validate_basic() {
+        let details = errors
+            .as_slice()
+            .iter()
+            .map(|error| match error {
+                ManifestValidationError::Empty { field } => {
+                    format!("field={field} empty declaration")
+                }
+                ManifestValidationError::Duplicate { field } => {
+                    format!("field={field} duplicate declaration")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!("校验 {source_label} 失败：{details}");
+    }
+    manifest
+        .validate_graph_evidence()
+        .with_context(|| format!("校验 {source_label} graph evidence 失败"))
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
@@ -228,7 +250,41 @@ fn render_modules(
             "        crate::domains::{module}::module(deps)\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
         ));
     }
-    code.push_str("    ])\n}\n\n#[cfg(test)]\npub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\n    Ok(vec![\n");
+    code.push_str("    ])\n}\n\npub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[\n");
+    for listener in &manifest.listeners {
+        for domain in &listener.domains {
+            code.push_str(&format!(
+                "    bootstrap::DomainListenerBinding {{ domain: \"{}\", listener: bootstrap::ListenerKind::{} }},\n",
+                domain.as_str(),
+                listener_variant(listener.kind)
+            ));
+        }
+    }
+    code.push_str(
+        "];
+
+pub const PROVIDER_OUTPUT_BINDINGS: &[bootstrap::ProviderOutputBinding] = &[\n",
+    );
+    for provider in &manifest.diport_providers {
+        code.push_str(&format!(
+            "    bootstrap::ProviderOutputBinding {{ port: \"{}\", provider: \"{}\", consumer: \"{}\", channels: &[",
+            provider.port.as_str(), provider.provider, provider.consumer
+        ));
+        for channel in &provider.outputs {
+            code.push_str(&format!(
+                "bootstrap::LifecycleChannel::{}, ",
+                channel_variant(*channel)
+            ));
+        }
+        code.push_str("] },\n");
+    }
+    code.push_str(
+        "];
+
+#[cfg(test)]
+pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
+    Ok(vec![\n",
+    );
     for domain in &manifest.domains {
         let module = module_name(*domain)?;
         code.push_str(&format!(
@@ -237,6 +293,23 @@ fn render_modules(
     }
     code.push_str("    ])\n}\n");
     crate::codegen::format_rust(&code)
+}
+
+fn listener_variant(kind: AssemblyListenerKind) -> &'static str {
+    match kind {
+        AssemblyListenerKind::Primary => "Primary",
+        AssemblyListenerKind::Internal => "Internal",
+        AssemblyListenerKind::Admin => "Admin",
+        AssemblyListenerKind::Health => "Health",
+    }
+}
+
+fn channel_variant(channel: LifecycleChannel) -> &'static str {
+    match channel {
+        LifecycleChannel::Probes => "Probes",
+        LifecycleChannel::Resources => "Resources",
+        LifecycleChannel::Workers => "Workers",
+    }
 }
 
 fn module_name(domain: AssemblyDomain) -> Result<&'static str> {
@@ -320,6 +393,7 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = [{domains}]
 
 [[diportProviders]]
 port = "diport::RateLimiter"
@@ -329,6 +403,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
 purpose = "test"
+outputs = ["resources"]
 "#
         )
     }
@@ -352,6 +427,7 @@ purpose = "test"
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)] // reason: one golden test intentionally checks the complete generated carrier shape.
     fn render_modules_golden_preserves_manifest_order() -> Result<()> {
         let source = manifest(r#""settings", "identity", "audit""#);
         let parsed = AssemblyManifest::from_toml_str(&source)?;
@@ -366,6 +442,10 @@ purpose = "test"
         assert_eq!(rendered.matches("::module(deps)").count(), 3);
         assert_eq!(rendered.matches(".context(\"wire domain '").count(), 3);
         assert!(rendered.contains("pub(crate) async fn wire_test_domains"));
+        assert!(rendered.contains("pub const DOMAIN_LISTENER_BINDINGS"));
+        assert!(rendered.contains("bootstrap::ListenerKind::Primary"));
+        assert!(rendered.contains("pub const PROVIDER_OUTPUT_BINDINGS"));
+        assert!(rendered.contains("bootstrap::LifecycleChannel::Resources"));
         assert_eq!(rendered.matches("::tests::test_binding()").count(), 3);
         let identity = rendered
             .find("domains::identity")
@@ -387,7 +467,7 @@ purpose = "test"
             .find("domains::audit::tests::test_binding")
             .ok_or_else(|| anyhow::anyhow!("missing audit test call"))?;
         assert!(test_settings < test_identity && test_identity < test_audit);
-        assert!(!rendered.contains("provider"));
+        assert!(rendered.contains("ratelimit::GovernorLimiter"));
         assert!(!rendered.contains("std::env"));
         syn::parse_file(&rendered)?;
         Ok(())
@@ -468,6 +548,28 @@ purpose = "test"
         generate_root(&root, false)?;
         write_manifest(&root, r#""settings", "identity", "audit""#)?;
         assert!(generate_root(&root, true).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn single_target_check_ignores_unrelated_assembly_drift() -> Result<()> {
+        let root = test_root("assembly-modules-target-isolation")?;
+        write_manifest(&root, r#""identity""#)?;
+        let other = root.join("assemblies/settingsonly");
+        fs::create_dir_all(&other)?;
+        fs::write(
+            other.join("assembly.toml"),
+            manifest(r#""settings""#).replace("name = \"runtime\"", "name = \"settingsonly\""),
+        )?;
+        generate_root(&root, false)?;
+        fs::write(
+            other.join("assembly.toml"),
+            manifest(r#""settings", "audit""#)
+                .replace("name = \"runtime\"", "name = \"settingsonly\""),
+        )?;
+        check_target(&root, "runtime")?;
+        assert!(check_target(&root, "settingsonly").is_err());
         fs::remove_dir_all(root)?;
         Ok(())
     }

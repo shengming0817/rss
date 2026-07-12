@@ -9,6 +9,7 @@ use primitives::MacKey;
 
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
+pub use modules_gen::{DOMAIN_LISTENER_BINDINGS, PROVIDER_OUTPUT_BINDINGS};
 
 const DEMO_JWT_ISSUER: &str = "https://identityaudit.demo.invalid";
 const DEMO_JWT_AUDIENCE: &str = "rss-identityaudit-demo";

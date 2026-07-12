@@ -255,6 +255,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#;
 
     fn manifest_with(body: &str) -> String {
@@ -267,9 +268,11 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 {body}
 "#
@@ -334,6 +337,7 @@ kind = "internal"
             r#"
 [[listeners]]
 kind = "health"
+domains = []
 addr = "127.0.0.1:0"
 "#,
         );
@@ -349,6 +353,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 secret = "super-secret-token"
 "#,
         );
@@ -406,6 +411,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#;
         assert!(
             RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(no_listeners).unwrap()).is_err()
@@ -427,6 +433,7 @@ diportProviders = []
 
 [[listeners]]
 kind = "primary"
+domains = []
 "#;
         assert!(
             RuntimePlan::from_assembly(AssemblyPlan::from_toml_str(no_providers).unwrap()).is_err()
@@ -445,6 +452,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "super-secret-token"
+outputs = []
 "#,
         );
         let assembly = AssemblyPlan::from_toml_str(&manifest).expect("assembly plan");

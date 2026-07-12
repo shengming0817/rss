@@ -5,9 +5,11 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = ["identity"]
 
 [[listeners]]
 kind = "admin"
+domains = ["audit"]
 
 [[diportProviders]]
 port = "diport::Signer"
@@ -18,6 +20,7 @@ consumer = "identity"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
+outputs = ["resources"]
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -28,6 +31,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification-capability-witness"
+outputs = ["resources"]
 
 [[diportProviders]]
 port = "diport::AuditSink"
@@ -37,3 +41,4 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
+outputs = ["resources", "workers"]

@@ -74,6 +74,81 @@ impl AssemblyManifest {
 
         errors
     }
+
+    pub fn validate_graph_evidence(&self) -> Result<(), GraphEvidenceValidationErrors> {
+        let mut errors = Vec::new();
+        let declared_domains: BTreeSet<_> = self.domains.iter().copied().collect();
+        let mut bound_domains = BTreeSet::new();
+        let mut bindings = BTreeSet::new();
+        for listener in &self.listeners {
+            for domain in &listener.domains {
+                if !declared_domains.contains(domain) {
+                    errors.push(GraphEvidenceValidationError::UnknownDomain { domain: *domain });
+                }
+                if !bindings.insert((*domain, listener.kind)) {
+                    errors.push(GraphEvidenceValidationError::DuplicateDomainListener {
+                        domain: *domain,
+                        listener: listener.kind,
+                    });
+                }
+                bound_domains.insert(*domain);
+            }
+        }
+        for domain in declared_domains.difference(&bound_domains) {
+            errors.push(GraphEvidenceValidationError::UnboundDomain { domain: *domain });
+        }
+        for provider in &self.diport_providers {
+            let mut seen = BTreeSet::new();
+            for channel in &provider.outputs {
+                if !seen.insert(*channel) {
+                    errors.push(GraphEvidenceValidationError::DuplicateProviderOutput {
+                        channel: *channel,
+                    });
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(GraphEvidenceValidationErrors { errors })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphEvidenceValidationErrors {
+    errors: Vec<GraphEvidenceValidationError>,
+}
+
+impl GraphEvidenceValidationErrors {
+    pub fn as_slice(&self) -> &[GraphEvidenceValidationError] {
+        &self.errors
+    }
+}
+
+impl fmt::Display for GraphEvidenceValidationErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} assembly graph evidence error(s)", self.errors.len())
+    }
+}
+
+impl std::error::Error for GraphEvidenceValidationErrors {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphEvidenceValidationError {
+    UnknownDomain {
+        domain: AssemblyDomain,
+    },
+    UnboundDomain {
+        domain: AssemblyDomain,
+    },
+    DuplicateDomainListener {
+        domain: AssemblyDomain,
+        listener: AssemblyListenerKind,
+    },
+    DuplicateProviderOutput {
+        channel: LifecycleChannel,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +246,7 @@ impl AssemblyTopology {
 #[serde(deny_unknown_fields)]
 pub struct AssemblyListener {
     pub kind: AssemblyListenerKind,
+    pub domains: Vec<AssemblyDomain>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -206,6 +282,25 @@ pub struct DiportProvider {
     pub lifecycle: ProviderLifecycle,
     pub durability: ProviderDurability,
     pub purpose: String,
+    pub outputs: Vec<LifecycleChannel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleChannel {
+    Probes,
+    Resources,
+    Workers,
+}
+
+impl LifecycleChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Probes => "probes",
+            Self::Resources => "resources",
+            Self::Workers => "workers",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -376,6 +471,7 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = ["identity", "settings", "audit"]
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -385,6 +481,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = ["resources", "workers"]
 "#;
 
     #[test]
@@ -401,6 +498,18 @@ purpose = "jwt-credential-verification"
             ["identity", "settings", "audit"]
         );
         assert!(manifest.diport_providers[0].required_features.is_empty());
+        assert_eq!(
+            manifest.listeners[0].domains.as_slice(),
+            [
+                AssemblyDomain::Identity,
+                AssemblyDomain::Settings,
+                AssemblyDomain::Audit
+            ]
+        );
+        assert_eq!(
+            manifest.diport_providers[0].outputs.as_slice(),
+            [LifecycleChannel::Resources, LifecycleChannel::Workers]
+        );
         manifest.validate_basic().expect("valid manifest");
     }
 
@@ -445,5 +554,21 @@ purpose = "jwt-credential-verification"
                 .basic_validation_errors()
                 .contains(&ManifestValidationError::Duplicate { field: "domains" })
         );
+    }
+
+    #[test]
+    fn graph_evidence_is_closed_and_non_vacuous() {
+        let manifest = AssemblyManifest::from_toml_str(MINIMAL).expect("manifest");
+        manifest
+            .validate_graph_evidence()
+            .expect("complete graph evidence");
+
+        let missing_listener = MINIMAL.replace(
+            "kind = \"primary\"\ndomains = [\"identity\", \"settings\", \"audit\"]",
+            "kind = \"primary\"",
+        );
+        assert!(AssemblyManifest::from_toml_str(&missing_listener).is_err());
+        let missing_provider = MINIMAL.replace("outputs = [\"resources\", \"workers\"]\n", "");
+        assert!(AssemblyManifest::from_toml_str(&missing_provider).is_err());
     }
 }

@@ -5,6 +5,7 @@ topology = "demo"
 
 [[listeners]]
 kind = "primary"
+domains = ["settings"]
 
 [[diportProviders]]
 port = "diport::KeyProvider"
@@ -15,3 +16,4 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "settings-configvalue-at-rest-encryption"
+outputs = ["resources"]

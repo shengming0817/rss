@@ -930,8 +930,12 @@ fn has_only_canonical_provider_output_calls(file: &syn::File) -> bool {
         ) {
             return false;
         }
-        let canonical = item.items.len() == 1
-            && item.items.first().is_some_and(|impl_item| {
+        let canonical = item.items.len() == 2
+            && item.items.iter().any(|impl_item| {
+                matches!(impl_item, syn::ImplItem::Const(binding)
+                    if is_canonical_provider_output_binding_impl(binding))
+            })
+            && item.items.iter().any(|impl_item| {
                 matches!(impl_item, syn::ImplItem::Fn(method)
                     if is_canonical_provider_output_method(method))
             });
@@ -977,8 +981,14 @@ fn provider_output_impl_count(file: &syn::File) -> usize {
 }
 
 fn is_canonical_provider_output_trait(item: &syn::ItemTrait) -> bool {
-    item.items.len() == 1
-        && item.items.first().is_some_and(|trait_item| {
+    item.items.len() == 2
+        && item.items.iter().any(|trait_item| {
+            matches!(trait_item, syn::TraitItem::Const(binding)
+                if binding.ident == "OUTPUT_BINDINGS"
+                    && compact_tokens(&binding.ty) == "&'static[ProviderOutputBinding]"
+                    && binding.default.is_none())
+        })
+        && item.items.iter().any(|trait_item| {
             matches!(trait_item, syn::TraitItem::Fn(method)
                 if method.sig.ident == "provider_output"
                     && method.sig.inputs.len() == 1
@@ -987,6 +997,16 @@ fn is_canonical_provider_output_trait(item: &syn::ItemTrait) -> bool {
                     && return_type_is(&method.sig.output, "DomainModuleResult")
                     && method.default.is_none())
         })
+}
+
+fn is_canonical_provider_output_binding_impl(binding: &syn::ImplItemConst) -> bool {
+    if binding.ident != "OUTPUT_BINDINGS"
+        || compact_tokens(&binding.ty) != "&'static[ProviderOutputBinding]"
+    {
+        return false;
+    }
+    matches!(&binding.expr, syn::Expr::Reference(reference)
+        if matches!(reference.expr.as_ref(), syn::Expr::Array(array) if !array.elems.is_empty()))
 }
 
 fn is_canonical_provider_output_method(method: &syn::ImplItemFn) -> bool {
@@ -3837,15 +3857,19 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -3856,6 +3880,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#,
         )?;
         write(
@@ -4003,15 +4028,19 @@ topology = "durable-shared"
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 
 [[diportProviders]]
 port = "diport::Pdp"
@@ -4021,6 +4050,7 @@ consumer = "httpserve"
 lifecycle = "unknown"
 durability = "persistent"
 purpose = "jwt-credential-verification"
+outputs = []
 "#,
         )?;
         assert!(collect_report(&root).is_err());
@@ -4119,15 +4149,19 @@ diportProviders = []
 
 [[listeners]]
 kind = "primary"
+domains = []
 
 [[listeners]]
 kind = "internal"
+domains = []
 
 [[listeners]]
 kind = "admin"
+domains = []
 
 [[listeners]]
 kind = "health"
+domains = []
 "#,
         )?;
         let report = collect_report(&root)?;
@@ -4547,10 +4581,10 @@ impl LaunchPlan {
 
     fn provider_adapter_fixture() -> &'static str {
         r#"
-trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult; }
-impl ProviderOutput for RedisRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
-impl ProviderOutput for S3RuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
-impl ProviderOutput for VaultRuntimeDeps { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
+trait ProviderOutput { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding]; fn provider_output(&self) -> DomainModuleResult; }
+impl ProviderOutput for RedisRuntimeDeps { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: "redis", provider: "redis", consumer: "runtime", channels: &[LifecycleChannel::Resources] }]; fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
+impl ProviderOutput for S3RuntimeDeps { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: "s3", provider: "s3", consumer: "runtime", channels: &[LifecycleChannel::Resources] }]; fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
+impl ProviderOutput for VaultRuntimeDeps { const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: "vault", provider: "vault", consumer: "runtime", channels: &[LifecycleChannel::Resources] }]; fn provider_output(&self) -> DomainModuleResult { DomainModuleResult { resources: self.runtime_resources(), ..DomainModuleResult::default() } } }
 fn build_provider_module(deps: &SharedRuntimeDeps) -> DomainModuleResult {
     let mut provider_module = DomainModuleResult::default();
     provider_module.merge_provider(&deps.redis);
@@ -4773,8 +4807,16 @@ async fn wire_durable() {
             (
                 "default trait method",
                 adapter.replace(
-                    "trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult; }",
-                    "trait ProviderOutput { fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() } }",
+                    "fn provider_output(&self) -> DomainModuleResult;",
+                    "fn provider_output(&self) -> DomainModuleResult { DomainModuleResult::default() }",
+                ),
+            ),
+            (
+                "missing typed output evidence",
+                adapter.replacen(
+                    "const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding { port: \"redis\", provider: \"redis\", consumer: \"runtime\", channels: &[LifecycleChannel::Resources] }]; ",
+                    "",
+                    1,
                 ),
             ),
             (

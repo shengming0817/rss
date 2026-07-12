@@ -103,6 +103,8 @@ enum InternalCheck {
     AssemblyValidate,
     /// assembly.toml domains → committed modules_gen.rs 漂移门（ASSEMBLY-MODULES-CODEGEN-01）。
     AssemblyModulesCheck,
+    /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
+    AssemblyGraphCheck,
     /// wire JSON-Schema 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。窗口分级：默认 warn（退出码 0），
     /// env `RSS_WIRE_BREAKING=deny` 对 active 契约破坏升 deny（退出码 1）；against = origin/develop。
     ContractBreaking,
@@ -238,6 +240,14 @@ fn step_assembly_modules_check() -> Step {
         id: GateId::AssemblyModulesCheck,
         args: &[],
         kind: StepKind::Internal(InternalCheck::AssemblyModulesCheck),
+        env: &[],
+    }
+}
+fn step_assembly_graph_check() -> Step {
+    Step {
+        id: GateId::AssemblyGraphCheck,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::AssemblyGraphCheck),
         env: &[],
     }
 }
@@ -1083,6 +1093,9 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
         InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
+        InternalCheck::AssemblyGraphCheck => {
+            crate::graph::run(&crate::graph::Options::check_runtime())
+        }
         // wire 破坏门：against=origin/develop，窗口分级经 env（默认 warn，退出码 0；deny 模式 active 破坏退出码 1）。
         InternalCheck::ContractBreaking => contract::breaking::run(
             contract::breaking::DEFAULT_AGAINST,
@@ -1264,7 +1277,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 29);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 30);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1348,14 +1361,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_47_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_48_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 47);
+        assert_eq!(plan.len(), 48);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 47);
+        assert_eq!(ids.len(), 48);
     }
 
     #[test]
@@ -1377,6 +1390,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
                 "shipped-feature-guard",
@@ -1477,6 +1491,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
                 "shipped-feature-guard",
@@ -1530,6 +1545,7 @@ mod tests {
                     "contract-validate",
                     "assembly-validate",
                     "assembly-modules-check",
+                    "assembly-graph-check",
                     "contract-breaking",
                     "layer-deps",
                     "shipped-feature-guard",
@@ -1666,6 +1682,34 @@ mod tests {
             assert!(matches!(
                 plan[codegen].kind,
                 StepKind::Internal(InternalCheck::AssemblyModulesCheck)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_graph_is_no_compile_internal_gate_after_modules_in_all_lanes() -> anyhow::Result<()>
+    {
+        for (name, plan) in [
+            ("full", plan_for(PlanTarget::Verify)),
+            ("fast", verify_plan(&opts(true, false))),
+            ("ci", plan_for(PlanTarget::CompatibilityCi)),
+        ] {
+            let labels = labels(&plan);
+            let modules = labels
+                .iter()
+                .position(|label| *label == "assembly-modules-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-modules-check"))?;
+            let graph = labels
+                .iter()
+                .position(|label| *label == "assembly-graph-check")
+                .ok_or_else(|| anyhow::anyhow!("{name} plan 缺 assembly-graph-check"))?;
+            assert_eq!(graph, modules + 1, "{name} lane order drift");
+            assert!(!plan[graph].needs_compile());
+            assert_eq!(plan[graph].carrier_file(), Some("xtask/src/graph.rs"));
+            assert!(matches!(
+                plan[graph].kind,
+                StepKind::Internal(InternalCheck::AssemblyGraphCheck)
             ));
         }
         Ok(())
@@ -1974,6 +2018,7 @@ mod tests {
                 "contract-validate",
                 "assembly-validate",
                 "assembly-modules-check",
+                "assembly-graph-check",
                 "contract-breaking",
                 "layer-deps",
                 "shipped-feature-guard",
@@ -2088,6 +2133,7 @@ mod tests {
             "contract-validate",
             "assembly-validate",
             "assembly-modules-check",
+            "assembly-graph-check",
             "contract-breaking",
             "layer-deps",
             "shipped-feature-guard",

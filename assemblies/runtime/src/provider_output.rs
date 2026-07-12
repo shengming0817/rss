@@ -11,11 +11,37 @@
 
 use std::time::Duration;
 
-use bootstrap::{DomainModuleResult, WorkerSpec};
+use bootstrap::{DomainModuleResult, LifecycleChannel, ProviderOutputBinding, WorkerSpec};
 use diport::DynManagedResource;
 use postgres::PgRuntimeDeps;
 
 use crate::SharedRuntimeDeps;
+
+const RESOURCES: &[LifecycleChannel] = &[LifecycleChannel::Resources];
+const RESOURCES_WORKERS: &[LifecycleChannel] =
+    &[LifecycleChannel::Resources, LifecycleChannel::Workers];
+
+pub(crate) const PG_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[
+    ProviderOutputBinding {
+        port: "diport::AuditSink",
+        provider: "postgres::PgAuthAuditSink",
+        consumer: "httpserve",
+        channels: RESOURCES_WORKERS,
+    },
+    ProviderOutputBinding {
+        port: "diport::CasStore",
+        provider: "postgres::PgCasStore",
+        consumer: "distributed",
+        channels: RESOURCES_WORKERS,
+    },
+];
+
+pub(crate) const OIDC_OUTPUT_BINDINGS: &[ProviderOutputBinding] = &[ProviderOutputBinding {
+    port: "diport::Pdp",
+    provider: "oidc::OidcProvider",
+    consumer: "httpserve",
+    channels: RESOURCES,
+}];
 
 /// Consumes the postgres lifecycle owner into the runtime's sole lifecycle output type.
 pub(crate) fn build_pg_runtime_module(
@@ -34,6 +60,8 @@ pub(crate) fn build_pg_runtime_module(
 
 /// Converts one provider capability bundle into the runtime's sole lifecycle output type.
 pub(crate) trait ProviderOutput {
+    const OUTPUT_BINDINGS: &'static [ProviderOutputBinding];
+
     /// Produces all probes, detached resources, and workers owned by this provider bundle.
     fn provider_output(&self) -> DomainModuleResult;
 }
@@ -60,6 +88,21 @@ pub(crate) fn build_provider_module(deps: &SharedRuntimeDeps) -> DomainModuleRes
 }
 
 impl ProviderOutput for redis::RedisRuntimeDeps {
+    const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[
+        ProviderOutputBinding {
+            port: "diport::LockStore",
+            provider: "redis::RedisLockStore",
+            consumer: "distributed",
+            channels: RESOURCES,
+        },
+        ProviderOutputBinding {
+            port: "diport::CasStore",
+            provider: "redis::RedisCasStore",
+            consumer: "distributed",
+            channels: RESOURCES,
+        },
+    ];
+
     fn provider_output(&self) -> DomainModuleResult {
         DomainModuleResult {
             resources: self.runtime_resources(),
@@ -69,6 +112,13 @@ impl ProviderOutput for redis::RedisRuntimeDeps {
 }
 
 impl ProviderOutput for s3::S3RuntimeDeps {
+    const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[ProviderOutputBinding {
+        port: "diport::ObjectStore",
+        provider: "s3::S3Store",
+        consumer: "runtime",
+        channels: RESOURCES,
+    }];
+
     fn provider_output(&self) -> DomainModuleResult {
         DomainModuleResult {
             resources: self.runtime_resources(),
@@ -78,12 +128,37 @@ impl ProviderOutput for s3::S3RuntimeDeps {
 }
 
 impl ProviderOutput for vault::VaultRuntimeDeps {
+    const OUTPUT_BINDINGS: &'static [ProviderOutputBinding] = &[
+        ProviderOutputBinding {
+            port: "diport::Signer",
+            provider: "vault::VaultSigner",
+            consumer: "identity",
+            channels: RESOURCES,
+        },
+        ProviderOutputBinding {
+            port: "diport::KeyProvider",
+            provider: "vault::VaultKeyProvider",
+            consumer: "settings",
+            channels: RESOURCES,
+        },
+    ];
+
     fn provider_output(&self) -> DomainModuleResult {
         DomainModuleResult {
             resources: self.runtime_resources(),
             ..DomainModuleResult::default()
         }
     }
+}
+
+pub(crate) fn provider_output_bindings() -> Vec<ProviderOutputBinding> {
+    let mut bindings = Vec::new();
+    bindings.extend_from_slice(redis::RedisRuntimeDeps::OUTPUT_BINDINGS);
+    bindings.extend_from_slice(s3::S3RuntimeDeps::OUTPUT_BINDINGS);
+    bindings.extend_from_slice(vault::VaultRuntimeDeps::OUTPUT_BINDINGS);
+    bindings.extend_from_slice(PG_OUTPUT_BINDINGS);
+    bindings.extend_from_slice(OIDC_OUTPUT_BINDINGS);
+    bindings
 }
 
 #[cfg(test)]
@@ -98,6 +173,8 @@ mod tests {
     struct LabeledOutput(&'static str);
 
     impl ProviderOutput for LabeledOutput {
+        const OUTPUT_BINDINGS: &'static [bootstrap::ProviderOutputBinding] = &[];
+
         fn provider_output(&self) -> DomainModuleResult {
             DomainModuleResult {
                 probes: vec![probe(self.0)],
@@ -276,6 +353,8 @@ mod tests {
     }
 
     impl ProviderOutput for RecordingOutput {
+        const OUTPUT_BINDINGS: &'static [bootstrap::ProviderOutputBinding] = &[];
+
         fn provider_output(&self) -> DomainModuleResult {
             DomainModuleResult {
                 resources: vec![DynManagedResource::new_box(RecordingResource {

@@ -52,8 +52,13 @@ pub use domaintransport::{
     DomainTransportConfig, DomainTransportResolveError, DomainTransportUrl, ResolvedDomainTransport,
 };
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
-pub use module::{DomainBinding, DomainModuleResult, WorkerSpec, compose_bindings};
+pub use module::{
+    DomainBinding, DomainModuleResult, LifecycleChannel, ProviderOutputBinding, WorkerSpec,
+    compose_bindings,
+};
+pub use primitives::ListenerKind;
 pub use refreshstoredeps::{RefreshStoreConfig, RefreshStoreResolveError, ResolvedRefreshStore};
+pub use registry::DomainListenerBinding;
 pub use registry::{
     HealthProbe, HealthReporter, Registry, SubscriberBinding, SubscriberEffect, SubscriberExecution,
 };

@@ -5,7 +5,7 @@ pub(crate) mod protection;
 pub(crate) mod redaction;
 pub(crate) mod validate;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use manifest::ContractManifest;
@@ -68,14 +68,31 @@ fn load_contract(contracts_root: &Path, manifest_path: &Path) -> Result<Discover
 }
 
 fn collect_contract_tomls(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("读取 {} 元数据", dir.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("contract discovery 禁止符号链接目录：{}", dir.display());
+    }
+    if !metadata.is_dir() {
         return Ok(());
     }
     for entry in std::fs::read_dir(dir).with_context(|| format!("读目录 {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("读取 {} 类型", path.display()))?;
+        if file_type.is_symlink() {
+            bail!("contract discovery 禁止符号链接：{}", path.display());
+        }
+        if file_type.is_dir() {
             collect_contract_tomls(&path, out)?;
-        } else if path.file_name().and_then(|n| n.to_str()) == Some("contract.toml") {
+        } else if file_type.is_file()
+            && path.file_name().and_then(|n| n.to_str()) == Some("contract.toml")
+        {
             out.push(path);
         }
     }
@@ -211,5 +228,51 @@ mod tests {
         let root = std::path::Path::new("/contracts");
         let dir = std::path::Path::new("/contracts");
         assert!(path_segments(root, dir).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlinked_directory_and_contract_file() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+        let root = crate::testutil::unique_tmp("contract-discovery-symlink");
+        let outside = crate::testutil::unique_tmp("contract-discovery-outside");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        symlink(&outside, root.join("event"))?;
+        assert!(discover(&root).is_err());
+
+        std::fs::remove_file(root.join("event"))?;
+
+        let contract_dir = root.join("event/identity/v1/created");
+        std::fs::create_dir_all(&contract_dir)?;
+        let outside_manifest = outside.join("contract.toml");
+        std::fs::write(&outside_manifest, "outside")?;
+        symlink(&outside_manifest, contract_dir.join("contract.toml"))?;
+        assert!(discover(&root).is_err());
+
+        std::fs::remove_file(contract_dir.join("contract.toml"))?;
+        std::fs::write(
+            contract_dir.join("contract.toml"),
+            r#"id="identity.created"
+kind="event"
+domain="identity"
+version="v1"
+owner="identity"
+consistencyLevel="OutboxFact"
+lifecycle="draft"
+[schemas]
+payload="payload.schema.json"
+[capabilities.outbox]
+role="fact"
+"#,
+        )?;
+        let outside_schema = outside.join("payload.schema.json");
+        std::fs::write(&outside_schema, "{}")?;
+        symlink(&outside_schema, contract_dir.join("payload.schema.json"))?;
+        assert!(discover(&root).is_err());
+
+        std::fs::remove_dir_all(root)?;
+        std::fs::remove_dir_all(outside)?;
+        Ok(())
     }
 }

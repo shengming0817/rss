@@ -7,6 +7,8 @@
 //!   `cargo xtask assembly validate`     assembly-level DI provider 声明校验（RevocationStore 持久 provider 门）
 //!   `cargo xtask assembly generate-modules [--check]`
 //!                                      assembly.toml domains → committed modules_gen.rs（--check 为漂移门）
+//!   `cargo xtask graph assembly [--assembly <name>] [--format mermaid|json] [--check]`
+//!                                      assembly 静态声明图；runtime 双格式 committed，--check 守漂移
 //!   `cargo xtask archrules list|verify|matrix [--write|--check]`
 //!                                      ArchRules 派生索引与持久化 funnel 单源矩阵；verify/matrix --check 为 CI 门
 //!   `cargo xtask contract breaking [--against <git-ref>] [--deny]`
@@ -81,6 +83,7 @@ mod diagnostic;
 mod diffcov;
 mod doc_contracts;
 mod event_transport_guard;
+mod graph;
 mod inbox_cutover_guard;
 mod integration_shards;
 mod layerdeps;
@@ -126,6 +129,7 @@ enum Command {
     AssemblyGenerateModules {
         check: bool,
     },
+    GraphAssembly(graph::Options),
     ArchRulesList,
     ArchRulesVerify,
     ArchRulesMatrix(archrules::MatrixAction),
@@ -219,6 +223,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["runtime-deps", rest @ ..] => parse_runtime_deps(rest),
         ["contract", rest @ ..] => parse_contract(rest),
         ["assembly", rest @ ..] => parse_assembly(rest),
+        ["graph", rest @ ..] => graph::parse(rest).map(Command::GraphAssembly),
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["doc-contracts"] => Ok(Command::DocContracts),
@@ -257,7 +262,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
-                "未知命令: {other:?}；用法含 localtx-coverage | ci-core | ci-core-prerequisites | ci-core-tests --partition M/N | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
+                "未知命令: {other:?}；用法含 graph assembly | localtx-coverage | ci-core | ci-core-prerequisites | ci-core-tests --partition M/N | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
             )
         }
     }
@@ -604,6 +609,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ContractValidate => diagnostic::run_check(&contract::validate::ContractValidate),
         Command::AssemblyValidate => diagnostic::run_check(&assembly::AssemblyValidate),
         Command::AssemblyGenerateModules { check } => assembly_codegen::run(check),
+        Command::GraphAssembly(options) => graph::run(&options),
         Command::ArchRulesList => archrules::list(),
         Command::ArchRulesVerify => diagnostic::run_check(&archrules::ArchRules),
         Command::ArchRulesMatrix(action) => archrules::matrix(action),
@@ -772,6 +778,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("localtx-coverage"), "{error}");
+        assert!(error.to_string().contains("graph assembly"), "{error}");
         Ok(())
     }
 
@@ -826,6 +833,24 @@ mod tests {
     fn parse_command_assembly_generate_modules_rejects_bad_args() {
         assert!(parse_command(&s(&["assembly", "generate-modules", "--bogus"])).is_err());
         assert!(parse_command(&s(&["assembly", "generate-modules", "--check", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parse_command_graph_assembly_is_exact_and_fail_closed() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["graph", "assembly"]))?,
+            Command::GraphAssembly(graph::Options::default())
+        );
+        assert_eq!(
+            parse_command(&s(&["graph", "assembly", "--check"]))?,
+            Command::GraphAssembly(graph::Options::check_runtime())
+        );
+        assert!(parse_command(&s(&["graph"])).is_err());
+        assert!(parse_command(&s(&["graph", "assembly", "--format"])).is_err());
+        assert!(parse_command(&s(&["graph", "assembly", "--format", "--check"])).is_err());
+        assert!(parse_command(&s(&["graph", "assembly", "--assembly", "--check"])).is_err());
+        assert!(parse_command(&s(&["graph", "assembly", "--assembly", "../runtime"])).is_err());
+        Ok(())
     }
 
     #[test]
