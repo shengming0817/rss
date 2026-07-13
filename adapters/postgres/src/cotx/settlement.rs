@@ -149,6 +149,11 @@ impl<E> LocalTxRetryError<E> {
         self.class
     }
 
+    /// Borrow the domain error for closed-label diagnostics before it is returned to the caller.
+    pub(crate) fn error(&self) -> &E {
+        &self.error
+    }
+
     /// Recover the caller's original domain error.
     pub(crate) fn into_error(self) -> E {
         self.error

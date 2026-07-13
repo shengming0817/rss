@@ -5319,6 +5319,7 @@ dependencies = [
  "generated",
  "httpserve",
  "mockall",
+ "observ",
  "primitives",
  "rstest",
  "secure",

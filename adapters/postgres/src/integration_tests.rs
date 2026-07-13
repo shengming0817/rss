@@ -940,6 +940,21 @@ fn localtx_profile_classified(
     testkit::localtx::ClassifiedError::new(localtx_profile_category(error), error)
 }
 
+fn secret_repo_conformance_category(error: &SecretRepoError) -> testkit::ConformanceErrorCategory {
+    match error {
+        SecretRepoError::VersionConflict => testkit::ConformanceErrorCategory::Conflict,
+        SecretRepoError::Storage(_) => testkit::ConformanceErrorCategory::Storage,
+        _ => testkit::ConformanceErrorCategory::Other,
+    }
+}
+
+fn secret_repo_classified(
+    error: SecretRepoError,
+) -> testkit::localtx::ClassifiedError<SecretRepoError> {
+    let category = secret_repo_conformance_category(&error);
+    testkit::localtx::ClassifiedError::new(category, error)
+}
+
 async fn setup_localtx_profile_probe(store: &PgStore) -> Result<(), LocalTxProfileProbeError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS localtx_profile_probe (\
@@ -1028,11 +1043,11 @@ async fn localtx_profile_count(
     usize::try_from(count).map_err(|_| LocalTxProfileProbeError::Storage)
 }
 
-/// Real Postgres enrollment for every active LocalTx contract.
+/// Shared real Postgres enrollment for active LocalTx contracts other than settings secret publish.
 ///
-/// The five typed markers form the manifest-keyed registry. `localtx-coverage` derives each
-/// contract's canonical `txModel` and requires the corresponding exact helper set in this real
-/// adapter test; deleting a marker or probe fails the verify gate.
+/// These four typed markers plus the settings marker in the dedicated `PgSecretRepo` matrix form
+/// the manifest-keyed registry. `localtx-coverage` derives each contract's canonical `txModel` and
+/// requires the corresponding exact helper set; deleting a marker or probe fails the verify gate.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn localtx_postgres_backend_profiles_conformance() -> TestResult {
@@ -1054,16 +1069,11 @@ async fn localtx_postgres_backend_profiles_conformance() -> TestResult {
         ::generated::http::identity_v1::password_change::RouteMarker,
         ::vocab::http::LocalTx,
     > = ::generated::http::identity_v1::password_change::ROUTE;
-    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
-        ::generated::http::settings_v2::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::settings_v2::ROUTE;
     let _typed_enrollment = (
         LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES,
         LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT,
         LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH,
         LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE,
-        LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH,
     );
 
     let (_pg, store) = connect_pg().await?;
@@ -1130,6 +1140,7 @@ async fn localtx_postgres_backend_profiles_conformance() -> TestResult {
         || rejected_mutations.load(Ordering::Relaxed),
     ))
     .await?;
+
     ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
         || async {
             Err::<(), _>(localtx_profile_classified(
@@ -15000,7 +15011,7 @@ async fn tc1b_bundle_config_save_find_roundtrip() -> TestResult {
     setup_config(&store).await?;
     // 经 funnel：PgRuntimeDeps → for_domain::<Settings> → settings_bundle → into_parts（取 read config box）。
     let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::new(store));
-    let (configs, writer, _secrets) = handle
+    let (configs, writer, _secrets, _secret_writer) = handle
         .for_domain::<crate::caps::Settings>()
         .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();
@@ -15036,7 +15047,7 @@ async fn tc1c_bundle_writer_cotx_commits_config_and_outbox() -> TestResult {
     // store 即将移入 deps（PG-BUNDLE-POOL-03 无 pool accessor）→ 先 clone pool 供验证查询。
     let pool = store.pool.clone();
     let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::new(store));
-    let (_configs, writer, _secrets) = handle
+    let (_configs, writer, _secrets, _secret_writer) = handle
         .for_domain::<crate::caps::Settings>()
         .settings_bundle(fixed_clock_arc(), config_protections())
         .into_parts();
@@ -16288,25 +16299,22 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
 
 // ── PgSecretRepo：secret 引用坐标仓储集成测试（#1274）──────────────────────────
 //
-// ts1:  save → find round-trip（全字段回环）
 // ts1b: ref_version=None round-trip
 // ts2:  find_version 历史（精确版本）
-// ts3:  CAS 冲突（陈旧 + 跳版 → VersionConflict；恰 max+1 成功）
-// ts4:  delete tombstone + 幂等（latest_version 含 tombstone；历史行保留；不存在 key → no-op）
 // ts5:  storage 错误通道（关池 → SecretRepoError::Storage）
-// ts6:  跨租户隔离（find / find_version / delete 互不影响）
-// ts7:  delete + republish 版本不重置（version 单调）
 // ts8:  material-never-persisted 断言（information_schema.columns 列集校验）
+// ts9:  real rss_app LocalTx matrix（commit/rollback/tenant/CAS/tombstone/races）
+// ts10: database-enforced positive version and append-only privileges
 
-use settings::ports::{SecretEntry, SecretKey, SecretRepo, SecretRepoError, StoreId};
+use settings::ports::{
+    SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRepo,
+    SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId,
+};
 
-use crate::PgSecretRepo;
+use crate::{PgSecretRepo, PgSecretUnitOfWork};
 
 /// secret 测试用 canonical 租户 UUID（复用 co-tx 段 [`COTX_TENANT_A`] 同值）。
 const SECRET_TENANT_A: &str = COTX_TENANT_A;
-/// 第二租户（跨租户隔离 ts6）。
-const SECRET_TENANT_B: &str = CONFIG_TENANT_B;
-
 /// setup：应用 migration（含 secret_refs 表），清空 secret_refs（防测试间污染）。
 async fn setup_secret(store: &PgStore) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     store.run_migrations().await?;
@@ -16342,57 +16350,32 @@ fn make_secret_entry(
     )
 }
 
-/// ts1：save → find round-trip（store_id / ref_key / ref_version / version / tenant 全字段正确）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn ts1_secret_save_find_roundtrip() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp.db-password").unwrap();
+fn internal_secret_publish(entry: SecretEntry) -> SecretInternalPublishCommand {
+    SecretInternalPublishCommand::for_test(entry)
+}
 
-    // 未写入 → None。
-    assert!(
-        repo.find(settings_scope(tenant), &key).await?.is_none(),
-        "未写入 → None"
-    );
+fn http_secret_publish(entry: SecretEntry) -> Result<SecretPublishCommand, SecretRepoError> {
+    SecretPublishCommand::for_test(entry)
+}
 
-    repo.save(
-        settings_scope(tenant),
-        make_secret_entry(
-            "myapp.db-password",
-            "vault",
-            "secret/data/myapp",
-            Some("v2"),
-            1,
-            tenant,
-        ),
+fn secret_republish(entry: SecretEntry) -> SecretRepublishCommand {
+    SecretRepublishCommand::for_test(entry)
+}
+
+async fn secret_ref_row_count(
+    store: &PgStore,
+    tenant: TenantId,
+    key: &SecretKey,
+) -> Result<usize, SecretRepoError> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
     )
-    .await?;
-
-    let found = repo.find(settings_scope(tenant), &key).await?.unwrap();
-    assert_eq!(found.key().as_str(), "myapp.db-password", "key 回环");
-    assert_eq!(
-        found.secret_ref().store_id().as_str(),
-        "vault",
-        "store_id 回环"
-    );
-    assert_eq!(
-        found.secret_ref().ref_key(),
-        "secret/data/myapp",
-        "ref_key 回环"
-    );
-    assert_eq!(
-        found.secret_ref().ref_version(),
-        Some("v2"),
-        "ref_version 回环"
-    );
-    assert_eq!(found.version(), 1, "version 回环");
-    assert_eq!(found.tenant(), tenant, "tenant 回环（tenant-correct）");
-
-    store.shutdown().await?;
-    Ok(())
+    .bind(tenant.as_uuid().to_string())
+    .bind(key.as_str())
+    .fetch_one(&store.pool)
+    .await
+    .map_err(|error| SecretRepoError::Storage(Box::new(error)))?;
+    usize::try_from(count).map_err(|error| SecretRepoError::Storage(Box::new(error)))
 }
 
 /// ts1b：ref_version=None（NULL=latest）round-trip。
@@ -16402,20 +16385,22 @@ async fn ts1b_secret_save_find_ref_version_null() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
+    let writer = PgSecretUnitOfWork::new(&store);
     let tenant = secret_tenant_a();
 
-    repo.save(
-        settings_scope(tenant),
-        make_secret_entry(
-            "myapp.api-key",
-            "k8s-secrets",
-            "ns/my-secret",
-            None,
-            1,
-            tenant,
-        ),
-    )
-    .await?;
+    writer
+        .publish_internal(
+            settings_scope(tenant),
+            internal_secret_publish(make_secret_entry(
+                "myapp.api-key",
+                "k8s-secrets",
+                "ns/my-secret",
+                None,
+                1,
+                tenant,
+            )),
+        )
+        .await?;
 
     let found = repo
         .find(
@@ -16441,26 +16426,36 @@ async fn ts2_secret_find_version_history() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_secret(&store).await?;
     let repo = PgSecretRepo::new(&store);
+    let writer = PgSecretUnitOfWork::new(&store);
     let tenant = secret_tenant_a();
     let key = SecretKey::parse("myapp.db-pass").unwrap();
 
-    repo.save(
-        settings_scope(tenant),
-        make_secret_entry("myapp.db-pass", "vault", "secret/v1", None, 1, tenant),
-    )
-    .await?;
-    repo.save(
-        settings_scope(tenant),
-        make_secret_entry(
-            "myapp.db-pass",
-            "vault",
-            "secret/v2",
-            Some("rev-2"),
-            2,
-            tenant,
-        ),
-    )
-    .await?;
+    writer
+        .publish_internal(
+            settings_scope(tenant),
+            internal_secret_publish(make_secret_entry(
+                "myapp.db-pass",
+                "vault",
+                "secret/v1",
+                None,
+                1,
+                tenant,
+            )),
+        )
+        .await?;
+    writer
+        .publish_internal(
+            settings_scope(tenant),
+            internal_secret_publish(make_secret_entry(
+                "myapp.db-pass",
+                "vault",
+                "secret/v2",
+                Some("rev-2"),
+                2,
+                tenant,
+            )),
+        )
+        .await?;
 
     // find 取最高版本。
     let latest = repo.find(settings_scope(tenant), &key).await?.unwrap();
@@ -16495,111 +16490,6 @@ async fn ts2_secret_find_version_history() -> TestResult {
     Ok(())
 }
 
-/// ts3：CAS——陈旧版本与跳版均 VersionConflict；恰 max+1 成功。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn ts3_secret_save_cas_conflict() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp.token").unwrap();
-
-    testkit::repo_conformance::assert_versioned_cas_repo(
-        "secret/tok".to_string(),
-        "secret/tok-b".to_string(),
-        "secret/tok-c".to_string(),
-        "secret/tok-v2".to_string(),
-        |version, marker| {
-            let repo = &repo;
-            async move {
-                repo.save(
-                    settings_scope(tenant),
-                    make_secret_entry("myapp.token", "vault", &marker, None, version, tenant),
-                )
-                .await
-            }
-        },
-        || {
-            let repo = &repo;
-            let key = &key;
-            async move {
-                repo.find(settings_scope(tenant), key)
-                    .await
-                    .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
-            }
-        },
-        |e| matches!(e, SecretRepoError::VersionConflict),
-    )
-    .await?;
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// ts4：delete tombstone + 幂等（find → None；latest_version 含 tombstone；历史行保留；再删 no-op；
-/// 不存在 key → no-op）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn ts4_secret_delete_tombstones_and_is_idempotent() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp.cred").unwrap();
-
-    testkit::repo_conformance::assert_tombstone_repo(
-        "secret/cred".to_string(),
-        "secret/cred-v2".to_string(),
-        |version, marker| {
-            let repo = &repo;
-            async move {
-                repo.save(
-                    settings_scope(tenant),
-                    make_secret_entry("myapp.cred", "vault", &marker, None, version, tenant),
-                )
-                .await
-            }
-        },
-        || {
-            let repo = &repo;
-            let key = &key;
-            async move { repo.delete(settings_scope(tenant), key).await }
-        },
-        || {
-            let repo = &repo;
-            let key = &key;
-            async move {
-                repo.find(settings_scope(tenant), key)
-                    .await
-                    .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
-            }
-        },
-        |version| {
-            let repo = &repo;
-            let key = &key;
-            async move {
-                repo.find_version(settings_scope(tenant), key, version)
-                    .await
-                    .map(|entry| entry.map(|entry| entry.secret_ref().ref_key().to_string()))
-            }
-        },
-        || {
-            let repo = &repo;
-            let key = &key;
-            async move { repo.latest_version(settings_scope(tenant), key).await }
-        },
-    )
-    .await?;
-
-    // 不存在 key → no-op（无 panic / 无错误）。
-    let phantom = SecretKey::parse("myapp.nonexistent").unwrap();
-    repo.delete(settings_scope(tenant), &phantom).await?;
-
-    store.shutdown().await?;
-    Ok(())
-}
-
 /// ts5：storage 错误通道——关池后 find 返回 `SecretRepoError::Storage`（基础设施错误分层映射）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -16617,141 +16507,6 @@ async fn ts5_secret_find_maps_storage_error() -> TestResult {
     )
     .await?;
 
-    Ok(())
-}
-
-/// ts6：跨租户隔离——tenant A 的 secret 对 tenant B 不可见；各自独立版本空间；delete 互不影响。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn ts6_secret_cross_tenant_isolation() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let tenant_a = secret_tenant_a();
-    let tenant_b = TenantId::parse(SECRET_TENANT_B).unwrap();
-    let key = SecretKey::parse("shared.key").unwrap();
-
-    testkit::repo_conformance::assert_tenant_scoped_repo(
-        testkit::repo_conformance::TenantScopedCase {
-            tenant_a,
-            tenant_b,
-            a_marker: "vault-a".to_string(),
-            b_marker: "vault-b".to_string(),
-            save: |tenant, version, marker: String| {
-                let repo = &repo;
-                async move {
-                    repo.save(
-                        settings_scope(tenant),
-                        make_secret_entry(
-                            "shared.key",
-                            &marker,
-                            "secret/ref",
-                            None,
-                            version,
-                            tenant,
-                        ),
-                    )
-                    .await
-                }
-            },
-            delete: |tenant| {
-                let repo = &repo;
-                let key = &key;
-                async move { repo.delete(settings_scope(tenant), key).await }
-            },
-            current: |tenant| {
-                let repo = &repo;
-                let key = &key;
-                async move {
-                    repo.find(settings_scope(tenant), key).await.map(|entry| {
-                        entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
-                    })
-                }
-            },
-            history: |tenant, version| {
-                let repo = &repo;
-                let key = &key;
-                async move {
-                    repo.find_version(settings_scope(tenant), key, version)
-                        .await
-                        .map(|entry| {
-                            entry.map(|entry| entry.secret_ref().store_id().as_str().to_string())
-                        })
-                }
-            },
-            latest_version: |tenant| {
-                let repo = &repo;
-                let key = &key;
-                async move { repo.latest_version(settings_scope(tenant), key).await }
-            },
-        },
-    )
-    .await?;
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// ts7：delete + republish 版本不重置——delete 软删后 republish 取 latest_version+1（非重置回 1）。
-///
-/// 对标 tc10 config 同款回归防护：tombstone 使 version 单调，防止版本号复用。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn ts7_secret_delete_republish_version_not_reset() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_secret(&store).await?;
-    let repo = PgSecretRepo::new(&store);
-    let tenant = secret_tenant_a();
-    let key = SecretKey::parse("myapp.rotate-key").unwrap();
-
-    // 写 v1。
-    repo.save(
-        settings_scope(tenant),
-        make_secret_entry(
-            "myapp.rotate-key",
-            "vault",
-            "secret/rotate",
-            None,
-            1,
-            tenant,
-        ),
-    )
-    .await?;
-
-    // delete → tombstone v2。
-    repo.delete(settings_scope(tenant), &key).await?;
-    assert_eq!(
-        repo.latest_version(settings_scope(tenant), &key).await?,
-        Some(2),
-        "tombstone v2"
-    );
-
-    // republish：下一版本 = latest+1 = 3（不是重置回 1）。
-    let next = repo
-        .latest_version(settings_scope(tenant), &key)
-        .await?
-        .map_or(1, |v| v + 1);
-    assert_eq!(next, 3, "delete 软删后下一版本 = 3，不重置回 1");
-
-    repo.save(
-        settings_scope(tenant),
-        make_secret_entry(
-            "myapp.rotate-key",
-            "vault",
-            "secret/rotate-new",
-            Some("v3"),
-            next,
-            tenant,
-        ),
-    )
-    .await?;
-
-    // 活跃值恢复，版本 = 3。
-    let active = repo.find(settings_scope(tenant), &key).await?.unwrap();
-    assert_eq!(active.version(), 3, "republish 后版本 = 3");
-    assert_eq!(active.secret_ref().ref_key(), "secret/rotate-new");
-
-    store.shutdown().await?;
     Ok(())
 }
 
@@ -16791,6 +16546,857 @@ async fn ts8_secret_refs_table_has_no_material_column() -> TestResult {
     );
 
     store.shutdown().await?;
+    Ok(())
+}
+
+/// #1703：真实 `rss_app` + `PgSecretRepo` LocalTx 后端矩阵。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    // Commit proof: the typed conformance helper drives the real repository, then the owner
+    // independently confirms the physical row.
+    let commit_key_raw = format!("commit.{}", uuid::Uuid::new_v4().simple());
+    let commit_key = SecretKey::parse(&commit_key_raw).unwrap();
+    let repo = PgSecretRepo::new(&app);
+    let writer = PgSecretUnitOfWork::new(&app);
+    let commit_writes = AtomicUsize::new(0);
+    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+        || async {
+            writer
+                .publish(
+                    settings_scope(tenant_a),
+                    http_secret_publish(make_secret_entry(
+                        &commit_key_raw,
+                        "vault",
+                        "secret/commit",
+                        Some("rev-1"),
+                        1,
+                        tenant_a,
+                    ))
+                    .map_err(secret_repo_classified)?,
+                )
+                .await
+                .map_err(secret_repo_classified)?;
+            commit_writes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        },
+        || async {
+            repo.find(settings_scope(tenant_a), &commit_key)
+                .await
+                .map(|entry| entry.map(|entry| entry.version()))
+                .map_err(secret_repo_classified)
+        },
+        Some(1),
+        || commit_writes.load(Ordering::Relaxed),
+    ))
+    .await?;
+    let committed = repo
+        .find(settings_scope(tenant_a), &commit_key)
+        .await?
+        .expect("committed secret must be readable");
+    assert_eq!(committed.version(), 1);
+    let committed_rows: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+    )
+    .bind(tenant_a.as_uuid().to_string())
+    .bind(&commit_key_raw)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(committed_rows.0, 1, "commit must persist one real row");
+
+    // Explicit rollback proof: fail after INSERT but before settlement; no row may survive.
+    let rollback_key_raw = format!("rollback.{}", uuid::Uuid::new_v4().simple());
+    let rollback_key = SecretKey::parse(&rollback_key_raw).unwrap();
+    crate::secret_repo::fail_secret_save_after_insert_once(&rollback_key);
+    let rollback_result = writer
+        .publish(
+            settings_scope(tenant_a),
+            http_secret_publish(make_secret_entry(
+                &rollback_key_raw,
+                "vault",
+                "secret/rollback",
+                None,
+                1,
+                tenant_a,
+            ))?,
+        )
+        .await;
+    assert!(
+        matches!(rollback_result, Err(SecretRepoError::Storage(_))),
+        "post-insert fault must surface through storage"
+    );
+    let rolled_back_rows: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+    )
+    .bind(tenant_a.as_uuid().to_string())
+    .bind(&rollback_key_raw)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(rolled_back_rows.0, 0, "post-insert error must rollback");
+
+    // Tenant isolation: the same key has independent version spaces and values. The typed helper
+    // proves round-trip, cross-tenant invisibility before tenant B writes, and no interference.
+    let shared_key_raw = format!("tenant.{}", uuid::Uuid::new_v4().simple());
+    let shared_key = SecretKey::parse(&shared_key_raw).unwrap();
+    ::testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let store_id = if tenant == tenant_a {
+                "vault-a"
+            } else {
+                "vault-b"
+            };
+            writer.publish_internal(
+                settings_scope(tenant),
+                internal_secret_publish(make_secret_entry(
+                    &shared_key_raw,
+                    store_id,
+                    "secret/tenant",
+                    None,
+                    1,
+                    tenant,
+                )),
+            )
+        },
+        |tenant| {
+            let repo = &repo;
+            let shared_key = &shared_key;
+            async move {
+                repo.find(settings_scope(tenant), shared_key)
+                    .await
+                    .map(|entry| entry.is_some())
+            }
+        },
+        secret_repo_conformance_category,
+    )
+    .await?;
+    assert_eq!(
+        repo.find(settings_scope(tenant_a), &shared_key)
+            .await?
+            .expect("tenant A value")
+            .secret_ref()
+            .store_id()
+            .as_str(),
+        "vault-a"
+    );
+    assert_eq!(
+        repo.find(settings_scope(tenant_b), &shared_key)
+            .await?
+            .expect("tenant B value")
+            .secret_ref()
+            .store_id()
+            .as_str(),
+        "vault-b"
+    );
+
+    // Missing GUC is fail-closed for both read and write on the real serving connection.
+    let mut missing_read = app.pool.begin().await?;
+    let hidden: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+    )
+    .bind(tenant_a.as_uuid().to_string())
+    .bind(&shared_key_raw)
+    .fetch_one(&mut *missing_read)
+    .await?;
+    assert_eq!(hidden.0, 0, "missing tenant GUC must hide all rows");
+    missing_read.rollback().await?;
+
+    let missing_scope_mutations = AtomicUsize::new(0);
+    let missing_key_raw = format!("missing.{}", uuid::Uuid::new_v4().simple());
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let mut transaction = app.pool.begin().await.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(
+                    testkit::ConformanceErrorCategory::Authorization,
+                    error,
+                )
+            })?;
+            let result = sqlx::query(
+                "INSERT INTO secret_refs \
+                     (tenant_id, secret_key, version, store_id, ref_key) \
+                     VALUES ($1::uuid, $2, 1, 'vault', 'secret/missing-scope')",
+            )
+            .bind(tenant_a.as_uuid().to_string())
+            .bind(&missing_key_raw)
+            .execute(&mut *transaction)
+            .await;
+            transaction.rollback().await.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(
+                    testkit::ConformanceErrorCategory::Authorization,
+                    error,
+                )
+            })?;
+            match result {
+                Ok(done) => {
+                    missing_scope_mutations.fetch_add(
+                        usize::try_from(done.rows_affected()).unwrap_or(usize::MAX),
+                        Ordering::Relaxed,
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(testkit::localtx::ClassifiedError::new(
+                    testkit::ConformanceErrorCategory::Authorization,
+                    error,
+                )),
+            }
+        },
+        testkit::ConformanceErrorCategory::Authorization,
+        || async {
+            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
+                .bind(&missing_key_raw)
+                .fetch_one(&owner.pool)
+                .await
+                .map(|count| count.0)
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        0,
+        || missing_scope_mutations.load(Ordering::Relaxed),
+    ))
+    .await?;
+
+    // Probe anti-vacuity: a durable row under the wrong tenant must still break the global-key
+    // no-write snapshot. This red case prevents the provider matrix from regressing to an
+    // expected-coordinate-only query that would miss a bypass mutation.
+    let no_write_red_key = format!("no-write-red.{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
+         VALUES ($1::uuid, $2, 1, 'vault', 'secret/no-write-red')",
+    )
+    .bind(tenant_b.as_uuid().to_string())
+    .bind(&no_write_red_key)
+    .execute(&owner.pool)
+    .await?;
+    let no_write_red =
+        ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+            || async {
+                Err::<(), _>(testkit::localtx::ClassifiedError::new(
+                    testkit::ConformanceErrorCategory::Validation,
+                    std::io::Error::other("synthetic rejection"),
+                ))
+            },
+            testkit::ConformanceErrorCategory::Validation,
+            || async {
+                sqlx::query_as::<_, (i64,)>(
+                    "SELECT count(*) FROM secret_refs WHERE secret_key = $1",
+                )
+                .bind(&no_write_red_key)
+                .fetch_one(&owner.pool)
+                .await
+                .map(|count| count.0)
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+            },
+            0,
+            || 0,
+        ))
+        .await;
+    assert!(matches!(
+        no_write_red,
+        Err(
+            testkit::localtx::LocalTxConformanceError::SnapshotMismatch {
+                stage: testkit::localtx::LocalTxStage::RejectedSnapshot
+            }
+        )
+    ));
+    sqlx::query("DELETE FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2")
+        .bind(tenant_b.as_uuid().to_string())
+        .bind(&no_write_red_key)
+        .execute(&owner.pool)
+        .await?;
+
+    // RLS WITH CHECK proof is independent from the opaque repository scope: tenant A's serving
+    // transaction cannot write a tenant B row even when raw SQL supplies tenant B explicitly.
+    let cross_tenant_key_raw = format!("cross-rls.{}", uuid::Uuid::new_v4().simple());
+    let mut cross_tenant_tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant_a.as_uuid().to_string())
+        .execute(&mut *cross_tenant_tx)
+        .await?;
+    let cross_tenant_write = sqlx::query(
+        "INSERT INTO secret_refs \
+             (tenant_id, secret_key, version, store_id, ref_key) \
+         VALUES ($1::uuid, $2, 1, 'vault', 'secret/cross-tenant')",
+    )
+    .bind(tenant_b.as_uuid().to_string())
+    .bind(&cross_tenant_key_raw)
+    .execute(&mut *cross_tenant_tx)
+    .await;
+    assert!(
+        cross_tenant_write.is_err(),
+        "tenant A GUC must fail secret_refs WITH CHECK for tenant B"
+    );
+    cross_tenant_tx.rollback().await?;
+    let cross_tenant_rows: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
+    )
+    .bind(tenant_b.as_uuid().to_string())
+    .bind(&cross_tenant_key_raw)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(cross_tenant_rows.0, 0, "RLS rejection must write nothing");
+
+    let invalid_scope_key_raw = format!("scope-mismatch.{}", uuid::Uuid::new_v4().simple());
+    let invalid_scope_key = SecretKey::parse(&invalid_scope_key_raw).unwrap();
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            writer
+                .publish(
+                    settings_scope(tenant_a),
+                    http_secret_publish(make_secret_entry(
+                        &invalid_scope_key_raw,
+                        "vault",
+                        "secret/scope-mismatch",
+                        None,
+                        1,
+                        tenant_b,
+                    ))
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::Validation,
+                            error,
+                        )
+                    })?,
+                )
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Validation,
+                        error,
+                    )
+                })
+        },
+        testkit::ConformanceErrorCategory::Validation,
+        || async {
+            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
+                .bind(&invalid_scope_key_raw)
+                .fetch_one(&owner.pool)
+                .await
+                .map(|count| count.0)
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        0,
+        || crate::secret_repo::secret_save_attempts(&invalid_scope_key),
+    ))
+    .await?;
+
+    // Sequential stale CAS conflict is explicit and does not overwrite the head.
+    let stale = writer
+        .publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &commit_key_raw,
+                "vault",
+                "secret/stale",
+                None,
+                1,
+                tenant_a,
+            )),
+        )
+        .await;
+    assert!(matches!(stale, Err(SecretRepoError::VersionConflict)));
+    let gap = writer
+        .publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &commit_key_raw,
+                "vault",
+                "secret/gap",
+                None,
+                3,
+                tenant_a,
+            )),
+        )
+        .await;
+    assert!(
+        matches!(gap, Err(SecretRepoError::VersionConflict)),
+        "version gaps must fail closed"
+    );
+
+    // Two concurrent v2 writers serialize under the keyed lock: exactly one commit and one conflict.
+    let concurrent_key_raw = format!("concurrent.{}", uuid::Uuid::new_v4().simple());
+    let concurrent_key = SecretKey::parse(&concurrent_key_raw).unwrap();
+    writer
+        .publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &concurrent_key_raw,
+                "vault",
+                "secret/v1",
+                None,
+                1,
+                tenant_a,
+            )),
+        )
+        .await?;
+    let writer_a = PgSecretUnitOfWork::new(&app);
+    let writer_b = PgSecretUnitOfWork::new(&app);
+    let entry_a = make_secret_entry(
+        &concurrent_key_raw,
+        "vault",
+        "secret/v2-a",
+        None,
+        2,
+        tenant_a,
+    );
+    let entry_b = make_secret_entry(
+        &concurrent_key_raw,
+        "vault",
+        "secret/v2-b",
+        None,
+        2,
+        tenant_a,
+    );
+    crate::secret_repo::rendezvous_secret_key_lock_attempts(&concurrent_key, 2);
+    let (write_a, write_b) = tokio::join!(
+        writer_a.publish_internal(settings_scope(tenant_a), internal_secret_publish(entry_a)),
+        writer_b.publish_internal(settings_scope(tenant_a), internal_secret_publish(entry_b)),
+    );
+    let successes = usize::from(write_a.is_ok()) + usize::from(write_b.is_ok());
+    let conflicts = usize::from(matches!(write_a, Err(SecretRepoError::VersionConflict)))
+        + usize::from(matches!(write_b, Err(SecretRepoError::VersionConflict)));
+    assert_eq!((successes, conflicts), (1, 1));
+    assert_eq!(
+        repo.latest_version(settings_scope(tenant_a), &concurrent_key)
+            .await?,
+        Some(2)
+    );
+
+    // Concurrent delete/delete appends one tombstone; save/delete has only serialized outcomes.
+    let delete_a = PgSecretUnitOfWork::new(&app);
+    let delete_b = PgSecretUnitOfWork::new(&app);
+    crate::secret_repo::rendezvous_secret_key_lock_attempts(&concurrent_key, 2);
+    let (deleted_a, deleted_b) = tokio::join!(
+        delete_a.delete(settings_scope(tenant_a), &concurrent_key),
+        delete_b.delete(settings_scope(tenant_a), &concurrent_key),
+    );
+    deleted_a?;
+    deleted_b?;
+    let tombstones: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs \
+         WHERE tenant_id = $1::uuid AND secret_key = $2 AND deleted",
+    )
+    .bind(tenant_a.as_uuid().to_string())
+    .bind(&concurrent_key_raw)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        tombstones.0, 1,
+        "concurrent delete must append one tombstone"
+    );
+    assert!(
+        repo.find_version(settings_scope(tenant_a), &concurrent_key, 1)
+            .await?
+            .is_some(),
+        "tombstone append must preserve historical active versions"
+    );
+
+    let phantom_key_raw = format!("phantom.{}", uuid::Uuid::new_v4().simple());
+    let phantom_key = SecretKey::parse(&phantom_key_raw).unwrap();
+    writer
+        .delete(settings_scope(tenant_a), &phantom_key)
+        .await?;
+    assert_eq!(
+        repo.latest_version(settings_scope(tenant_a), &phantom_key)
+            .await?,
+        None,
+        "deleting an absent key must be a physical no-op"
+    );
+
+    // A tenant-scoped delete preserves that tenant's history and cannot disturb the same key in B.
+    writer.delete(settings_scope(tenant_a), &shared_key).await?;
+    assert!(
+        repo.find(settings_scope(tenant_a), &shared_key)
+            .await?
+            .is_none()
+    );
+    assert!(
+        repo.find_version(settings_scope(tenant_a), &shared_key, 1)
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        repo.latest_version(settings_scope(tenant_a), &shared_key)
+            .await?,
+        Some(2)
+    );
+    assert!(
+        repo.find(settings_scope(tenant_b), &shared_key)
+            .await?
+            .is_some(),
+        "tenant A delete must not hide tenant B's active value"
+    );
+    assert_eq!(
+        repo.latest_version(settings_scope(tenant_b), &shared_key)
+            .await?,
+        Some(1)
+    );
+
+    let race_key_raw = format!("race.{}", uuid::Uuid::new_v4().simple());
+    let race_key = SecretKey::parse(&race_key_raw).unwrap();
+    writer
+        .publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &race_key_raw,
+                "vault",
+                "secret/race-v1",
+                None,
+                1,
+                tenant_a,
+            )),
+        )
+        .await?;
+    let race_writer = PgSecretUnitOfWork::new(&app);
+    let race_deleter = PgSecretUnitOfWork::new(&app);
+    crate::secret_repo::rendezvous_secret_key_lock_attempts(&race_key, 2);
+    let (race_save, race_delete) = tokio::join!(
+        race_writer.publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &race_key_raw,
+                "vault",
+                "secret/race-v2",
+                None,
+                2,
+                tenant_a,
+            )),
+        ),
+        race_deleter.delete(settings_scope(tenant_a), &race_key),
+    );
+    assert!(
+        race_save.is_ok() || matches!(race_save, Err(SecretRepoError::VersionConflict)),
+        "save/delete race must not leak storage errors"
+    );
+    race_delete?;
+    assert!(
+        repo.find(settings_scope(tenant_a), &race_key)
+            .await?
+            .is_none(),
+        "delete wins or follows the save in both serial orders"
+    );
+    let deleted_version = repo
+        .latest_version(settings_scope(tenant_a), &race_key)
+        .await?
+        .expect("race must retain a tombstone head");
+    assert!(matches!(deleted_version, 2 | 3));
+
+    // Republish never reuses a version after the tombstone.
+    let republished_version = deleted_version + 1;
+    writer
+        .republish(
+            settings_scope(tenant_a),
+            secret_republish(make_secret_entry(
+                &race_key_raw,
+                "vault",
+                "secret/republished",
+                None,
+                republished_version,
+                tenant_a,
+            )),
+        )
+        .await?;
+    assert_eq!(
+        repo.find(settings_scope(tenant_a), &race_key)
+            .await?
+            .expect("republished value")
+            .version(),
+        republished_version
+    );
+
+    // Delete has no generated retry contract, but its advisory-lock wait is still bounded. Hold
+    // the exact key lock from an owner transaction and prove delete returns without replay/write.
+    let bounded_key_raw = format!("bounded-delete.{}", uuid::Uuid::new_v4().simple());
+    let bounded_key = SecretKey::parse(&bounded_key_raw).unwrap();
+    writer
+        .publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &bounded_key_raw,
+                "vault",
+                "secret/bounded-delete",
+                None,
+                1,
+                tenant_a,
+            )),
+        )
+        .await?;
+    let mut lock_holder = owner.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
+        .bind(tenant_a.as_uuid().to_string())
+        .bind(&bounded_key_raw)
+        .execute(&mut *lock_holder)
+        .await?;
+    let bounded_delete = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        writer.delete(settings_scope(tenant_a), &bounded_key),
+    )
+    .await
+    .expect("delete advisory lock wait must be bounded");
+    assert!(
+        matches!(bounded_delete, Err(SecretRepoError::Storage(_))),
+        "lock timeout must surface as storage without replay"
+    );
+    let bounded_tombstones: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM secret_refs \
+         WHERE tenant_id = $1::uuid AND secret_key = $2 AND deleted",
+    )
+    .bind(tenant_a.as_uuid().to_string())
+    .bind(&bounded_key_raw)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        bounded_tombstones.0, 0,
+        "timed-out delete must append nothing"
+    );
+    lock_holder.rollback().await?;
+
+    // The profile helpers below execute the real PgSecretRepo + retry_write + settlement funnel.
+    let retry_success_key_raw = format!("retry-success.{}", uuid::Uuid::new_v4().simple());
+    let retry_success_key = SecretKey::parse(&retry_success_key_raw).unwrap();
+    crate::secret_repo::fail_secret_save_transient_after_insert(&retry_success_key, 1);
+    let retry_conflict_key_raw = format!("retry-conflict.{}", uuid::Uuid::new_v4().simple());
+    let retry_conflict_key = SecretKey::parse(&retry_conflict_key_raw).unwrap();
+    let retry_permanent_key_raw = format!("retry-permanent.{}", uuid::Uuid::new_v4().simple());
+    let retry_permanent_key = SecretKey::parse(&retry_permanent_key_raw).unwrap();
+    crate::secret_repo::fail_secret_save_after_insert_once(&retry_permanent_key);
+    let retry_exhaustion_key_raw = format!("retry-exhaustion.{}", uuid::Uuid::new_v4().simple());
+    let retry_exhaustion_key = SecretKey::parse(&retry_exhaustion_key_raw).unwrap();
+    crate::secret_repo::fail_secret_save_transient_after_insert(&retry_exhaustion_key, 3);
+    ::testkit::repo_conformance::assert_retry_boundary_policy(
+        ::testkit::repo_conformance::RetryBoundaryCase::new(
+            ::testkit::repo_conformance::TransientSuccessPath::new(
+                || async {
+                    writer
+                        .publish(
+                            settings_scope(tenant_a),
+                            http_secret_publish(make_secret_entry(
+                                &retry_success_key_raw,
+                                "vault",
+                                "secret/retry-success",
+                                None,
+                                1,
+                                tenant_a,
+                            ))?,
+                        )
+                        .await
+                },
+                || crate::secret_repo::secret_save_attempts(&retry_success_key),
+                2,
+                || secret_ref_row_count(&owner, tenant_a, &retry_success_key),
+            ),
+            ::testkit::repo_conformance::ConflictPath::new(
+                || async {
+                    writer
+                        .publish(
+                            settings_scope(tenant_a),
+                            http_secret_publish(make_secret_entry(
+                                &retry_conflict_key_raw,
+                                "vault",
+                                "secret/retry-conflict-gap",
+                                None,
+                                2,
+                                tenant_a,
+                            ))?,
+                        )
+                        .await
+                },
+                || crate::secret_repo::secret_save_attempts(&retry_conflict_key),
+                || secret_ref_row_count(&owner, tenant_a, &retry_conflict_key),
+            ),
+            ::testkit::repo_conformance::PermanentPath::new(
+                || async {
+                    writer
+                        .publish(
+                            settings_scope(tenant_a),
+                            http_secret_publish(make_secret_entry(
+                                &retry_permanent_key_raw,
+                                "vault",
+                                "secret/retry-permanent",
+                                None,
+                                1,
+                                tenant_a,
+                            ))?,
+                        )
+                        .await
+                },
+                || crate::secret_repo::secret_save_attempts(&retry_permanent_key),
+                || secret_ref_row_count(&owner, tenant_a, &retry_permanent_key),
+            ),
+            ::testkit::repo_conformance::TransientExhaustionPath::new(
+                || async {
+                    writer
+                        .publish(
+                            settings_scope(tenant_a),
+                            http_secret_publish(make_secret_entry(
+                                &retry_exhaustion_key_raw,
+                                "vault",
+                                "secret/retry-exhaustion",
+                                None,
+                                1,
+                                tenant_a,
+                            ))?,
+                        )
+                        .await
+                },
+                || crate::secret_repo::secret_save_attempts(&retry_exhaustion_key),
+                3,
+                || secret_ref_row_count(&owner, tenant_a, &retry_exhaustion_key),
+            ),
+        ),
+        |error| conformance_retry_category(crate::tx_retry::classify_secret_repo_error(error)),
+    )
+    .await?;
+
+    let unknown_key_raw = format!("commit-unknown.{}", uuid::Uuid::new_v4().simple());
+    let unknown_key = SecretKey::parse(&unknown_key_raw).unwrap();
+    crate::secret_repo::fail_secret_save_commit_unknown_after_insert_once(&unknown_key);
+    ::testkit::localtx::assert_commit_unknown_no_replay(
+        ::testkit::localtx::CommitUnknownCase::new(
+            || async {
+                writer
+                    .publish(
+                        settings_scope(tenant_a),
+                        http_secret_publish(make_secret_entry(
+                            &unknown_key_raw,
+                            "vault",
+                            "secret/commit-unknown",
+                            None,
+                            1,
+                            tenant_a,
+                        ))
+                        .map_err(|error| {
+                            testkit::localtx::ClassifiedError::new(
+                                testkit::ConformanceErrorCategory::CommitUnknown,
+                                error,
+                            )
+                        })?,
+                    )
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::CommitUnknown,
+                            error,
+                        )
+                    })
+            },
+            testkit::ConformanceErrorCategory::CommitUnknown,
+            || crate::secret_repo::secret_save_attempts(&unknown_key),
+        ),
+    )
+    .await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// #1703：`secret_refs` 由 PostgreSQL 强制 append-only，且版本必须为正数。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts10_secret_refs_database_hardening() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let key = format!("hardening.{}", uuid::Uuid::new_v4().simple());
+
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
+         VALUES ($1::uuid, $2, 1, 'vault', 'secret/ref')",
+    )
+    .bind(&tenant)
+    .bind(&key)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE secret_refs SET ref_key = 'mutated' \
+         WHERE tenant_id = $1::uuid AND secret_key = $2",
+    )
+    .bind(&tenant)
+    .bind(&key)
+    .execute(&mut *tx)
+    .await;
+    assert!(
+        update.is_err(),
+        "rss_app must not UPDATE append-only secret_refs"
+    );
+    tx.rollback().await?;
+
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    let delete =
+        sqlx::query("DELETE FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2")
+            .bind(&tenant)
+            .bind(&key)
+            .execute(&mut *tx)
+            .await;
+    assert!(
+        delete.is_err(),
+        "rss_app must not DELETE append-only secret_refs"
+    );
+    tx.rollback().await?;
+
+    for invalid in [0_i64, -1] {
+        let invalid_version = sqlx::query(
+            "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
+             VALUES ($1::uuid, $2, $3, 'vault', 'secret/ref')",
+        )
+        .bind(&tenant)
+        .bind(format!("{key}.invalid{}", invalid.unsigned_abs()))
+        .bind(invalid)
+        .execute(&owner.pool)
+        .await;
+        assert!(
+            invalid_version.is_err(),
+            "database must reject non-positive secret version {invalid}"
+        );
+    }
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -18896,10 +19502,11 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
     Ok(())
 }
 
-// ── T20–T23: RLS 强制力证明（#1298）────────────────────────────────────────────
+// ── T20–T22: RLS 强制力证明（#1298）────────────────────────────────────────────
 //
-// 0009 迁移落地 ENABLE ROW LEVEL SECURITY + FORCE ROW LEVEL SECURITY + tenant_isolation policy（四表：
-// sessions / config_entries / roles / secret_refs）+ rss_app serving role；本组测试以 SET LOCAL ROLE
+// 0009 迁移落地 ENABLE ROW LEVEL SECURITY + FORCE ROW LEVEL SECURITY + tenant_isolation policy；
+// 本组覆盖 sessions / config_entries / roles，secret_refs 由 ts9 的真实 rss_app repository matrix 覆盖。
+// 本组测试以 SET LOCAL ROLE
 // rss_app 切换到非 owner 角色，验证 RLS 对 rss_app 生效（superuser 永远绕过 RLS，不适合做验证角色）。
 //
 // 测试结构：
@@ -19471,147 +20078,6 @@ async fn t22b_rls_role_bindings_enforces_tenant_isolation() -> TestResult {
         assert_eq!(
             cnt.0, 0,
             "t22b: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
-        );
-        tx.rollback().await?;
-    }
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// T23：RLS 强制力证明 — secret_refs 表（#1298）。
-///
-/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
-/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝；未设 rss.tenant_id → fail-closed（0 行）。
-/// 同 config_entries t21 范式（secret_refs 版本历史模型同 config_entries 0005 范式，#1298）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-// reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
-async fn t23_secret_refs_rls_isolation() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-
-    // 提权：superuser 需成为 rss_app member 才能 SET LOCAL ROLE；幂等（已是 member 则 no-op）。
-    sqlx::query("GRANT rss_app TO CURRENT_USER")
-        .execute(&store.pool)
-        .await?;
-
-    let tenant_a = uuid::Uuid::new_v4().to_string();
-    let tenant_b = uuid::Uuid::new_v4().to_string();
-    // 唯一 secret_key（防并发测试污染）。
-    let secret_key = format!("rls.test.secret.{}", uuid::Uuid::new_v4());
-
-    // Tx1：rss_app + tenant_a scope → INSERT secret_refs 行 → 成功（WITH CHECK pass）。
-    {
-        let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_a)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
-             VALUES ($1::uuid, $2, 1, $3, $4)",
-        )
-        .bind(&tenant_a)
-        .bind(&secret_key)
-        .bind("vault-a")
-        .bind("secret/rls-test")
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Tx1 INSERT tenant_a secret_ref failed (should succeed): {e}"))?;
-        tx.commit().await?;
-    }
-
-    // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
-    {
-        let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_a)
-            .execute(&mut *tx)
-            .await?;
-        let cnt: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
-        )
-        .bind(&tenant_a)
-        .bind(&secret_key)
-        .fetch_one(&mut *tx)
-        .await?;
-        assert_eq!(
-            cnt.0, 1,
-            "t23: rss_app + tenant_a scope — secret_ref 应可见（USING policy pass）"
-        );
-        tx.rollback().await?;
-    }
-
-    // Tx3：rss_app + tenant_b scope → SELECT 同 key → 不可见（跨租 USING 过滤）。
-    {
-        let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_b)
-            .execute(&mut *tx)
-            .await?;
-        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
-            .bind(&secret_key)
-            .fetch_one(&mut *tx)
-            .await?;
-        assert_eq!(
-            cnt.0, 0,
-            "t23: rss_app + tenant_b scope — tenant_a secret_ref 应不可见（跨租 RLS 过滤）"
-        );
-        tx.rollback().await?;
-    }
-
-    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b secret_ref → WITH CHECK 拒绝。
-    {
-        let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_a)
-            .execute(&mut *tx)
-            .await?;
-        let result = sqlx::query(
-            "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
-             VALUES ($1::uuid, $2, 1, $3, $4)",
-        )
-        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
-        .bind(format!("{secret_key}.cross"))
-        .bind("vault-b")
-        .bind("secret/cross-tenant")
-        .execute(&mut *tx)
-        .await;
-        assert!(
-            result.is_err(),
-            "t23: WITH CHECK 应拒绝 tenant_b secret_ref 写入（rss.tenant_id=tenant_a）"
-        );
-        tx.rollback().await?;
-    }
-
-    // Tx5（NULL fail-closed）：rss_app + 未设 rss.tenant_id → SELECT secret_refs → 0 行。
-    // current_setting('rss.tenant_id', true) 返 NULL → RLS USING 谓词 NULL → 所有行过滤，fail-closed。
-    {
-        let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
-            .execute(&mut *tx)
-            .await?;
-        // 不调用 set_config('rss.tenant_id', ...) → current_setting 返 NULL → 行不可见。
-        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
-            .bind(&secret_key)
-            .fetch_one(&mut *tx)
-            .await?;
-        assert_eq!(
-            cnt.0, 0,
-            "t23: rss_app + 未设 rss.tenant_id — current_setting NULL → RLS fail-closed（0 行）"
         );
         tx.rollback().await?;
     }

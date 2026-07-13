@@ -13,7 +13,7 @@
 //! - [`PgInfraDeps`]：framework/global（provider-agnostic、非单域）基建能力句柄——emitter / inbox /
 //!   dead_letter / checkpoint / saga / projection，不绑 `caps::*` 域。
 //! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同
-//!   store + 单 clock 扇出），内部预包装 read config + write co-tx UoW + secret 域形 DynX port；组合根经
+//!   store + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
 //!
 //! ## INVARIANT
@@ -28,13 +28,14 @@
 //!   anti-vacuity = 下方 `PgDomainDeps` 的 `compile_fail` doctest（Settings 句柄调 `session_lifecycle` 必败）。
 //! - **PG-BUNDLE-POOL-03**（Hard）：本模块无任何返回 `&PgStore` / `Arc<PgStore>` / `PgPool` 的公开 accessor；
 //!   `store` 字段私有，仅 in-crate repo 构造方法 clone `pub(crate) pool`。
-//! - **PG-BUNDLE-SETTINGS-04**（Hard，可见性 + sealed funnel + typed function choice）：settings 三件套
-//!   （read config / write co-tx UoW / secret）只能经 [`PgDomainDeps::settings_bundle`] 单次构造（funnel，
+//! - **PG-BUNDLE-SETTINGS-04**（Hard，可见性 + sealed funnel + typed function choice）：settings 四件套
+//!   （config read/write + secret read/write）只能经 [`PgDomainDeps::settings_bundle`] 单次构造（funnel，
 //!   私有字段 + 唯一公开构造 ⇒ 外部 crate 无法 mint），经 [`PgSettingsBundle::into_parts`] 解包；一次
-//!   `into_parts` 产出的三元同源（同一 store + 同一注入 clock，clock 经 `Arc` 扇出到两个 `PgConfigRepo`）。
-//!   三件为互不可换的域形 dyn 类型（`DynConfigRepo`/`DynConfigUnitOfWork`/`DynSecretRepo`）⇒ 注入两 service
-//!   时 read/write/secret **角色无法错插**（typed function choice）。散装 `config_repo()` / `secret_repo()`
-//!   accessor 已删除（不留兼容路径）。**强制边界**：funnel 守上游构造 + 角色槽位；`into_parts` 后三件为
+//!   `into_parts` 产出的四元同源（同一 store + 同一注入 clock，clock 经 `Arc` 扇出到两个 `PgConfigRepo`）。
+//!   四件为互不可换的域形 dyn 类型（`DynConfigRepo`/`DynConfigUnitOfWork`/`DynSecretRepo`/
+//!   `DynSecretUnitOfWork`）⇒ 注入 service 时 read/write **角色无法错插**（typed function choice）。
+//!   散装 `config_repo()` / `secret_repo()`
+//!   accessor 已删除（不留兼容路径）。**强制边界**：funnel 守上游构造 + 角色槽位；`into_parts` 后四件为
 //!   owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（单一 `PgRuntimeDeps` ⇒ 同 store，跨 bundle
 //!   重组为 contrived），故不声称该项。anti-vacuity = [`PgSettingsBundle`] 私有字段 `compile_fail` doctest
 //!   （须经 `into_parts` 唯一出口，不可旁路直读单字段）。
@@ -61,7 +62,7 @@ use diport::{Clock, DynCasStore, DynManagedResource, ManagedResource};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use eventexec::TenantAuthority;
 #[cfg(feature = "domain-settings")]
-use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo};
+use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork};
 #[cfg(feature = "test-support")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
@@ -74,7 +75,7 @@ use crate::projection_events::ProjectionWriteRegistry;
 #[cfg(feature = "domain-settings")]
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
-    PgConfigValueMaintenance, PgSecretRepo, PgSettingsConsumerTx,
+    PgConfigValueMaintenance, PgSecretRepo, PgSecretUnitOfWork, PgSettingsConsumerTx,
 };
 use crate::{
     DlxPayloadProtector, LegacyConfigPlaintextPolicy, PgCheckpointStore, PgCommandJournal,
@@ -799,9 +800,9 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
 
 #[cfg(feature = "domain-settings")]
 impl PgDomainDeps<caps::Settings> {
-    /// settings 域 durable 接线包：单一 `(store, clock)` → read config 仓储（`DynConfigRepo`）+ write co-tx
-    /// UoW（`DynConfigUnitOfWork`）+ secret 坐标仓储（`DynSecretRepo`），内部完成域形 DynX 包裹。取代已删除的
-    /// 散装 `config_repo()` / `secret_repo()`（PERSIST-003，不留兼容路径，PG-BUNDLE-SETTINGS-04）。
+    /// settings 域 durable 接线包：单一 `(store, clock)` → config 与 secret 各自的 read repo + write UoW，
+    /// 内部完成域形 DynX 包裹。取代已删除的散装 `config_repo()` / `secret_repo()`（PERSIST-003，不留兼容
+    /// 路径，PG-BUNDLE-SETTINGS-04）。
     ///
     /// `clock`（`Arc<dyn Clock>`，构造器位置参，必填、非 `Option`、不默认系统钟）：单一注入 clock 经
     /// `Arc::clone` 扇出到 read/write 两个 [`PgConfigRepo`] 实例（envelope `occurred_at` 源；write lane 经
@@ -830,6 +831,7 @@ impl PgDomainDeps<caps::Settings> {
                 self.projection_registry,
             )),
             secret_repo: DynSecretRepo::new_box(PgSecretRepo::new(&self.store)),
+            secret_uow: DynSecretUnitOfWork::new_box(PgSecretUnitOfWork::new(&self.store)),
         }
     }
 
@@ -862,16 +864,16 @@ impl PgDomainDeps<caps::Settings> {
     }
 }
 
-/// settings 域 durable 接线包（PERSIST-003 / #1424）：read config 仓储 + write co-tx UoW + secret 坐标仓储，
-/// 全部源自同一 `(store, clock)`、预包装为 settings 域 dyn DI port。
+/// settings 域 durable 接线包（PERSIST-003 / #1424）：config 与 secret 各自的 read repo + write UoW，全部
+/// 源自同一 `(store, clock)`、预包装为 settings 域 dyn DI port。
 ///
 /// 字段私有 + 唯一构造经 [`PgDomainDeps::settings_bundle`] + 唯一解包经 [`PgSettingsBundle::into_parts`]
 /// （PG-BUNDLE-SETTINGS-04，Hard）。**实际强制**（仅声明类型层真成立的）：
 /// - 外部 crate 无法 mint（私有字段 + 唯一公开构造 funnel）；
-/// - 一次 `into_parts` 产出的三元同源（同一 store + 同一注入 clock）；
-/// - 三件为互不可换的域形 dyn 类型 ⇒ 注入两 service 时 read/write/secret 角色无法错插（typed function choice）。
+/// - 一次 `into_parts` 产出的四元同源（同一 store + 同一注入 clock）；
+/// - 四件为互不可换的域形 dyn 类型 ⇒ config/secret 的 read/write 角色无法错插（typed function choice）。
 ///
-/// **不声称**：`into_parts` 后三件为 owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（funnel 守
+/// **不声称**：`into_parts` 后四件为 owned 值，类型层不阻止把不同 bundle 实例的 box 跨实例重组（funnel 守
 /// 上游构造 + 角色槽位，不守下游跨 bundle 重组；单一 `PgRuntimeDeps` ⇒ 同 store，跨 bundle 重组为 contrived）。
 /// 对标 GoCell `accesspg.Bundle` / `WithPGBundle`（单次解包注入聚合）。
 ///
@@ -885,7 +887,7 @@ impl PgDomainDeps<caps::Settings> {
 ///     protections: postgres::ConfigValueProtections,
 /// ) {
 ///     let b = d.settings_bundle(clock, protections);
-///     // E0616：字段 `config_repo` 私有——须经 `into_parts` 唯一出口取三元，不可旁路直读单字段（PG-BUNDLE-SETTINGS-04）。
+///     // E0616：字段 `config_repo` 私有——须经 `into_parts` 唯一出口取四元，不可旁路直读单字段（PG-BUNDLE-SETTINGS-04）。
 ///     let _ = b.config_repo;
 /// }
 /// ```
@@ -895,13 +897,13 @@ pub struct PgSettingsBundle {
     config_repo: Box<DynConfigRepo<'static>>,
     config_uow: Box<DynConfigUnitOfWork<'static>>,
     secret_repo: Box<DynSecretRepo<'static>>,
+    secret_uow: Box<DynSecretUnitOfWork<'static>>,
 }
 
 #[cfg(feature = "domain-settings")]
 impl PgSettingsBundle {
-    /// 受控解包：移出三件已包裹域形 DI box——`(read config, write co-tx UoW, secret)`，typed 位置逐参注入
-    /// 两个 service 构造器。三者类型互不可换（`DynConfigRepo` / `DynConfigUnitOfWork` / `DynSecretRepo`）⇒
-    /// 重排即编译错误。本 bundle 唯一对外读取路径（字段私有）。对标 GoCell `WithPGBundle(b)` 单次解包注入。
+    /// 受控解包：移出四件已包裹域形 DI box——`(config read, config write, secret read, secret write)`。
+    /// 四者类型互不可换，重排即编译错误。本 bundle 唯一对外读取路径（字段私有）。
     #[must_use]
     pub fn into_parts(
         self,
@@ -909,8 +911,14 @@ impl PgSettingsBundle {
         Box<DynConfigRepo<'static>>,
         Box<DynConfigUnitOfWork<'static>>,
         Box<DynSecretRepo<'static>>,
+        Box<DynSecretUnitOfWork<'static>>,
     ) {
-        (self.config_repo, self.config_uow, self.secret_repo)
+        (
+            self.config_repo,
+            self.config_uow,
+            self.secret_repo,
+            self.secret_uow,
+        )
     }
 }
 
@@ -1465,8 +1473,8 @@ mod tests {
     #[tokio::test]
     async fn settings_bundle_constructs_all_parts() {
         let s: PgDomainDeps<caps::Settings> = deps().handle().for_domain();
-        // 单 clock 经 Arc 扇出到 read/write 两个 config 实例；into_parts 解包三件套（纯 pool clone，无 I/O）。
-        let (_configs, _writer, _secrets) = s
+        // 单 clock 经 Arc 扇出到 read/write 两个 config 实例；into_parts 解包四件套（纯 pool clone，无 I/O）。
+        let (_configs, _config_writer, _secrets, _secret_writer) = s
             .settings_bundle(Arc::new(EpochClock) as Arc<dyn Clock>, protections())
             .into_parts();
     }

@@ -132,6 +132,17 @@ impl<'tx> TxCapability<'tx> {
     pub(crate) fn conn(&mut self) -> &mut PgConnection {
         self.conn
     }
+
+    /// Integration-only seam that simulates losing the commit acknowledgement after PostgreSQL
+    /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
+    /// production callers cannot construct or trigger it.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
 }
 
 /// tenant-scoped Postgres pool wrapper.
@@ -223,8 +234,31 @@ impl PgTenantPool {
             .into_result()
     }
 
+    /// Run a tenant-scoped write with a lock wait bound but without replaying the operation.
+    ///
+    /// This is for mutation paths such as an idempotent tombstone append that have no generated
+    /// LocalTx retry contract but still acquire a blocking PostgreSQL advisory lock.
+    #[cfg(feature = "domain-settings")]
+    pub(crate) async fn lock_bounded_write<S, T, F, E>(
+        &self,
+        scope: S,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> Result<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'c, 'tx> FnOnce(&'c mut TxCapability<'tx>) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        let tenant = scope.tenant();
+        tenant_scoped_write_inner(&self.pool, tenant, write, map_storage, true)
+            .await
+            .into_result()
+    }
+
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
-    #[cfg(feature = "domain-identity")]
+    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
     pub(crate) async fn retry_write<S, T, F, E>(
         &self,
         scope: S,
@@ -552,7 +586,18 @@ where
 {
     match result {
         Ok(value) => {
-            finish_local_tx_commit_result(tx.commit().await, value, map_storage, operation, tenant)
+            #[allow(unused_mut)]
+            let mut tx = tx;
+            #[cfg(all(test, feature = "integration"))]
+            let inject_commit_unknown = test_commit_unknown_after_commit_requested(&mut tx).await;
+            let commit_result = tx.commit().await;
+            #[cfg(all(test, feature = "integration"))]
+            let commit_result = if inject_commit_unknown && commit_result.is_ok() {
+                Err(sqlx::Error::PoolTimedOut)
+            } else {
+                commit_result
+            };
+            finish_local_tx_commit_result(commit_result, value, map_storage, operation, tenant)
         }
         Err(error) => finish_local_tx_rollback_result(
             tx.rollback().await,
@@ -562,6 +607,18 @@ where
             tenant,
         ),
     }
+}
+
+#[cfg(all(test, feature = "integration"))]
+async fn test_commit_unknown_after_commit_requested(tx: &mut Transaction<'_, Postgres>) -> bool {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT current_setting('rss.test_commit_unknown_after_commit', true)",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|value| value == "1")
 }
 
 fn finish_local_tx_commit_result<T, E>(
@@ -575,7 +632,9 @@ fn finish_local_tx_commit_result<T, E>(
         Ok(()) => LocalTxAttempt::committed(value),
         Err(error) => {
             let redacted_error = secure::redact_error(&error);
-            tracing::warn!(
+            // Actionable WARN ownership belongs to the typed runner: generic routing or HTTP
+            // LocalTx observation. This common funnel stays below WARN to avoid duplicate pages.
+            tracing::debug!(
                 target: "postgres",
                 operation,
                 tenant_id = %tenant,
@@ -601,7 +660,9 @@ where
         Ok(()) => LocalTxAttempt::rolled_back(error),
         Err(rollback_error) => {
             let redacted_error = secure::redact_error(&rollback_error);
-            tracing::warn!(
+            // Actionable WARN ownership belongs to the typed runner: generic routing or HTTP
+            // LocalTx observation. This common funnel stays below WARN to avoid duplicate pages.
+            tracing::debug!(
                 target: "postgres",
                 operation,
                 tenant_id = %tenant,
@@ -950,16 +1011,19 @@ mod tx_capability_tests {
             OutboxMetadata::new(0, tenant, contract),
         );
 
-        let co_tx = scoped
-            .co_tx_with_outbox(
-                settings::ports::TenantRepoScope::for_test(tenant),
-                &entry,
-                &env,
-                |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
-                map_storage,
-            )
-            .await;
-        assert!(co_tx.is_err());
+        #[cfg(feature = "domain-identity")]
+        {
+            let co_tx = scoped
+                .co_tx_with_outbox(
+                    settings::ports::TenantRepoScope::for_test(tenant),
+                    &entry,
+                    &env,
+                    |_| Box::pin(async { Ok::<(), ConfigRepoError>(()) }),
+                    map_storage,
+                )
+                .await;
+            assert!(co_tx.is_err());
+        }
 
         let retry_co_tx = scoped
             .retry_co_tx_with_outbox(
@@ -1015,15 +1079,24 @@ mod tx_capability_tests {
 #[cfg(all(test, any(feature = "domain-settings", feature = "domain-identity")))]
 mod retry_settlement_tests {
     #[cfg(feature = "domain-settings")]
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+    };
 
     use consistency::TxRetryClass;
+    #[cfg(feature = "domain-settings")]
+    use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 
     use super::LocalTxAttempt;
     #[cfg(feature = "domain-identity")]
-    use crate::tx_retry::{IDENTITY_CREDENTIAL_BOUNDARY, run_pg_localtx_retry};
+    use crate::tx_retry::IDENTITY_CREDENTIAL_BOUNDARY;
+    use crate::tx_retry::run_pg_localtx_retry;
     #[cfg(feature = "domain-settings")]
-    use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, run_pg_tx_retry};
+    use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, SETTINGS_SECRET_BOUNDARY, run_pg_tx_retry};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
     enum FakeError {
@@ -1050,14 +1123,98 @@ mod retry_settlement_tests {
         }
     }
 
+    #[cfg(feature = "domain-settings")]
+    #[derive(Default)]
+    struct CapturedFields(BTreeMap<String, String>);
+
+    #[cfg(feature = "domain-settings")]
+    impl Visit for CapturedFields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    #[cfg(feature = "domain-settings")]
+    #[derive(Clone, Default)]
+    struct WarnCapture {
+        records: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    #[cfg(feature = "domain-settings")]
+    impl Subscriber for WarnCapture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(fields.0);
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
+
+    #[cfg(feature = "domain-settings")]
+    fn assert_generic_unsafe_warning_scope(records: &[BTreeMap<String, String>]) {
+        let unsafe_warnings: Vec<_> = records
+            .iter()
+            .filter(|fields| fields.contains_key("final_status"))
+            .collect();
+        assert_eq!(
+            unsafe_warnings.len(),
+            2,
+            "generic unsafe settlements must each emit one routing WARN: {records:?}"
+        );
+        for final_status in ["commit_unknown", "rollback_failed"] {
+            assert!(
+                unsafe_warnings.iter().any(|fields| {
+                    fields.get("boundary").map(String::as_str)
+                        == Some(SETTINGS_SECRET_BOUNDARY.as_label())
+                        && fields.get("final_status").map(String::as_str) == Some(final_status)
+                }),
+                "metric routing scope has no matching WARN for {final_status}: {records:?}"
+            );
+        }
+        for fields in unsafe_warnings {
+            assert!(
+                fields
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "message" | "boundary" | "final_status")),
+                "generic unsafe WARN escaped the closed routing fields: {fields:?}"
+            );
+        }
+    }
+
     #[test]
     #[cfg(feature = "domain-settings")]
     fn retry_metrics_emit_closed_labels() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
+        let capture = WarnCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
+        let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
                 let attempts = AtomicU32::new(0);
@@ -1094,6 +1251,28 @@ mod retry_settlement_tests {
                 )
                 .await;
                 assert!(matches!(exhausted, Err(FakeError::Transient)));
+
+                for terminal in [
+                    LocalTxAttempt::<(), _>::commit_unknown(FakeError::Transient),
+                    LocalTxAttempt::rollback_failed(FakeError::Transient),
+                ] {
+                    let calls = AtomicU32::new(0);
+                    let mut terminal = Some(terminal);
+                    let result = run_pg_tx_retry(
+                        SETTINGS_SECRET_BOUNDARY,
+                        |_attempt| {
+                            calls.fetch_add(1, Ordering::Relaxed);
+                            core::future::ready(match terminal.take() {
+                                Some(attempt) => attempt,
+                                None => LocalTxAttempt::committed(()),
+                            })
+                        },
+                        classify_fake,
+                    )
+                    .await;
+                    assert!(result.is_err());
+                    assert_eq!(calls.load(Ordering::Relaxed), 1);
+                }
             });
         });
         let rendered = handle.render();
@@ -1108,9 +1287,143 @@ mod retry_settlement_tests {
         assert!(rendered.contains("status=\"success\""), "{rendered}");
         assert!(rendered.contains("status=\"conflict\""), "{rendered}");
         assert!(rendered.contains("status=\"exhausted\""), "{rendered}");
+        assert!(rendered.contains("tx_settlement_final_total"), "{rendered}");
+        assert!(
+            rendered.contains("boundary=\"settings.secret\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("final_status=\"commit_unknown\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("final_status=\"rollback_failed\""),
+            "{rendered}"
+        );
         assert!(
             !rendered.contains("localtx_"),
-            "generic retry must not emit LocalTx telemetry: {rendered}"
+            "generic retry must not emit contract-attributed LocalTx telemetry: {rendered}"
+        );
+        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        assert_generic_unsafe_warning_scope(&records);
+        Ok(())
+    }
+
+    #[cfg(feature = "domain-settings")]
+    fn settings_secret_observation()
+    -> Result<observ::LocalTxObservation, Box<dyn std::error::Error + Send + Sync>> {
+        use settings::ports::{SecretEntry, SecretKey, SecretPublishCommand, StoreId};
+
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?;
+        let entry = SecretEntry::hydrate(
+            SecretKey::parse("test.secret")?,
+            StoreId::parse("vault")?,
+            "test/secret",
+            None,
+            tenant,
+            1,
+        );
+        Ok(SecretPublishCommand::for_test(entry)?.into_parts().1)
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "domain-settings")]
+    async fn settings_localtx_retry_accepts_generated_observation()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let result = run_pg_localtx_retry(
+            SETTINGS_SECRET_BOUNDARY,
+            settings_secret_observation()?,
+            |_attempt| async { LocalTxAttempt::<(), FakeError>::committed(()) },
+            classify_fake,
+        )
+        .await;
+        assert_eq!(result, Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "domain-settings")]
+    fn localtx_unsafe_settlement_does_not_emit_generic_routing_telemetry()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let capture = WarnCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        let observation = settings_secret_observation()?;
+
+        let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let result = run_pg_localtx_retry(
+                    SETTINGS_SECRET_BOUNDARY,
+                    observation,
+                    |_attempt| async {
+                        LocalTxAttempt::<(), _>::commit_unknown(FakeError::Transient)
+                    },
+                    classify_fake,
+                )
+                .await;
+                assert_eq!(result, Err(FakeError::Transient));
+            });
+        });
+
+        let rendered = handle.render();
+        assert!(rendered.contains("localtx_final_total"), "{rendered}");
+        assert!(
+            !rendered.contains("tx_settlement_final_total"),
+            "HTTP LocalTx must not duplicate generic settlement metrics: {rendered}"
+        );
+        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            records.iter().any(|fields| {
+                fields.get("boundary").map(String::as_str) == Some("single_domain")
+                    && fields.get("final_status").map(String::as_str) == Some("commit_unknown")
+            }),
+            "HTTP LocalTx must retain its contract-attributed unsafe WARN: {records:?}"
+        );
+        assert!(
+            records.iter().all(|fields| {
+                fields.get("boundary").map(String::as_str)
+                    != Some(SETTINGS_SECRET_BOUNDARY.as_label())
+            }),
+            "HTTP LocalTx must not duplicate the generic routing WARN: {records:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "domain-settings")]
+    fn common_settlement_funnel_does_not_duplicate_runner_warnings()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let capture = WarnCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?;
+
+        let _commit_unknown = super::finish_local_tx_commit_result(
+            Err(sqlx::Error::PoolTimedOut),
+            (),
+            |_| FakeError::Permanent,
+            "test",
+            tenant,
+        );
+        let _rollback_failed = super::finish_local_tx_rollback_result::<(), _>(
+            Err(sqlx::Error::PoolTimedOut),
+            FakeError::Conflict,
+            |_| FakeError::Permanent,
+            "test",
+            tenant,
+        );
+
+        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            records.is_empty(),
+            "common settlement funnel must leave unsafe WARN ownership to the runner: {records:?}"
         );
         Ok(())
     }

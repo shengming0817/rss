@@ -62,7 +62,7 @@ use generated::event::{SubscriptionEffect, SubscriptionExecution};
 use primitives::ListenerKind;
 use vocab::{CoreError, CoreErrorKind, TenantId};
 
-use crate::secret_application::secret_publish_handler;
+use crate::secret_application::{SecretPublishState, secret_publish_handler};
 
 use crate::domain::{
     ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, ConfigTombstone, ConfigValue,
@@ -75,7 +75,7 @@ use crate::internal::mem::{
 use crate::internal::ports::FlagStore;
 use crate::ports::{
     ConfigRepo, ConfigUnitOfWork, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
-    TenantRepoScope,
+    DynSecretUnitOfWork, TenantRepoScope,
 };
 
 /// 配置路由组前缀（Primary listener，业务 API）。
@@ -959,13 +959,13 @@ fn config_error_response(
 
 /// settings 域 bootstrap 生命周期：挂载 config publish/get/delete/rollback 与 secret-publish 业务路由。
 ///
-/// 持有 config 应用服务 + secret 仓储端口（构造器必填位置参注入，缺失即编译错误，rust-standards §工程护栏）；
+/// 持有 config 应用服务 + secret read repo / mutation UoW（构造器必填位置参注入，缺失即编译错误）；
 /// `init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint` 从 generated SPEC 单源挂五条认证路由
 /// （对标 identity `IdentityDomain`）。
 ///
-/// secret 路由 State 持 `Arc<DynSecretRepo>`（而非 `SecretService`）：`SecretService` 含 `Box<DynSecretResolver>`
+/// secret 路由 State 持 read repo + mutation UoW（而非 `SecretService`）：后者含 `Box<DynSecretResolver>`
 /// （diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）⇒ 非 `Sync`、不可作 axum State；
-/// publish 路径不需 resolver，故经仓储端口直挂（见 `secret_application::publish_secret_to_repo`）。
+/// publish 路径不需 resolver，故经 typed ports 直挂。
 ///
 /// `configs_ready` 探针由组合根（`assemblies/runtime::wire_settings`）经 `DomainModuleResult` 注册——探针包
 /// `PgDbReadiness`（adapter 类型，域 crate 不可依赖 adapter），故不在此声明（层序约束）。
@@ -973,16 +973,22 @@ pub struct SettingsDomain {
     config: Arc<SettingsService>,
     config_query: ConfigQueryService,
     secret_repo: Arc<DynSecretRepo<'static>>,
+    secret_uow: Arc<DynSecretUnitOfWork<'static>>,
 }
 
 impl SettingsDomain {
     /// 组合根构造：注入 config 应用服务 + secret 仓储端口（已装配域形 repo / UoW provider）。
-    pub fn new(config: Arc<SettingsService>, secret_repo: Arc<DynSecretRepo<'static>>) -> Self {
+    pub fn new(
+        config: Arc<SettingsService>,
+        secret_repo: Arc<DynSecretRepo<'static>>,
+        secret_uow: Arc<DynSecretUnitOfWork<'static>>,
+    ) -> Self {
         let config_query = config.config_query_service();
         Self {
             config,
             config_query,
             secret_repo,
+            secret_uow,
         }
     }
 }
@@ -1056,7 +1062,8 @@ impl ::bootstrap::Domain for SettingsDomain {
 
         let config = Arc::clone(&self.config);
         let config_query = self.config_query.clone();
-        let secret_repo = Arc::clone(&self.secret_repo);
+        let secret_state =
+            SecretPublishState::new(Arc::clone(&self.secret_repo), Arc::clone(&self.secret_uow));
         reg.route_group::<Primary>(SETTINGS_ROUTE_PREFIX, move |rb| {
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(CONFIG_HTTP_ROUTE, config_publish_handler)?
@@ -1076,7 +1083,7 @@ impl ::bootstrap::Domain for SettingsDomain {
             )?;
             let rb = rb.mount(
                 GeneratedPrimaryEndpoint::new(SECRET_HTTP_ROUTE, secret_publish_handler)?
-                    .with_state(secret_repo),
+                    .with_state(secret_state),
             )?;
             Ok(rb)
         })?;
@@ -1398,25 +1405,37 @@ mod tests {
     use testkit::ContractRequest;
     use vocab::PrincipalKind;
 
-    /// in-mem secret 仓储端口（secret-publish 路由 State / SettingsDomain 构造替身）。
-    fn secret_repo_arc() -> Arc<DynSecretRepo<'static>> {
-        Arc::from(DynSecretRepo::new_box(InMemSecretRepo::from_shared(
-            new_secret_store(),
-        )))
+    /// 共享同一 in-mem store 的 secret read repo + mutation UoW。
+    fn secret_ports_arc() -> (
+        Arc<DynSecretRepo<'static>>,
+        Arc<DynSecretUnitOfWork<'static>>,
+    ) {
+        let store = new_secret_store();
+        (
+            Arc::from(DynSecretRepo::new_box(InMemSecretRepo::from_shared(
+                Arc::clone(&store),
+            ))),
+            Arc::from(DynSecretUnitOfWork::new_box(InMemSecretRepo::from_shared(
+                store,
+            ))),
+        )
     }
 
     /// 测试用 SettingsDomain 实例（config 服务 + secret 仓储端口，均 in-mem 替身）。
     fn settings_domain_for_test() -> SettingsDomain {
         let capture = CapturingEmitter::default();
+        let (secret_repo, secret_uow) = secret_ports_arc();
         SettingsDomain::new(
             Arc::new(service_with(&capture, InMemFlagStore::new())),
-            secret_repo_arc(),
+            secret_repo,
+            secret_uow,
         )
     }
 
     #[allow(clippy::expect_used, clippy::panic)]
     fn subscriber_effect_for(service: Arc<SettingsService>) -> SubscriberEffect {
-        let domain = SettingsDomain::new(service, secret_repo_arc());
+        let (secret_repo, secret_uow) = secret_ports_arc();
+        let domain = SettingsDomain::new(service, secret_repo, secret_uow);
         let mut registry = bootstrap::compose(&[&domain]).expect("settings domain composes");
         let binding = registry
             .drain_subscribers()

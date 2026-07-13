@@ -18,7 +18,7 @@ use diport::{
 use postgres::{ConfigValueProtections, PgDbReadiness, PgDomainDeps, PoolReadiness, caps};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use secure::{Plaintext, ProtectionContext};
-use settings::ports::DynSecretRepo;
+use settings::ports::{DynSecretRepo, DynSecretUnitOfWork};
 use settings::{SettingsDomain, SettingsService, empty_flag_store};
 use tokio_util::sync::CancellationToken;
 use vault::{VaultDomainDeps, caps as vault_caps};
@@ -150,7 +150,7 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         .context("verify settings config value key provider")?;
 
     let service_clock = Arc::clone(&clock);
-    let (configs, writer, secrets) = pg
+    let (configs, writer, secrets, secret_writer) = pg
         .settings_bundle(
             clock,
             ConfigValueProtections::new(read_key_provider, write_key_provider, key_name),
@@ -163,7 +163,8 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         Box::new(SharedClock(service_clock)),
     );
     let secret_repo: Arc<DynSecretRepo<'static>> = Arc::from(secrets);
-    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo);
+    let secret_uow: Arc<DynSecretUnitOfWork<'static>> = Arc::from(secret_writer);
+    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow);
     let output = module_result(pg_readiness, keyprovider_ready, readiness_worker)?;
 
     Ok(DomainBinding::new(DOMAIN_NAME, Box::new(domain), output))

@@ -21,6 +21,7 @@
 use consistency::EventEntry;
 use diport::OutboxEnvelopeParts;
 use dynosaur::dynosaur;
+use generated::http::settings_v2::{ROUTE as SECRET_HTTP_ROUTE, SPEC as SECRET_HTTP_SPEC};
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 pub use crate::domain::{
@@ -159,16 +160,89 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
     ) -> Result<(), ConfigRepoError>;
 }
 
-/// secret 引用仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
+/// `settings.secret-publish` HTTP 写命令。
+///
+/// entry 与 LocalTx observation 一起封装；字段私有，外部 adapter 只能消费，不能伪造 contract / boundary
+/// evidence。构造始终经本 crate 从 generated `ROUTE + SPEC.local_tx` fail-closed 取得证据。
+pub struct SecretPublishCommand {
+    entry: SecretEntry,
+    observation: observ::LocalTxObservation,
+}
+
+impl SecretPublishCommand {
+    pub(crate) fn from_entry(entry: SecretEntry) -> Result<Self, SecretRepoError> {
+        let observation = SECRET_HTTP_SPEC
+            .local_tx
+            .map(|spec| observ::LocalTxObservation::new(SECRET_HTTP_ROUTE, spec.boundary))
+            .ok_or_else(|| {
+                SecretRepoError::Storage(Box::new(std::io::Error::other(
+                    "generated settings.secret-publish contract is missing LocalTx metadata",
+                )))
+            })?;
+        Ok(Self { entry, observation })
+    }
+
+    /// Adapter 消费命令并取得不可伪造的 LocalTx evidence。
+    pub fn into_parts(self) -> (SecretEntry, observ::LocalTxObservation) {
+        (self.entry, self.observation)
+    }
+
+    /// 下游 adapter conformance 测试仍经同一 generated evidence funnel 构造。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(entry: SecretEntry) -> Result<Self, SecretRepoError> {
+        Self::from_entry(entry)
+    }
+}
+
+/// 非 HTTP 的应用内 publish 命令；刻意不携带 HTTP LocalTx observation。
+pub struct SecretInternalPublishCommand {
+    entry: SecretEntry,
+}
+
+impl SecretInternalPublishCommand {
+    pub(crate) fn from_entry(entry: SecretEntry) -> Self {
+        Self { entry }
+    }
+
+    /// Adapter 消费内部 publish entry。
+    pub fn into_entry(self) -> SecretEntry {
+        self.entry
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(entry: SecretEntry) -> Self {
+        Self::from_entry(entry)
+    }
+}
+
+/// rollback 重新发布历史引用的命令；与 HTTP / internal publish 类型互不可换。
+pub struct SecretRepublishCommand {
+    entry: SecretEntry,
+}
+
+impl SecretRepublishCommand {
+    pub(crate) fn from_entry(entry: SecretEntry) -> Self {
+        Self { entry }
+    }
+
+    /// Adapter 消费 republish entry。
+    pub fn into_entry(self) -> SecretEntry {
+        self.entry
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(entry: SecretEntry) -> Self {
+        Self::from_entry(entry)
+    }
+}
+
+/// secret 引用只读仓储 DI port（async；provider 可换：prod postgres / test in-mem / mockall）。
 ///
 /// 公开 [`SecretRepo`] 是 **Send 变体**，[`DynSecretRepo`] 是其 dyn-compatible wrapper
 /// （组合根经 `Box<DynSecretRepo>` 注入）。租户必经 [`TenantRepoScope`] opaque handle 做 RLS 分隔。
 ///
 /// **无 resolve**：secret 材料解析是 diport seam（`diport::SecretResolver`），不在此 port。
-/// **无 UoW**：secret 写入是 L1 本地事务，不需与 outbox 同事务（与 config 的 L2 OutboxFact 分叉）。
-///
-/// CAS 语义：`save` 要求 `entry.version()` = 当前最高版本 + 1
-/// （首版要求 `1`），否则 [`SecretRepoError::VersionConflict`]。tombstone 软删使 version 单调不重置。
+/// mutation 不进入本 read slot；所有写入只经 sibling [`SecretUnitOfWork`] 的 typed command。
 #[trait_variant::make(SecretRepo: Send)]
 #[dynosaur(pub DynSecretRepo = dyn(box) SecretRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
@@ -196,11 +270,37 @@ pub trait SecretRepoLocal: Send + Sync {
         scope: TenantRepoScope,
         key: &SecretKey,
     ) -> Result<Option<u64>, SecretRepoError>;
+}
 
-    /// 单次调用原子地比较并追加新版本：`entry.version()` 须等于当前最高版本 + 1，否则返回
-    /// [`SecretRepoError::VersionConflict`]，且不得插入、覆盖或产生任何部分写入。调用方不负责重试 CAS。
-    async fn save(&self, scope: TenantRepoScope, entry: SecretEntry)
-    -> Result<(), SecretRepoError>;
+/// Secret mutation UoW：HTTP publish、应用内 publish 与 rollback republish 由互不可换的 command 区分。
+///
+/// 三条 active-row 写路径共享相同 CAS 语义：entry version 必须等于当前最高版本 + 1；冲突返回
+/// [`SecretRepoError::VersionConflict`]。delete 追加 tombstone，version 单调不重置且幂等。
+#[trait_variant::make(SecretUnitOfWork: Send)]
+#[dynosaur(pub DynSecretUnitOfWork = dyn(box) SecretUnitOfWork, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+// reason: Send 由 trait_variant 变体 + dynosaur wrapper 承载；provider 必须可供 HTTP State 跨线程共享。
+pub trait SecretUnitOfWorkLocal: Send + Sync {
+    /// HTTP `settings.secret-publish` CAS；command 必带 generated LocalTx evidence。
+    async fn publish(
+        &self,
+        scope: TenantRepoScope,
+        command: SecretPublishCommand,
+    ) -> Result<(), SecretRepoError>;
+
+    /// 非 HTTP 应用 API publish；不得产生 HTTP contract telemetry。
+    async fn publish_internal(
+        &self,
+        scope: TenantRepoScope,
+        command: SecretInternalPublishCommand,
+    ) -> Result<(), SecretRepoError>;
+
+    /// rollback republish；不得产生 HTTP publish contract telemetry。
+    async fn republish(
+        &self,
+        scope: TenantRepoScope,
+        command: SecretRepublishCommand,
+    ) -> Result<(), SecretRepoError>;
 
     /// 软删除 key（tombstone）：version 单调不重置；幂等（latest 已 tombstone / key 不存在 ⇒ no-op）。
     async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError>;
@@ -248,7 +348,8 @@ macro_rules! classify_settings_ports {
 classify_settings_ports! {
     DynConfigRepo => diport::ReadEffect,
     DynConfigUnitOfWork => diport::OutboxEffect,
-    DynSecretRepo => diport::WriteEffect,
+    DynSecretRepo => diport::ReadEffect,
+    DynSecretUnitOfWork => diport::WriteEffect,
 }
 
 impl<T: SettingsPortEffect + ?Sized> settings_port_effect_sealed::Sealed for std::sync::Arc<T> {}
@@ -288,8 +389,13 @@ mod smoke {
         assert_effect::<DynConfigRepo<'static>, diport::ReadEffect, diport::LocalPrivilege>();
         assert_effect::<DynConfigUnitOfWork<'static>, diport::OutboxEffect, diport::LocalPrivilege>(
         );
-        assert_effect::<super::DynSecretRepo<'static>, diport::WriteEffect, diport::LocalPrivilege>(
+        assert_effect::<super::DynSecretRepo<'static>, diport::ReadEffect, diport::LocalPrivilege>(
         );
+        assert_effect::<
+            super::DynSecretUnitOfWork<'static>,
+            diport::WriteEffect,
+            diport::LocalPrivilege,
+        >();
     }
 
     struct NoopConfigRepo;
@@ -425,7 +531,11 @@ mod smoke {
     // SecretRepo smoke
     // ---------------------------------------------------------------------------
 
-    use super::{DynSecretRepo, SecretEntry, SecretKey, SecretRepo, SecretRepoError};
+    use super::{
+        DynSecretRepo, DynSecretUnitOfWork, SecretEntry, SecretInternalPublishCommand, SecretKey,
+        SecretPublishCommand, SecretRepo, SecretRepoError, SecretRepublishCommand,
+        SecretUnitOfWork,
+    };
 
     struct NoopSecretRepo;
     impl SecretRepo for NoopSecretRepo {
@@ -451,10 +561,28 @@ mod smoke {
         ) -> Result<Option<u64>, SecretRepoError> {
             Ok(None)
         }
-        async fn save(
+    }
+
+    struct NoopSecretUow;
+    impl SecretUnitOfWork for NoopSecretUow {
+        async fn publish(
             &self,
             _scope: TenantRepoScope,
-            _entry: SecretEntry,
+            _command: SecretPublishCommand,
+        ) -> Result<(), SecretRepoError> {
+            Ok(())
+        }
+        async fn publish_internal(
+            &self,
+            _scope: TenantRepoScope,
+            _command: SecretInternalPublishCommand,
+        ) -> Result<(), SecretRepoError> {
+            Ok(())
+        }
+        async fn republish(
+            &self,
+            _scope: TenantRepoScope,
+            _command: SecretRepublishCommand,
         ) -> Result<(), SecretRepoError> {
             Ok(())
         }
@@ -476,22 +604,43 @@ mod smoke {
         assert_send(&from_mock);
     }
 
+    #[test]
+    fn secret_uow_impls_load_into_dyn_wrapper() {
+        let from_impl: Box<DynSecretUnitOfWork> = DynSecretUnitOfWork::new_box(NoopSecretUow);
+        assert_send(&from_impl);
+        let from_mock: Box<DynSecretUnitOfWork> =
+            DynSecretUnitOfWork::new_box(MockTestSecretUow::new());
+        assert_send(&from_mock);
+    }
+
     // PORT-SHAPE-04：消费侧构造器必填位置参注入（ADR-004 C5）。
     struct SecretService {
         _repo: Box<DynSecretRepo<'static>>,
+        _uow: Box<DynSecretUnitOfWork<'static>>,
     }
     impl SecretService {
-        fn new(repo: Box<DynSecretRepo<'static>>) -> Self {
-            Self { _repo: repo }
+        fn new(repo: Box<DynSecretRepo<'static>>, uow: Box<DynSecretUnitOfWork<'static>>) -> Self {
+            Self {
+                _repo: repo,
+                _uow: uow,
+            }
         }
     }
 
     #[test]
     fn secret_repo_is_required_ctor_injectable() {
-        let svc = SecretService::new(DynSecretRepo::new_box(NoopSecretRepo));
+        let svc = SecretService::new(
+            DynSecretRepo::new_box(NoopSecretRepo),
+            DynSecretUnitOfWork::new_box(NoopSecretUow),
+        );
         assert_send(&svc._repo);
-        let svc_mock = SecretService::new(DynSecretRepo::new_box(MockTestSecretRepo::new()));
+        assert_send(&svc._uow);
+        let svc_mock = SecretService::new(
+            DynSecretRepo::new_box(MockTestSecretRepo::new()),
+            DynSecretUnitOfWork::new_box(MockTestSecretUow::new()),
+        );
         assert_send(&svc_mock._repo);
+        assert_send(&svc_mock._uow);
     }
 
     mockall::mock! {
@@ -513,8 +662,32 @@ mod smoke {
                 scope: TenantRepoScope,
                 key: &SecretKey,
             ) -> Result<Option<u64>, SecretRepoError>;
-            async fn save(&self, scope: TenantRepoScope, entry: SecretEntry) -> Result<(), SecretRepoError>;
-            async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError>;
+        }
+    }
+
+    mockall::mock! {
+        TestSecretUow {}
+        impl SecretUnitOfWork for TestSecretUow {
+            async fn publish(
+                &self,
+                scope: TenantRepoScope,
+                command: SecretPublishCommand,
+            ) -> Result<(), SecretRepoError>;
+            async fn publish_internal(
+                &self,
+                scope: TenantRepoScope,
+                command: SecretInternalPublishCommand,
+            ) -> Result<(), SecretRepoError>;
+            async fn republish(
+                &self,
+                scope: TenantRepoScope,
+                command: SecretRepublishCommand,
+            ) -> Result<(), SecretRepoError>;
+            async fn delete(
+                &self,
+                scope: TenantRepoScope,
+                key: &SecretKey,
+            ) -> Result<(), SecretRepoError>;
         }
     }
 }

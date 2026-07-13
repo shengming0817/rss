@@ -145,9 +145,10 @@ postgres UoW retry boundary 发射下列 metric（bare 名，emit site = `adapte
 
 | metric | 类型 | label | 语义 |
 |--------|------|-------|------|
-| `tx_retry_attempts_total` | Counter | `boundary`,`class` | 失败 attempt 按错误分类计数 |
-| `tx_retry_final_total` | Counter | `boundary`,`status` | 每次 UoW retry loop 的最终状态 |
-| `tx_retry_attempts` | Histogram | `boundary`,`status` | 每次 UoW 实际 attempt 数 |
+| `tx_retry_attempts_total` | Counter | `boundary`,`class`,`reason` | 失败 attempt 按错误分类与低基数原因计数 |
+| `tx_retry_final_total` | Counter | `boundary`,`status`,`reason` | 每次 UoW retry loop 的最终状态；无失败时 `reason=none` |
+| `tx_retry_attempts` | Histogram | `boundary`,`status`,`reason` | 每次 UoW 实际 attempt 数 |
+| `tx_settlement_final_total` | Counter | `boundary`,`final_status` | 不携带 HTTP contract identity 的 generic UoW 最后真实结算状态；全程未开始事务则不发 |
 
 label 闭值集纪律：
 
@@ -155,8 +156,20 @@ label 闭值集纪律：
   `ownership_lost`）。
 - `status` 闭合于 `consistency::TxRetryFinalStatus::as_label()`（`success`/`exhausted`/`conflict`/
   `permanent`/`ownership_lost`/`transient_not_retried`）。
-- `boundary` 只允许 adapter 内常量（当前 `settings.config` / `identity.credential`），不得从租户、key、
+- `reason` 是 adapter 从 error source chain 提取的闭值：`lock_timeout` / `deadlock` / `serialization` /
+  `connection` / `pool_timeout` / `pool_closed` / `database` / `database_unknown` / `settlement_wrapper` /
+  `storage` / `domain` / `none`；不得放原始错误、SQLSTATE、租户或 key。
+- `boundary` 闭合于 adapter 私有构造面的 `PgTxRetryBoundary::as_label()`（当前 `settings.config` /
+  `settings.secret` / `identity.credential`），不得从租户、key、
   SQL、handler 或请求输入派生。
+- `settings.secret` 的 generic retry telemetry 覆盖非 HTTP `publish_internal` 与 rollback `republish`；它只描述
+  repository CAS retry loop，不得附着 `settings.secret-publish` 的 contract identity。其真实事务终态只由
+  `tx_settlement_final_total` 按闭值 `boundary` / `final_status` 报告；不得从 `tx_retry_final_total` 反推。
+- `tx_settlement_final_total.final_status` 闭合于 `LocalTxFinalStatus::as_label()`；仅 generic
+  `run_pg_tx_retry` 发射。HTTP-aware `run_pg_localtx_retry` 继续只发 `localtx_*`，两条路径不会重复计数。
+- generic final metric 与 unsafe WARN 只由同一个 private settlement routing 派生，二者共用闭值
+  `boundary` / `final_status`；common cotx settlement funnel 不发 unsafe WARN，避免 HTTP LocalTx 与 generic
+  routing 重复。HTTP 路径的 actionable WARN 仍只由 `LocalTxObservation` 携 contract scope 发射。
 
 ### LocalTx Settlement Metrics（#1705）
 
@@ -174,6 +187,10 @@ label 与 trace 字段纪律：
 
 - `domain` / `contract_id` 只能从 generated `HttpRouteBinding<Marker, LocalTx>` 内的静态
   `ContractBinding` 取得；`observ` 独占 metric 名与 label key，adapter 不暴露或手写第二条 label 路径。
+- settings HTTP publish 的 observation 由域层封装进 `SecretPublishCommand`，Postgres adapter 只能消费该 opaque
+  command；`PgSecretUnitOfWork::publish_internal` 与 `republish` 使用不携带 observation 的独立 command 并只发
+  通用 `tx_retry_*` / `tx_settlement_*`。adapter 自行调用 secret-publish factory、手写 observation，或给 internal/rollback 路径发
+  `localtx_*`，都属于 contract attribution 污染。
 - `boundary`、`retry_class`、`final_status` 分别闭合于 `LocalTxBoundary::as_label()`、
   `TxRetryClass::as_label()`、`LocalTxFinalStatus::as_label()`；当前终态为 `committed` / `rolled_back` /
   `rollback_failed` / `commit_unknown`。

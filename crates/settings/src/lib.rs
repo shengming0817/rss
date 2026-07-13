@@ -48,16 +48,25 @@ pub fn empty_flag_store() -> FlagStoreBox {
     FlagStoreBox(Box::new(internal::mem::InMemFlagStore::new()))
 }
 
-/// 返回空 in-mem secret 仓储端口（`Arc<DynSecretRepo>`），供 seed / journey 注入 [`SettingsDomain::new`]
-/// 的 secret-publish 路由 State（#1430）。
+/// 返回共享同一 in-mem store 的 secret read repo + mutation UoW，供 seed / journey 注入
+/// [`SettingsDomain::new`] 的 secret-publish 路由 State（#1430）。
 ///
 /// 与 [`empty_flag_store`] 同治理姿态：`InMemSecretRepo` 保持 `pub(crate)` 封装，此工厂是唯一对外构造路径
-/// （调用方只需持有 `Arc<DynSecretRepo>`，无需命名内部类型）。仅 `test` / `seed-data` 可用（非生产 store）。
+/// 两个 dyn port 类型互不可换，且写入后 read slot 可立即观察同一 store。仅 `test` / `seed-data` 可用。
 #[cfg(any(test, feature = "seed-data"))]
-pub fn empty_secret_repo() -> std::sync::Arc<ports::DynSecretRepo<'static>> {
-    std::sync::Arc::from(ports::DynSecretRepo::new_box(
-        internal::mem::InMemSecretRepo::from_shared(internal::mem::new_secret_store()),
-    ))
+pub fn empty_secret_ports() -> (
+    std::sync::Arc<ports::DynSecretRepo<'static>>,
+    std::sync::Arc<ports::DynSecretUnitOfWork<'static>>,
+) {
+    let store = internal::mem::new_secret_store();
+    (
+        std::sync::Arc::from(ports::DynSecretRepo::new_box(
+            internal::mem::InMemSecretRepo::from_shared(std::sync::Arc::clone(&store)),
+        )),
+        std::sync::Arc::from(ports::DynSecretUnitOfWork::new_box(
+            internal::mem::InMemSecretRepo::from_shared(store),
+        )),
+    )
 }
 
 // ---------------------------------------------------------------------------

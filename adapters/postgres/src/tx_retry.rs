@@ -2,7 +2,9 @@
 
 use std::error::Error;
 use std::future::Future;
-use std::sync::Mutex;
+use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use consistency::{
@@ -11,19 +13,47 @@ use consistency::{
 };
 #[cfg(feature = "domain-identity")]
 use identity::ports::IdentityError;
-#[cfg(feature = "domain-identity")]
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use observ::LocalTxObservation;
 #[cfg(feature = "domain-settings")]
-use settings::ports::ConfigRepoError;
+use settings::ports::{ConfigRepoError, SecretRepoError};
 
 use crate::cotx::{LocalTxAttempt, LocalTxRetryError};
 
-/// Retry boundary label for settings config UoW writes.
+/// Closed Postgres retry-routing boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PgTxRetryBoundary {
+    #[cfg(feature = "domain-settings")]
+    SettingsConfig,
+    #[cfg(feature = "domain-settings")]
+    SettingsSecret,
+    #[cfg(feature = "domain-identity")]
+    IdentityCredential,
+}
+
+impl PgTxRetryBoundary {
+    pub(crate) const fn as_label(self) -> &'static str {
+        match self {
+            #[cfg(feature = "domain-settings")]
+            Self::SettingsConfig => "settings.config",
+            #[cfg(feature = "domain-settings")]
+            Self::SettingsSecret => "settings.secret",
+            #[cfg(feature = "domain-identity")]
+            Self::IdentityCredential => "identity.credential",
+        }
+    }
+}
+
+/// Retry boundary for settings config UoW writes.
 #[cfg(feature = "domain-settings")]
-pub(crate) const SETTINGS_CONFIG_BOUNDARY: &str = "settings.config";
-/// Retry boundary label for identity credential UoW writes.
+pub(crate) const SETTINGS_CONFIG_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsConfig;
+/// Retry boundary for settings secret CAS writes.
+#[cfg(feature = "domain-settings")]
+pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsSecret;
+/// Retry boundary for identity credential UoW writes.
 #[cfg(feature = "domain-identity")]
-pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: &str = "identity.credential";
+pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: PgTxRetryBoundary =
+    PgTxRetryBoundary::IdentityCredential;
 
 /// Classify a SQLSTATE code.
 pub(crate) fn classify_sqlstate(code: Option<&str>) -> TxRetryClass {
@@ -78,6 +108,16 @@ pub(crate) fn classify_config_repo_error(error: &ConfigRepoError) -> TxRetryClas
     }
 }
 
+/// Classify settings secret repository errors.
+#[cfg(feature = "domain-settings")]
+pub(crate) fn classify_secret_repo_error(error: &SecretRepoError) -> TxRetryClass {
+    match error {
+        SecretRepoError::VersionConflict => TxRetryClass::Conflict,
+        SecretRepoError::Storage(source) => classify_source(source.as_ref()),
+        _ => TxRetryClass::Permanent,
+    }
+}
+
 /// Classify identity repository/UoW errors.
 #[cfg(feature = "domain-identity")]
 pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
@@ -91,7 +131,7 @@ pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
 /// Run a Postgres UoW under the default retry policy and emit closed-label metrics.
 #[cfg(feature = "domain-settings")]
 pub(crate) async fn run_pg_tx_retry<T, E, Op, OpFut, Classify>(
-    boundary: &'static str,
+    boundary: PgTxRetryBoundary,
     op: Op,
     classify: Classify,
 ) -> Result<T, E>
@@ -99,15 +139,17 @@ where
     Op: FnMut(u32) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
+    E: Error + Send + Sync + 'static,
 {
-    let (result, _, _) = run_pg_tx_retry_core(boundary, op, classify, |_, _, _| {}).await;
+    let (result, _, settlement) = run_pg_tx_retry_core(boundary, op, classify, |_, _, _| {}).await;
+    record_generic_settlement(boundary, settlement);
     result
 }
 
 /// Run a typed LocalTx Postgres UoW and emit retry and settlement observability.
-#[cfg(feature = "domain-identity")]
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 pub(crate) async fn run_pg_localtx_retry<T, E, Op, OpFut, Classify>(
-    operation_boundary: &'static str,
+    operation_boundary: PgTxRetryBoundary,
     observation: LocalTxObservation,
     op: Op,
     classify: Classify,
@@ -116,6 +158,7 @@ where
     Op: FnMut(u32) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
+    E: Error + Send + Sync + 'static,
 {
     let (result, report, settlement) = run_pg_tx_retry_core(
         operation_boundary,
@@ -131,7 +174,7 @@ where
 }
 
 async fn run_pg_tx_retry_core<T, E, Op, OpFut, Classify, OnFailed>(
-    boundary: &'static str,
+    boundary: PgTxRetryBoundary,
     mut op: Op,
     classify: Classify,
     on_failed: OnFailed,
@@ -141,8 +184,10 @@ where
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
     OnFailed: Fn(u32, TxRetryClass, Option<LocalTxFinalStatus>),
+    E: Error + Send + Sync + 'static,
 {
     let last_settlement = Mutex::new(None);
+    let last_reason = Mutex::new("none");
     let (result, report) = run_tx_retry(
         TxRetryPolicy::default(),
         |attempt| {
@@ -168,13 +213,22 @@ where
         },
         |error| {
             let class = error.class();
-            record_attempt(boundary, class);
+            let reason = retry_reason(error.error());
+            match last_reason.lock() {
+                Ok(mut last) => *last = reason,
+                Err(poisoned) => *poisoned.into_inner() = reason,
+            }
+            record_attempt(boundary, class, reason);
             class
         },
         sleep_delay,
     )
     .await;
-    record_final(boundary, report);
+    let reason = match last_reason.into_inner() {
+        Ok(reason) => reason,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    record_final(boundary, report, reason);
     let settlement = match last_settlement.into_inner() {
         Ok(settlement) => settlement,
         Err(poisoned) => poisoned.into_inner(),
@@ -188,26 +242,122 @@ where
 
 async fn sleep_delay(delay: Duration) {
     if !delay.is_zero() {
-        tokio::time::sleep(delay).await;
+        tokio::time::sleep(full_jitter(delay)).await;
     }
 }
 
-fn record_attempt(boundary: &'static str, class: TxRetryClass) {
+static RETRY_JITTER_SEQUENCE: LazyLock<AtomicU64> = LazyLock::new(|| {
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    AtomicU64::new(hasher.finish())
+});
+
+fn full_jitter(ceiling: Duration) -> Duration {
+    let sample = RETRY_JITTER_SEQUENCE
+        .fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
+        .wrapping_mul(0xbf58_476d_1ce4_e5b9)
+        .rotate_left(27);
+    full_jitter_from_sample(ceiling, sample)
+}
+
+fn full_jitter_from_sample(ceiling: Duration, sample: u64) -> Duration {
+    let max_nanos = u64::try_from(ceiling.as_nanos()).unwrap_or(u64::MAX);
+    if max_nanos == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_nanos(sample % max_nanos.saturating_add(1))
+}
+
+fn retry_reason(error: &(dyn Error + 'static)) -> &'static str {
+    let mut current = Some(error);
+    while let Some(source) = current {
+        if let Some(error) = source.downcast_ref::<sqlx::Error>() {
+            return sqlx_retry_reason(error);
+        }
+        current = source.source();
+    }
+    "domain"
+}
+
+fn sqlx_retry_reason(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::Database(database) => match database.code().as_deref() {
+            Some("55P03") => "lock_timeout",
+            Some("40P01") => "deadlock",
+            Some("40001") => "serialization",
+            Some(code) if code.starts_with("08") || code.starts_with("57P") => "connection",
+            Some(_) => "database",
+            None => "database_unknown",
+        },
+        sqlx::Error::PoolTimedOut => "pool_timeout",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::Io(_) | sqlx::Error::WorkerCrashed => "connection",
+        sqlx::Error::AnyDriverError(_) => "settlement_wrapper",
+        _ => "storage",
+    }
+}
+
+fn record_attempt(boundary: PgTxRetryBoundary, class: TxRetryClass, reason: &'static str) {
     metrics::counter!(
         "tx_retry_attempts_total",
-        "boundary" => boundary,
+        "boundary" => boundary.as_label(),
         "class" => class.as_label(),
+        "reason" => reason,
     )
     .increment(1);
 }
 
-fn record_final(boundary: &'static str, report: TxRetryReport) {
+#[derive(Clone, Copy)]
+struct GenericSettlementRouting {
+    boundary: PgTxRetryBoundary,
+    final_status: LocalTxFinalStatus,
+}
+
+impl GenericSettlementRouting {
+    fn emit(self) {
+        let boundary = self.boundary.as_label();
+        let final_status = self.final_status.as_label();
+        metrics::counter!(
+            "tx_settlement_final_total",
+            "boundary" => boundary,
+            "final_status" => final_status,
+        )
+        .increment(1);
+
+        if matches!(
+            self.final_status,
+            LocalTxFinalStatus::CommitUnknown | LocalTxFinalStatus::RollbackFailed
+        ) {
+            tracing::warn!(
+                target: "postgres",
+                boundary,
+                final_status,
+                "generic transaction completed with an unsafe settlement"
+            );
+        }
+    }
+}
+
+fn record_generic_settlement(boundary: PgTxRetryBoundary, settlement: Option<LocalTxFinalStatus>) {
+    let Some(final_status) = settlement else {
+        return;
+    };
+    GenericSettlementRouting {
+        boundary,
+        final_status,
+    }
+    .emit();
+}
+
+fn record_final(boundary: PgTxRetryBoundary, report: TxRetryReport, reason: &'static str) {
+    let boundary = boundary.as_label();
     if report.final_status() == TxRetryFinalStatus::Exhausted {
         tracing::warn!(
             target: "postgres",
             boundary,
             attempts = report.attempts(),
             status = report.final_status().as_label(),
+            reason,
             "transaction retry budget exhausted"
         );
     }
@@ -215,12 +365,14 @@ fn record_final(boundary: &'static str, report: TxRetryReport) {
         "tx_retry_final_total",
         "boundary" => boundary,
         "status" => report.final_status().as_label(),
+        "reason" => reason,
     )
     .increment(1);
     metrics::histogram!(
         "tx_retry_attempts",
         "boundary" => boundary,
         "status" => report.final_status().as_label(),
+        "reason" => reason,
     )
     .record(f64::from(report.attempts()));
 }
@@ -228,13 +380,38 @@ fn record_final(boundary: &'static str, report: TxRetryReport) {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "domain-settings")]
-    use super::classify_config_repo_error;
-    use super::{classify_sqlstate, classify_sqlx_error};
+    use super::{SETTINGS_SECRET_BOUNDARY, classify_config_repo_error, classify_secret_repo_error};
+    use super::{
+        classify_sqlstate, classify_sqlx_error, full_jitter, full_jitter_from_sample, retry_reason,
+    };
     #[cfg(feature = "domain-settings")]
     use crate::cotx::commit_unknown;
     use consistency::TxRetryClass;
     #[cfg(feature = "domain-settings")]
-    use settings::ports::ConfigRepoError;
+    use settings::ports::{ConfigRepoError, SecretRepoError};
+    use std::time::Duration;
+
+    #[cfg(feature = "domain-settings")]
+    #[test]
+    fn secret_repo_classification_is_closed_and_fail_closed() {
+        assert_eq!(SETTINGS_SECRET_BOUNDARY.as_label(), "settings.secret");
+        assert_eq!(
+            classify_secret_repo_error(&SecretRepoError::VersionConflict),
+            TxRetryClass::Conflict
+        );
+        assert_eq!(
+            classify_secret_repo_error(&SecretRepoError::Storage(Box::new(
+                sqlx::Error::PoolTimedOut,
+            ))),
+            TxRetryClass::Transient
+        );
+        assert_eq!(
+            classify_secret_repo_error(&SecretRepoError::Storage(Box::new(std::io::Error::other(
+                "opaque storage failure",
+            )))),
+            TxRetryClass::Permanent
+        );
+    }
 
     #[test]
     fn sqlstate_classification_is_closed_and_fail_closed() {
@@ -268,6 +445,22 @@ mod tests {
         assert_eq!(
             classify_sqlx_error(&sqlx::Error::RowNotFound),
             TxRetryClass::Permanent
+        );
+    }
+
+    #[test]
+    fn retry_diagnostics_use_closed_reason_and_full_jitter() {
+        let error = sqlx::Error::PoolTimedOut;
+        assert_eq!(retry_reason(&error), "pool_timeout");
+
+        let ceiling = Duration::from_millis(10);
+        for _ in 0..32 {
+            assert!(full_jitter(ceiling) <= ceiling);
+        }
+        assert_eq!(full_jitter(Duration::ZERO), Duration::ZERO);
+        assert_eq!(
+            full_jitter_from_sample(Duration::from_nanos(10), 12),
+            Duration::from_nanos(1)
         );
     }
 

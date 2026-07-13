@@ -487,7 +487,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let value = "30s";
 
     let settings_deps = pg.for_domain::<caps::Settings>();
-    let (configs, writer, _secrets) = settings_deps
+    let (configs, writer, _secrets, _secret_writer) = settings_deps
         .settings_bundle(
             Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
             config_value_protections()?,

@@ -56,8 +56,13 @@ LocalTx 表示一次 HTTP handler 内的单域、租户作用域本地原子写�
 也可以由 repository 的单次原子 CAS mutation 承载；contract 必须选择与执行体一致的 `txModel`。它不表示跨域事务，
 不表示 outbox 发布已兑现，也不表示 saga/reconcile/workflow 已接线。
 
-`settings.secret-publish` 使用 `repo-atomic-cas`：应用层先读最高版本并构造候选版本，最终正确性由
-`SecretRepo::save` 的单次条件写保证；并发竞争失败映射为 `VersionConflict`，不得把两次 repo 调用描述成同一 UoW。
+`settings.secret-publish` 使用 `repo-atomic-cas`：应用层先经只读 `SecretRepo` 读取最高版本并构造候选
+`SecretEntry`，最终正确性由 `SecretUnitOfWork::publish` 的单次条件写保证；并发竞争失败映射为
+`VersionConflict`，不得把两次 port 调用描述成同一显式 UoW。HTTP command 同时携带 settings 域从 generated
+route 铸造的 LocalTx observation；内部 publish 与 rollback republish 使用互不可换且不携带 HTTP evidence 的
+command。Postgres adapter 在同一 transaction attempt 内先获取 `(tenant, secret_key)` advisory lock，再经私有
+`LockedSecretKey` capability 执行 CAS INSERT；同一写 port 的 delete 经该 capability 追加 tombstone，因此
+publish/publish、publish/delete 与 delete/delete 均按同一 key 线性化，不能用未锁定连接直接写 `secret_refs`。
 
 `identity.password-change` 同样使用 `repo-atomic-cas`：handler 路径为 find credential → 校验旧密码 →
 `rotate` 构造下一版本 → 单次 `CredentialRepo::bump_version` CAS；业务正确性由该次条件写保证。
@@ -70,7 +75,7 @@ append+read 序列。
 
 `LocalTxFinalStatus`、`cotx` 与 handler 级 UoW settlement 语义只描述 `tenant-scoped-uow`，不可外推为
 `repo-atomic-cas` 的业务模型（handler 不持有显式 UoW，也不按 UoW 语义重放整条 find→mutate 序列）。
-Postgres `run_pg_tx_retry` / `LocalTxAttempt` 仍可作为 **repo 内** 单次 CAS mutation 的底层事务承载：仅对
+Postgres `run_pg_tx_retry` / `LocalTxAttempt` 仍可作为 **mutation port 内** 单次 CAS 的底层事务承载：仅对
 已确认 rollback 的 transient attempt 有界重试；`VersionConflict` 与 `CommitUnknown` 不重试。
 
 `commitUnknown = "not-retryable"` 对 `tenant-scoped-uow` 的含义是：当提交结果未知时，不允许按普通 transient path
@@ -126,8 +131,9 @@ action-local delta，不能使用并发测试可改写的进程全局累计值�
 只证明 helper 非恒真与 testkit 零内部依赖。真实 provider enrollment 必须同时位于 `adapters/*`、携带具名 typed
 `HttpRouteBinding<RouteMarker, LocalTx>` 并执行完整 helper set。Postgres profile test 使用真实事务表证明 commit、rollback、
 validation/authorization no-write、tenant isolation 与 bounded retry；unknown settlement helpers 仍只断言一次 attempt，
-不伪造 snapshot/no-write 结论。#1703/#1704 可继续扩展 SecretRepo/Identity 的领域专用矩阵，但不再承担 registry
-闭环前置。
+不伪造 snapshot/no-write 结论。`settings.secret-publish` 的 marker 与 commit/rollback、tenant isolation、CAS conflict、
+tombstone monotonicity 证明位于真实 `PgSecretRepo` + `PgSecretUnitOfWork` / `secret_refs` backend matrix；通用
+toy transaction table 不作为该 contract 的仓储语义证据。
 
 ref: sqlx sqlx-core/src/transaction.rs@v0.8.6
 
@@ -137,17 +143,27 @@ result/status 组合在类型层不可表达（Hard）。生产 mint 构造器�
 funnel 可铸造；兄弟模块与 `tx_retry` 只能消费。`PgTenantPool` 仍是 tenant scope 与 transaction
 capability 的唯一入口；`cotx` 在每次 attempt 内重新 begin、注入 `SET LOCAL`，并经单一 settlement
 funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
-错误（保留 primary+rollback 因果链），不再把可重试领域冲突（如 `VersionConflict`）冒泡到 HTTP。
+错误（保留 primary+rollback 因果链），不再把领域冲突（如 `VersionConflict`）误分类为 transient retry。
 Postgres retry operation 只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为 transient 时有界
 重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。通用 `run_pg_tx_retry` 保留 adapter operation
 boundary 的 retry-loop 指标；LocalTx contract 必须改用 `run_pg_localtx_retry`，并传 opaque
 `LocalTxObservation`。该 observation 只能由 typed `HttpRouteBinding<Marker, LocalTx>` 构造；identity 域从
 同一 generated password-change `ROUTE` + `SPEC.local_tx.boundary` 提供 fail-closed factory，Postgres adapter
-不建立被分层禁止的 production generated 依赖。两个 runner 复用同一个私有 retry core，不以 `Option` context
+不建立被分层禁止的 production generated 依赖。settings 域在构造 `SecretPublishCommand` 时同样从 generated
+secret-publish `ROUTE` + `SPEC.local_tx.boundary` fail-closed 铸造 observation；adapter 只能消费
+`command.into_parts()`，不得自行调用 factory 或手制 evidence。`PgSecretUnitOfWork::publish` 使用
+`run_pg_localtx_retry` 发射 HTTP contract telemetry；`publish_internal` 与 rollback `republish` 不携带该 command，
+只经 `run_pg_tx_retry` 发射 generic `settings.secret` retry telemetry 与闭值 `tx_settlement_final_total`，不能冒充
+HTTP 调用；generic settlement 不携带 domain / contract id，unsafe 终态仍可独立告警。两个 runner
+复用同一个私有 retry core，不以 `Option` context
 或 bool 在运行期区分语义。该 core 既服务 `tenant-scoped-uow` 准入路径，也可被
 `repo-atomic-cas` adapter 用于单次 CAS 的底层 settlement；
 业务层 CAS 冲突仍按 `repo-atomic-cas` 规则上抛，不经 handler 自动重试。retry engine 与两个准入 UoW
-的放置继续由 `pg-tenant-tx-guard`（Medium）守住。
+以及 settings secret publish 的精确放置由 `LOCALTX-PG-RETRY-PLACEMENT-01`（`pg-tenant-tx-guard`，
+Medium）守住：HTTP 路径只接受 `PgSecretUnitOfWork::publish` 中的 closed boundary、command-carried
+observation、`run_pg_localtx_retry` 与 `retry_write` 同址 AST 形状；旧 `SecretRepo::save`、adapter factory、
+generic/legacy `write` 或手制 observation 均阻断 verify。internal publish / republish 只接受 generic runner，
+三条 publish 语义最终共享唯一 keyed CAS attempt funnel；delete 共享同一 lock capability 并只追加 tombstone。
 
 `observ::LocalTxObservation` 从 typed generated route 私有提取 domain / contract id，并以
 `LocalTxBoundary` / `TxRetryClass` / `LocalTxFinalStatus` 的闭标签发射 metrics 与 trace。每个 failed attempt

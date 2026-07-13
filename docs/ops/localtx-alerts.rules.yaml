@@ -1,6 +1,7 @@
-# LocalTx transaction settlement alerts (#1705).
+# HTTP LocalTx and generic UoW transaction settlement alerts (#1705, #1703).
 #
-# Metric and closed-label contract: docs/rules/observability.md §LocalTx Settlement Metrics.
+# Metric and closed-label contract: docs/rules/observability.md §Transaction Retry Metrics and
+# §LocalTx Settlement Metrics.
 # Operator procedure: docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md.
 #
 # Validation: promtool check rules docs/ops/localtx-alerts.rules.yaml
@@ -30,4 +31,24 @@ groups:
         annotations:
           summary: "LocalTx rollback failed (domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }})"
           description: "Rollback failed at {{ $labels.boundary }}; do not retry on the same transaction or connection. Check database health, isolate the affected connection, and verify authoritative state before reconciliation."
+          runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#rollback-failed"
+
+      - alert: GenericTxCommitUnknown
+        expr: sum by (boundary) (increase(tx_settlement_final_total{final_status="commit_unknown"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Generic transaction commit outcome unknown (boundary={{ $labels.boundary }})"
+          description: "A non-HTTP UoW lost its commit acknowledgement at {{ $labels.boundary }}. Do not replay it; use the boundary-scoped WARN trace and authoritative read path to verify state."
+          runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#commit-unknown"
+
+      - alert: GenericTxRollbackFailed
+        expr: sum by (boundary) (increase(tx_settlement_final_total{final_status="rollback_failed"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Generic transaction rollback failed (boundary={{ $labels.boundary }})"
+          description: "A non-HTTP UoW could not confirm rollback at {{ $labels.boundary }}. Do not replay it; isolate the failed connection and verify authoritative state before reconciliation."
           runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#rollback-failed"

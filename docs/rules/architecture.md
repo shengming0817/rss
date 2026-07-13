@@ -245,12 +245,19 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
 - **Transaction retry policy([PERSIST-018] #1439)**:`consistency::tx_retry` 持有闭值集
   `TxRetryClass::{Transient, Conflict, Permanent, OwnershipLost}` + `TxRetryPolicy` + runtime-neutral
   `run_tx_retry`。adapter 只在明确 UoW 边界套 retry（当前 postgres `settings.config` /
-  `identity.credential` 写边界），每次 attempt 必须重建完整事务；repo 方法内部、handler 内部、outbox
-  publish/settle、consumer commit/release 内部不得隐式 retry 带副作用写入。分类规则：`Transient`
+  `settings.secret` / `identity.credential` 写边界），每次 attempt 必须重建完整事务；仅注册的 config commit、
+  `PgSecretUnitOfWork` mutation、credential bump version 是 adapter UoW 入口，其余 repo 方法、handler、outbox
+  publish/settle、
+  consumer commit/release 内部不得隐式 retry 带副作用写入。分类规则：`Transient`
   （如 PG `40001`/`40P01`/连接瞬断/池获取超时）可在预算内重试；`Conflict`（CAS/version 冲突）必须向上返回，
   由 command 层显式 refetch/recompute；`Permanent`（约束/解码/租户 envelope mismatch/损坏行）fail-closed；
   `OwnershipLost`（lease lost/fencing miss/stale owner）是终态围栏，不得把当前 side effect 当 transient 重跑。
-  durable command 的 request-side 幂等不靠重试包自动重放：`command_journal` 先 claim request fingerprint；
+  settings secret 的 HTTP `publish` 只能消费 domain command 携带的 generated LocalTx observation 并使用
+  LocalTx runner；`publish_internal` / rollback `republish` 使用 generic runner，二者不得借用 HTTP contract
+  telemetry。只读 `SecretRepo` 不暴露 mutation，四个写入口集中在 `SecretUnitOfWork`。
+  backoff 使用 full jitter；Postgres retry attempt 的 pool acquire 与 lock wait 均有上限，有限 attempt 数构成总等待
+  上界，调用 future 被请求 deadline 取消时不得在后台继续重放。durable command 的 request-side 幂等不靠重试包自动重放：
+  `command_journal` 先 claim request fingerprint；
   需要业务写共提交时，由 Postgres/domain-shaped UoW 在同一 tenant transaction 内提交业务写与 outbox
   append；重复请求只按 journal 结果回放，same-key different-fingerprint 返回 conflict。
   **INVARIANT: TX-RETRY-BOUNDARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }**:

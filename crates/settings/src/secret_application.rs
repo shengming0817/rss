@@ -1,8 +1,9 @@
 //! settings secret 应用层：secret 引用 CAS CRUD + 按坐标 resolve 材料（L1 本地事务，无 outbox）。
 //!
-//! [`SecretService`] 持 [`crate::ports::SecretRepo`]（坐标存储）+
+//! [`SecretService`] 持只读 [`crate::ports::SecretRepo`] + typed
+//! [`crate::ports::SecretUnitOfWork`]（坐标存储）+
 //! [`diport::SecretResolver`]（材料解析，fail-closed）+ [`diport::Clock`]（保留供未来扩展，当前未使用）。
-//! 版本 CAS 逻辑镜像 [`crate::application::SettingsService`]，差异：L1 无 outbox / 无 UoW。
+//! 版本 CAS 逻辑镜像 [`crate::application::SettingsService`]，差异：L1 无 outbox。
 //!
 //! # 安全语义
 //!
@@ -31,7 +32,10 @@ use crate::application::{authenticated_tenant_scope, request_id_from, wire_versi
 use crate::domain::{
     SecretEntry, SecretKey, SecretRef, SecretRepoError, SecretVersion, SettingsError, StoreId,
 };
-use crate::ports::{DynSecretRepo, SecretRepo, TenantRepoScope};
+use crate::ports::{
+    DynSecretRepo, DynSecretUnitOfWork, SecretInternalPublishCommand, SecretPublishCommand,
+    SecretRepo, SecretRepublishCommand, SecretUnitOfWork, TenantRepoScope,
+};
 
 #[cfg(test)]
 use crate::internal::mem::{InMemSecretRepo, new_secret_store};
@@ -119,13 +123,13 @@ fn secret_ref_to_coordinate(r: &SecretRef) -> diport::SecretCoordinate {
 
 /// settings secret 应用服务（L1 本地事务，无 outbox）。
 ///
-/// 必填依赖走构造器位置参（缺失即编译错误）：`secrets`（坐标仓储）、`resolver`（材料解析 provider）、
-/// `clock`（保留位置参，未来扩展审计时间戳用，当前未使用）。
+/// 必填依赖走构造器位置参（缺失即编译错误）：`secrets`（只读坐标仓储）、`secret_uow`（typed mutation）、
+/// `resolver`（材料解析 provider）、`clock`（保留位置参，未来扩展审计时间戳用，当前未使用）。
 ///
 /// # 生产构造约束（#1430）
 ///
-/// **生产组合根不构造 `SecretService`**：secret-publish 路由经 `Arc<DynSecretRepo>` + [`secret_publish_handler`]
-/// 直挂（写引用坐标走 [`publish_secret_to_repo`]，不需 resolver）。`SecretService` 持 `Box<DynSecretResolver>`
+/// **生产组合根不构造 `SecretService`**：secret-publish 路由经 read repo + mutation UoW State 与
+/// [`secret_publish_handler`] 直挂（不需 resolver）。`SecretService` 持 `Box<DynSecretResolver>`
 /// （ADR-003 Amendment #1095：diport infra 端口 `Send` 非 `Sync`）⇒ 整体非 `Sync`、不可作 axum State。本类型
 /// 承载 secret **resolve** 路径（解析材料；对应 HTTP 路由待落）+ 测试，仍是 secret 域服务的完整 API 表面。
 ///
@@ -134,6 +138,7 @@ fn secret_ref_to_coordinate(r: &SecretRef) -> diport::SecretCoordinate {
 /// `resolve_secret` 每次均发起 fresh resolver 调用，绝不缓存材料——零信任边界要求 secret 读取须 fresh。
 pub struct SecretService {
     secrets: Box<DynSecretRepo<'static>>,
+    secret_uow: Box<DynSecretUnitOfWork<'static>>,
     resolver: Box<DynSecretResolver<'static>>,
     // reason: Clock 是构造器必填位置参（rust-standards §Clock 构造器位置参）；当前未使用字段，
     // 保留为未来 publish_secret 审计时间戳扩展点，不删除——删除需改构造器签名（breaking change）。
@@ -147,11 +152,13 @@ impl SecretService {
     /// `clock` 是构造器位置参（rust-standards §Clock 构造器位置参），生产传 `SystemClock`。
     pub fn with_postgres(
         secrets: Box<DynSecretRepo<'static>>,
+        secret_uow: Box<DynSecretUnitOfWork<'static>>,
         resolver: Box<DynSecretResolver<'static>>,
         clock: Box<dyn Clock>,
     ) -> Self {
         Self {
             secrets,
+            secret_uow,
             resolver,
             clock,
         }
@@ -163,11 +170,13 @@ impl SecretService {
     #[cfg(any(test, feature = "seed-data"))]
     pub(crate) fn new(
         secrets: Box<DynSecretRepo<'static>>,
+        secret_uow: Box<DynSecretUnitOfWork<'static>>,
         resolver: Box<DynSecretResolver<'static>>,
         clock: Box<dyn Clock>,
     ) -> Self {
         Self {
             secrets,
+            secret_uow,
             resolver,
             clock,
         }
@@ -175,10 +184,10 @@ impl SecretService {
 
     /// 写入新 secret 引用版本（CAS，L1 本地事务）。返回新版本号。并发冲突冒泡 `VersionConflict`。
     ///
-    /// 逻辑收口进 [`publish_secret_to_repo`]（仅依赖仓储，无 resolver / clock）——secret-publish handler 共享
-    /// 同一单源（DRY）。handler 的 axum State 只持 `Arc<DynSecretRepo>` 而非整个 `SecretService`：`SecretService`
+    /// 逻辑收口进 internal typed publish helper（仅依赖 repo/UoW，无 resolver / clock）。handler 的 axum
+    /// State 只持 typed ports 而非整个 `SecretService`：`SecretService`
     /// 持 `Box<DynSecretResolver>`（diport infra 端口，ADR-003 Amendment #1095 故意 `Send` 非 `Sync`）⇒ 整体非
-    /// `Sync`、不可作 axum State；publish 路径不需 resolver，故经仓储端口直挂（避开冻结端口签名，不动 ADR-003）。
+    /// `Sync`、不可作 axum State；publish 路径不需 resolver，故经 typed ports 直挂。
     #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
     pub async fn publish_secret(
         &self,
@@ -187,7 +196,8 @@ impl SecretService {
         secret_ref: SecretRef,
     ) -> Result<u64, SecretServiceError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
-        publish_secret_to_repo(&self.secrets, scope, key, secret_ref).await
+        publish_secret_internal_to_ports(&self.secrets, &self.secret_uow, scope, key, secret_ref)
+            .await
     }
 
     /// 读取当前活跃 secret 引用（不存在返回 `Ok(None)`）。
@@ -239,7 +249,14 @@ impl SecretService {
             .ok_or(SecretServiceError::NotFound)?
             .secret_ref()
             .clone();
-        self.publish_secret(tenant, key.clone(), source_ref).await
+        republish_secret_to_ports(
+            &self.secrets,
+            &self.secret_uow,
+            scope,
+            key.clone(),
+            source_ref,
+        )
+        .await
     }
 
     /// 软删除 secret 引用（tombstone 语义：版本单调不重置；幂等——key 不存在 / 已删 → no-op）。
@@ -252,7 +269,7 @@ impl SecretService {
         key: &SecretKey,
     ) -> Result<(), SecretServiceError> {
         let scope = TenantRepoScope::from_authenticated_tenant(tenant);
-        self.secrets.delete(scope, key).await.map_err(Into::into)
+        self.secret_uow.delete(scope, key).await.map_err(Into::into)
     }
 
     /// 按 secret 引用解析材料（每次 fresh 调用 resolver，绝不缓存）。
@@ -282,32 +299,90 @@ impl SecretService {
 /// `settings.secret-publish` 请求体上界（防御性 body 限额）。
 const MAX_SECRET_BODY_BYTES: usize = 64 * 1024;
 
-/// secret 坐标发布核心（**仅依赖仓储**，无 resolver / clock）：CAS 写新版本（`latest+1`，含 tombstone 单调
-/// 不重置，防 event_id 复用对齐 #1249 F1），返回新版本号；并发冲突冒泡 `VersionConflict`。
-///
-/// `SecretService::publish_secret` 与 secret-publish handler 共享此单源（DRY）。handler State 仅持
-/// `Arc<DynSecretRepo>`（已 `Send + Sync`），不持整个 `SecretService`（含 `Send`-only resolver、非 `Sync`）。
-pub(crate) async fn publish_secret_to_repo(
+/// 预读最高版本并构造下一条 active entry；最终并发正确性仍由单次 UoW CAS 保证。
+async fn next_secret_entry(
     secrets: &DynSecretRepo<'static>,
     scope: TenantRepoScope,
     key: SecretKey,
     secret_ref: SecretRef,
-) -> Result<u64, SecretServiceError> {
+) -> Result<(SecretEntry, u64), SecretServiceError> {
     let tenant = scope.tenant();
     let current = secrets.latest_version(scope, &key).await?;
     let version = current.map_or(1, |v| v + 1);
     let entry = SecretEntry::new(key, secret_ref, tenant, SecretVersion::new(version));
-    secrets.save(scope, entry).await?;
+    Ok((entry, version))
+}
+
+/// HTTP secret-publish 单源：只允许 typed HTTP command 进入 `publish` UoW slot。
+pub(crate) async fn publish_secret_to_ports(
+    secrets: &DynSecretRepo<'static>,
+    secret_uow: &DynSecretUnitOfWork<'static>,
+    scope: TenantRepoScope,
+    key: SecretKey,
+    secret_ref: SecretRef,
+) -> Result<u64, SecretServiceError> {
+    let (entry, version) = next_secret_entry(secrets, scope, key, secret_ref).await?;
+    let command = SecretPublishCommand::from_entry(entry)?;
+    secret_uow.publish(scope, command).await?;
     Ok(version)
+}
+
+/// 程序内 SecretService publish：与 HTTP contract 分离，不携带 LocalTx observation。
+async fn publish_secret_internal_to_ports(
+    secrets: &DynSecretRepo<'static>,
+    secret_uow: &DynSecretUnitOfWork<'static>,
+    scope: TenantRepoScope,
+    key: SecretKey,
+    secret_ref: SecretRef,
+) -> Result<u64, SecretServiceError> {
+    let (entry, version) = next_secret_entry(secrets, scope, key, secret_ref).await?;
+    secret_uow
+        .publish_internal(scope, SecretInternalPublishCommand::from_entry(entry))
+        .await?;
+    Ok(version)
+}
+
+/// rollback republish：typed republish slot，绝不回调 HTTP/internal publish。
+async fn republish_secret_to_ports(
+    secrets: &DynSecretRepo<'static>,
+    secret_uow: &DynSecretUnitOfWork<'static>,
+    scope: TenantRepoScope,
+    key: SecretKey,
+    secret_ref: SecretRef,
+) -> Result<u64, SecretServiceError> {
+    let (entry, version) = next_secret_entry(secrets, scope, key, secret_ref).await?;
+    secret_uow
+        .republish(scope, SecretRepublishCommand::from_entry(entry))
+        .await?;
+    Ok(version)
+}
+
+/// HTTP handler 的可共享 typed state；resolver/clock 不进入路由 State。
+#[derive(Clone)]
+pub(crate) struct SecretPublishState {
+    secrets: Arc<DynSecretRepo<'static>>,
+    secret_uow: Arc<DynSecretUnitOfWork<'static>>,
+}
+
+impl SecretPublishState {
+    pub(crate) fn new(
+        secrets: Arc<DynSecretRepo<'static>>,
+        secret_uow: Arc<DynSecretUnitOfWork<'static>>,
+    ) -> Self {
+        Self {
+            secrets,
+            secret_uow,
+        }
+    }
 }
 
 /// `settings.secret-publish` handler（Primary listener，JWT 认证）：route gate 授权证据取租户 → parse body →
 /// domain newtype funnel（`SecretKey` / `StoreId` / `SecretRef::parse` 权威校验，路径穿越在此 fail-closed）→
-/// [`publish_secret_to_repo`]（CAS 写引用坐标，L1 无 outbox）→ 201。请求 / 响应**绝无 secret 材料**（只写坐标）。
-/// State 仅持 `Arc<DynSecretRepo>`（见 [`publish_secret_to_repo`] 说明：避开 `SecretService` 非 `Sync`）。
+/// [`publish_secret_to_ports`]（CAS 写引用坐标，L1 无 outbox）→ 201。请求 / 响应**绝无 secret 材料**。
+/// State 仅持 read repo + mutation UoW，避开 `SecretService` 非 `Sync`。
 pub(crate) async fn secret_publish_handler(
     _: ContractMarker<::generated::http::settings_v2::RouteMarker>,
-    State(secrets): State<Arc<DynSecretRepo<'static>>>,
+    State(state): State<SecretPublishState>,
     req: Request<Body>,
 ) -> Response {
     let request_id = request_id_from(&req);
@@ -323,12 +398,13 @@ pub(crate) async fn secret_publish_handler(
         }
         Err(_) => return httpserve::error::validation_bad_request(&request_id),
     };
-    secret_publish_handler_bytes(&secrets, scope, body, &request_id).await
+    secret_publish_handler_bytes(&state.secrets, &state.secret_uow, scope, body, &request_id).await
 }
 
 /// secret-publish 核心（tenant 已解析）：parse + domain funnel + 仓储发布。供单测直接驱动。
 pub(crate) async fn secret_publish_handler_bytes(
     secrets: &DynSecretRepo<'static>,
+    secret_uow: &DynSecretUnitOfWork<'static>,
     scope: TenantRepoScope,
     body: Bytes,
     request_id: &str,
@@ -342,7 +418,7 @@ pub(crate) async fn secret_publish_handler_bytes(
         Ok(parsed) => parsed,
         Err(_) => return httpserve::error::validation_bad_request(request_id),
     };
-    match publish_secret_to_repo(secrets, scope, key, secret_ref).await {
+    match publish_secret_to_ports(secrets, secret_uow, scope, key, secret_ref).await {
         Ok(version) => {
             let response = SettingsSecretPublishResponse {
                 data: SettingsSecretPublishData {
@@ -408,7 +484,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{SecretKey, SecretRef, StoreId};
-    use crate::ports::DynSecretRepo;
+    use crate::ports::{DynSecretRepo, DynSecretUnitOfWork};
 
     use axum::routing::post;
     use httpserve::AuthorizedSubject;
@@ -471,7 +547,8 @@ mod tests {
     fn service_with_mock_resolver(mock: MockTestSecretResolver) -> SecretService {
         let store = new_secret_store();
         SecretService::new(
-            DynSecretRepo::new_box(InMemSecretRepo::from_shared(store)),
+            DynSecretRepo::new_box(InMemSecretRepo::from_shared(Arc::clone(&store))),
+            DynSecretUnitOfWork::new_box(InMemSecretRepo::from_shared(store)),
             DynSecretResolver::new_box(mock),
             fixed_clock(),
         )
@@ -487,11 +564,20 @@ mod tests {
 
     // ── #1430 settings durable module：secret-publish HTTP handler 测试 ────────────────
 
-    /// in-mem secret 仓储端口（secret-publish 路由 State 替身；publish 路径不需 resolver）。
-    fn secret_repo_arc() -> Arc<DynSecretRepo<'static>> {
-        Arc::from(DynSecretRepo::new_box(InMemSecretRepo::from_shared(
-            new_secret_store(),
-        )))
+    /// 共享同一 in-mem store 的 read repo + mutation UoW。
+    fn secret_ports_arc() -> (
+        Arc<DynSecretRepo<'static>>,
+        Arc<DynSecretUnitOfWork<'static>>,
+    ) {
+        let store = new_secret_store();
+        (
+            Arc::from(DynSecretRepo::new_box(InMemSecretRepo::from_shared(
+                Arc::clone(&store),
+            ))),
+            Arc::from(DynSecretUnitOfWork::new_box(InMemSecretRepo::from_shared(
+                store,
+            ))),
+        )
     }
 
     #[derive(Clone, Copy)]
@@ -502,7 +588,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct SaveAttempt {
+    struct MutationAttempt {
         scope_tenant: TenantId,
         entry: SecretEntry,
     }
@@ -512,7 +598,9 @@ mod tests {
         find_calls: usize,
         find_version_calls: usize,
         latest_calls: usize,
-        save_attempts: Vec<SaveAttempt>,
+        publish_attempts: Vec<MutationAttempt>,
+        internal_publish_attempts: Vec<MutationAttempt>,
+        republish_attempts: Vec<MutationAttempt>,
         delete_calls: usize,
         committed: Vec<SecretEntry>,
     }
@@ -522,7 +610,9 @@ mod tests {
             self.find_calls
                 + self.find_version_calls
                 + self.latest_calls
-                + self.save_attempts.len()
+                + self.publish_attempts.len()
+                + self.internal_publish_attempts.len()
+                + self.republish_attempts.len()
                 + self.delete_calls
         }
     }
@@ -530,7 +620,7 @@ mod tests {
     struct ProbeSecretRepo {
         state: Arc<Mutex<ProbeState>>,
         latest: Option<u64>,
-        save_script: SaveScript,
+        find_version_entry: Option<SecretEntry>,
     }
 
     impl SecretRepo for ProbeSecretRepo {
@@ -550,13 +640,17 @@ mod tests {
             &self,
             _scope: TenantRepoScope,
             _key: &SecretKey,
-            _version: u64,
+            version: u64,
         ) -> Result<Option<SecretEntry>, SecretRepoError> {
             self.state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .find_version_calls += 1;
-            Ok(None)
+            Ok(self
+                .find_version_entry
+                .as_ref()
+                .filter(|entry| entry.version() == version)
+                .cloned())
         }
 
         async fn latest_version(
@@ -570,14 +664,22 @@ mod tests {
                 .latest_calls += 1;
             Ok(self.latest)
         }
+    }
 
-        async fn save(
+    struct ProbeSecretUow {
+        state: Arc<Mutex<ProbeState>>,
+        save_script: SaveScript,
+    }
+
+    impl ProbeSecretUow {
+        fn apply(
             &self,
             scope: TenantRepoScope,
             entry: SecretEntry,
+            slot: fn(&mut ProbeState) -> &mut Vec<MutationAttempt>,
         ) -> Result<(), SecretRepoError> {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.save_attempts.push(SaveAttempt {
+            slot(&mut state).push(MutationAttempt {
                 scope_tenant: scope.tenant(),
                 entry: entry.clone(),
             });
@@ -591,6 +693,37 @@ mod tests {
                     std::io::Error::other("backend leaked sentinel"),
                 ))),
             }
+        }
+    }
+
+    impl SecretUnitOfWork for ProbeSecretUow {
+        async fn publish(
+            &self,
+            scope: TenantRepoScope,
+            command: SecretPublishCommand,
+        ) -> Result<(), SecretRepoError> {
+            let (entry, _observation) = command.into_parts();
+            self.apply(scope, entry, |state| &mut state.publish_attempts)
+        }
+
+        async fn publish_internal(
+            &self,
+            scope: TenantRepoScope,
+            command: SecretInternalPublishCommand,
+        ) -> Result<(), SecretRepoError> {
+            self.apply(scope, command.into_entry(), |state| {
+                &mut state.internal_publish_attempts
+            })
+        }
+
+        async fn republish(
+            &self,
+            scope: TenantRepoScope,
+            command: SecretRepublishCommand,
+        ) -> Result<(), SecretRepoError> {
+            self.apply(scope, command.into_entry(), |state| {
+                &mut state.republish_attempts
+            })
         }
 
         async fn delete(
@@ -606,17 +739,55 @@ mod tests {
         }
     }
 
-    fn probe_repo(
+    fn probe_ports(
         latest: Option<u64>,
         save_script: SaveScript,
-    ) -> (Arc<DynSecretRepo<'static>>, Arc<Mutex<ProbeState>>) {
+    ) -> (
+        Arc<DynSecretRepo<'static>>,
+        Arc<DynSecretUnitOfWork<'static>>,
+        Arc<Mutex<ProbeState>>,
+    ) {
         let state = Arc::new(Mutex::new(ProbeState::default()));
         let repo = ProbeSecretRepo {
             state: Arc::clone(&state),
             latest,
+            find_version_entry: None,
+        };
+        let uow = ProbeSecretUow {
+            state: Arc::clone(&state),
             save_script,
         };
-        (Arc::from(DynSecretRepo::new_box(repo)), state)
+        (
+            Arc::from(DynSecretRepo::new_box(repo)),
+            Arc::from(DynSecretUnitOfWork::new_box(uow)),
+            state,
+        )
+    }
+
+    fn probe_service(
+        latest: Option<u64>,
+        find_version_entry: Option<SecretEntry>,
+    ) -> (SecretService, Arc<Mutex<ProbeState>>) {
+        let state = Arc::new(Mutex::new(ProbeState::default()));
+        let repo = ProbeSecretRepo {
+            state: Arc::clone(&state),
+            latest,
+            find_version_entry,
+        };
+        let uow = ProbeSecretUow {
+            state: Arc::clone(&state),
+            save_script: SaveScript::Succeed,
+        };
+        let resolver = MockTestSecretResolver::new();
+        (
+            SecretService::new(
+                DynSecretRepo::new_box(repo),
+                DynSecretUnitOfWork::new_box(uow),
+                DynSecretResolver::new_box(resolver),
+                fixed_clock(),
+            ),
+            state,
+        )
     }
 
     struct SameSnapshotRepo {
@@ -651,22 +822,6 @@ mod tests {
             self.latest_barrier.wait().await;
             Ok(snapshot)
         }
-
-        async fn save(
-            &self,
-            scope: TenantRepoScope,
-            entry: SecretEntry,
-        ) -> Result<(), SecretRepoError> {
-            self.inner.save(scope, entry).await
-        }
-
-        async fn delete(
-            &self,
-            scope: TenantRepoScope,
-            key: &SecretKey,
-        ) -> Result<(), SecretRepoError> {
-            self.inner.delete(scope, key).await
-        }
     }
 
     /// post-authz 授权证据（Primary route gate 注入）。
@@ -676,10 +831,12 @@ mod tests {
 
     fn secret_router(
         repo: Arc<DynSecretRepo<'static>>,
+        uow: Arc<DynSecretUnitOfWork<'static>>,
         auth: Option<AuthorizedSubject>,
     ) -> axum::Router {
+        let state = SecretPublishState::new(repo, uow);
         let router =
-            axum::Router::new().route("/secrets", post(secret_publish_handler).with_state(repo));
+            axum::Router::new().route("/secrets", post(secret_publish_handler).with_state(state));
         match auth {
             Some(a) => router.layer(axum::Extension(a)),
             None => router,
@@ -698,7 +855,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_handler_authed_returns_201() {
-        let router = secret_router(secret_repo_arc(), Some(user_evidence(tenant())));
+        let (repo, uow) = secret_ports_arc();
+        let router = secret_router(repo, uow, Some(user_evidence(tenant())));
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").json(&publish_request(Some("v3"))),
@@ -714,8 +872,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_handler_missing_auth_returns_401() {
-        let (repo, state) = probe_repo(None, SaveScript::Succeed);
-        let router = secret_router(repo, None);
+        let (repo, uow, state) = probe_ports(None, SaveScript::Succeed);
+        let router = secret_router(repo, uow, None);
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").json(&publish_request(None)),
@@ -745,9 +903,10 @@ mod tests {
             r#"{"key":"vault.db","storeId":"vault","refKey":"a/../evil"}"#,
         ];
         for body in invalid_bodies {
-            let (repo, state) = probe_repo(None, SaveScript::Succeed);
+            let (repo, uow, state) = probe_ports(None, SaveScript::Succeed);
             let resp = secret_publish_handler_bytes(
                 &repo,
+                &uow,
                 tenant_scope(),
                 Bytes::copy_from_slice(body.as_bytes()),
                 "rid",
@@ -768,7 +927,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_bytes_path_traversal_returns_400() {
-        let repo = secret_repo_arc();
+        let (repo, uow) = secret_ports_arc();
         let req = SettingsSecretPublishRequest {
             key: "vault.db".to_string(),
             store_id: "vault".to_string(),
@@ -776,7 +935,8 @@ mod tests {
             ref_version: None,
         };
         let body = serde_json::to_vec(&req).expect("serialize");
-        let resp = secret_publish_handler_bytes(&repo, tenant_scope(), body.into(), "rid").await;
+        let resp =
+            secret_publish_handler_bytes(&repo, &uow, tenant_scope(), body.into(), "rid").await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -787,8 +947,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_handler_oversize_returns_413_without_repo_calls() {
-        let (repo, state) = probe_repo(None, SaveScript::Succeed);
-        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let (repo, uow, state) = probe_ports(None, SaveScript::Succeed);
+        let router = secret_router(repo, uow, Some(user_evidence(tenant())));
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").raw_body(vec![b'x'; MAX_SECRET_BODY_BYTES + 1]),
@@ -813,8 +973,8 @@ mod tests {
         use futures::stream;
         use tower::ServiceExt as _;
 
-        let (repo, state) = probe_repo(None, SaveScript::Succeed);
-        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let (repo, uow, state) = probe_ports(None, SaveScript::Succeed);
+        let router = secret_router(repo, uow, Some(user_evidence(tenant())));
         let body = Body::from_stream(stream::once(async {
             Err::<Bytes, _>(std::io::Error::other("body provider failed"))
         }));
@@ -845,8 +1005,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_success_passes_authenticated_scope_and_coordinate_once() {
-        let (repo, state) = probe_repo(Some(6), SaveScript::Succeed);
-        let router = secret_router(Arc::clone(&repo), Some(user_evidence(tenant())));
+        let (repo, uow, state) = probe_ports(Some(6), SaveScript::Succeed);
+        let router = secret_router(Arc::clone(&repo), uow, Some(user_evidence(tenant())));
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").json(&publish_request(Some("v3"))),
@@ -859,9 +1019,11 @@ mod tests {
 
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.latest_calls, 1);
-        assert_eq!(state.save_attempts.len(), 1);
+        assert_eq!(state.publish_attempts.len(), 1);
+        assert!(state.internal_publish_attempts.is_empty());
+        assert!(state.republish_attempts.is_empty());
         assert_eq!(state.committed.len(), 1);
-        let call = &state.save_attempts[0];
+        let call = &state.publish_attempts[0];
         assert_eq!(call.scope_tenant, tenant());
         assert_eq!(call.entry.tenant(), tenant());
         assert_eq!(call.entry.key().as_str(), "vault.db");
@@ -874,8 +1036,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_conflict_is_retryable_409_without_retry_or_commit() {
-        let (repo, state) = probe_repo(Some(2), SaveScript::Conflict);
-        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let (repo, uow, state) = probe_ports(Some(2), SaveScript::Conflict);
+        let router = secret_router(repo, uow, Some(user_evidence(tenant())));
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").json(&publish_request(None)),
@@ -891,15 +1053,17 @@ mod tests {
 
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.latest_calls, 1, "handler 不重读 head");
-        assert_eq!(state.save_attempts.len(), 1, "handler 不自动重试 CAS");
+        assert_eq!(state.publish_attempts.len(), 1, "handler 不自动重试 CAS");
+        assert!(state.internal_publish_attempts.is_empty());
+        assert!(state.republish_attempts.is_empty());
         assert!(state.committed.is_empty(), "冲突必须零提交");
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn secret_publish_storage_failure_is_generic_500_without_commit() {
-        let (repo, state) = probe_repo(None, SaveScript::StorageFailure);
-        let router = secret_router(repo, Some(user_evidence(tenant())));
+        let (repo, uow, state) = probe_ports(None, SaveScript::StorageFailure);
+        let router = secret_router(repo, uow, Some(user_evidence(tenant())));
         let resp = testkit::call(
             router,
             ContractRequest::post("/secrets").json(&publish_request(Some("private-version"))),
@@ -920,7 +1084,9 @@ mod tests {
         }
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.latest_calls, 1);
-        assert_eq!(state.save_attempts.len(), 1);
+        assert_eq!(state.publish_attempts.len(), 1);
+        assert!(state.internal_publish_attempts.is_empty());
+        assert!(state.republish_attempts.is_empty());
         assert!(state.committed.is_empty());
     }
 
@@ -930,17 +1096,22 @@ mod tests {
         let store = new_secret_store();
         let repo: Arc<DynSecretRepo<'static>> =
             Arc::from(DynSecretRepo::new_box(SameSnapshotRepo {
-                inner: InMemSecretRepo::from_shared(store),
+                inner: InMemSecretRepo::from_shared(Arc::clone(&store)),
                 latest_barrier: Arc::new(tokio::sync::Barrier::new(2)),
             }));
-        let first = publish_secret_to_repo(
+        let uow: Arc<DynSecretUnitOfWork<'static>> = Arc::from(DynSecretUnitOfWork::new_box(
+            InMemSecretRepo::from_shared(store),
+        ));
+        let first = publish_secret_internal_to_ports(
             &repo,
+            &uow,
             tenant_scope(),
             make_key("vault.db"),
             make_ref("vault", "first"),
         );
-        let second = publish_secret_to_repo(
+        let second = publish_secret_internal_to_ports(
             &repo,
+            &uow,
             tenant_scope(),
             make_key("vault.db"),
             make_ref("vault", "second"),
@@ -964,18 +1135,20 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn publish_secret_to_repo_increments_version_monotonically() {
-        let repo = secret_repo_arc();
-        let v1 = publish_secret_to_repo(
+    async fn publish_secret_internal_to_ports_increments_version_monotonically() {
+        let (repo, uow) = secret_ports_arc();
+        let v1 = publish_secret_internal_to_ports(
             &repo,
+            &uow,
             tenant_scope(),
             make_key("vault.db"),
             make_ref("vault", "k"),
         )
         .await
         .expect("v1");
-        let v2 = publish_secret_to_repo(
+        let v2 = publish_secret_internal_to_ports(
             &repo,
+            &uow,
             tenant_scope(),
             make_key("vault.db"),
             make_ref("vault", "k"),
@@ -1168,6 +1341,22 @@ mod tests {
         assert_eq!(found, Some(secret_ref));
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn service_publish_uses_only_internal_publish_slot() {
+        let (svc, state) = probe_service(None, None);
+        let version = svc
+            .publish_secret(tenant(), make_key("vault.db"), make_ref("store", "path"))
+            .await
+            .expect("internal publish");
+        assert_eq!(version, 1);
+
+        let state = state.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.internal_publish_attempts.len(), 1);
+        assert!(state.publish_attempts.is_empty());
+        assert!(state.republish_attempts.is_empty());
+    }
+
     /// 找不到 secret key 时 resolve_secret 返 NotFound（非 resolver 调用）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -1210,6 +1399,30 @@ mod tests {
         assert_eq!(current_ref, Some(make_ref("s", "v1")));
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn rollback_uses_only_republish_slot() {
+        let key = make_key("vault.db");
+        let source = SecretEntry::new(
+            key.clone(),
+            make_ref("store", "source"),
+            tenant(),
+            SecretVersion::new(1),
+        );
+        let (svc, state) = probe_service(Some(1), Some(source));
+
+        let version = svc
+            .rollback_secret(tenant(), &key, 1)
+            .await
+            .expect("republish");
+        assert_eq!(version, 2);
+
+        let state = state.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.republish_attempts.len(), 1);
+        assert!(state.publish_attempts.is_empty());
+        assert!(state.internal_publish_attempts.is_empty());
+    }
+
     /// rollback 找不到源版本 → NotFound。
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -1228,12 +1441,15 @@ mod tests {
 
     // ── 构造器必填参数（编译锁）────────────────────────────────────────────────────────────
 
-    /// 编译锁：`SecretService::with_postgres` 须接受三个必填位置参（类型签名断言）。
+    /// 编译锁：`SecretService::with_postgres` 须接受四个必填位置参（类型签名断言）。
     #[test]
+    #[allow(clippy::type_complexity)]
+    // reason: 四个互不可换的必填 DI port 正是本编译锁要完整表达的构造器签名。
     fn secret_service_ctor_required_params() {
         // 绑定函数指针断言签名——缺参 / 类型不符即编译失败（ADR-004 C5）。
         let _ctor: fn(
             Box<DynSecretRepo<'static>>,
+            Box<DynSecretUnitOfWork<'static>>,
             Box<DynSecretResolver<'static>>,
             Box<dyn Clock>,
         ) -> SecretService = SecretService::with_postgres;

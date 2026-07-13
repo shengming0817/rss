@@ -9,6 +9,21 @@
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
+//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries" } —
+//! Postgres retry wrappers are confined to their exact config commit, secret mutation, and
+//! credential bump boundaries. `PgSecretUnitOfWork::publish` is the only settings secret LocalTx
+//! owner: it must consume the command-carried generated observation beside `retry_write`;
+//! internal publish / republish must use the generic runner and may not impersonate the HTTP
+//! contract.
+//!
+//! INVARIANT: TENANCY-SECRET-KEY-MUTATION-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::secret_ref_mutation_guard_rejects_split_or_legacy_owners", anti_vacuity = "tests::secret_ref_mutation_guard_real_workspace_has_exact_capability_sites" } —
+//! production `secret_refs` mutations are append-only INSERTs confined to the transaction-bound
+//! `key_lock::LockedSecretKey::{cas_insert,append_tombstone}` capability. `SecretRepo` is read-only;
+//! `PgSecretUnitOfWork::{publish,publish_internal,republish}` share one `cas_insert_locked` funnel,
+//! while `delete` alone acquires the same keyed capability and appends a tombstone. The capability
+//! has one exact mint site: `acquire`, which must bind the stored tenant/key to the transaction
+//! advisory lock before returning the value.
+//!
 //! INVARIANT: OUTBOX-FACT-FUNNEL-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::red_outbox_log_insert_outside_cdc_funnel", anti_vacuity = "tests::green_outbox_log_insert_is_owned_by_cdc_funnel" } —
 //! production `outbox` / `outbox_log` INSERTs are confined to their canonical fingerprint funnels.
 //! It intentionally does not replace `setlocal-funnel`: that guard owns "GUC write literal is
@@ -39,8 +54,12 @@ pub(crate) enum Rule {
     StaleException,
     /// transaction retry primitive or postgres wrapper used outside the sanctioned UoW boundary.
     RetryPlacement,
-    /// real workspace scan did not find both required retry boundaries.
+    /// real workspace scan did not find every required retry boundary.
     RetrySitesAbsent,
+    /// `secret_refs` mutation escaped the keyed `LockedSecretKey` capability.
+    SecretRefMutationBypass,
+    /// canonical `LockedSecretKey` mutation sites are absent or duplicated.
+    SecretRefMutationSitesAbsent,
 }
 
 pub(crate) struct PgTenantTxGuard;
@@ -66,7 +85,14 @@ impl GovernanceCheck for PgTenantTxGuard {
         let root = crate::workspace_root()?;
         let migrations = load_sql_files(&root.join("adapters/postgres/migrations"))?;
         let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
-        let (summary, findings) = scan_guard(&migrations, &files);
+        let settings_ports_path = root.join("crates/settings/src/ports.rs");
+        let settings_ports = std::fs::read_to_string(&settings_ports_path)
+            .with_context(|| format!("读 {} 失败", settings_ports_path.display()))?;
+        let (summary, mut findings) = scan_guard(&migrations, &files);
+        findings.extend(secret_repo_read_only_findings(
+            "crates/settings/src/ports.rs",
+            &settings_ports,
+        ));
         Ok((summary, findings))
     }
 }
@@ -253,17 +279,11 @@ pub(crate) fn scan_guard(
             }
         }
     }
-    if files.iter().any(|(rel, _)| rel == "tx_retry.rs") {
-        for required in ["settings-config-commit", "identity-credential-bump-version"] {
-            if !state.retry_sites.contains(required) {
-                findings.push(finding(
-                    Rule::RetrySitesAbsent,
-                    required,
-                    "sanctioned transaction retry boundary was not found",
-                ));
-            }
-        }
-    }
+    findings.extend(required_retry_site_findings(files, &state.retry_sites));
+    findings.extend(required_secret_ref_site_findings(
+        files,
+        &state.secret_ref_mutation_sites,
+    ));
 
     let summary = format!(
         "{} tenant 表；{} 个生产文件；{} 个 tenant SQL 文件；{} 个 raw pattern",
@@ -275,6 +295,63 @@ pub(crate) fn scan_guard(
     (summary, findings)
 }
 
+fn required_retry_site_findings(
+    files: &[(String, String)],
+    sites: &BTreeSet<&'static str>,
+) -> Vec<Finding> {
+    if !files.iter().any(|(rel, _)| rel == "tx_retry.rs") {
+        return Vec::new();
+    }
+    [
+        "settings-config-commit",
+        "settings-secret-publish",
+        "settings-secret-publish-internal",
+        "settings-secret-republish",
+        "identity-credential-bump-version",
+    ]
+    .into_iter()
+    .filter(|required| !sites.contains(required))
+    .map(|required| {
+        finding(
+            Rule::RetrySitesAbsent,
+            required,
+            "sanctioned transaction retry boundary was not found",
+        )
+    })
+    .collect()
+}
+
+fn required_secret_ref_site_findings(
+    files: &[(String, String)],
+    sites: &BTreeMap<&'static str, usize>,
+) -> Vec<Finding> {
+    if !files.iter().any(|(rel, _)| rel == "secret_repo.rs") {
+        return Vec::new();
+    }
+    [
+        "secret-key-lock-acquire",
+        "secret-key-advisory-lock",
+        "secret-key-capability-mint",
+        "secret-key-cas-insert",
+        "secret-key-append-tombstone",
+        "secret-uow-cas-funnel",
+        "secret-uow-publish-cas",
+        "secret-uow-publish-internal-cas",
+        "secret-uow-republish-cas",
+        "secret-uow-delete-tombstone",
+    ]
+        .into_iter()
+        .filter(|required| sites.get(required).copied() != Some(1))
+        .map(|required| {
+            finding(
+                Rule::SecretRefMutationSitesAbsent,
+                required,
+                "SecretRepo must stay read-only and PgSecretUnitOfWork must own the exact shared CAS and keyed tombstone funnels",
+            )
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct ScanState {
     tenant_sql_sites: usize,
@@ -282,6 +359,7 @@ struct ScanState {
     allowed_exceptions: BTreeSet<&'static str>,
     retry_sites: BTreeSet<&'static str>,
     outbox_insert_sites: BTreeMap<&'static str, usize>,
+    secret_ref_mutation_sites: BTreeMap<&'static str, usize>,
 }
 
 fn scan_source_file(
@@ -297,6 +375,11 @@ fn scan_source_file(
         rel,
         &stripped,
         &mut state.retry_sites,
+    ));
+    findings.extend(secret_ref_mutation_findings(
+        rel,
+        &stripped,
+        &mut state.secret_ref_mutation_sites,
     ));
     let tenant_hits = tenant_table_hits(&expanded, tenant_tables);
     state.tenant_sql_sites += usize::from(!tenant_hits.is_empty());
@@ -398,7 +481,22 @@ fn retry_placement_findings(
             ));
         }
     }
+    findings.extend(scan.settings_secret_factory_calls.iter().map(|(line, function)| {
+        finding(
+            Rule::RetryPlacement,
+            site_subject(rel, *line),
+            format!(
+                "Postgres adapter function {} must consume SecretPublishCommand evidence; it may not call the settings secret-publish factory",
+                function.as_deref().unwrap_or("<module>")
+            ),
+        )
+    }));
     if scan.wrapper_calls.is_empty() {
+        return findings;
+    }
+
+    if rel == "secret_repo.rs" {
+        findings.extend(settings_secret_retry_findings(&scan, sites));
         return findings;
     }
 
@@ -412,7 +510,7 @@ fn retry_placement_findings(
             findings.push(finding(
                 Rule::RetryPlacement,
                 site_subject(rel, call.line),
-                "Postgres retry wrappers are restricted to settings commit and identity credential bump_version",
+                "Postgres retry wrappers are restricted to settings config commit, typed settings secret mutations, and identity credential bump_version",
             ));
         }
         return findings;
@@ -452,7 +550,75 @@ fn retry_placement_findings(
     findings
 }
 
-type RetryScope = BTreeMap<String, Option<RetrySymbol>>;
+fn settings_secret_retry_findings(
+    scan: &RetryAstScan,
+    sites: &mut BTreeSet<&'static str>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let exact_owners = [
+        (
+            "publish",
+            "settings-secret-publish",
+            valid_settings_secret_retry as fn(&RetryCall) -> bool,
+        ),
+        (
+            "publish_internal",
+            "settings-secret-publish-internal",
+            valid_settings_secret_generic_retry as fn(&RetryCall) -> bool,
+        ),
+        (
+            "republish",
+            "settings-secret-republish",
+            valid_settings_secret_generic_retry as fn(&RetryCall) -> bool,
+        ),
+    ];
+    for (function, site, valid) in exact_owners {
+        let calls = scan
+            .wrapper_calls
+            .iter()
+            .filter(|call| {
+                call.impl_type.as_deref() == Some("PgSecretUnitOfWork")
+                    && call.function.as_deref() == Some(function)
+            })
+            .collect::<Vec<_>>();
+        if calls.len() == 1 && valid(calls[0]) {
+            sites.insert(site);
+        } else if !calls.is_empty() {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                format!("secret_repo.rs::PgSecretUnitOfWork::{function}"),
+                format!(
+                    "{function} must contain exactly one correctly typed retry wrapper, closed settings secret boundary, and retry_write transaction primitive"
+                ),
+            ));
+        }
+    }
+    for call in &scan.wrapper_calls {
+        let allowed_owner = call.impl_type.as_deref() == Some("PgSecretUnitOfWork")
+            && matches!(
+                call.function.as_deref(),
+                Some("publish" | "publish_internal" | "republish")
+            );
+        if !allowed_owner {
+            findings.push(finding(
+                Rule::RetryPlacement,
+                site_subject("secret_repo.rs", call.line),
+                "settings secret retry wrappers are restricted to PgSecretUnitOfWork::{publish,publish_internal,republish}; SecretRepo::save and private/delete owners are forbidden",
+            ));
+        }
+    }
+    findings
+}
+
+type RetryScope = BTreeMap<String, Option<RetryBinding>>;
+type ObservationScope = BTreeMap<String, Option<ObservationFactory>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryBinding {
+    Symbol(RetrySymbol),
+    ConsistencyModule,
+    TxRetryModule,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RetrySymbol {
@@ -463,9 +629,18 @@ enum RetrySymbol {
 
 fn retry_aliases(file: &syn::File) -> RetryScope {
     let mut aliases = RetryScope::from([
-        ("run_tx_retry".to_string(), Some(RetrySymbol::Direct)),
-        ("run_pg_tx_retry".to_string(), Some(RetrySymbol::Generic)),
-        ("run_pg_localtx_retry".to_string(), Some(RetrySymbol::Local)),
+        (
+            "run_tx_retry".to_string(),
+            Some(RetryBinding::Symbol(RetrySymbol::Direct)),
+        ),
+        (
+            "run_pg_tx_retry".to_string(),
+            Some(RetryBinding::Symbol(RetrySymbol::Generic)),
+        ),
+        (
+            "run_pg_localtx_retry".to_string(),
+            Some(RetryBinding::Symbol(RetrySymbol::Local)),
+        ),
     ]);
     for item in &file.items {
         if let syn::Item::Use(item_use) = item {
@@ -509,9 +684,8 @@ fn collect_retry_use_aliases(tree: &syn::UseTree, prefix: &[String], aliases: &m
 }
 
 fn note_retry_alias(prefix: &[String], original: &str, local: &str, aliases: &mut RetryScope) {
-    let symbol = retry_symbol_for_import(prefix, original);
-    if symbol.is_some() {
-        aliases.insert(local.to_string(), symbol);
+    if let Some(binding) = retry_binding_for_import(prefix, original) {
+        aliases.insert(local.to_string(), Some(binding));
     }
 }
 
@@ -538,9 +712,36 @@ fn retry_symbol_for_import(prefix: &[String], name: &str) -> Option<RetrySymbol>
     }
 }
 
+fn retry_binding_for_import(prefix: &[String], name: &str) -> Option<RetryBinding> {
+    if let Some(symbol) = retry_symbol_for_import(prefix, name) {
+        return Some(RetryBinding::Symbol(symbol));
+    }
+    match (prefix, name) {
+        ([], "consistency") => Some(RetryBinding::ConsistencyModule),
+        ([root], "consistency") if matches!(root.as_str(), "crate" | "super" | "self") => {
+            Some(RetryBinding::ConsistencyModule)
+        }
+        ([], "tx_retry") => Some(RetryBinding::TxRetryModule),
+        ([root], "tx_retry") if matches!(root.as_str(), "crate" | "super" | "self") => {
+            Some(RetryBinding::TxRetryModule)
+        }
+        _ => None,
+    }
+}
+
+fn retry_symbol_from_module(binding: RetryBinding, name: &str) -> Option<RetrySymbol> {
+    match (binding, name) {
+        (RetryBinding::ConsistencyModule, "run_tx_retry") => Some(RetrySymbol::Direct),
+        (RetryBinding::TxRetryModule, "run_pg_tx_retry") => Some(RetrySymbol::Generic),
+        (RetryBinding::TxRetryModule, "run_pg_localtx_retry") => Some(RetrySymbol::Local),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 struct RetryCall {
     line: usize,
+    impl_type: Option<String>,
     function: Option<String>,
     wrapper: Option<RetryWrapper>,
     arguments: Vec<RetryExprFacts>,
@@ -555,37 +756,61 @@ enum RetryWrapper {
 #[derive(Debug, Default)]
 struct RetryExprFacts {
     exact_path: Option<String>,
-    observation_factory: bool,
+    observation_factory: Option<ObservationFactory>,
     operation_method: Option<String>,
+    scoped_operation_calls: usize,
+    legacy_write: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservationFactory {
+    IdentityPasswordChange,
+    SettingsSecretPublish,
+    SettingsSecretPublishCommand,
 }
 
 struct RetryAstScan {
     scopes: Vec<RetryScope>,
+    observation_scopes: Vec<ObservationScope>,
+    current_impl: Option<String>,
     current_function: Option<String>,
+    current_secret_publish_command: Option<String>,
     direct_calls: Vec<RetryCall>,
     wrapper_calls: Vec<RetryCall>,
+    settings_secret_factory_calls: Vec<(usize, Option<String>)>,
 }
 
 impl RetryAstScan {
     fn new(aliases: RetryScope) -> Self {
         Self {
             scopes: vec![aliases],
+            observation_scopes: vec![ObservationScope::new()],
+            current_impl: None,
             current_function: None,
+            current_secret_publish_command: None,
             direct_calls: Vec::new(),
             wrapper_calls: Vec::new(),
+            settings_secret_factory_calls: Vec::new(),
         }
     }
 
     fn visit_function(&mut self, name: String, signature: &syn::Signature, block: &syn::Block) {
         let previous = self.current_function.replace(name.clone());
+        let previous_command = std::mem::replace(
+            &mut self.current_secret_publish_command,
+            secret_publish_command_param(signature),
+        );
         self.scopes.push(RetryScope::new());
+        self.observation_scopes.push(ObservationScope::new());
         for input in &signature.inputs {
             if let syn::FnArg::Typed(typed) = input {
                 self.shadow_pattern(&typed.pat);
             }
         }
         <Self as syn::visit::Visit>::visit_block(self, block);
+        self.observation_scopes.pop();
         self.scopes.pop();
+        self.current_secret_publish_command = previous_command;
         self.current_function = previous;
     }
 
@@ -601,26 +826,123 @@ impl RetryAstScan {
                 .iter()
                 .rev()
                 .find_map(|scope| scope.get(&segments[0]).copied())
-                .flatten();
+                .flatten()
+                .and_then(|binding| match binding {
+                    RetryBinding::Symbol(symbol) => Some(symbol),
+                    RetryBinding::ConsistencyModule | RetryBinding::TxRetryModule => None,
+                });
         }
         retry_symbol_for_import(
             &segments[..segments.len() - 1],
             &segments[segments.len() - 1],
         )
+        .or_else(|| {
+            if segments.len() != 2 {
+                return None;
+            }
+            let binding = self
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&segments[0]).copied())
+                .flatten()?;
+            retry_symbol_from_module(binding, &segments[1])
+        })
     }
 
     fn shadow_pattern(&mut self, pattern: &syn::Pat) {
         let mut names = Vec::new();
         collect_pattern_names(pattern, &mut names);
         if let Some(scope) = self.scopes.last_mut() {
+            for name in &names {
+                scope.insert(name.clone(), None);
+            }
+        }
+        if let Some(scope) = self.observation_scopes.last_mut() {
             for name in names {
                 scope.insert(name, None);
             }
         }
     }
+
+    fn note_observation_binding(&mut self, local: &syn::Local) {
+        let Some(init) = &local.init else {
+            return;
+        };
+        if let Some(binding) = command_observation_binding(
+            &local.pat,
+            &init.expr,
+            self.current_secret_publish_command.as_deref(),
+        ) {
+            if let Some(scope) = self.observation_scopes.last_mut() {
+                scope.insert(
+                    binding,
+                    Some(ObservationFactory::SettingsSecretPublishCommand),
+                );
+            }
+            return;
+        }
+        let syn::Pat::Ident(binding) = &local.pat else {
+            return;
+        };
+        let Some(factory) = observation_factory_expr(&init.expr) else {
+            return;
+        };
+        if let Some(scope) = self.observation_scopes.last_mut() {
+            scope.insert(binding.ident.to_string(), Some(factory));
+        }
+    }
+
+    fn observation_factory(&self, expr: &syn::Expr) -> Option<ObservationFactory> {
+        observation_factory_expr(expr).or_else(|| {
+            let path = exact_expr_path(expr)?;
+            if path.contains("::") {
+                return None;
+            }
+            self.observation_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&path).copied())
+                .flatten()
+        })
+    }
+
+    fn invalidate_observation_binding(&mut self, expr: &syn::Expr) {
+        let Some(path) = exact_expr_path(expr) else {
+            return;
+        };
+        if path.contains("::") {
+            return;
+        }
+        if let Some(scope) = self
+            .observation_scopes
+            .iter_mut()
+            .rev()
+            .find(|scope| scope.contains_key(&path))
+        {
+            scope.insert(path, None);
+        }
+    }
+
+    fn retry_expr_facts(&self, expr: &syn::Expr) -> RetryExprFacts {
+        let operation_scan = scoped_operation_scan(expr);
+        RetryExprFacts {
+            exact_path: exact_expr_path(expr),
+            observation_factory: self.observation_factory(expr),
+            operation_method: canonical_retry_operation(expr),
+            scoped_operation_calls: operation_scan.calls,
+            legacy_write: operation_scan.legacy_write,
+        }
+    }
 }
 
 impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let previous = self.current_impl.replace(impl_type_name(&node.self_ty));
+        syn::visit::visit_item_impl(self, node);
+        self.current_impl = previous;
+    }
+
     fn visit_item_fn(&mut self, node: &syn::ItemFn) {
         self.visit_function(node.sig.ident.to_string(), &node.sig, &node.block);
     }
@@ -639,34 +961,50 @@ impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
             }
         }
         self.scopes.push(scope);
+        self.observation_scopes.push(ObservationScope::new());
         for statement in &node.stmts {
             syn::visit::visit_stmt(self, statement);
             if let syn::Stmt::Local(local) = statement {
                 self.shadow_pattern(&local.pat);
+                self.note_observation_binding(local);
             }
         }
+        self.observation_scopes.pop();
         self.scopes.pop();
     }
 
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
         self.scopes.push(RetryScope::new());
+        self.observation_scopes.push(ObservationScope::new());
         for input in &node.inputs {
             self.shadow_pattern(input);
         }
         syn::visit::visit_expr(self, &node.body);
+        self.observation_scopes.pop();
         self.scopes.pop();
     }
 
     fn visit_expr_call(&mut self, node: &syn::ExprCall) {
         use syn::spanned::Spanned as _;
+        if exact_expr_path(&node.func).as_deref()
+            == Some("settings::secret_publish_localtx_observation")
+        {
+            self.settings_secret_factory_calls
+                .push((node.func.span().start().line, self.current_function.clone()));
+        }
         if let syn::Expr::Path(path) = &*node.func
             && let Some(symbol) = self.resolve(&path.path)
         {
             let call = |wrapper| RetryCall {
                 line: node.func.span().start().line,
+                impl_type: self.current_impl.clone(),
                 function: self.current_function.clone(),
                 wrapper,
-                arguments: node.args.iter().map(retry_expr_facts).collect(),
+                arguments: node
+                    .args
+                    .iter()
+                    .map(|argument| self.retry_expr_facts(argument))
+                    .collect(),
             };
             match symbol {
                 RetrySymbol::Direct => self.direct_calls.push(call(None)),
@@ -676,13 +1014,10 @@ impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
         }
         syn::visit::visit_expr_call(self, node);
     }
-}
 
-fn retry_expr_facts(expr: &syn::Expr) -> RetryExprFacts {
-    RetryExprFacts {
-        exact_path: exact_expr_path(expr),
-        observation_factory: is_observation_factory_expr(expr),
-        operation_method: canonical_retry_operation(expr),
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        syn::visit::visit_expr_assign(self, node);
+        self.invalidate_observation_binding(&node.left);
     }
 }
 
@@ -691,14 +1026,38 @@ fn valid_settings_retry(call: &RetryCall) -> bool {
         && call.arguments.len() == 3
         && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_CONFIG_BOUNDARY")
         && call.arguments[1].operation_method.as_deref() == Some("retry_co_tx_with_outbox")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
 }
 
 fn valid_identity_retry(call: &RetryCall) -> bool {
     call.wrapper == Some(RetryWrapper::Local)
         && call.arguments.len() == 4
         && call.arguments[0].exact_path.as_deref() == Some("IDENTITY_CREDENTIAL_BOUNDARY")
-        && call.arguments[1].observation_factory
+        && call.arguments[1].observation_factory == Some(ObservationFactory::IdentityPasswordChange)
         && call.arguments[2].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[2].scoped_operation_calls == 1
+        && !call.arguments[2].legacy_write
+}
+
+fn valid_settings_secret_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Local)
+        && call.arguments.len() == 4
+        && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_SECRET_BOUNDARY")
+        && call.arguments[1].observation_factory
+            == Some(ObservationFactory::SettingsSecretPublishCommand)
+        && call.arguments[2].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[2].scoped_operation_calls == 1
+        && !call.arguments[2].legacy_write
+}
+
+fn valid_settings_secret_generic_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Generic)
+        && call.arguments.len() == 3
+        && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_SECRET_BOUNDARY")
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
 }
 
 fn collect_pattern_names(pattern: &syn::Pat, names: &mut Vec<String>) {
@@ -735,6 +1094,48 @@ fn collect_pattern_names(pattern: &syn::Pat, names: &mut Vec<String>) {
     }
 }
 
+fn secret_publish_command_param(signature: &syn::Signature) -> Option<String> {
+    signature.inputs.iter().find_map(|input| {
+        let syn::FnArg::Typed(typed) = input else {
+            return None;
+        };
+        let syn::Type::Path(path) = &*typed.ty else {
+            return None;
+        };
+        if path.path.segments.last()?.ident != "SecretPublishCommand" {
+            return None;
+        }
+        let syn::Pat::Ident(binding) = &*typed.pat else {
+            return None;
+        };
+        Some(binding.ident.to_string())
+    })
+}
+
+fn command_observation_binding(
+    pattern: &syn::Pat,
+    initializer: &syn::Expr,
+    command: Option<&str>,
+) -> Option<String> {
+    let command = command?;
+    let syn::Pat::Tuple(tuple) = pattern else {
+        return None;
+    };
+    if tuple.elems.len() != 2 {
+        return None;
+    }
+    let syn::Pat::Ident(observation) = &tuple.elems[1] else {
+        return None;
+    };
+    let syn::Expr::MethodCall(call) = transparent_expr(initializer) else {
+        return None;
+    };
+    (call.method == "into_parts"
+        && call.args.is_empty()
+        && exact_expr_path(&call.receiver).as_deref() == Some(command))
+    .then(|| observation.ident.to_string())
+}
+
 fn transparent_expr(expr: &syn::Expr) -> &syn::Expr {
     match expr {
         syn::Expr::Group(group) => transparent_expr(&group.expr),
@@ -757,36 +1158,45 @@ fn exact_expr_path(expr: &syn::Expr) -> Option<String> {
     )
 }
 
-fn is_observation_factory_expr(expr: &syn::Expr) -> bool {
+fn observation_factory_expr(expr: &syn::Expr) -> Option<ObservationFactory> {
     match transparent_expr(expr) {
         syn::Expr::Call(call) => {
-            exact_expr_path(&call.func).as_deref()
-                == Some("identity::password_change_localtx_observation")
-                && call.args.is_empty()
+            if !call.args.is_empty() {
+                return None;
+            }
+            match exact_expr_path(&call.func).as_deref() {
+                Some("identity::password_change_localtx_observation") => {
+                    Some(ObservationFactory::IdentityPasswordChange)
+                }
+                Some("settings::secret_publish_localtx_observation") => {
+                    Some(ObservationFactory::SettingsSecretPublish)
+                }
+                _ => None,
+            }
         }
         syn::Expr::MethodCall(method) if method.method == "ok_or_else" => {
-            is_observation_factory_expr(&method.receiver)
+            observation_factory_expr(&method.receiver)
         }
-        syn::Expr::Try(try_expr) => is_observation_factory_expr(&try_expr.expr),
-        syn::Expr::Match(match_expr) => is_canonical_observation_match(match_expr),
-        _ => false,
+        syn::Expr::Try(try_expr) => observation_factory_expr(&try_expr.expr),
+        syn::Expr::Match(match_expr) => canonical_observation_match(match_expr),
+        _ => None,
     }
 }
 
-fn is_canonical_observation_match(match_expr: &syn::ExprMatch) -> bool {
-    if !is_observation_factory_expr(&match_expr.expr) || match_expr.arms.len() != 2 {
-        return false;
+fn canonical_observation_match(match_expr: &syn::ExprMatch) -> Option<ObservationFactory> {
+    let factory = observation_factory_expr(&match_expr.expr)?;
+    if match_expr.arms.len() != 2 {
+        return None;
     }
     let some = &match_expr.arms[0];
     let none = &match_expr.arms[1];
-    let Some(binding) = some_observation_binding(&some.pat) else {
-        return false;
-    };
-    some.guard.is_none()
+    let binding = some_observation_binding(&some.pat)?;
+    (some.guard.is_none()
         && exact_expr_path(&some.body).as_deref() == Some(binding.as_str())
         && none.guard.is_none()
         && is_none_pattern(&none.pat)
-        && is_return_err(&none.body)
+        && is_return_err(&none.body))
+    .then_some(factory)
 }
 
 fn some_observation_binding(pattern: &syn::Pat) -> Option<String> {
@@ -840,11 +1250,797 @@ fn is_return_err(expr: &syn::Expr) -> bool {
     exact_expr_path(&call.func).as_deref() == Some("Err") && call.args.len() == 1
 }
 
+fn secret_repo_read_only_findings(rel: &str, content: &str) -> Vec<Finding> {
+    let syntax = match syn::parse_file(content) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            return vec![finding(
+                Rule::SecretRefMutationBypass,
+                rel,
+                format!("cannot parse settings ports for SecretRepo ownership: {error}"),
+            )];
+        }
+    };
+    let Some(repo) = syntax.items.iter().find_map(|item| match item {
+        syn::Item::Trait(item) if item.ident == "SecretRepoLocal" => Some(item),
+        _ => None,
+    }) else {
+        return vec![finding(
+            Rule::SecretRefMutationSitesAbsent,
+            rel,
+            "SecretRepoLocal trait is absent; read-only mutation separation is vacuous",
+        )];
+    };
+    let mut names = BTreeSet::new();
+    let methods_are_exact = repo.items.len() == SECRET_REPO_READ_METHODS.len()
+        && repo.items.iter().all(|item| match item {
+            syn::TraitItem::Fn(method) => {
+                method.default.is_none()
+                    && canonical_secret_repo_signature(&method.sig)
+                    && names.insert(method.sig.ident.to_string())
+            }
+            _ => false,
+        });
+    if compact_tokens(&repo.supertraits) == "Send+Sync" && methods_are_exact {
+        Vec::new()
+    } else {
+        vec![finding(
+            Rule::SecretRefMutationBypass,
+            format!("{rel}::SecretRepoLocal"),
+            "SecretRepoLocal must remain Send + Sync with exactly find/find_version/latest_version and their canonical read-only signatures",
+        )]
+    }
+}
+
+const SECRET_REPO_READ_METHODS: [&str; 3] = ["find", "find_version", "latest_version"];
+
+fn canonical_secret_repo_signature(signature: &syn::Signature) -> bool {
+    let normalized = compact_tokens(signature).replace(",)->", ")->");
+    matches!(
+        normalized.as_str(),
+        "asyncfnfind(&self,scope:TenantRepoScope,key:&SecretKey)->Result<Option<SecretEntry>,SecretRepoError>"
+            | "asyncfnfind_version(&self,scope:TenantRepoScope,key:&SecretKey,version:u64)->Result<Option<SecretEntry>,SecretRepoError>"
+            | "asyncfnlatest_version(&self,scope:TenantRepoScope,key:&SecretKey)->Result<Option<u64>,SecretRepoError>"
+    )
+}
+
+fn secret_ref_mutation_findings(
+    rel: &str,
+    content: &str,
+    sites: &mut BTreeMap<&'static str, usize>,
+) -> Vec<Finding> {
+    let syntax = match syn::parse_file(content) {
+        Ok(syntax) => syntax,
+        Err(error) => {
+            return vec![finding(
+                Rule::SecretRefMutationBypass,
+                rel,
+                format!("cannot parse production Rust for secret_refs mutation ownership: {error}"),
+            )];
+        }
+    };
+    let mut scan = SecretRefMutationScan::new(rel, sites);
+    syn::visit::Visit::visit_file(&mut scan, &syntax);
+    scan.finish()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretRefMutationKind {
+    Insert,
+    Destructive,
+}
+
+struct SecretRefMutationScan<'a> {
+    rel: &'a str,
+    modules: Vec<String>,
+    current_impl: Option<String>,
+    current_function: Option<String>,
+    current_acquire_shape_is_valid: bool,
+    impl_functions: BTreeSet<(String, String)>,
+    pg_secret_repo_seen: bool,
+    pg_secret_repo_trait_impls: usize,
+    locked_key_scopes: Vec<BTreeMap<String, bool>>,
+    branch_depth: usize,
+    acquire_calls: BTreeMap<(String, String), usize>,
+    cas_insert_calls: BTreeMap<(String, String), usize>,
+    append_tombstone_calls: BTreeMap<(String, String), usize>,
+    cas_funnel_calls: BTreeMap<(String, String), usize>,
+    sites: &'a mut BTreeMap<&'static str, usize>,
+    findings: Vec<Finding>,
+}
+
+impl<'a> SecretRefMutationScan<'a> {
+    fn new(rel: &'a str, sites: &'a mut BTreeMap<&'static str, usize>) -> Self {
+        Self {
+            rel,
+            modules: Vec::new(),
+            current_impl: None,
+            current_function: None,
+            current_acquire_shape_is_valid: false,
+            impl_functions: BTreeSet::new(),
+            pg_secret_repo_seen: false,
+            pg_secret_repo_trait_impls: 0,
+            locked_key_scopes: Vec::new(),
+            branch_depth: 0,
+            acquire_calls: BTreeMap::new(),
+            cas_insert_calls: BTreeMap::new(),
+            append_tombstone_calls: BTreeMap::new(),
+            cas_funnel_calls: BTreeMap::new(),
+            sites,
+            findings: Vec::new(),
+        }
+    }
+
+    fn owner(&self) -> (String, String) {
+        (
+            self.current_impl.clone().unwrap_or_default(),
+            self.current_function.clone().unwrap_or_default(),
+        )
+    }
+
+    fn note_call(map: &mut BTreeMap<(String, String), usize>, owner: (String, String)) {
+        *map.entry(owner).or_default() += 1;
+    }
+
+    fn note_sql(&mut self, sql: &str, line: usize) {
+        let normalized = normalize_sql(sql);
+        if self.rel == "secret_repo.rs" && normalized.contains("pg_advisory_xact_lock") {
+            if self.is_canonical_acquire_context() && exact_secret_key_lock_sql(&normalized) {
+                *self.sites.entry("secret-key-advisory-lock").or_default() += 1;
+            } else {
+                self.findings.push(finding(
+                    Rule::SecretRefMutationBypass,
+                    site_subject(self.rel, line),
+                    "LockedSecretKey advisory lock must occur exactly once inside the canonical acquire method",
+                ));
+            }
+        }
+        let Some(kind) = secret_ref_mutation_kind(sql) else {
+            return;
+        };
+        if let Some(site) = self.canonical_site(kind) {
+            *self.sites.entry(site).or_default() += 1;
+            return;
+        }
+        self.findings.push(finding(
+            Rule::SecretRefMutationBypass,
+            site_subject(self.rel, line),
+            "secret_refs mutations must be append-only INSERTs owned by key_lock::LockedSecretKey::{cas_insert,append_tombstone}",
+        ));
+    }
+
+    fn canonical_site(&self, kind: SecretRefMutationKind) -> Option<&'static str> {
+        if kind != SecretRefMutationKind::Insert
+            || self.rel != "secret_repo.rs"
+            || self.modules.len() != 1
+            || self.modules[0] != "key_lock"
+            || self.current_impl.as_deref() != Some("LockedSecretKey")
+        {
+            return None;
+        }
+        match self.current_function.as_deref() {
+            Some("cas_insert") => Some("secret-key-cas-insert"),
+            Some("append_tombstone") => Some("secret-key-append-tombstone"),
+            _ => None,
+        }
+    }
+
+    fn is_canonical_acquire_context(&self) -> bool {
+        self.rel == "secret_repo.rs"
+            && self.modules.as_slice() == ["key_lock"]
+            && self.current_impl.as_deref() == Some("LockedSecretKey")
+            && self.current_function.as_deref() == Some("acquire")
+            && self.current_acquire_shape_is_valid
+    }
+
+    fn inspect_pg_secret_repo_impl(&mut self, node: &syn::ItemImpl) {
+        if impl_type_name(&node.self_ty) != "PgSecretRepo" {
+            return;
+        }
+        self.pg_secret_repo_seen = true;
+        let trait_impl = node.trait_.as_ref().map(|(polarity, path, _)| {
+            (
+                polarity.is_none(),
+                path.segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default(),
+            )
+        });
+        match trait_impl {
+            Some((true, trait_name)) if trait_name == "SecretRepo" => {
+                self.pg_secret_repo_trait_impls += 1;
+                let mut names = BTreeSet::new();
+                let methods_are_exact = node.items.len() == SECRET_REPO_READ_METHODS.len()
+                    && node.items.iter().all(|item| match item {
+                        syn::ImplItem::Fn(method) => {
+                            matches!(method.vis, syn::Visibility::Inherited)
+                                && canonical_secret_repo_signature(&method.sig)
+                                && names.insert(method.sig.ident.to_string())
+                        }
+                        _ => false,
+                    });
+                if node.unsafety.is_some() || node.defaultness.is_some() || !methods_are_exact {
+                    self.findings.push(finding(
+                        Rule::SecretRefMutationBypass,
+                        site_subject(self.rel, node.impl_token.span.start().line),
+                        "PgSecretRepo must use one ordinary positive SecretRepo impl with exactly find/find_version/latest_version and their canonical signatures",
+                    ));
+                }
+            }
+            Some(_) => self.findings.push(finding(
+                Rule::SecretRefMutationBypass,
+                site_subject(self.rel, node.impl_token.span.start().line),
+                "PgSecretRepo may implement only its canonical SecretRepo read trait",
+            )),
+            None => {
+                for item in &node.items {
+                    let allowed_constructor =
+                        matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "new");
+                    if !allowed_constructor {
+                        self.findings.push(finding(
+                            Rule::SecretRefMutationBypass,
+                            "secret_repo.rs::PgSecretRepo",
+                            "PgSecretRepo inherent impl is restricted to its constructor; all repository methods belong to the exact SecretRepo read impl",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_pg_secret_repo_contract(&mut self) {
+        if !self.pg_secret_repo_seen {
+            return;
+        }
+        if self.pg_secret_repo_trait_impls != 1 {
+            self.findings.push(finding(
+                Rule::SecretRefMutationBypass,
+                "secret_repo.rs::PgSecretRepo",
+                "PgSecretRepo must have exactly one positive SecretRepo trait impl",
+            ));
+        }
+    }
+
+    fn note_locked_key_binding(&mut self, local: &syn::Local) {
+        let mut names = Vec::new();
+        collect_pattern_names(&local.pat, &mut names);
+        let Some(scope) = self.locked_key_scopes.last_mut() else {
+            return;
+        };
+        for name in names {
+            scope.insert(name, false);
+        }
+        let syn::Pat::Ident(binding) = &local.pat else {
+            return;
+        };
+        if binding.subpat.is_some() || binding.mutability.is_some() {
+            return;
+        }
+        let Some(init) = &local.init else {
+            return;
+        };
+        if self.branch_depth == 0 && is_locked_key_acquire_result(&init.expr) {
+            scope.insert(binding.ident.to_string(), true);
+        }
+    }
+
+    fn locked_key_receiver_is_valid(&self, receiver: &syn::Expr) -> bool {
+        if self.branch_depth != 0 {
+            return false;
+        }
+        if is_locked_key_acquire_result(receiver) {
+            return true;
+        }
+        let Some(name) = exact_expr_path(receiver).filter(|path| !path.contains("::")) else {
+            return false;
+        };
+        self.locked_key_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name).copied())
+            .unwrap_or(false)
+    }
+
+    fn invalidate_locked_key_binding(&mut self, receiver: &syn::Expr) {
+        let Some(name) = exact_expr_path(receiver).filter(|path| !path.contains("::")) else {
+            return;
+        };
+        if let Some(scope) = self
+            .locked_key_scopes
+            .iter_mut()
+            .rev()
+            .find(|scope| scope.contains_key(&name))
+        {
+            scope.insert(name, false);
+        }
+    }
+
+    fn finish(mut self) -> Vec<Finding> {
+        if self.rel != "secret_repo.rs" {
+            return self.findings;
+        }
+        self.finish_pg_secret_repo_contract();
+        if !self
+            .impl_functions
+            .iter()
+            .any(|(owner, _)| owner == "PgSecretUnitOfWork")
+        {
+            return self.findings;
+        }
+
+        let uow_owner = |function: &str| ("PgSecretUnitOfWork".to_string(), function.to_string());
+        let cas_funnel = uow_owner("cas_insert_locked");
+        let cas_funnel_is_exact = self.impl_functions.contains(&cas_funnel)
+            && self.acquire_calls.get(&cas_funnel).copied() == Some(1)
+            && self.cas_insert_calls.get(&cas_funnel).copied() == Some(1)
+            && !self.append_tombstone_calls.contains_key(&cas_funnel);
+        if cas_funnel_is_exact {
+            *self.sites.entry("secret-uow-cas-funnel").or_default() += 1;
+        } else {
+            self.findings.push(finding(
+                Rule::SecretRefMutationBypass,
+                "secret_repo.rs::PgSecretUnitOfWork::cas_insert_locked",
+                "canonical CAS funnel must acquire LockedSecretKey exactly once and call cas_insert exactly once",
+            ));
+        }
+
+        for (function, site) in [
+            ("publish", "secret-uow-publish-cas"),
+            ("publish_internal", "secret-uow-publish-internal-cas"),
+            ("republish", "secret-uow-republish-cas"),
+        ] {
+            let owner = uow_owner(function);
+            let exact = self.impl_functions.contains(&owner)
+                && self.cas_funnel_calls.get(&owner).copied() == Some(1)
+                && !self.acquire_calls.contains_key(&owner)
+                && !self.cas_insert_calls.contains_key(&owner)
+                && !self.append_tombstone_calls.contains_key(&owner);
+            if exact {
+                *self.sites.entry(site).or_default() += 1;
+            } else {
+                self.findings.push(finding(
+                    Rule::SecretRefMutationBypass,
+                    format!("secret_repo.rs::PgSecretUnitOfWork::{function}"),
+                    format!(
+                        "{function} must call the shared cas_insert_locked funnel exactly once and must not mint or consume LockedSecretKey directly"
+                    ),
+                ));
+            }
+        }
+
+        let delete = uow_owner("delete");
+        let delete_is_exact = self.impl_functions.contains(&delete)
+            && self.acquire_calls.get(&delete).copied() == Some(1)
+            && self.append_tombstone_calls.get(&delete).copied() == Some(1)
+            && !self.cas_insert_calls.contains_key(&delete)
+            && !self.cas_funnel_calls.contains_key(&delete);
+        if delete_is_exact {
+            *self.sites.entry("secret-uow-delete-tombstone").or_default() += 1;
+        } else {
+            self.findings.push(finding(
+                Rule::SecretRefMutationBypass,
+                "secret_repo.rs::PgSecretUnitOfWork::delete",
+                "delete must acquire LockedSecretKey exactly once and append_tombstone exactly once",
+            ));
+        }
+
+        for (owners, expected, operation) in [
+            (
+                &self.acquire_calls,
+                vec![cas_funnel.clone(), delete],
+                "acquire",
+            ),
+            (&self.cas_insert_calls, vec![cas_funnel], "cas_insert"),
+        ] {
+            for owner in owners.keys().filter(|owner| !expected.contains(owner)) {
+                self.findings.push(finding(
+                    Rule::SecretRefMutationBypass,
+                    format!("secret_repo.rs::{}::{}", owner.0, owner.1),
+                    format!("LockedSecretKey::{operation} is outside its canonical UoW owner"),
+                ));
+            }
+        }
+        for owner in self
+            .append_tombstone_calls
+            .keys()
+            .filter(|owner| **owner != uow_owner("delete"))
+        {
+            self.findings.push(finding(
+                Rule::SecretRefMutationBypass,
+                format!("secret_repo.rs::{}::{}", owner.0, owner.1),
+                "LockedSecretKey::append_tombstone is outside PgSecretUnitOfWork::delete",
+            ));
+        }
+        let expected_publishers = [
+            uow_owner("publish"),
+            uow_owner("publish_internal"),
+            uow_owner("republish"),
+        ];
+        for owner in self
+            .cas_funnel_calls
+            .keys()
+            .filter(|owner| !expected_publishers.contains(owner))
+        {
+            self.findings.push(finding(
+                Rule::SecretRefMutationBypass,
+                format!("secret_repo.rs::{}::{}", owner.0, owner.1),
+                "cas_insert_locked may only be called by the three typed secret publish entries",
+            ));
+        }
+
+        self.findings
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SecretRefMutationScan<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let Some((_, items)) = &node.content else {
+            return;
+        };
+        self.modules.push(node.ident.to_string());
+        for item in items {
+            syn::visit::Visit::visit_item(self, item);
+        }
+        self.modules.pop();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.inspect_pg_secret_repo_impl(node);
+        let previous = self.current_impl.replace(impl_type_name(&node.self_ty));
+        for item in &node.items {
+            syn::visit::Visit::visit_impl_item(self, item);
+        }
+        self.current_impl = previous;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let previous = self.current_function.replace(node.sig.ident.to_string());
+        if let Some(current_impl) = &self.current_impl {
+            self.impl_functions
+                .insert((current_impl.clone(), node.sig.ident.to_string()));
+        }
+        let previous_acquire_shape = self.current_acquire_shape_is_valid;
+        self.current_acquire_shape_is_valid = false;
+        if self.rel == "secret_repo.rs"
+            && self.modules.as_slice() == ["key_lock"]
+            && self.current_impl.as_deref() == Some("LockedSecretKey")
+            && node.sig.ident == "acquire"
+        {
+            if canonical_secret_key_acquire(node) {
+                self.current_acquire_shape_is_valid = true;
+                *self.sites.entry("secret-key-lock-acquire").or_default() += 1;
+            } else {
+                self.findings.push(finding(
+                    Rule::SecretRefMutationBypass,
+                    site_subject(self.rel, node.sig.ident.span().start().line),
+                    "LockedSecretKey::acquire must take &mut TxCapability plus tenant/key, bind those coordinates to the exact advisory lock, and return the same stored fields",
+                ));
+            }
+        }
+        syn::visit::Visit::visit_block(self, &node.block);
+        self.current_acquire_shape_is_valid = previous_acquire_shape;
+        self.current_function = previous;
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let previous_impl = self.current_impl.take();
+        let previous_function = self.current_function.replace(node.sig.ident.to_string());
+        let previous_acquire_shape = self.current_acquire_shape_is_valid;
+        self.current_acquire_shape_is_valid = false;
+        syn::visit::Visit::visit_block(self, &node.block);
+        self.current_acquire_shape_is_valid = previous_acquire_shape;
+        self.current_function = previous_function;
+        self.current_impl = previous_impl;
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.locked_key_scopes.push(BTreeMap::new());
+        for statement in &node.stmts {
+            syn::visit::visit_stmt(self, statement);
+            if let syn::Stmt::Local(local) = statement {
+                self.note_locked_key_binding(local);
+            }
+        }
+        self.locked_key_scopes.pop();
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        match exact_expr_path(&node.func).as_deref() {
+            Some("LockedSecretKey::acquire") => {
+                let owner = self.owner();
+                Self::note_call(&mut self.acquire_calls, owner);
+            }
+            Some("Self::cas_insert_locked") => {
+                let owner = self.owner();
+                Self::note_call(&mut self.cas_funnel_calls, owner);
+            }
+            _ => {}
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let owner = self.owner();
+        let method = node.method.to_string();
+        if matches!(method.as_str(), "cas_insert" | "append_tombstone") {
+            if self.locked_key_receiver_is_valid(&node.receiver) {
+                if method == "cas_insert" {
+                    Self::note_call(&mut self.cas_insert_calls, owner);
+                } else {
+                    Self::note_call(&mut self.append_tombstone_calls, owner);
+                }
+                self.invalidate_locked_key_binding(&node.receiver);
+            } else {
+                self.findings.push(finding(
+                    Rule::SecretRefMutationBypass,
+                    site_subject(self.rel, node.method.span().start().line),
+                    format!(
+                        "LockedSecretKey::{method} receiver must be the unconditional, unmodified result of LockedSecretKey::acquire"
+                    ),
+                ));
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        syn::visit::visit_expr_assign(self, node);
+        self.invalidate_locked_key_binding(&node.left);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let mut scope = BTreeMap::new();
+        for input in &node.inputs {
+            let mut names = Vec::new();
+            collect_pattern_names(input, &mut names);
+            scope.extend(names.into_iter().map(|name| (name, false)));
+        }
+        self.locked_key_scopes.push(scope);
+        syn::visit::visit_expr_closure(self, node);
+        self.locked_key_scopes.pop();
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.branch_depth += 1;
+        syn::visit::visit_expr_if(self, node);
+        self.branch_depth -= 1;
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        self.branch_depth += 1;
+        syn::visit::visit_expr_match(self, node);
+        self.branch_depth -= 1;
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.branch_depth += 1;
+        syn::visit::visit_expr_for_loop(self, node);
+        self.branch_depth -= 1;
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.branch_depth += 1;
+        syn::visit::visit_expr_while(self, node);
+        self.branch_depth -= 1;
+    }
+
+    fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+        self.branch_depth += 1;
+        syn::visit::visit_expr_loop(self, node);
+        self.branch_depth -= 1;
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        use syn::spanned::Spanned as _;
+
+        let constructor = node
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string());
+        let constructs_locked_key = constructor.as_deref() == Some("LockedSecretKey")
+            || (constructor.as_deref() == Some("Self")
+                && self.current_impl.as_deref() == Some("LockedSecretKey"));
+        if constructs_locked_key {
+            if self.is_canonical_acquire_context() && canonical_locked_key_mint(node) {
+                *self.sites.entry("secret-key-capability-mint").or_default() += 1;
+            } else {
+                self.findings.push(finding(
+                    Rule::SecretRefMutationBypass,
+                    site_subject(self.rel, node.path.span().start().line),
+                    "LockedSecretKey may only be constructed by its canonical advisory-lock acquire method",
+                ));
+            }
+        }
+        syn::visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        self.note_sql(&node.value(), node.span().start().line);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        use syn::spanned::Spanned as _;
+        let combined = macro_string_literals(&node.tokens).join(" ");
+        self.note_sql(&combined, node.path.span().start().line);
+    }
+}
+
+fn is_locked_key_acquire_result(expr: &syn::Expr) -> bool {
+    match transparent_expr(expr) {
+        syn::Expr::Await(awaited) => is_locked_key_acquire_result(&awaited.base),
+        syn::Expr::Try(tried) => is_locked_key_acquire_result(&tried.expr),
+        syn::Expr::MethodCall(call)
+            if (call.method == "unwrap" && call.args.is_empty())
+                || (call.method == "expect" && call.args.len() == 1) =>
+        {
+            is_locked_key_acquire_result(&call.receiver)
+        }
+        syn::Expr::Call(call) => {
+            exact_expr_path(&call.func).as_deref() == Some("LockedSecretKey::acquire")
+                && call.args.len() == 3
+        }
+        _ => false,
+    }
+}
+
+fn impl_type_name(ty: &syn::Type) -> String {
+    let syn::Type::Path(path) = ty else {
+        return String::new();
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default()
+}
+
+fn macro_string_literals(tokens: &proc_macro2::TokenStream) -> Vec<String> {
+    let mut values = Vec::new();
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Group(group) => {
+                values.extend(macro_string_literals(&group.stream()));
+            }
+            proc_macro2::TokenTree::Literal(literal) => {
+                if let Ok(syn::Lit::Str(value)) = syn::parse_str::<syn::Lit>(&literal.to_string()) {
+                    values.push(value.value());
+                }
+            }
+            _ => {}
+        }
+    }
+    values
+}
+
+fn secret_ref_mutation_kind(sql: &str) -> Option<SecretRefMutationKind> {
+    let normalized = normalize_sql(sql);
+    if !normalized.contains("secret_refs") {
+        return None;
+    }
+    let statement = normalized.trim_start();
+    if statement.starts_with("update ")
+        || statement.starts_with("delete from")
+        || statement.starts_with("merge into")
+        || statement.starts_with("truncate ")
+    {
+        return Some(SecretRefMutationKind::Destructive);
+    }
+    statement
+        .starts_with("insert into")
+        .then_some(SecretRefMutationKind::Insert)
+}
+
+fn normalize_sql(sql: &str) -> String {
+    strip_sql_comments(sql)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn exact_secret_key_lock_sql(normalized: &str) -> bool {
+    normalized == "select pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))"
+}
+
+fn canonical_secret_key_acquire(node: &syn::ImplItemFn) -> bool {
+    if node.sig.asyncness.is_none() || node.sig.inputs.len() != 3 {
+        return false;
+    }
+    let signature = compact_tokens(&node.sig);
+    if signature
+        != "asyncfnacquire(tx:&'capmutTxCapability<'tx>,tenant:TenantId,key:&SecretKey,)->Result<Self,SecretRepoError>"
+    {
+        return false;
+    }
+    let statements: Vec<_> = node.block.stmts.iter().map(compact_tokens).collect();
+    let prefix = [
+        "lettenant_uuid=tenant_param(tenant);",
+        "letkey=key.as_str().to_owned();",
+    ];
+    if statements.get(..2).is_none_or(|actual| actual != prefix) {
+        return false;
+    }
+    let lock_index = if statements.get(2).is_some_and(|statement| {
+        statement
+            == "#[cfg(all(test,feature=\"integration\"))]wait_at_secret_key_lock_rendezvous(&key).await;"
+            || statement == "wait_at_secret_key_lock_rendezvous(&key).await;"
+    }) {
+        3
+    } else {
+        2
+    };
+    let required_tail = [
+        "sqlx::query(\"SELECTpg_advisory_xact_lock(hashtextextended($1||chr(31)||$2,0))\").bind(&tenant_uuid).bind(&key).execute(tx.conn()).await.map_err(storage)?;",
+    ];
+    statements
+        .get(lock_index)
+        .is_some_and(|statement| statement == required_tail[0])
+        && statements.len() == lock_index + 2
+        && statements.get(lock_index + 1).is_some_and(|statement| {
+            matches!(
+                statement.as_str(),
+                "Ok(Self{tx,tenant,tenant_uuid,key})" | "Ok(Self{tx,tenant,tenant_uuid,key,})"
+            )
+        })
+}
+
+fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
+    tokens
+        .to_token_stream()
+        .to_string()
+        .replace(char::is_whitespace, "")
+}
+
+fn canonical_locked_key_mint(node: &syn::ExprStruct) -> bool {
+    if node.rest.is_some() || node.fields.len() != 4 {
+        return false;
+    }
+    node.fields
+        .iter()
+        .zip(["tx", "tenant", "tenant_uuid", "key"])
+        .all(|(field, expected)| {
+            let syn::Member::Named(member) = &field.member else {
+                return false;
+            };
+            member == expected && compact_tokens(&field.expr) == expected
+        })
+}
+
 fn canonical_retry_operation(expr: &syn::Expr) -> Option<String> {
     let syn::Expr::Closure(closure) = transparent_expr(expr) else {
         return None;
     };
     canonical_retry_tail(&closure.body)
+}
+
+#[derive(Default)]
+struct ScopedOperationScan {
+    calls: usize,
+    legacy_write: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ScopedOperationScan {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if is_self_pool(&node.receiver) {
+            match node.method.to_string().as_str() {
+                "retry_write" | "retry_co_tx_with_outbox" => self.calls += 1,
+                "write" | "co_tx_with_outbox" => {
+                    self.calls += 1;
+                    self.legacy_write = true;
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn scoped_operation_scan(expr: &syn::Expr) -> ScopedOperationScan {
+    let mut scan = ScopedOperationScan::default();
+    syn::visit::Visit::visit_expr(&mut scan, expr);
+    scan
 }
 
 fn canonical_retry_tail(expr: &syn::Expr) -> Option<String> {
@@ -1725,6 +2921,86 @@ mod tests {
             .iter()
             .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
             .collect()
+    }
+
+    fn secret_retry_green_source() -> &'static str {
+        r#"
+impl SecretUnitOfWork for PgSecretUnitOfWork {
+    async fn publish(&self, command: SecretPublishCommand) {
+        let (entry, observation) = command.into_parts();
+        run_pg_localtx_retry(
+            SETTINGS_SECRET_BOUNDARY,
+            observation,
+            |_attempt| async { self.pool.retry_write() },
+            classify,
+        ).await;
+    }
+
+    async fn publish_internal(&self, command: SecretInternalPublishCommand) {
+        run_pg_tx_retry(
+            SETTINGS_SECRET_BOUNDARY,
+            |_attempt| async { self.pool.retry_write() },
+            classify,
+        ).await;
+    }
+
+    async fn republish(&self, command: SecretRepublishCommand) {
+        run_pg_tx_retry(
+            SETTINGS_SECRET_BOUNDARY,
+            |_attempt| async { self.pool.retry_write() },
+            classify,
+        ).await;
+    }
+}
+"#
+    }
+
+    fn secret_mutation_green_source() -> &'static str {
+        r#"
+impl PgSecretUnitOfWork {
+    async fn cas_insert_locked(tx: &mut TxCapability<'_>, tenant: TenantId, entry: SecretEntry) {
+        let key = entry.key();
+        LockedSecretKey::acquire(tx, tenant, key).await.unwrap().cas_insert(&entry).await;
+    }
+}
+
+impl SecretUnitOfWork for PgSecretUnitOfWork {
+    async fn publish(&self) { Self::cas_insert_locked(tx, tenant, entry).await; }
+    async fn publish_internal(&self) { Self::cas_insert_locked(tx, tenant, entry).await; }
+    async fn republish(&self) { Self::cas_insert_locked(tx, tenant, entry).await; }
+    async fn delete(&self) {
+        LockedSecretKey::acquire(tx, tenant, key).await.unwrap().append_tombstone().await;
+    }
+}
+
+mod key_lock {
+    impl<'cap, 'tx> LockedSecretKey<'cap, 'tx> {
+        pub(super) async fn acquire(
+            tx: &'cap mut TxCapability<'tx>,
+            tenant: TenantId,
+            key: &SecretKey,
+        ) -> Result<Self, SecretRepoError> {
+            let tenant_uuid = tenant_param(tenant);
+            let key = key.as_str().to_owned();
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
+                .bind(&tenant_uuid)
+                .bind(&key)
+                .execute(tx.conn())
+                .await
+                .map_err(storage)?;
+            Ok(Self { tx, tenant, tenant_uuid, key })
+        }
+
+        async fn cas_insert(self) {
+            sqlx::query("INSERT INTO secret_refs (tenant_id, secret_key) VALUES ($1, $2)").execute(self.conn()).await;
+        }
+
+        async fn append_tombstone(self) {
+            sqlx::query("INSERT INTO secret_refs (tenant_id, secret_key, deleted) VALUES ($1, $2, TRUE)").execute(self.conn()).await;
+        }
+    }
+}
+"#
     }
 
     #[test]
@@ -2626,14 +3902,44 @@ pub mod fault_matrix;
     }
 
     #[test]
+    fn retry_guard_accepts_command_carried_settings_secret_observation() {
+        let mut sites = BTreeSet::new();
+        let source = r#"
+use crate::tx_retry::run_pg_localtx_retry as retry;
+impl SecretUnitOfWork for PgSecretUnitOfWork {
+    async fn publish(&self, command: SecretPublishCommand) {
+        let (entry, observation) = command.into_parts();
+        retry(
+            SETTINGS_SECRET_BOUNDARY,
+            observation,
+            |_attempt| async { self.pool.retry_write() },
+            classify,
+        ).await;
+    }
+}
+"#;
+        let findings = retry_placement_findings("secret_repo.rs", source, &mut sites);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(sites.contains("settings-secret-publish"));
+    }
+
+    #[test]
     fn retry_guard_rejects_wrong_wrapper_or_unbound_identity_evidence() {
         let mut sites = BTreeSet::new();
         for source in [
             "impl Repo { async fn bump_version(&self){ run_pg_tx_retry(IDENTITY_CREDENTIAL_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
             "impl Uow { async fn commit(&self){ run_pg_localtx_retry(SETTINGS_CONFIG_BOUNDARY, observation, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            "impl Repo { async fn save(&self){ run_pg_tx_retry(SETTINGS_SECRET_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn save(&self){ let mut observation = settings::secret_publish_localtx_observation().ok_or_else(missing)?; observation = handmade(); run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, settings::secret_publish_localtx_observation().ok_or_else(missing)?, || async { self.pool.write() }, classify).await; } }",
+            "impl Repo { async fn save(&self){ run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, settings::secret_publish_localtx_observation().ok_or_else(missing)?, || async { self.pool.write().await; self.pool.retry_write().await }, classify).await; } }",
         ] {
-            let rel = if source.contains("impl Repo") {
+            let rel = if source.contains("SETTINGS_SECRET_BOUNDARY") {
+                "secret_repo.rs"
+            } else if source.contains("impl Repo") {
                 "credential_repo.rs"
             } else {
                 "config_repo.rs"
@@ -2646,6 +3952,323 @@ pub mod fault_matrix;
                 "wrong wrapper/evidence must fail closed: {findings:?}"
             );
         }
+    }
+
+    #[test]
+    fn retry_guard_rejects_secret_contract_attribution_bypasses() {
+        for source in [
+            r#"impl SecretRepo for PgSecretRepo { async fn save(&self) { run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, |_attempt| async { self.pool.retry_write() }, classify).await; } }"#,
+            r#"impl SecretUnitOfWork for PgSecretUnitOfWork { async fn publish(&self, command: SecretPublishCommand) { let (_, observation) = command.into_parts(); run_pg_tx_retry(SETTINGS_SECRET_BOUNDARY, |_attempt| async { self.pool.retry_write() }, classify).await; } }"#,
+            r#"impl SecretUnitOfWork for PgSecretUnitOfWork { async fn publish(&self, command: SecretPublishCommand) { let (_, command_observation) = command.into_parts(); let observation = handmade(); run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, |_attempt| async { self.pool.retry_write() }, classify).await; } }"#,
+            r#"impl SecretUnitOfWork for PgSecretUnitOfWork { async fn publish(&self, command: SecretPublishCommand) { let (_, command_observation) = command.into_parts(); run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, settings::secret_publish_localtx_observation().unwrap(), |_attempt| async { self.pool.retry_write() }, classify).await; } }"#,
+            r#"impl SecretUnitOfWork for PgSecretUnitOfWork { async fn publish(&self, command: SecretPublishCommand) { let (_, observation) = command.into_parts(); run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, |_attempt| async { self.pool.write() }, classify).await; } }"#,
+            r#"impl SecretUnitOfWork for PgSecretUnitOfWork { async fn publish_internal(&self) { run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, |_attempt| async { self.pool.retry_write() }, classify).await; } }"#,
+            r#"impl SecretUnitOfWork for PgSecretUnitOfWork { async fn republish(&self) { run_pg_localtx_retry(SETTINGS_SECRET_BOUNDARY, observation, |_attempt| async { self.pool.retry_write() }, classify).await; } }"#,
+        ] {
+            let mut sites = BTreeSet::new();
+            let findings = retry_placement_findings("secret_repo.rs", source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "secret retry attribution bypass must fail closed: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_guard_rejects_protected_module_alias_bypasses() {
+        for (rel, source) in [
+            (
+                "role_repo.rs",
+                "use consistency as c; async fn load(){ c::run_tx_retry(work).await; }",
+            ),
+            (
+                "role_repo.rs",
+                "use crate::tx_retry as retry; async fn load(){ retry::run_pg_tx_retry(boundary, operation, classify).await; }",
+            ),
+        ] {
+            let mut sites = BTreeSet::new();
+            let findings = retry_placement_findings(rel, source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "protected retry module alias must not bypass owner checks: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_guard_accepts_protected_module_aliases_in_exact_owners() {
+        let mut sites = BTreeSet::new();
+        let direct = retry_placement_findings(
+            "tx_retry.rs",
+            "use consistency as c; async fn run_pg_tx_retry_core(){ c::run_tx_retry(work).await; }",
+            &mut sites,
+        );
+        let wrapper = retry_placement_findings(
+            "config_repo.rs",
+            "use crate::tx_retry as retry; impl Uow { async fn commit(&self){ retry::run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+            &mut sites,
+        );
+        assert!(direct.is_empty(), "{direct:?}");
+        assert!(wrapper.is_empty(), "{wrapper:?}");
+        assert!(sites.contains("settings-config-commit"));
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_rejects_raw_and_destructive_bypasses() {
+        for source in [
+            r#"async fn save(conn: &mut PgConnection) { sqlx::query("INSERT INTO secret_refs (tenant_id) VALUES ($1)").execute(conn).await; }"#,
+            r#"mod key_lock { impl LockedSecretKey<'_, '_> { async fn update(self) { sqlx::query("UPDATE secret_refs SET deleted = TRUE").execute(self.conn()).await; } } }"#,
+            r#"mod key_lock { impl LockedSecretKey<'_, '_> { async fn delete(self) { sqlx::query("DELETE FROM secret_refs").execute(self.conn()).await; } } }"#,
+            r#"mod key_lock { impl LockedSecretKey<'_, '_> { async fn truncate(self) { sqlx::query("TRUNCATE secret_refs").execute(self.conn()).await; } } }"#,
+            r#"
+mod key_lock {
+    impl<'cap, 'tx> LockedSecretKey<'cap, 'tx> {
+        pub(super) async fn acquire(
+            tx: &'cap mut TxCapability<'tx>,
+            tenant: TenantId,
+            key: &SecretKey,
+        ) -> Result<Self, SecretRepoError> {
+            let tenant_uuid = tenant_param(tenant);
+            let key = key.as_str().to_owned();
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
+                .bind(&tenant_uuid)
+                .bind(&key)
+                .execute(tx.conn())
+                .await
+                .map_err(storage)?;
+            Ok(Self { tx, tenant, tenant_uuid, key })
+        }
+
+        fn unchecked(tx: &'cap mut TxCapability<'tx>, tenant: TenantId, key: String) -> Self {
+            Self { tx, tenant, tenant_uuid: tenant_param(tenant), key }
+        }
+    }
+}
+"#,
+            r#"
+mod key_lock {
+    impl<'cap, 'tx> LockedSecretKey<'cap, 'tx> {
+        pub(super) async fn acquire(
+            tx: &'cap mut TxCapability<'tx>,
+            tenant: TenantId,
+            key: &SecretKey,
+        ) -> Result<Self, SecretRepoError> {
+            let tenant_uuid = tenant_param(tenant);
+            let key = key.as_str().to_owned();
+            if false {
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
+                    .bind(&tenant_uuid)
+                    .bind(&key)
+                    .execute(tx.conn())
+                    .await
+                    .map_err(storage)?;
+            }
+            Ok(Self { tx, tenant, tenant_uuid, key })
+        }
+    }
+}
+"#,
+        ] {
+            let mut sites = BTreeMap::new();
+            let findings = secret_ref_mutation_findings("secret_repo.rs", source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+                "raw/destructive mutation must fail closed: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_accepts_only_exact_locked_capability_sites() {
+        let mut sites = BTreeMap::new();
+        let findings = secret_ref_mutation_findings(
+            "secret_repo.rs",
+            secret_mutation_green_source(),
+            &mut sites,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            sites,
+            BTreeMap::from([
+                ("secret-key-advisory-lock", 1),
+                ("secret-key-capability-mint", 1),
+                ("secret-key-cas-insert", 1),
+                ("secret-key-append-tombstone", 1),
+                ("secret-key-lock-acquire", 1),
+                ("secret-uow-cas-funnel", 1),
+                ("secret-uow-delete-tombstone", 1),
+                ("secret-uow-publish-cas", 1),
+                ("secret-uow-publish-internal-cas", 1),
+                ("secret-uow-republish-cas", 1),
+            ])
+        );
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_accepts_stable_acquire_bindings() {
+        let source = secret_mutation_green_source().replacen(
+            "LockedSecretKey::acquire(tx, tenant, key).await.unwrap().cas_insert(&entry).await;",
+            "let locked = LockedSecretKey::acquire(tx, tenant, key).await.unwrap(); locked.cas_insert(&entry).await;",
+            1,
+        );
+        let mut sites = BTreeMap::new();
+        let findings = secret_ref_mutation_findings("secret_repo.rs", &source, &mut sites);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(sites.get("secret-uow-cas-funnel"), Some(&1));
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_rejects_receiver_provenance_bait() {
+        for (original, replacement) in [
+            (
+                "LockedSecretKey::acquire(tx, tenant, key).await.unwrap().cas_insert(&entry).await;",
+                "let _locked = LockedSecretKey::acquire(tx, tenant, key).await.unwrap(); decoy.cas_insert(&entry).await;",
+            ),
+            (
+                "LockedSecretKey::acquire(tx, tenant, key).await.unwrap().cas_insert(&entry).await;",
+                "let mut locked = LockedSecretKey::acquire(tx, tenant, key).await.unwrap(); locked = decoy; locked.cas_insert(&entry).await;",
+            ),
+            (
+                "LockedSecretKey::acquire(tx, tenant, key).await.unwrap().cas_insert(&entry).await;",
+                "let locked = if false { LockedSecretKey::acquire(tx, tenant, key).await.unwrap() } else { decoy }; locked.cas_insert(&entry).await;",
+            ),
+            (
+                "LockedSecretKey::acquire(tx, tenant, key).await.unwrap().cas_insert(&entry).await;",
+                "let locked = LockedSecretKey::acquire(tx, tenant, key).await.unwrap(); (|locked| async { locked.cas_insert(&entry).await })(decoy).await; drop(locked);",
+            ),
+            (
+                "LockedSecretKey::acquire(tx, tenant, key).await.unwrap().append_tombstone().await;",
+                "let _locked = LockedSecretKey::acquire(tx, tenant, key).await.unwrap(); decoy.append_tombstone().await;",
+            ),
+        ] {
+            let broken = secret_mutation_green_source().replacen(original, replacement, 1);
+            let mut sites = BTreeMap::new();
+            let findings = secret_ref_mutation_findings("secret_repo.rs", &broken, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+                "only an unmodified LockedSecretKey::acquire receiver may consume cas_insert: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_rejects_split_or_legacy_owners() {
+        let mut broken = secret_mutation_green_source().to_string();
+        broken = broken.replacen(
+            "async fn publish_internal(&self) { Self::cas_insert_locked(tx, tenant, entry).await; }",
+            "async fn publish_internal(&self) { raw_insert(entry).await; }",
+            1,
+        );
+        let mut sites = BTreeMap::new();
+        let findings = secret_ref_mutation_findings("secret_repo.rs", &broken, &mut sites);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+            "split CAS owner must fail closed: {findings:?}"
+        );
+
+        let mut sites = BTreeMap::new();
+        let findings = secret_ref_mutation_findings(
+            "secret_repo.rs",
+            "impl SecretRepo for PgSecretRepo { async fn save(&self) {} async fn delete(&self) {} }",
+            &mut sites,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+            "legacy read-repo mutation methods must fail: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn secret_repo_port_guard_rejects_write_methods() {
+        let green = r#"
+pub trait SecretRepoLocal: Send + Sync {
+    async fn find(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<Option<SecretEntry>, SecretRepoError>;
+    async fn find_version(&self, scope: TenantRepoScope, key: &SecretKey, version: u64) -> Result<Option<SecretEntry>, SecretRepoError>;
+    async fn latest_version(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<Option<u64>, SecretRepoError>;
+}
+"#;
+        assert!(secret_repo_read_only_findings("ports.rs", green).is_empty());
+        let red = green.replacen("}", "async fn save(&self); async fn delete(&self); }", 1);
+        let findings = secret_repo_read_only_findings("ports.rs", &red);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+            "SecretRepo write methods must fail closed: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn secret_repo_guard_rejects_unknown_methods_and_contract_drift() {
+        let canonical_methods = r#"
+async fn find(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<Option<SecretEntry>, SecretRepoError>;
+async fn find_version(&self, scope: TenantRepoScope, key: &SecretKey, version: u64) -> Result<Option<SecretEntry>, SecretRepoError>;
+async fn latest_version(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<Option<u64>, SecretRepoError>;
+"#;
+        let trait_with_unknown = format!(
+            "pub trait SecretRepoLocal: Send + Sync {{ {canonical_methods} async fn upsert(&self); }}"
+        );
+        let wrong_signature = r#"
+pub trait SecretRepoLocal: Send + Sync {
+    async fn find(&self) -> Result<Option<SecretEntry>, SecretRepoError>;
+    async fn find_version(&self, scope: TenantRepoScope, key: &SecretKey, version: u64) -> Result<Option<SecretEntry>, SecretRepoError>;
+    async fn latest_version(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<Option<u64>, SecretRepoError>;
+}
+"#;
+        for source in [&trait_with_unknown, wrong_signature] {
+            let findings = secret_repo_read_only_findings("ports.rs", source);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+                "SecretRepoLocal must keep the exact read-only contract: {findings:?}"
+            );
+        }
+
+        for source in [
+            format!(
+                "impl SecretRepo for PgSecretRepo {{ {} async fn upsert(&self) {{}} }}",
+                canonical_methods.replace(';', " {}")
+            ),
+            format!(
+                "impl ImpostorRepo for PgSecretRepo {{ {} }}",
+                canonical_methods.replace(';', " {}")
+            ),
+        ] {
+            let mut sites = BTreeMap::new();
+            let findings = secret_ref_mutation_findings("secret_repo.rs", &source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::SecretRefMutationBypass),
+                "PgSecretRepo must implement only the exact SecretRepo read surface: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_allows_select_for_update() {
+        let source = r#"async fn read(conn: &mut PgConnection) {
+            sqlx::query("SELECT version FROM secret_refs WHERE tenant_id = $1 FOR UPDATE")
+                .fetch_all(conn)
+                .await;
+        }"#;
+        let mut sites = BTreeMap::new();
+        let findings = secret_ref_mutation_findings("secret_repo.rs", source, &mut sites);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(sites.is_empty());
     }
 
     #[test]
@@ -2676,14 +4299,15 @@ pub mod fault_matrix;
             }"#,
         )?;
         assert!(
-            is_observation_factory_expr(&expression),
+            observation_factory_expr(&expression)
+                == Some(ObservationFactory::IdentityPasswordChange),
             "generated observation match must preserve the Some binding and diverge on None"
         );
         Ok(())
     }
 
     #[test]
-    fn retry_guard_accepts_exact_settings_and_identity_boundaries() {
+    fn retry_guard_accepts_all_exact_boundaries() {
         let mut sites = BTreeSet::new();
         let config = retry_placement_findings(
             "config_repo.rs",
@@ -2695,14 +4319,20 @@ pub mod fault_matrix;
             "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
             &mut sites,
         );
+        let secret =
+            retry_placement_findings("secret_repo.rs", secret_retry_green_source(), &mut sites);
         assert!(config.is_empty(), "{config:?}");
         assert!(identity.is_empty(), "{identity:?}");
+        assert!(secret.is_empty(), "{secret:?}");
         assert!(sites.contains("settings-config-commit"));
+        assert!(sites.contains("settings-secret-publish"));
+        assert!(sites.contains("settings-secret-publish-internal"));
+        assert!(sites.contains("settings-secret-republish"));
         assert!(sites.contains("identity-credential-bump-version"));
     }
 
     #[test]
-    fn retry_guard_real_workspace_contains_both_exact_boundaries() -> Result<()> {
+    fn retry_guard_real_workspace_contains_all_exact_boundaries() -> Result<()> {
         let root = crate::workspace_root()?;
         let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
         let mut sites = BTreeSet::new();
@@ -2710,7 +4340,7 @@ pub mod fault_matrix;
         for (rel, source) in files.iter().filter(|(rel, _)| {
             matches!(
                 rel.as_str(),
-                "tx_retry.rs" | "config_repo.rs" | "credential_repo.rs"
+                "tx_retry.rs" | "config_repo.rs" | "secret_repo.rs" | "credential_repo.rs"
             )
         }) {
             findings.extend(retry_placement_findings(rel, source, &mut sites));
@@ -2718,8 +4348,42 @@ pub mod fault_matrix;
         assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(
             sites,
-            BTreeSet::from(["identity-credential-bump-version", "settings-config-commit"])
+            BTreeSet::from([
+                "identity-credential-bump-version",
+                "settings-config-commit",
+                "settings-secret-publish",
+                "settings-secret-publish-internal",
+                "settings-secret-republish",
+            ])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn secret_ref_mutation_guard_real_workspace_has_exact_capability_sites() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let source = std::fs::read_to_string(root.join("adapters/postgres/src/secret_repo.rs"))?;
+        let mut sites = BTreeMap::new();
+        let findings = secret_ref_mutation_findings("secret_repo.rs", &source, &mut sites);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            sites,
+            BTreeMap::from([
+                ("secret-key-advisory-lock", 1),
+                ("secret-key-capability-mint", 1),
+                ("secret-key-cas-insert", 1),
+                ("secret-key-append-tombstone", 1),
+                ("secret-key-lock-acquire", 1),
+                ("secret-uow-cas-funnel", 1),
+                ("secret-uow-delete-tombstone", 1),
+                ("secret-uow-publish-cas", 1),
+                ("secret-uow-publish-internal-cas", 1),
+                ("secret-uow-republish-cas", 1),
+            ])
+        );
+        let ports = std::fs::read_to_string(root.join("crates/settings/src/ports.rs"))?;
+        let port_findings = secret_repo_read_only_findings("crates/settings/src/ports.rs", &ports);
+        assert!(port_findings.is_empty(), "{port_findings:?}");
         Ok(())
     }
 }

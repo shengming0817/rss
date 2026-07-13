@@ -23,9 +23,12 @@ use crate::domain::{
 };
 #[cfg(any(test, feature = "seed-data"))]
 use crate::domain::{SecretEntry, SecretKey, SecretRepoError};
-#[cfg(any(test, feature = "seed-data"))]
-use crate::ports::SecretRepo;
 use crate::ports::{ConfigRepo, ConfigUnitOfWork, TenantRepoScope};
+#[cfg(any(test, feature = "seed-data"))]
+use crate::ports::{
+    SecretInternalPublishCommand, SecretPublishCommand, SecretRepo, SecretRepublishCommand,
+    SecretUnitOfWork,
+};
 
 /// 复合存储键（租户隔离）：(tenant, key 字符串)。
 type StoreKey = (TenantId, String);
@@ -328,6 +331,20 @@ impl InMemSecretRepo {
     pub(crate) fn from_shared(entries: SecretStore) -> Self {
         Self { entries }
     }
+
+    fn append_active_entry(
+        &self,
+        scope: TenantRepoScope,
+        entry: SecretEntry,
+    ) -> Result<(), SecretRepoError> {
+        let tenant = scope.tenant();
+        if entry.tenant() != tenant {
+            return Err(SecretRepoError::Storage(Box::new(std::io::Error::other(
+                "secret mutation tenant mismatch",
+            ))));
+        }
+        secret_cas_insert(&self.entries, tenant, entry)
+    }
 }
 
 #[cfg(any(test, feature = "seed-data"))]
@@ -373,19 +390,33 @@ impl SecretRepo for InMemSecretRepo {
             .and_then(|h| h.last())
             .map(|row| row.entry.version()))
     }
+}
 
-    async fn save(
+#[cfg(any(test, feature = "seed-data"))]
+impl SecretUnitOfWork for InMemSecretRepo {
+    async fn publish(
         &self,
         scope: TenantRepoScope,
-        entry: SecretEntry,
+        command: SecretPublishCommand,
     ) -> Result<(), SecretRepoError> {
-        let tenant = scope.tenant();
-        if entry.tenant() != tenant {
-            return Err(SecretRepoError::Storage(Box::new(std::io::Error::other(
-                "secret tenant mismatch",
-            ))));
-        }
-        secret_cas_insert(&self.entries, tenant, entry)
+        let (entry, _observation) = command.into_parts();
+        self.append_active_entry(scope, entry)
+    }
+
+    async fn publish_internal(
+        &self,
+        scope: TenantRepoScope,
+        command: SecretInternalPublishCommand,
+    ) -> Result<(), SecretRepoError> {
+        self.append_active_entry(scope, command.into_entry())
+    }
+
+    async fn republish(
+        &self,
+        scope: TenantRepoScope,
+        command: SecretRepublishCommand,
+    ) -> Result<(), SecretRepoError> {
+        self.append_active_entry(scope, command.into_entry())
     }
 
     async fn delete(&self, scope: TenantRepoScope, key: &SecretKey) -> Result<(), SecretRepoError> {
@@ -742,13 +773,16 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn secret_save_rejects_entry_tenant_mismatch_without_write() {
+    async fn secret_internal_publish_rejects_entry_tenant_mismatch_without_write() {
         let store = new_secret_store();
         let repo = InMemSecretRepo::from_shared(store);
         let key = secret_key("app.secret");
 
         let result = repo
-            .save(scope(TENANT_A), secret_entry("app.secret", TENANT_B))
+            .publish_internal(
+                scope(TENANT_A),
+                SecretInternalPublishCommand::from_entry(secret_entry("app.secret", TENANT_B)),
+            )
             .await;
 
         assert!(matches!(result, Err(SecretRepoError::Storage(_))));

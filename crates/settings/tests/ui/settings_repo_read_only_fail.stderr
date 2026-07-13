@@ -3,16 +3,6 @@ error[E0599]: no method named `save` found for reference `&R` in the current sco
   |
 9 |     repo.save(scope, entry).await;
   |          ^^^^ method not found in `&R`
-  |
-  = help: items from traits can only be used if the type parameter is bounded by the trait
-help: the following traits define an item `save`, perhaps you need to restrict type parameter `R` with one of them:
-  |
-3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + SecretRepo>(
-  |                                                        ++++++++++++
-3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + SecretRepoLocal>(
-  |                                                        +++++++++++++++++
-3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + ports::__dynosaur_macro_dynsecretrepo::ErasedSecretRepo>(
-  |                                                        +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 error[E0599]: no method named `delete` found for reference `&R` in the current scope
   --> tests/ui/settings_repo_read_only_fail.rs:10:10
@@ -23,9 +13,9 @@ error[E0599]: no method named `delete` found for reference `&R` in the current s
    = help: items from traits can only be used if the type parameter is bounded by the trait
 help: the following traits define an item `delete`, perhaps you need to restrict type parameter `R` with one of them:
    |
- 3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + SecretRepo>(
-   |                                                        ++++++++++++
- 3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + SecretRepoLocal>(
-   |                                                        +++++++++++++++++
- 3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + ports::__dynosaur_macro_dynsecretrepo::ErasedSecretRepo>(
-   |                                                        +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + SecretUnitOfWork>(
+   |                                                        ++++++++++++++++++
+ 3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + SecretUnitOfWorkLocal>(
+   |                                                        +++++++++++++++++++++++
+ 3 | async fn mutation_cannot_enter_read_slot<R: ConfigRepo + ports::__dynosaur_macro_dynsecretunitofwork::ErasedSecretUnitOfWork>(
+   |                                                        +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

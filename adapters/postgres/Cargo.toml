@@ -70,7 +70,7 @@ anyhow = { workspace = true, optional = true }
 
 [features]
 default = []
-domain-settings = ["dep:settings"]
+domain-settings = ["dep:settings", "dep:observ"]
 domain-identity = ["dep:identity", "dep:observ"]
 domain-audit = ["dep:audit"]
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。

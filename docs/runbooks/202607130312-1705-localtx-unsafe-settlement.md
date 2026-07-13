@@ -3,22 +3,29 @@
 ref: prometheus/prometheus documentation/content/docs/practices/alerting.md@main
 ref: open-telemetry/opentelemetry-collector docs/observability.md@main
 
-This runbook handles `LocalTxCommitUnknown` and `LocalTxRollbackFailed`. Both represent an unsafe
-database settlement that requires a human to verify authoritative state. They are not retry-budget
-alerts and must not trigger automatic replay.
+This runbook handles contract-attributed `LocalTxCommitUnknown` / `LocalTxRollbackFailed` and
+boundary-attributed `GenericTxCommitUnknown` / `GenericTxRollbackFailed`. All four represent an
+unsafe database settlement that requires a human to verify authoritative state. They are not
+retry-budget alerts and must not trigger automatic replay.
 
-The alert scope is limited to the closed labels `domain`, `contract_id`, and `boundary`. Tenant,
+Contract-attributed alert scope is limited to the closed labels `domain`, `contract_id`, and
+`boundary`. For generic UoW, the generic WARN routing fields are exactly `boundary` and
+`final_status`; both values come from the same closed settlement routing used by
+`tx_settlement_final_total`. The generic runner is the only generic unsafe-settlement WARN emitter;
+HTTP LocalTx keeps its contract-attributed WARN path and does not emit the generic WARN. Tenant,
 business key, SQL, payload, and error text are intentionally absent. Obtain any record-level context
-from access-controlled tracing or audit storage; never add it to metric labels or alert annotations.
+from access-controlled tracing or audit storage; never add it to metric labels, WARN routing fields,
+or alert annotations.
 
 ## First response
 
-1. Acknowledge the alert and record its `domain`, `contract_id`, `boundary`, first-seen time, and
-   deployment identity.
-2. Stop automated replay for that contract path. Do not retry the mutation and do not issue manual
+1. Acknowledge the alert and record its available closed scope (`domain` / `contract_id` / `boundary`
+   for LocalTx, or `boundary` for generic UoW), first-seen time, and deployment identity.
+2. Stop automated replay for that contract path or internal boundary. Do not retry the mutation and do not issue manual
    commit, rollback, or corrective SQL.
-3. Find the matching WARN event by the alert scope and time window. Confirm its `final_status`; do
-   not infer settlement from `retry_status` or from an exhausted retry loop.
+3. Find the matching WARN event by the available alert scope and time window. For a generic alert,
+   match both its closed `boundary` and the alert's `final_status` filter to the identical WARN fields.
+   Confirm its settlement; do not infer settlement from `retry_status` or from an exhausted retry loop.
 4. Check database availability, failover, connection resets, saturation, and recent deployment
    changes. Preserve traces and database diagnostics before restarting components.
 5. Use the owning domain's read path or approved audit tooling to inspect authoritative state. Keep

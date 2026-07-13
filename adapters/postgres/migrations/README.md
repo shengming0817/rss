@@ -197,6 +197,30 @@ retention 只按 `published_at` 的 partial index 清理，DLX 继续保留供�
 3. 运行唯一正式 migration runner；若发现 `publishing` 行缺 token 则终止，不伪造所有权。失败后只做新的 forward-only 修复，不恢复旧函数。
 4. 验证 `rss_app` 仅有新 claim/settle/redrive/backlog 函数 EXECUTE，旧 poll/acquire 及旧 settle 签名不存在；再启动新 binary。
 
+`0058` / `0059` 将 `secret_refs` 固化为正版本、serving role append-only。SQLx applies pending migrations in
+version order，并在某一版本 apply 失败时立即返回；因此异常发生后 0058 remains the first pending migration，
+no later forward migration can run first。不可把 forward-only 原则误作失败 migration 的恢复调度机制。
+
+部署含 0058 的 binary 前必须完成以下受审计 preflight；不得等启动 migration 失败后再准备修复：
+
+1. 冻结所有 `secret_refs` writer，记录部署 / change ticket、数据库标识和 preflight 时间窗。
+2. 用表 owner 的只读 maintenance session 执行
+   `SELECT count(*) FROM secret_refs WHERE version <= 0`。结果为 0 才能继续部署；结果非 0 时终止 rollout，
+   把 `(tenant_id, secret_key, version)` inventory 保存到受控审计存储，不写入普通日志或 PR 评论。
+3. 由 settings owner 对每条异常历史给出明确的旧版本到新版本映射，再由 DBA review。`version` 是外部可查询的
+   历史坐标且参与 `(tenant_id, secret_key, version)` 主键，不能用 `row_number()`、绝对值或统一偏移自动猜测。
+4. DBA 在 writer 仍冻结时执行 reviewed out-of-band repair：单事务锁定 `secret_refs`，只应用已批准的逐行映射；
+   提交前同时证明 `version > 0`、每个 key 的版本唯一且映射后的历史次序与审批记录一致。保存 repair script
+   checksum、审批人、影响行数与事务完成证据。
+5. 重新运行同一 preflight，确认异常计数为 0，才可部署 binary 并让 SQLx 执行 0058 / 0059。若 0058 已失败，
+   保持 rollout 停止，完成同一个部署前流程后重试；不得创建 0060 期望它越过 0058，也不得临时恢复 serving
+   role 的 UPDATE/DELETE 权限。
+
+0058 通过 preflight 后，用短时 `ACCESS EXCLUSIVE` 安装 `CHECK (version > 0) NOT VALID`（新写即时受约束）
+并撤销 `rss_app` 的 UPDATE/DELETE。0059 在独立 migration transaction 中 `VALIDATE CONSTRAINT`，避免把安装约束
+的强锁持有到历史扫描结束。部署前确认无长事务占用 `secret_refs` DDL 锁；5 秒内无法取得锁会中止启动，移除阻塞
+事务后重跑，禁止修改已发布迁移。
+
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
 `saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，

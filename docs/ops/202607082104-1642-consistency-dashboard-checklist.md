@@ -41,6 +41,7 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | LocalTx failed attempt rate | `sum by (domain, contract_id, boundary, retry_class) (rate(localtx_retry_attempts_total[5m]))` | `domain`, `contract_id`, `boundary`, `retry_class` | Diagnostic only; correlate sustained transient failures with DB health and request error rate |
 | LocalTx final settlement rate | `sum by (domain, contract_id, boundary, final_status) (rate(localtx_final_total[5m]))` | `domain`, `contract_id`, `boundary`, `final_status` | `LocalTxCommitUnknown` / `LocalTxRollbackFailed`; do not infer settlement from retry status |
 | LocalTx attempts P95 | `histogram_quantile(0.95, sum by (domain, contract_id, boundary, final_status, le) (rate(localtx_attempts_bucket[5m])))` | `domain`, `contract_id`, `boundary`, `final_status` | Retry-pressure diagnosis; exhaustion alone does not page |
+| Generic UoW final settlement rate | `sum by (boundary, final_status) (rate(tx_settlement_final_total[5m]))` | `boundary`, `final_status` | `GenericTxCommitUnknown` / `GenericTxRollbackFailed`; internal operations have no HTTP contract identity |
 
 ## Explicit Gaps
 

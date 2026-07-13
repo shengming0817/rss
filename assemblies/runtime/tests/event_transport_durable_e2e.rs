@@ -578,7 +578,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         resource_attrs,
         clock: Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     });
-    let (settings_configs, settings_writer, settings_secrets) = settings_pg
+    let (settings_configs, settings_writer, settings_secrets, settings_secret_writer) = settings_pg
         .settings_bundle(
             Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
             config_value_protections()?,
@@ -593,14 +593,19 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let settings_domain = SettingsDomain::new(
         Arc::clone(&subscriber_settings_service),
         Arc::from(settings_secrets),
+        Arc::from(settings_secret_writer),
     );
-    let (publisher_settings_configs, publisher_settings_writer, _publisher_settings_secrets) =
-        settings_pg
-            .settings_bundle(
-                Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
-                config_value_protections()?,
-            )
-            .into_parts();
+    let (
+        publisher_settings_configs,
+        publisher_settings_writer,
+        _publisher_settings_secrets,
+        _publisher_settings_secret_writer,
+    ) = settings_pg
+        .settings_bundle(
+            Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+            config_value_protections()?,
+        )
+        .into_parts();
     let publisher_settings_service = Arc::new(SettingsService::with_postgres(
         publisher_settings_configs,
         publisher_settings_writer,

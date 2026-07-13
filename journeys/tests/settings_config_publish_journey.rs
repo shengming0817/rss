@@ -27,7 +27,7 @@ use generated::event::settings_v1::{
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use memory::{FixedClock, MemBus, MemEmitter};
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
-use settings::{SettingsDomain, SettingsService, empty_secret_repo};
+use settings::{SettingsDomain, SettingsService, empty_secret_ports};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use vocab::{PrincipalKind, TenantId};
@@ -91,13 +91,15 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
     let bus = MemBus::new();
 
     // 2. bootstrap 组装：settings durable module 经 Domain::init 挂 config publish/get/delete/rollback /
-    //    secret-publish 业务路由组（config 服务 + secret 仓储端口构造器注入）。
+    //    secret-publish 业务路由组（config 服务 + secret read/write typed 端口构造器注入）。
+    let (secret_repo, secret_uow) = empty_secret_ports();
     let domain = SettingsDomain::new(
         Arc::new(SettingsService::with_seed(
             MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer()),
             Box::new(FixedClock::at_unix_secs(NOW_SECS)),
         )),
-        empty_secret_repo(),
+        secret_repo,
+        secret_uow,
     );
     let mut registry = bootstrap::compose(&[&domain])?;
     let route_groups = registry.route_groups();

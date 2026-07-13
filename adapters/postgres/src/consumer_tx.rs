@@ -346,7 +346,7 @@ enum PgConsumerTxError {
     LeaseLost,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "domain-audit"))]
 mod tests {
     use std::error::Error;
     use std::time::{Duration, UNIX_EPOCH};

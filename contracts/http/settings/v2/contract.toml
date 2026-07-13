@@ -1,5 +1,5 @@
 # settings secret-publish HTTP 契约（active）——secret 引用坐标写入，请求/响应绝无 secret 材料。
-# L1 LocalTx：SecretRepo 单次原子 CAS 写坐标，无 outbox；并发冲突零写且 handler 不自动重试。
+# L1 LocalTx：typed SecretUnitOfWork 单次原子 CAS 写坐标，无 outbox；并发冲突零写且 handler 不自动重试。
 # graduate draft→active（#1430 PERSIST-009 settings 首条 durable module 闭环）：挂活路由 + 鉴权 = permission。
 id = "settings.secret-publish"
 kind = "http"

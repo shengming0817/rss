@@ -23,6 +23,7 @@ consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 bootstrap = { path = "../bootstrap" }
+observ = { path = "../observ" }
 generated = { path = "../../generated" }
 # 域形 repo DI port（ports 模块 ConfigRepo）的 async dyn 派发：native AFIT + dynosaur dyn-compatible wrapper +
 # trait-variant Send 变体（同 diport 范式，ADR-003/ADR-004 C1）。归属域 crate 而非 diport：repo port 签名

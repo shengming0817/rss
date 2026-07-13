@@ -130,7 +130,7 @@ pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaInstanceStore, PgSagaJournal};
 #[cfg(feature = "domain-settings")]
-pub use secret_repo::PgSecretRepo;
+pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
 pub use service_token_replay::PgServiceTokenReplayGuard;
 #[cfg(feature = "domain-identity")]
 pub use session_lifecycle::PgSessionLifecycle;
@@ -236,7 +236,7 @@ mod smoke {
     //! InboxStore/InboxBacklog on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + SessionLifecycle on PgSessionLifecycle（完整 durable impl：co-tx 创建 #1083/#1192 + find/revoke #1278）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
-    //! SecretRepo on PgSecretRepo（真实 impl，#1274）+
+    //! SecretRepo on PgSecretRepo + SecretUnitOfWork on PgSecretUnitOfWork（真实 impl，#1274）+
     //! CredentialRepo on PgCredentialRepo（真实 impl，credentials 表 + 折叠锁定态 + 行锁原子 RMW，#1316）+
     //! RefreshTokenStore on PgRefreshTokenStore（真实 impl：哈希存储 + CAS rotation + RLS，#1325）+
     //! read/write ports on PgAuditRepo（真实 impl：append-only per-tenant keyed-HMAC chain + RLS，#1230）+
@@ -266,6 +266,7 @@ mod smoke {
     fn assert_command_journal_store<T: eventexec::command::CommandJournalStore>(_: PhantomData<T>) {
     }
     fn assert_secret_repo<T: settings::ports::SecretRepo>(_: PhantomData<T>) {}
+    fn assert_secret_uow<T: settings::ports::SecretUnitOfWork>(_: PhantomData<T>) {}
     fn assert_refresh_token_store<T: identity::ports::RefreshTokenStore>(_: PhantomData<T>) {}
     fn assert_audit_repo<T: audit::ports::AuditReadRepo + audit::ports::AuditWriteRepo>(
         _: PhantomData<T>,
@@ -307,8 +308,9 @@ mod smoke {
         assert_cas_store(PhantomData::<super::PgCasStore>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
         assert_command_journal_store(PhantomData::<super::PgCommandJournal>);
-        // `PgSecretRepo: SecretRepo` 真实 impl（非 edge proof）——secret 引用坐标仓储（#1274）。
+        // secret 读写分槽：read-only repo + mutation UoW（#1274）。
         assert_secret_repo(PhantomData::<super::PgSecretRepo>);
+        assert_secret_uow(PhantomData::<super::PgSecretUnitOfWork>);
         // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
         assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
         // `PgAuditRepo<TestVerifier>` 真实 read/write impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。

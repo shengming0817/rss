@@ -1,6 +1,7 @@
 //! settings secret e2e 集成测试（`integration` feature 门控；需真实 postgres）。
 //!
-//! 覆盖路径：`SecretService::with_postgres(PgSecretRepo, InlineMemResolver, FixedClock)` over 真实 pg：
+//! 覆盖路径：`SecretService::with_postgres(PgSecretRepo, PgSecretUnitOfWork,
+//! InlineMemResolver, FixedClock)` over 真实 pg：
 //! - e2e-s1: publish_secret → find_secret_ref roundtrip
 //! - e2e-s2: resolve_secret：mem resolver 命中（材料字节正确）
 //! - e2e-s3: rollback_secret → 版本号单调，活跃引用回到旧 ref
@@ -232,16 +233,17 @@ async fn provision_rss_app_login(
     Ok(())
 }
 
-/// 构造 SecretService（真 PgSecretRepo via settings 域受控句柄 + InlineMemResolver + FixedClock）。
+/// 构造 SecretService（真 PgSecretRepo 读端 + PgSecretUnitOfWork 写端 via settings 域受控句柄）。
 fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretService {
     // settings bundle 产出 secret box（本 e2e 不消费 read/write config）。
-    let (_configs, _writer, secrets) = deps
+    let (_configs, _writer, secrets, secret_writer) = deps
         .handle()
         .for_domain::<caps::Settings>()
         .settings_bundle(Arc::new(FixedClock), unused_config_protections())
         .into_parts();
     SecretService::with_postgres(
         secrets,
+        secret_writer,
         DynSecretResolver::new_box(resolver),
         Box::new(FixedClock),
     )
@@ -249,7 +251,7 @@ fn make_service(deps: &PgRuntimeDeps, resolver: InlineMemResolver) -> SecretServ
 
 // ── e2e 测试 ─────────────────────────────────────────────────────────────────
 
-/// e2e-s1：publish_secret → find_secret_ref roundtrip（PgSecretRepo 读写闭合）。
+/// e2e-s1：publish_secret → find_secret_ref roundtrip（typed UoW 写入 + PgSecretRepo 读取闭合）。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。

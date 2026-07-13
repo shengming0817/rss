@@ -35,6 +35,14 @@ fn feature_set(
     string_set(value)
 }
 
+fn expected_domain_feature_members(domain: &str) -> BTreeSet<String> {
+    let mut expected = BTreeSet::from([format!("dep:{domain}")]);
+    if matches!(domain, "settings" | "identity") {
+        expected.insert("dep:observ".to_owned());
+    }
+    expected
+}
+
 #[test]
 fn domain_dependencies_are_optional_and_features_are_explicit()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -78,14 +86,10 @@ fn domain_dependencies_are_optional_and_features_are_explicit()
             Some(expected_path.as_str()),
             "{domain} must resolve to the workspace domain crate"
         );
-        let mut expected_members = BTreeSet::from([format!("dep:{domain}")]);
-        if domain == "identity" {
-            expected_members.insert("dep:observ".to_owned());
-        }
         assert_eq!(
             feature_set(features, feature_name)?,
-            expected_members,
-            "{feature_name} must activate only its matching dependency and reviewed companions"
+            expected_domain_feature_members(domain),
+            "{feature_name} must activate its matching dependency and only sanctioned shared capabilities"
         );
     }
 
@@ -102,4 +106,29 @@ fn domain_dependencies_are_optional_and_features_are_explicit()
         "integration must explicitly exercise all derived domain features"
     );
     Ok(())
+}
+
+#[test]
+fn domain_feature_shared_capability_allowlist_is_closed() {
+    assert_eq!(
+        expected_domain_feature_members("settings"),
+        BTreeSet::from(["dep:observ".to_owned(), "dep:settings".to_owned()])
+    );
+    assert_eq!(
+        expected_domain_feature_members("identity"),
+        BTreeSet::from(["dep:identity".to_owned(), "dep:observ".to_owned()])
+    );
+    assert_eq!(
+        expected_domain_feature_members("audit"),
+        BTreeSet::from(["dep:audit".to_owned()])
+    );
+    assert_ne!(
+        expected_domain_feature_members("settings"),
+        BTreeSet::from([
+            "dep:observ".to_owned(),
+            "dep:settings".to_owned(),
+            "dep:unknown".to_owned(),
+        ]),
+        "unknown shared dependencies must not be accepted"
+    );
 }

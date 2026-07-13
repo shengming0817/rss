@@ -111,13 +111,21 @@ Medium）机器强制：含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SEC
 NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`，旧迁移可经前向迁移升级）；缺失即门红。
 
 app-serving role `rss_app` 已 provision 为非 owner、NOBYPASSRLS，并按各 tenant 表最小授权 DML
-（sessions / config_entries / roles / secret_refs / credentials / refresh_tokens / abac_policies /
+（sessions / config_entries / roles / credentials / refresh_tokens / abac_policies /
 resource_attributes / inbox_receipts；audit_entries 仅 SELECT+INSERT；dead_letter 仅 SELECT+INSERT；outbox 仅 SELECT+INSERT，relay settlement/retention
 不得直接授 UPDATE/DELETE）；`FORCE ROW LEVEL SECURITY` 使 owner 连接亦受 policy 约束。durable
 bootstrap 使用 dual-pool：migrator pool 只用于迁移与启动前检查，长期 serving pool 必须以 `rss_app`
 连接；启动期 RLS 能力门会拒绝 owner/superuser、BYPASSRLS 角色以及任何非 `rss_app` serving role。
 注：superuser 连接永远绕过 RLS（含 FORCE）；serving role rss_app 为非 superuser 故受 policy 约束；
 生产 owner 须为非 superuser。
+
+`secret_refs` 是版本历史 append-only 表：`rss_app` 仅有 `SELECT, INSERT`，数据库 `CHECK (version > 0)`
+并拒绝直接 `UPDATE/DELETE`；删除只允许追加 tombstone。Postgres adapter 的 Hard 载体是
+`key_lock::LockedSecretKey`：唯一构造器在当前 `TxCapability` 上按 canonical `(tenant, secret_key)` 获取
+transaction advisory lock，CAS 与 tombstone INSERT 只能消费该 capability 内保存的坐标。PostgreSQL 权限与
+CHECK、Rust 私有 capability 共同令未授权 mutation 难以表达；`TENANCY-SECRET-KEY-MUTATION-01`
+（`cargo xtask pg-tenant-tx-guard`，Medium）再以 AST exact-owner、synthetic red 和真实 workspace
+anti-vacuity 阻断 raw INSERT、破坏性 DML、错误 owner 或重复/缺失 canonical site。
 
 outbox 是 tenant-scoped 表：`tenant_id uuid NOT NULL` 与 metadata `tenantId` 同源落库，并受
 `ENABLE/FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy 约束。emit-only 路径和 co-tx 路径必须
@@ -179,7 +187,10 @@ credentials / refresh_tokens / audit_entries / tenant dead_letter/DLQ 路径）�
 Medium backstop 是 `cargo xtask pg-tenant-tx-guard`（接入 `verify` / `ci`）：从迁移派生
 tenant 表集合，扫描生产 Rust SQL site，禁止 tenant 表 SQL 通过 raw `pool.begin` /
 `pool.acquire` / `&self.pool` executor / `run_global_transaction` 访问，并带 anti-vacuity 与 stale
-allowlist 测试。raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
+allowlist 测试；同一 guard 还把 `SecretRepo` 限定为 read-only，精确限制 HTTP LocalTx retry 到
+`PgSecretUnitOfWork::publish`，并证明 publish/internal/republish 共享唯一 `LockedSecretKey` CAS funnel、delete
+只经同一 key lock 追加 tombstone。
+raw `PgPool` 只允许在 `PgStore` setup、migration、readiness/RLS capability probe、
 global infra adapter 和命名维护例外中出现。
 
 **repo scope 签名守卫**：`INVARIANT TENANCY-REPO-SCOPE-SIGNATURE-01`（`cargo xtask
