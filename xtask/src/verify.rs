@@ -50,6 +50,7 @@
 //! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "verify", source = "code" }—— cache writer 资格必须由
 //!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
+//! INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_tool_adapter_contract_green_and_synthetic_red", anti_vacuity = "github_ci_tool_adapter_contract_is_closed" }—— lane 工具集只能由机器 catalog 经 adapter 派生；workflow/action 不得复制清单或接收任意工具 input，installer immutable SHA 必须同时绑定 uses 与 cache identity，adapter 与 catalog 内容必须绑定 cache key 与 seal，fresh/cache verify 必须先于 PATH 暴露和 cache save，tool-cache epoch 必须为 v4。
 //! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须是闭合、无重复的 committed matrix。
 //! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
 //! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；四个 live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
@@ -72,17 +73,6 @@ use crate::{
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::Stdio;
-
-#[cfg(test)]
-const CI_TOOL_SPECS: &[&str] = &[
-    "cargo-nextest@0.9.137",
-    "cargo-deny@0.19.9",
-    "cargo-dylint@6.0.1",
-    "dylint-link@6.0.1",
-    "cargo-llvm-cov@0.8.7",
-    "cargo-public-api@0.52.0",
-    "cargo-audit@0.22.2",
-];
 
 /// verify 选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3105,6 +3095,183 @@ mod tests {
             .all(|script| command_script_is_setup_only(script))
     }
 
+    /// CI-TOOL-ADAPTER-01 的 Medium 结构谓词。工具集内容由 shell adapter 运行时派生；
+    /// 此处只锁定 GitHub 边界的单源连接、immutable identity 与验证顺序。
+    fn ci_tool_adapter_contract_is_hardened(
+        reusable_yaml: &str,
+        action_yaml: &str,
+        adapter_source: &str,
+    ) -> bool {
+        const INSTALL_ACTION_SHA: &str = "b8cecb83565409bcc297b2df6e77f030b2a468d5";
+        const TOOL_LIST_MARKERS: &[&str] = &[
+            "cargo-nextest@",
+            "cargo-llvm-cov@",
+            "cargo-deny@",
+            "cargo-audit@",
+            "cargo-dylint@",
+            "dylint-link@",
+            "cargo-public-api@",
+        ];
+
+        let reusable_lines = yaml_indented_code_lines(reusable_yaml);
+        let reusable_steps = yaml_typed_steps(reusable_yaml);
+        let action_lines = yaml_indented_code_lines(action_yaml);
+        let action_steps = yaml_typed_steps(action_yaml);
+        let unique_step = |steps: &[TypedStep], id: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.id.as_deref() == Some(id)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+        let unique_named_step = |steps: &[TypedStep], name: &str| {
+            let matches = steps
+                .iter()
+                .enumerate()
+                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then(|| matches[0])
+        };
+
+        let workflow_has_no_tool_catalog = !reusable_yaml.contains("prebuilt-tools")
+            && !reusable_yaml.contains("fallback-tools")
+            && !TOOL_LIST_MARKERS
+                .iter()
+                .any(|marker| reusable_yaml.contains(marker));
+        let action_has_no_arbitrary_tool_inputs = action_lines.iter().all(|(indent, line)| {
+            !(*indent == 2
+                && line.ends_with(':')
+                && matches!(
+                    line.trim_end_matches(':'),
+                    "prebuilt-tools" | "fallback-tools" | "tools" | "tool-specs"
+                ))
+        });
+        let action_has_no_copied_catalog = !TOOL_LIST_MARKERS
+            .iter()
+            .any(|marker| action_yaml.contains(marker));
+
+        let setup = unique_step(&reusable_steps, "setup");
+        let measure = unique_step(&reusable_steps, "measure-tools");
+        let save = unique_step(&reusable_steps, "save-tools");
+        let reusable_order_and_epoch = setup.is_some_and(|index| {
+            reusable_steps[index].with_exact("tool-cache-epoch", &["v4"])
+                && reusable_steps.iter().enumerate().all(|(candidate, step)| {
+                    step.uses.as_deref() != Some("actions/cache/save@v4") || index < candidate
+                })
+                && measure.is_some_and(|measure_index| {
+                    reusable_steps[measure_index].run_contains(".rss-tool-seal-v1")
+                        && save.is_some_and(|save_index| {
+                            index < measure_index && measure_index < save_index
+                        })
+                })
+        });
+
+        let policy = unique_step(&action_steps, "tool-policy");
+        let cache_keys = unique_step(&action_steps, "cache-keys");
+        let verifiers = action_steps
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                step.run_contains(".github/scripts/ci-tool-adapters.sh verify")
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let install_action = action_steps
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| {
+                step.uses
+                    .as_deref()
+                    .is_some_and(|uses| {
+                        uses == format!("taiki-e/install-action@{INSTALL_ACTION_SHA}")
+                    })
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let immutable_installer_is_single_and_keyed = install_action.len() == 1
+            && action_yaml
+                .matches(&format!("taiki-e/install-action@{INSTALL_ACTION_SHA}"))
+                .count()
+                == 2
+            && cache_keys.is_some_and(|index| {
+                let step = &action_steps[index];
+                step.env_exact(
+                    "RSS_ADAPTER_SHA256",
+                    &["${{ steps.tool-policy.outputs.adapter-sha256 }}"],
+                ) && step.env_exact(
+                    "RSS_CATALOG_SHA256",
+                    &["${{ steps.tool-policy.outputs.catalog-sha256 }}"],
+                ) && step.env_exact(
+                    "RSS_INSTALL_ACTION_TOOLS",
+                    &["${{ steps.tool-policy.outputs.install-action-tools }}"],
+                ) && step.env_exact(
+                    "RSS_BINSTALL_TOOLS",
+                    &["${{ steps.tool-policy.outputs.binstall-tools }}"],
+                ) && step.run_contains("tools_hash=")
+                    && step.run_contains(&format!("taiki-e/install-action@{INSTALL_ACTION_SHA}"))
+                    && step.run_contains("RSS_ADAPTER_SHA256")
+                    && step.run_contains("RSS_CATALOG_SHA256")
+                    && step.run_contains("sha256")
+                    && step.run_contains("RSS_INSTALL_ACTION_TOOLS")
+                    && step.run_contains("RSS_BINSTALL_TOOLS")
+            });
+        let catalog_is_executable_single_source = policy.is_some_and(|index| {
+            let step = &action_steps[index];
+            step.run_contains(".github/scripts/ci-tool-adapters.sh specs")
+                && step.run_contains("--lane")
+                && step.run_contains("--backend install-action")
+                && step.run_contains("--backend binstall")
+                && step.run_contains("adapter-sha256")
+                && step.run_contains("catalog-sha256")
+        });
+        let verifier_precedes_path =
+            (verifiers.len() == 1)
+                .then_some(verifiers[0])
+                .is_some_and(|index| {
+                    let run = &action_steps[index].run;
+                    let verify = run
+                        .iter()
+                        .position(|line| line.contains("ci-tool-adapters.sh verify"));
+                    let first_path = run.iter().position(|line| line.contains("GITHUB_PATH"));
+                    matches!((verify, first_path), (Some(a), Some(b)) if a < b)
+                        && run.iter().any(|line| line.contains("mode=fresh"))
+                        && run.iter().any(|line| line.contains("mode=cache"))
+                        && run.iter().any(|line| {
+                            line.contains("--mode \"$mode\"")
+                                && line.contains("--lane \"$RSS_LANE\"")
+                                && line.contains("--root \"$RSS_TOOL_ROOT\"")
+                        })
+                });
+        let adapter_binds_its_content_to_seal = adapter_source.contains(".rss-tool-seal-v1")
+            && adapter_source.contains("adapter-sha256")
+            && adapter_source.contains("catalog-sha256")
+            && adapter_source.contains("sha256sum");
+        let fallback_installer_precedes_prebuilt_and_verify =
+            unique_named_step(&action_steps, "Install fallback tools").is_some_and(|fallback| {
+                install_action
+                    .first()
+                    .copied()
+                    .zip(verifiers.first().copied())
+                    .is_some_and(|(prebuilt, verify)| fallback < prebuilt && prebuilt < verify)
+            });
+
+        workflow_has_no_tool_catalog
+            && action_has_no_arbitrary_tool_inputs
+            && action_has_no_copied_catalog
+            && reusable_lines
+                .iter()
+                .filter(|(indent, line)| *indent == 0 && *line == "jobs:")
+                .count()
+                == 1
+            && reusable_order_and_epoch
+            && immutable_installer_is_single_and_keyed
+            && catalog_is_executable_single_source
+            && verifier_precedes_path
+            && fallback_installer_precedes_prebuilt_and_verify
+            && adapter_binds_its_content_to_seal
+    }
+
     /// 真实 committed 执行面：三个 caller 只绑定 literal lane，生命周期只存在于 reusable workflow。
     #[test]
     fn github_resource_evidence_workflows_have_lifecycle() -> anyhow::Result<()> {
@@ -3214,6 +3381,23 @@ mod tests {
             status.success(),
             "ci-cache-maintain shell selftest 必须通过"
         );
+        Ok(())
+    }
+
+    /// Adapter catalog 是 CI 工具协议的单一事实源；其真实 probe、seal 与 cache-hit
+    /// fail-closed 矩阵必须进入 workspace test/verify 执行面。
+    #[test]
+    fn ci_tool_adapter_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
+            &[".github/scripts/ci-tool-adapters.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 ci-tool-adapters shell selftest 失败: {e}"))?;
+        assert!(status.success(), "ci-tool-adapters shell selftest 必须通过");
         Ok(())
     }
 
@@ -3394,42 +3578,191 @@ jobs:
     }
 
     #[test]
-    fn ci_tool_versions_are_pinned_in_docs_and_workflows() -> anyhow::Result<()> {
+    fn github_ci_tool_adapter_contract_is_closed() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let read = |rel: &str| -> anyhow::Result<String> {
             let path = root.join(rel);
             std::fs::read_to_string(&path)
                 .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))
         };
-        let ci_surface = [
-            ".github/actions/setup-rss-ci/action.yml",
-            ".github/workflows/ci.yml",
-            ".github/workflows/integration.yml",
-            ".github/workflows/audit.yml",
-            ".github/workflows/rss-rust-lane.yml",
-        ]
-        .iter()
-        .map(|rel| read(rel))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .join("\n");
-        for spec in CI_TOOL_SPECS {
-            assert!(
-                ci_surface.contains(spec),
-                "GitHub CI surface 须包含钉版工具 `{spec}`"
-            );
-        }
+        let reusable = read(".github/workflows/rss-rust-lane.yml")?;
+        let action = read(".github/actions/setup-rss-ci/action.yml")?;
+        let adapter = read(".github/scripts/ci-tool-adapters.sh")?;
         assert!(
-            ci_surface
-                .contains("cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65")
-                && ci_surface.contains("version: 1.20.1"),
-            "cargo-binstall action 与工具版本必须分别不可变钉选"
+            ci_tool_adapter_contract_is_hardened(&reusable, &action, &adapter),
+            "committed reusable workflow/setup action/adapter 须闭合 CI-TOOL-ADAPTER-01"
+        );
+        Ok(())
+    }
+
+    fn ci_tool_adapter_contract_fixture() -> (&'static str, &'static str, &'static str) {
+        const REUSABLE: &str = r#"jobs:
+  lane:
+    steps:
+      - id: policy
+        run: |
+          echo 'profile=ci-core-tests'
+          echo 'nightly='
+      - id: setup
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          lane: ${{ inputs.lane }}
+          profile: ${{ steps.policy.outputs.profile }}
+          tool-cache-epoch: v4
+      - id: measure-tools
+        run: test -f "$tool_root/.rss-tool-seal-v1"
+      - id: save-tools
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.setup.outputs.tools-primary-key }}
+"#;
+        const ACTION: &str = r#"inputs:
+  lane:
+    required: true
+  profile:
+    required: true
+  tool-cache-epoch:
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: tool-policy
+      run: |
+        adapter_hash="$(sha256sum .github/scripts/ci-tool-adapters.sh | cut -d' ' -f1)"
+        catalog_hash="$(sha256sum .github/scripts/ci-tool-catalog.txt | cut -d' ' -f1)"
+        echo "adapter-sha256=$adapter_hash" >> "$GITHUB_OUTPUT"
+        echo "catalog-sha256=$catalog_hash" >> "$GITHUB_OUTPUT"
+        echo "install-action-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)" >> "$GITHUB_OUTPUT"
+        echo "binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend binstall)" >> "$GITHUB_OUTPUT"
+    - id: cache-keys
+      env:
+        RSS_ADAPTER_SHA256: ${{ steps.tool-policy.outputs.adapter-sha256 }}
+        RSS_CATALOG_SHA256: ${{ steps.tool-policy.outputs.catalog-sha256 }}
+        RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
+        RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
+      run: |
+        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
+    - name: Install fallback tools
+      run: cargo binstall --root "$RSS_TOOL_ROOT" "$spec"
+    - name: Install pinned prebuilt tools
+      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
+      with:
+        tool: ${{ steps.tool-policy.outputs.install-action-tools }}
+    - id: verify-tools
+      run: |
+        mode=fresh
+        if [ "$RSS_TOOLS_HIT" = true ]; then mode=cache; fi
+        .github/scripts/ci-tool-adapters.sh verify --mode "$mode" --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
+        echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
+        echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
+"#;
+        const ADAPTER: &str = r#"#!/usr/bin/env bash
+seal="$RSS_TOOL_ROOT/.rss-tool-seal-v1"
+adapter_hash="$(sha256sum "$0" | cut -d' ' -f1)"
+catalog_hash="$(sha256sum ci-tool-catalog.txt | cut -d' ' -f1)"
+printf 'adapter-sha256=%s\n' "$adapter_hash" >> "$seal"
+printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
+"#;
+        (REUSABLE, ACTION, ADAPTER)
+    }
+
+    #[test]
+    fn ci_tool_adapter_contract_green_and_synthetic_red() {
+        let (reusable, action, adapter) = ci_tool_adapter_contract_fixture();
+        assert!(
+            ci_tool_adapter_contract_is_hardened(reusable, action, adapter),
+            "anti-vacuity: canonical adapter fixture must pass"
         );
 
-        let readme = read("README.md")?;
-        for spec in CI_TOOL_SPECS.iter().copied() {
-            assert!(readme.contains(spec), "README 治理工具须钉版 `{spec}`");
+        for (name, reusable_red, action_red, adapter_red) in [
+            (
+                "workflow-tool-list",
+                reusable.replacen("echo 'nightly='", "echo 'nightly='\n          echo 'prebuilt-tools=cargo-nextest@0.9.137'", 1),
+                action.to_owned(),
+                adapter.to_owned(),
+            ),
+            (
+                "arbitrary-tool-input",
+                reusable.to_owned(),
+                action.replacen("  lane:\n", "  prebuilt-tools:\n    required: false\n  lane:\n", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "installer-uses-sha-drift",
+                reusable.to_owned(),
+                action.replacen("uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5", "uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "installer-key-sha-drift",
+                reusable.to_owned(),
+                action.replacen("taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' \"$RSS_ADAPTER_SHA256\"", "taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a' \"$RSS_ADAPTER_SHA256\"", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "adapter-not-in-key",
+                reusable.to_owned(),
+                action.replacen(" \"$RSS_ADAPTER_SHA256\" \"$RSS_CATALOG_SHA256\"", " \"$RSS_CATALOG_SHA256\"", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "catalog-not-in-key",
+                reusable.to_owned(),
+                action.replacen(" \"$RSS_CATALOG_SHA256\" \"$RSS_INSTALL_ACTION_TOOLS\"", " \"$RSS_INSTALL_ACTION_TOOLS\"", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "adapter-not-in-seal",
+                reusable.to_owned(),
+                action.to_owned(),
+                adapter.replacen("printf 'adapter-sha256=%s\\n' \"$adapter_hash\" >> \"$seal\"", "true", 1),
+            ),
+            (
+                "catalog-not-in-seal",
+                reusable.to_owned(),
+                action.to_owned(),
+                adapter.replacen("printf 'catalog-sha256=%s\\n' \"$catalog_hash\" >> \"$seal\"", "true", 1),
+            ),
+            (
+                "missing-cache-verify",
+                reusable.to_owned(),
+                action.replacen("if [ \"$RSS_TOOLS_HIT\" = true ]; then mode=cache; fi", "if [ \"$RSS_TOOLS_HIT\" = true ]; then exit 0; fi", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "path-before-verify",
+                reusable.to_owned(),
+                action.replacen(".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"\n        echo \"$RSS_TOOL_ROOT/.install-action/bin\" >> \"$GITHUB_PATH\"", "echo \"$RSS_TOOL_ROOT/.install-action/bin\" >> \"$GITHUB_PATH\"\n        .github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "prebuilt-before-fallback",
+                reusable.to_owned(),
+                action.replacen(
+                    "    - name: Install fallback tools\n      run: cargo binstall --root \"$RSS_TOOL_ROOT\" \"$spec\"\n    - name: Install pinned prebuilt tools\n      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5",
+                    "    - name: Install pinned prebuilt tools\n      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5\n    - name: Install fallback tools\n      run: cargo binstall --root \"$RSS_TOOL_ROOT\" \"$spec\"",
+                    1,
+                ),
+                adapter.to_owned(),
+            ),
+            (
+                "save-before-setup",
+                reusable.replacen("- id: setup", "- id: save-tools-copy\n        uses: actions/cache/save@v4\n      - id: setup", 1),
+                action.to_owned(),
+                adapter.to_owned(),
+            ),
+            (
+                "old-epoch",
+                reusable.replacen("tool-cache-epoch: v4", "tool-cache-epoch: v3", 1),
+                action.to_owned(),
+                adapter.to_owned(),
+            ),
+        ] {
+            assert!(
+                !ci_tool_adapter_contract_is_hardened(&reusable_red, &action_red, &adapter_red),
+                "adapter contract weakening `{name}` must fail closed"
+            );
         }
-        Ok(())
     }
 
     /// GitHub CI 安装 pinned nightly 时，每个 component 必须显式带 `--component`，否则 rustup 会把后续
@@ -4695,7 +5028,7 @@ jobs:
             step.uses.as_deref() == Some("./.github/actions/setup-rss-ci")
                 && step.with_exact("lane", &["${{ inputs.lane }}"])
                 && step.with_exact("profile", &["${{ steps.policy.outputs.profile }}"])
-                && step.with_exact("tool-cache-epoch", &["v3"])
+                && step.with_exact("tool-cache-epoch", &["v4"])
                 && step.with_exact("writer-mode", &["${{ env.RSS_CACHE_WRITER }}"])
                 && step.with_exact("evidence-enabled", &["true"])
         });
@@ -4716,8 +5049,6 @@ jobs:
                         "ci-meta)",
                         "echo 'profile=ci-meta'",
                         "echo 'nightly='",
-                        "echo 'prebuilt-tools='",
-                        "echo 'fallback-tools='",
                         ";;",
                     ]
                     .as_slice(),
@@ -4725,8 +5056,6 @@ jobs:
                         "ci-core-prerequisites)",
                         "echo 'profile=ci-core-prerequisites'",
                         "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                        "echo 'prebuilt-tools='",
-                        "echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1'",
                         ";;",
                     ]
                     .as_slice(),
@@ -4734,8 +5063,6 @@ jobs:
                         "ci-core-tests)",
                         "echo 'profile=ci-core-tests'",
                         "echo 'nightly='",
-                        "echo 'prebuilt-tools=cargo-nextest@0.9.137'",
-                        "echo 'fallback-tools='",
                         ";;",
                     ]
                     .as_slice(),
@@ -4743,8 +5070,6 @@ jobs:
                         "ci-security)",
                         "echo 'profile=ci-security'",
                         "echo 'nightly='",
-                        "echo 'prebuilt-tools=cargo-deny@0.19.9,cargo-audit@0.22.2'",
-                        "echo 'fallback-tools='",
                         ";;",
                     ]
                     .as_slice(),
@@ -4752,8 +5077,6 @@ jobs:
                         "ci-coverage)",
                         "echo 'profile=ci-coverage'",
                         "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                        "echo 'prebuilt-tools=cargo-llvm-cov@0.8.7,cargo-nextest@0.9.137'",
-                        "echo 'fallback-tools=cargo-public-api@0.52.0'",
                         ";;",
                     ]
                     .as_slice(),
@@ -5378,11 +5701,7 @@ jobs:
                 "ci-core-tests)\n              echo 'profile=ci-core-tests'",
                 "ci-core-tests)\n              echo 'profile=ci-core'",
             ),
-            ("tool-cache-epoch: v3", "tool-cache-epoch: v2"),
-            (
-                "prebuilt-tools=cargo-llvm-cov@0.8.7,cargo-nextest@0.9.137",
-                "prebuilt-tools=cargo-llvm-cov@0.8.7",
-            ),
+            ("tool-cache-epoch: v4", "tool-cache-epoch: v3"),
             (
                 "steps.setup.outputs.tools-primary-key",
                 "steps.setup.outputs.target-primary-key",

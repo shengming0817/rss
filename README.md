@@ -51,12 +51,11 @@ cargo deny check                                       # 分层禁依赖 + licen
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
 
-工具链由 `rust-toolchain.toml` 钉定（首次进入目录自动安装）。治理工具：
+工具链由 `rust-toolchain.toml` 钉定（首次进入目录自动安装）。治理工具的版本、安装 backend 与 CI lane
+映射由 adapter catalog 单源维护；查看完整精确版本：
 
 ```bash
-cargo install cargo-nextest@0.9.137 cargo-deny@0.19.9 --locked
-cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked
-cargo install cargo-llvm-cov@0.8.7 cargo-public-api@0.52.0 cargo-audit@0.22.2 --locked
+.github/scripts/ci-tool-adapters.sh specs --lane all --backend all
 ```
 
 > dylint 须 nightly：`cargo-dylint` / `dylint-link` 版本与 `lints/rust-toolchain.toml` 的 channel +

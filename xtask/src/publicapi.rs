@@ -11,7 +11,7 @@
 //! 自检可显式 `--allow-missing` 宽限缺失（drift 仍 fail）——对齐 cargo-public-api snapshot-gate
 //! 范式，杜绝「无 baseline 也绿」的误绿。
 //!
-//! 依赖：外部 `cargo-public-api`（`cargo install cargo-public-api@0.52.0`）+ 钉版 nightly rustdoc-json
+//! 依赖：外部 `cargo-public-api`（版本由 CI tool catalog 编译期派生）+ 钉版 nightly rustdoc-json
 //! （`rustup toolchain install <PINNED_NIGHTLY>`，见 [`PINNED_NIGHTLY`]）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
 //! **不在 `cargo xtask verify` 聚合门内**：verify 聚合每次代码改动的强制门（fmt/build/clippy/nextest/deny/
@@ -125,12 +125,13 @@ fn baseline_dir() -> Result<PathBuf> {
 
 /// 检测外部 cargo-public-api；缺失即 fail-fast 给安装指引（INVARIANT PUBLICAPI-TOOL-GATE-01）。
 fn ensure_tool_available() -> Result<()> {
+    const PUBLIC_API_VERSION: &str = env!("RSS_TOOL_VERSION_CARGO_PUBLIC_API");
     if crate::cmd::tool_available(crate::cmd::CargoSubcommand::PublicApi) {
         return Ok(());
     }
     bail!(
         "未找到 `cargo public-api`。安装：\n  \
-         cargo install cargo-public-api@0.52.0\n  \
+         cargo install cargo-public-api@{PUBLIC_API_VERSION}\n  \
          rustup toolchain install {PINNED_NIGHTLY}   # rustdoc-json 需钉版 nightly（NIGHTLY-PIN-01）\n\
          仅基础/引擎层与 curated extras 封装面冻结需要本工具（非全 workspace 强制门）。"
     )

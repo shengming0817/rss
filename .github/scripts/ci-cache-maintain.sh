@@ -16,10 +16,7 @@ usage() {
     "usage: $0 cleanup --workspace <path> --target <path>" \
     "       $0 measure --path <path>" \
     "       $0 tree-identity --workspace <path>" \
-    "       $0 prepare-roots --workspace <path> --tool-root <path> --runner-temp <path> --fallback-target <path>" \
-    "       $0 validate-tools --specs <name@semver,...> [--tool-root <path> --fallback-target <path>]" \
-    "       $0 validate-tool-layout --root <path> --spec <name@semver>" \
-    "       $0 verify-tool --root <path> --spec <name@semver>" >&2
+    "       $0 prepare-roots --workspace <path> --tool-root <path> --runner-temp <path> --fallback-target <path>" >&2
   exit 2
 }
 
@@ -91,32 +88,12 @@ prepare_roots() {
   case "$fallback_physical/" in "$tool_physical"/*) die 'fallback target overlaps tool root' ;; esac
 }
 
-validate_spec() {
-  [[ "$1" =~ ^[a-z0-9]+(-[a-z0-9]+)*@(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
-}
-
-validate_specs() {
-  specs=$1
-  [ -n "$specs" ] || return 0
-  case ",$specs," in *,,*) return 1 ;; esac
-  while [ -n "$specs" ]; do
-    spec=${specs%%,*}
-    validate_spec "$spec" || return 1
-    if [ "$specs" = "$spec" ]; then
-      specs=
-    else
-      specs=${specs#*,}
-    fi
-  done
-}
-
 validate_diagnostic_context() {
   stage=$1
   subject=$2
   case "$stage" in
     metadata) [ "$subject" = workspace ] ;;
     clean) [[ "$subject" =~ ^[A-Za-z0-9]+([_-][A-Za-z0-9]+)*$ ]] ;;
-    tool-version) validate_spec "$subject" ;;
     git-tree) [ "$subject" = repository ] ;;
     metadata-parse) case "$subject" in workspace-root|target-directory|packages) return 0 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
@@ -285,74 +262,6 @@ EOF
   temporary_file=
 }
 
-validate_tools() {
-  specs=
-  tool_root=
-  fallback_target=
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --specs) [ "$#" -ge 2 ] || usage; specs=$2; shift 2 ;;
-      --tool-root) [ "$#" -ge 2 ] || usage; tool_root=$2; shift 2 ;;
-      --fallback-target) [ "$#" -ge 2 ] || usage; fallback_target=$2; shift 2 ;;
-      *) usage ;;
-    esac
-  done
-  validate_specs "$specs" || die 'invalid tool specification'
-  if [ -n "$tool_root" ] || [ -n "$fallback_target" ]; then
-    [ -n "$tool_root" ] && [ -n "$fallback_target" ] || usage
-    tool_physical=$(canonical_directory "$tool_root") || die 'tool root is not a safe directory'
-    fallback_physical=$(canonical_directory "$fallback_target") || die 'fallback target is not a safe directory'
-    case "$tool_physical/" in "$fallback_physical"/*) die 'tool root overlaps fallback target' ;; esac
-    case "$fallback_physical/" in "$tool_physical"/*) die 'fallback target overlaps tool root' ;; esac
-  fi
-}
-
-verify_tool() {
-  root=
-  spec=
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --root) [ "$#" -ge 2 ] || usage; root=$2; shift 2 ;;
-      --spec) [ "$#" -ge 2 ] || usage; spec=$2; shift 2 ;;
-      *) usage ;;
-    esac
-  done
-  if [ -z "$root" ] || ! validate_spec "$spec"; then usage; fi
-  root_physical=$(canonical_directory "$root") || die 'tool root is not a safe directory'
-  name=${spec%@*}
-  version=${spec#*@}
-  binary="$root_physical/bin/$name"
-  [ -f "$binary" ] && [ ! -L "$binary" ] && [ -x "$binary" ] || die 'cached tool binary is unsafe or unavailable'
-  run_diagnostic tool-version "$spec" "$binary" --version || exit 1
-  version_output=$(consume_diagnostic_output) || die 'cannot consume tool version output'
-  case "$version_output" in
-    "$name $version"*) remainder=${version_output#"$name $version"} ;;
-    "$name v$version"*) remainder=${version_output#"$name v$version"} ;;
-    *) die 'cached tool version mismatch' ;;
-  esac
-  case "$remainder" in ""|" "*) ;; *) die 'cached tool version mismatch' ;; esac
-  if [[ "$remainder" =~ (^|[^0-9A-Za-z])[v]?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-    die 'cached tool version output is ambiguous'
-  fi
-}
-
-validate_tool_layout() {
-  root=
-  spec=
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --root) [ "$#" -ge 2 ] || usage; root=$2; shift 2 ;;
-      --spec) [ "$#" -ge 2 ] || usage; spec=$2; shift 2 ;;
-      *) usage ;;
-    esac
-  done
-  if [ -z "$root" ] || ! validate_spec "$spec"; then usage; fi
-  root_physical=$(canonical_directory "$root") || die 'tool root is not a safe directory'
-  name=${spec%@*}
-  binary="$root_physical/bin/$name"
-  [ -f "$binary" ] && [ ! -L "$binary" ] && [ -x "$binary" ] || die 'cached tool binary is unsafe or unavailable'
-}
-
 [ "$#" -gt 0 ] || usage
 command_name=$1
 shift
@@ -361,8 +270,5 @@ case "$command_name" in
   measure) measure "$@" ;;
   tree-identity) tree_identity "$@" ;;
   prepare-roots) prepare_roots "$@" ;;
-  validate-tools) validate_tools "$@" ;;
-  validate-tool-layout) validate_tool_layout "$@" ;;
-  verify-tool) verify_tool "$@" ;;
   *) usage ;;
 esac

@@ -146,16 +146,6 @@ expect_failure 'incremental discovery failure fails closed' env PATH="$FAIL_FIND
 if [ -d "$TARGET/debug/incremental/fail-case" ]; then pass 'failed discovery does not partially delete incremental data'; else fail 'failed discovery does not partially delete incremental data'; fi
 if [ "$(wc -l <"$TMP_ROOT/clean.trace" | tr -d ' ')" = 4 ]; then pass 'failed discovery does not invoke cargo clean'; else fail 'failed discovery does not invoke cargo clean'; fi
 
-TOOL_ROOT="$WORKSPACE/.cache/ci-tools/test"
-FALLBACK_TARGET="$WORKSPACE/.cache/ci-tool-build/test"
-mkdir -p "$TOOL_ROOT/bin" "$FALLBACK_TARGET"
-expect_success 'strict tool specs and isolated roots validate' run_maintain validate-tools --specs 'cargo-nextest@0.9.85,cargo-deny@0.18.3' --tool-root "$TOOL_ROOT" --fallback-target "$FALLBACK_TARGET"
-expect_success 'empty optional tool specs are a no-op' run_maintain validate-tools --specs ''
-for bad in '--evil@1.2.3' 'cargo-nextest@1' 'cargo-nextest@1.2' 'cargo-nextest@1.2.3;touch' 'cargo_nextest@1.2.3' 'cargo-nextest@01.2.3' 'cargo-nextest@1.2.3,'; do
-  expect_failure "invalid tool spec is rejected: $bad" run_maintain validate-tools --specs "$bad"
-done
-expect_failure 'tool root and fallback target cannot overlap' run_maintain validate-tools --specs 'cargo-nextest@0.9.85' --tool-root "$TOOL_ROOT" --fallback-target "$TOOL_ROOT/build"
-
 PREPARE_WORKSPACE="$TMP_ROOT/prepare-workspace"
 PREPARE_TEMP="$TMP_ROOT/runner-temp"
 mkdir -p "$PREPARE_WORKSPACE/.cache" "$PREPARE_TEMP"
@@ -185,40 +175,9 @@ expect_failure 'prepare-roots rejects fallback symlink ancestor' run_maintain pr
   --workspace "$PREPARE_WORKSPACE" --tool-root "$PREPARE_WORKSPACE/.cache/ci-tools/other" \
   --runner-temp "$PREPARE_TEMP" --fallback-target "$PREPARE_TEMP/target-link/build"
 
-cat >"$TOOL_ROOT/bin/cargo-nextest" <<'EOF'
-#!/bin/sh
-printf 'cargo-nextest 0.9.85\n'
-EOF
-chmod +x "$TOOL_ROOT/bin/cargo-nextest"
-expect_success 'cached tool exact version verifies' run_maintain verify-tool --root "$TOOL_ROOT" --spec 'cargo-nextest@0.9.85'
-expect_success 'cached tool layout validates without execution' run_maintain validate-tool-layout --root "$TOOL_ROOT" --spec 'cargo-nextest@0.9.85'
-SIDE_EFFECT="$TMP_ROOT/version-side-effect"
-cat >"$TOOL_ROOT/bin/cargo-side-effect" <<EOF
-#!/bin/sh
-touch '$SIDE_EFFECT'
-printf 'cargo-side-effect 1.2.3\n'
-EOF
-chmod +x "$TOOL_ROOT/bin/cargo-side-effect"
-expect_success 'cache-hit layout check accepts a safe executable' run_maintain validate-tool-layout --root "$TOOL_ROOT" --spec 'cargo-side-effect@1.2.3'
-if [ ! -e "$SIDE_EFFECT" ]; then pass 'cache-hit layout check never executes the binary'; else fail 'cache-hit layout check never executes the binary'; fi
-cat >"$TOOL_ROOT/bin/cargo-mixed" <<'EOF'
-#!/bin/sh
-printf 'cargo-mixed 1.2.3 dependency 9.8.7\n'
-EOF
-chmod +x "$TOOL_ROOT/bin/cargo-mixed"
-expect_failure 'fresh tool verification rejects mixed version output' run_maintain verify-tool --root "$TOOL_ROOT" --spec 'cargo-mixed@1.2.3'
-cat >"$TOOL_ROOT/bin/cargo-failing" <<EOF
-#!/bin/sh
-printf 'No such file or directory SECRET_CANARY token=credential https://example.invalid $WORKSPACE\n' >&2
-exit 25
-EOF
-chmod +x "$TOOL_ROOT/bin/cargo-failing"
-expect_safe_failure 'tool version failure emits closed diagnostic only' \
-  'ci-cache-maintain: command failed stage=tool-version subject=cargo-failing@1.2.3 exit=25 class=not-found' \
-  run_maintain verify-tool --root "$TOOL_ROOT" --spec 'cargo-failing@1.2.3'
-expect_failure 'cached tool version pollution fails closed' run_maintain verify-tool --root "$TOOL_ROOT" --spec 'cargo-nextest@0.9.84'
-ln -s "$TOOL_ROOT/bin/cargo-nextest" "$TOOL_ROOT/bin/cargo-deny"
-expect_failure 'cached tool symlink is rejected' run_maintain verify-tool --root "$TOOL_ROOT" --spec 'cargo-deny@0.9.85'
+expect_failure 'deprecated validate-tools command is removed' run_maintain validate-tools --specs ''
+expect_failure 'deprecated verify-tool command is removed' run_maintain verify-tool --root "$WORKSPACE" --spec cargo-nextest@0.9.137
+expect_failure 'deprecated validate-tool-layout command is removed' run_maintain validate-tool-layout --root "$WORKSPACE" --spec cargo-nextest@0.9.137
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '%s cache maintenance selftest(s) failed\n' "$FAILURES" >&2

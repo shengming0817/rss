@@ -964,12 +964,33 @@ impl GateSpec {
     }
 }
 
-const DENY_HINT: &str = "cargo install cargo-deny@0.19.9 --locked";
-const AUDIT_HINT: &str = "cargo install cargo-audit@0.22.2 --locked";
-const DYLINT_HINT: &str = "cargo install cargo-dylint@6.0.1 dylint-link@6.0.1 --locked";
-pub(crate) const LLVM_COV_HINT: &str = "cargo install cargo-llvm-cov@0.8.7 --locked";
-const PUBLIC_API_HINT: &str =
-    "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@0.52.0 --locked";
+const DENY_HINT: &str = concat!(
+    "cargo install cargo-deny@",
+    env!("RSS_TOOL_VERSION_CARGO_DENY"),
+    " --locked"
+);
+const AUDIT_HINT: &str = concat!(
+    "cargo install cargo-audit@",
+    env!("RSS_TOOL_VERSION_CARGO_AUDIT"),
+    " --locked"
+);
+const DYLINT_HINT: &str = concat!(
+    "cargo install cargo-dylint@",
+    env!("RSS_TOOL_VERSION_CARGO_DYLINT"),
+    " dylint-link@",
+    env!("RSS_TOOL_VERSION_DYLINT_LINK"),
+    " --locked"
+);
+pub(crate) const LLVM_COV_HINT: &str = concat!(
+    "cargo install cargo-llvm-cov@",
+    env!("RSS_TOOL_VERSION_CARGO_LLVM_COV"),
+    " --locked"
+);
+const PUBLIC_API_HINT: &str = concat!(
+    "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@",
+    env!("RSS_TOOL_VERSION_CARGO_PUBLIC_API"),
+    " --locked"
+);
 
 const fn gate(
     id: GateId,

@@ -15,14 +15,6 @@ inputs:
     description: Optional pinned nightly toolchain required by public-api.
     required: false
     default: ""
-  prebuilt-tools:
-    description: Comma-separated name@semver specs supported by taiki-e/install-action.
-    required: false
-    default: ""
-  fallback-tools:
-    description: Comma-separated name@semver specs installed by cargo-binstall.
-    required: false
-    default: ""
   tool-cache-epoch:
     description: Explicit epoch for incompatible tool-cache changes.
     required: true
@@ -73,6 +65,24 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Resolve lane tools from the adapter catalog
+      id: tool-policy
+      shell: bash
+      env:
+        RSS_LANE: ${{ inputs.lane }}
+      run: |
+        set -euo pipefail
+        install_action_tools="$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)"
+        binstall_tools="$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend binstall)"
+        adapter_sha256="$(sha256sum .github/scripts/ci-tool-adapters.sh | cut -d' ' -f1)"
+        catalog_sha256="$(sha256sum .github/scripts/ci-tool-catalog.txt | cut -d' ' -f1)"
+        {
+          echo "install-action-tools=$install_action_tools"
+          echo "binstall-tools=$binstall_tools"
+          echo "adapter-sha256=$adapter_sha256"
+          echo "catalog-sha256=$catalog_sha256"
+        } >> "$GITHUB_OUTPUT"
+
     - name: Validate policy inputs and derive exact cache keys
       id: cache-keys
       shell: bash
@@ -81,8 +91,10 @@ runs:
         RSS_PROFILE: ${{ inputs.profile }}
         RSS_TOOLCHAIN: ${{ inputs.toolchain }}
         RSS_NIGHTLY: ${{ inputs.nightly }}
-        RSS_PREBUILT_TOOLS: ${{ inputs.prebuilt-tools }}
-        RSS_FALLBACK_TOOLS: ${{ inputs.fallback-tools }}
+        RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
+        RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
+        RSS_ADAPTER_SHA256: ${{ steps.tool-policy.outputs.adapter-sha256 }}
+        RSS_CATALOG_SHA256: ${{ steps.tool-policy.outputs.catalog-sha256 }}
         RSS_TOOL_CACHE_EPOCH: ${{ inputs.tool-cache-epoch }}
         RSS_WRITER_MODE: ${{ inputs.writer-mode }}
         RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
@@ -95,11 +107,9 @@ runs:
         case "$RSS_WRITER_MODE" in true|false) ;; *) exit 64 ;; esac
         RSS_NIGHTLY_ID="${RSS_NIGHTLY:-none}"
         .github/scripts/ci-cache-maintain.sh prepare-roots --workspace "$GITHUB_WORKSPACE" --tool-root "$RSS_TOOL_ROOT" --runner-temp "$RUNNER_TEMP" --fallback-target "$RSS_FALLBACK_TARGET"
-        .github/scripts/ci-cache-maintain.sh validate-tools --specs "$RSS_PREBUILT_TOOLS" --tool-root "$RSS_TOOL_ROOT" --fallback-target "$RSS_FALLBACK_TARGET"
-        .github/scripts/ci-cache-maintain.sh validate-tools --specs "$RSS_FALLBACK_TOOLS" --tool-root "$RSS_TOOL_ROOT" --fallback-target "$RSS_FALLBACK_TARGET"
         source_hash="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
         tree_identity="$(.github/scripts/ci-cache-maintain.sh tree-identity --workspace "$GITHUB_WORKSPACE")"
-        tools_hash="$(printf '%s\n' 'taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a' 'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' "$RSS_PREBUILT_TOOLS" "$RSS_FALLBACK_TOOLS" | sha256sum | cut -d' ' -f1)"
+        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' 'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
         common="$RSS_LANE-${RUNNER_OS}-${RUNNER_ARCH}-$RSS_TOOLCHAIN-$RSS_NIGHTLY_ID-$RSS_PROFILE"
         echo "download-primary-key=rss-download-v3-$common-$source_hash" >> "$GITHUB_OUTPUT"
         echo "target-primary-key=rss-target-v3-$common-$source_hash-$tree_identity" >> "$GITHUB_OUTPUT"
@@ -168,57 +178,52 @@ runs:
         fi
         rustup show
 
-    - name: Install pinned prebuilt tools
-      if: ${{ inputs.prebuilt-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
-      uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a
-      env:
-        HOME: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
-      with:
-        tool: ${{ inputs.prebuilt-tools }}
-        fallback: none
-
     - name: Install cargo-binstall
-      if: ${{ inputs.fallback-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
+      if: ${{ steps.tool-policy.outputs.binstall-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
       uses: cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65
       with:
         version: 1.20.1
 
-    - name: Install and verify fallback tools
-      if: ${{ inputs.fallback-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
+    - name: Install fallback tools
+      if: ${{ steps.tool-policy.outputs.binstall-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
       shell: bash
       env:
-        RSS_FALLBACK_TOOLS: ${{ inputs.fallback-tools }}
+        RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
         RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
         CARGO_TARGET_DIR: ${{ runner.temp }}/rss-tool-build-target
         CARGO_BINSTALL_DISABLE_TELEMETRY: "true"
       run: |
         set -euo pipefail
         mkdir -p "$RSS_TOOL_ROOT/bin"
-        IFS=',' read -r -a specs <<< "$RSS_FALLBACK_TOOLS"
+        IFS=',' read -r -a specs <<< "$RSS_BINSTALL_TOOLS"
         for spec in "${specs[@]}"; do
           cargo binstall --locked --no-confirm --disable-strategies quick-install --disable-telemetry --root "$RSS_TOOL_ROOT" "$spec"
-          .github/scripts/ci-cache-maintain.sh verify-tool --root "$RSS_TOOL_ROOT" --spec "$spec"
         done
 
+    # install-action appends its checksum-verified bin directory to GITHUB_PATH internally.
+    # Keep it as the final installer so no intervening step can consume those binaries before
+    # the repository-owned adapter validates the complete set below.
+    - name: Install pinned prebuilt tools
+      if: ${{ steps.tool-policy.outputs.install-action-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
+      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
+      env:
+        HOME: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
+      with:
+        tool: ${{ steps.tool-policy.outputs.install-action-tools }}
+        fallback: none
+
     - name: Validate and expose isolated tool cache
+      id: verify-tools
       shell: bash
       env:
-        RSS_PREBUILT_TOOLS: ${{ inputs.prebuilt-tools }}
-        RSS_FALLBACK_TOOLS: ${{ inputs.fallback-tools }}
+        RSS_LANE: ${{ inputs.lane }}
         RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
         RSS_TOOLS_HIT: ${{ steps.tools-cache.outputs.cache-hit }}
       run: |
         set -euo pipefail
-        validation=verify-tool
-        if [ "$RSS_TOOLS_HIT" = true ]; then validation=validate-tool-layout; fi
-        IFS=',' read -r -a specs <<< "$RSS_PREBUILT_TOOLS"
-        for spec in "${specs[@]}"; do
-          if [ -n "$spec" ]; then .github/scripts/ci-cache-maintain.sh "$validation" --root "$RSS_TOOL_ROOT/.install-action" --spec "$spec"; fi
-        done
-        IFS=',' read -r -a specs <<< "$RSS_FALLBACK_TOOLS"
-        for spec in "${specs[@]}"; do
-          if [ -n "$spec" ]; then .github/scripts/ci-cache-maintain.sh "$validation" --root "$RSS_TOOL_ROOT" --spec "$spec"; fi
-        done
+        mode=fresh
+        if [ "$RSS_TOOLS_HIT" = true ]; then mode=cache; fi
+        .github/scripts/ci-tool-adapters.sh verify --mode "$mode" --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
         echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
         echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
 

@@ -91,44 +91,30 @@ jobs:
             ci-meta)
               echo 'profile=ci-meta'
               echo 'nightly='
-              echo 'prebuilt-tools='
-              echo 'fallback-tools='
               ;;
             ci-core-prerequisites)
               echo 'profile=ci-core-prerequisites'
               echo "nightly=$RSS_NIGHTLY_PINNED"
-              echo 'prebuilt-tools='
-              echo 'fallback-tools=cargo-dylint@6.0.1,dylint-link@6.0.1'
               ;;
             ci-core-tests)
               echo 'profile=ci-core-tests'
               echo 'nightly='
-              echo 'prebuilt-tools=cargo-nextest@0.9.137'
-              echo 'fallback-tools='
               ;;
             ci-security)
               echo 'profile=ci-security'
               echo 'nightly='
-              echo 'prebuilt-tools=cargo-deny@0.19.9,cargo-audit@0.22.2'
-              echo 'fallback-tools='
               ;;
             ci-coverage)
               echo 'profile=ci-coverage'
               echo "nightly=$RSS_NIGHTLY_PINNED"
-              echo 'prebuilt-tools=cargo-llvm-cov@0.8.7,cargo-nextest@0.9.137'
-              echo 'fallback-tools=cargo-public-api@0.52.0'
               ;;
             integration)
               echo 'profile=integration'
               echo 'nightly='
-              echo 'prebuilt-tools=cargo-nextest@0.9.137'
-              echo 'fallback-tools='
               ;;
             audit)
               echo 'profile=audit'
               echo 'nightly='
-              echo 'prebuilt-tools=cargo-deny@0.19.9,cargo-audit@0.22.2'
-              echo 'fallback-tools='
               ;;
             *) exit 64 ;;
           esac >> "$GITHUB_OUTPUT"
@@ -142,9 +128,7 @@ jobs:
           profile: ${{ steps.policy.outputs.profile }}
           toolchain: 1.96.0
           nightly: ${{ steps.policy.outputs.nightly }}
-          prebuilt-tools: ${{ steps.policy.outputs.prebuilt-tools }}
-          fallback-tools: ${{ steps.policy.outputs.fallback-tools }}
-          tool-cache-epoch: v3
+          tool-cache-epoch: v4
           writer-mode: ${{ env.RSS_CACHE_WRITER }}
           evidence-enabled: true
 
@@ -152,7 +136,11 @@ jobs:
         id: measure-tools
         timeout-minutes: 2
         if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}
-        run: echo "bytes=$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/ci-tools/${{ steps.policy.outputs.profile }}")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          tool_root="$GITHUB_WORKSPACE/.cache/ci-tools/${{ steps.policy.outputs.profile }}"
+          test -f "$tool_root/.rss-tool-seal-v1"
+          echo "bytes=$(.github/scripts/ci-cache-maintain.sh measure --path "$tool_root")" >> "$GITHUB_OUTPUT"
 
       - name: Enforce pre-execution tool cache budget
         id: tools-budget

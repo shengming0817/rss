@@ -1,0 +1,7 @@
+cargo-nextest|0.9.137|install-action|.install-action/bin/cargo-nextest|nextest
+cargo-llvm-cov|0.8.7|install-action|.install-action/bin/cargo-llvm-cov|llvm-cov
+cargo-deny|0.19.9|install-action|.install-action/bin/cargo-deny|direct
+cargo-audit|0.22.2|install-action|.install-action/bin/cargo-audit|direct
+cargo-dylint|6.0.1|binstall|bin/cargo-dylint|dylint
+dylint-link|6.0.1|binstall|bin/dylint-link|receipt
+cargo-public-api|0.52.0|binstall|bin/cargo-public-api|direct

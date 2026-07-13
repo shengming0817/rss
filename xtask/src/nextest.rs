@@ -19,9 +19,13 @@ use std::process::ExitStatus;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) const NEXTEST_VERSION: &str = "0.9.137";
+pub(crate) const NEXTEST_VERSION: &str = env!("RSS_TOOL_VERSION_CARGO_NEXTEST");
 const TOOL_NAME: &str = "nextest";
-const INSTALL_HINT: &str = "cargo install cargo-nextest@0.9.137 --locked";
+const INSTALL_HINT: &str = concat!(
+    "cargo install cargo-nextest@",
+    env!("RSS_TOOL_VERSION_CARGO_NEXTEST"),
+    " --locked"
+);
 const EVIDENCE_SCHEMA_VERSION: u8 = 2;
 const EVIDENCE_DIR: &str = "target/nextest-evidence";
 
