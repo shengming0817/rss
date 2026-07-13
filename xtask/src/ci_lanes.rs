@@ -7,6 +7,7 @@
 //! INVARIANT: CI-LANE-PLAN-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_lane_registry_rejects_duplicate_and_missing_red", anti_vacuity = "ci_lane_registry_accepts_canonical_green" } —— lane and
 //! compatibility plans are derived from this registry and guarded by non-vacuous red/green tests.
 //! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
+//! INVARIANT: CI-IMPACT-CATALOG-01 { level = "Hard", exec = "native-compile", source = "code", native = "ci_job_catalog generates CiJobKey, ALL, workflow identity, artifact identity, and planner matrix fields from one descriptor" }.
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -20,14 +21,14 @@ use crate::nextest::HashPartition;
 struct CiJobDescriptor {
     key: CiJobKey,
     name: &'static str,
-    lane: &'static str,
+    lane: CiLane,
     shard: Option<&'static str>,
     partition: Option<&'static str>,
 }
 
 macro_rules! ci_job_catalog {
-    ($( $variant:ident => ($name:literal, $lane:literal, $shard:expr, $partition:expr) ),+ $(,)?) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    ($( $variant:ident => ($name:literal, $lane:ident, $shard:expr, $partition:expr) ),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub(crate) enum CiJobKey {
             $( $variant, )+
         }
@@ -36,7 +37,7 @@ macro_rules! ci_job_catalog {
             $(CiJobDescriptor {
                 key: CiJobKey::$variant,
                 name: $name,
-                lane: $lane,
+                lane: CiLane::$lane,
                 shard: $shard,
                 partition: $partition,
             },)+
@@ -59,58 +60,60 @@ macro_rules! ci_job_catalog {
 }
 
 ci_job_catalog! {
-    CiMeta => ("ci-meta", "ci-meta", None, None),
-    CiCorePrerequisites => ("ci-core-prerequisites", "ci-core-prerequisites", None, None),
-    CiCoreTests1Of2 => ("ci-core-tests/1-of-2", "ci-core-tests", None, Some("1/2")),
-    CiCoreTests2Of2 => ("ci-core-tests/2-of-2", "ci-core-tests", None, Some("2/2")),
-    CiSecurity => ("ci-security", "ci-security", None, None),
-    CiCoverage => ("ci-coverage", "ci-coverage", None, None),
+    CiMeta => ("ci-meta", Meta, None, None),
+    CiCorePrerequisites => ("ci-core-prerequisites", CorePrerequisites, None, None),
+    CiCoreTests1Of2 => ("ci-core-tests/1-of-2", CoreTests, None, Some("1/2")),
+    CiCoreTests2Of2 => ("ci-core-tests/2-of-2", CoreTests, None, Some("2/2")),
+    CiSecurity => ("ci-security", Security, None, None),
+    CiCoverage => ("ci-coverage", Coverage, None, None),
     IntegrationPostgresDomain => (
         "integration/postgres-domain",
-        "integration",
+        Integration,
         Some("postgres-domain"),
         None
     ),
     IntegrationEventTransport1Of2 => (
         "integration/event-transport/1-of-2",
-        "integration",
+        Integration,
         Some("event-transport"),
         Some("1/2")
     ),
     IntegrationEventTransport2Of2 => (
         "integration/event-transport/2-of-2",
-        "integration",
+        Integration,
         Some("event-transport"),
         Some("2/2")
     ),
     IntegrationRuntimeHttpAuth1Of2 => (
         "integration/runtime-http-auth/1-of-2",
-        "integration",
+        Integration,
         Some("runtime-http-auth"),
         Some("1/2")
     ),
     IntegrationRuntimeHttpAuth2Of2 => (
         "integration/runtime-http-auth/2-of-2",
-        "integration",
+        Integration,
         Some("runtime-http-auth"),
         Some("2/2")
     ),
     IntegrationConsistencyFault => (
         "integration/consistency-fault",
-        "integration",
+        Integration,
         Some("consistency-fault"),
         None
     ),
     IntegrationCdcProjectionSaga => (
         "integration/cdc-projection-saga",
-        "integration",
+        Integration,
         Some("cdc-projection-saga"),
         None
     ),
-    Audit => ("audit", "audit", None, None),
+    Audit => ("audit", Nightly, None, None),
 }
 
 impl CiJobKey {
+    pub(crate) const COUNT: usize = Self::ALL.len();
+
     pub(crate) fn from_workflow_parts(
         lane: &str,
         shard: Option<IntegrationShard>,
@@ -121,7 +124,7 @@ impl CiJobKey {
         CI_JOB_DESCRIPTORS
             .iter()
             .find(|descriptor| {
-                descriptor.lane == lane
+                descriptor.lane.workflow_name() == lane
                     && descriptor.shard == shard
                     && descriptor.partition == partition.as_deref()
             })
@@ -140,7 +143,38 @@ impl CiJobKey {
             Some(_) => unreachable!(),
             None => "unpartitioned",
         };
-        (descriptor.lane, shard, partition)
+        (descriptor.lane.workflow_name(), shard, partition)
+    }
+
+    pub(crate) fn expected_artifact(self, run_id: &str, run_attempt: &str) -> String {
+        let prefix = self.artifact_prefix();
+        format!("{prefix}{run_id}-{run_attempt}")
+    }
+
+    pub(crate) fn artifact_prefix(self) -> String {
+        let (lane, shard, partition) = self.artifact_parts();
+        format!("ci-evidence-{lane}-{shard}-{partition}-")
+    }
+
+    pub(crate) const fn lane_kind(self) -> CiLane {
+        self.descriptor().lane
+    }
+
+    pub(crate) const fn shard(self) -> Option<&'static str> {
+        self.descriptor().shard
+    }
+
+    pub(crate) const fn partition(self) -> Option<&'static str> {
+        self.descriptor().partition
+    }
+
+    pub(crate) fn partition_label(self) -> &'static str {
+        match self.descriptor().partition {
+            Some("1/2") => "1-of-2",
+            Some("2/2") => "2-of-2",
+            Some(_) => "invalid",
+            None => "unpartitioned",
+        }
     }
 }
 
@@ -179,20 +213,45 @@ impl<'de> Deserialize<'de> for CiJobKey {
 pub(crate) enum CiLane {
     Meta,
     Core,
+    CorePrerequisites,
+    CoreTests,
     Security,
     Coverage,
+    Integration,
     Nightly,
 }
 
 impl CiLane {
+    pub(crate) const fn workflow_name(self) -> &'static str {
+        match self {
+            Self::Meta => "ci-meta",
+            Self::Core => "ci-core",
+            Self::CorePrerequisites => "ci-core-prerequisites",
+            Self::CoreTests => "ci-core-tests",
+            Self::Security => "ci-security",
+            Self::Coverage => "ci-coverage",
+            Self::Integration => "integration",
+            Self::Nightly => "audit",
+        }
+    }
+
     pub(crate) const fn command_name(self) -> &'static str {
         match self {
             Self::Meta => "ci-meta",
             Self::Core => "ci-core",
+            Self::CorePrerequisites => "ci-core-prerequisites",
+            Self::CoreTests => "ci-core-tests",
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
+            Self::Integration => "ci-integration",
             Self::Nightly => "audit",
         }
+    }
+}
+
+impl Serialize for CiLane {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.workflow_name())
     }
 }
 
@@ -1178,7 +1237,8 @@ mod tests {
             assert_eq!(descriptor.key, CiJobKey::ALL[index]);
             let shard = descriptor.shard.map(str::parse).transpose()?;
             let partition = descriptor.partition.map(str::parse).transpose()?;
-            let job = CiJobKey::from_workflow_parts(descriptor.lane, shard, partition)?;
+            let job =
+                CiJobKey::from_workflow_parts(descriptor.lane.workflow_name(), shard, partition)?;
             assert_eq!(job, descriptor.key);
             assert_eq!(job.to_string(), job.as_str());
             assert_eq!(job.as_str().parse::<CiJobKey>()?, job);

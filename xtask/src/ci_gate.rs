@@ -1,0 +1,1507 @@
+//! Stable aggregate gate for a typed CI impact plan.
+//!
+//! INVARIANT: CI-GATE-RECEIPT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "gate_rejects_missing_duplicate_and_mismatched_receipts_red", anti_vacuity = "gate_accepts_exact_receipt_set_green" }.
+
+use crate::ci_evidence::{MAX_JSON_INTEGER, ValidatedEvidence};
+use crate::ci_impact::{CiImpactPlan, DecisionKind, DecisionReason, PolicyMode};
+use crate::ci_lanes::CiJobKey;
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Options {
+    pub(crate) plan_path: PathBuf,
+    pub(crate) receipts_path: PathBuf,
+    pub(crate) planner_result: JobResult,
+    pub(crate) matrix_result: JobResult,
+    pub(crate) metrics_output: PathBuf,
+}
+
+pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
+    let mut plan_path = None;
+    let mut receipts_path = None;
+    let mut planner_result = None;
+    let mut matrix_result = None;
+    let mut metrics_output = None;
+    let mut iter = args.iter().copied();
+    while let Some(flag) = iter.next() {
+        let value = iter
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("ci-gate 参数 {flag} 缺少值"))?;
+        match flag {
+            "--plan" if plan_path.is_none() => plan_path = Some(PathBuf::from(value)),
+            "--receipts" if receipts_path.is_none() => receipts_path = Some(PathBuf::from(value)),
+            "--planner-result" if planner_result.is_none() => {
+                planner_result = Some(value.parse()?);
+            }
+            "--matrix-result" if matrix_result.is_none() => {
+                matrix_result = Some(value.parse()?);
+            }
+            "--metrics-output" if metrics_output.is_none() => {
+                metrics_output = Some(PathBuf::from(value));
+            }
+            _ => bail!("ci-gate 未知或重复参数: {flag}"),
+        }
+    }
+    Ok(Options {
+        plan_path: plan_path.context("ci-gate 缺少 --plan")?,
+        receipts_path: receipts_path.context("ci-gate 缺少 --receipts")?,
+        planner_result: planner_result.context("ci-gate 缺少 --planner-result")?,
+        matrix_result: matrix_result.context("ci-gate 缺少 --matrix-result")?,
+        metrics_output: metrics_output.context("ci-gate 缺少 --metrics-output")?,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum JobResult {
+    Success,
+    Failure,
+    Cancelled,
+    Skipped,
+}
+
+impl JobResult {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Cancelled => "cancelled",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeIdentity {
+    run_id: Option<String>,
+    run_attempt: Option<String>,
+    execution_revision: Option<String>,
+    summary_path: Option<PathBuf>,
+}
+
+impl RuntimeIdentity {
+    fn from_environment() -> Self {
+        Self {
+            run_id: std::env::var("GITHUB_RUN_ID").ok(),
+            run_attempt: std::env::var("GITHUB_RUN_ATTEMPT").ok(),
+            execution_revision: std::env::var("GITHUB_SHA").ok(),
+            summary_path: std::env::var_os("GITHUB_STEP_SUMMARY").map(PathBuf::from),
+        }
+    }
+}
+
+impl FromStr for JobResult {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "success" => Ok(Self::Success),
+            "failure" => Ok(Self::Failure),
+            "cancelled" => Ok(Self::Cancelled),
+            "skipped" => Ok(Self::Skipped),
+            _ => bail!("unknown GitHub job result: {value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiptIdentity {
+    artifact: String,
+    job_key: CiJobKey,
+    source_revision: String,
+    plan_digest: String,
+    run_id: String,
+    run_attempt: String,
+    started_at: String,
+    finished_at: String,
+    cpu_time_ms: Option<u64>,
+    peak_rss_bytes: Option<u64>,
+    disk_low_water_bytes: u64,
+    compiler_cache_requests: u64,
+    compiler_cache_hits: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GateMetrics {
+    schema_version: u8,
+    plan_digest: String,
+    policy_mode: PolicyMode,
+    decision_kind: DecisionKind,
+    decision_reason: DecisionReason,
+    full_fallback: bool,
+    recommended_job_keys: Vec<CiJobKey>,
+    executed_job_keys: Vec<CiJobKey>,
+    recommended_jobs: usize,
+    executed_jobs: usize,
+    skipped_runner_jobs: usize,
+    started_at: String,
+    finished_at: String,
+    cpu_time_ms: u64,
+    peak_rss_bytes: u64,
+    disk_low_water_bytes: u64,
+    compiler_cache_requests: u64,
+    compiler_cache_hits: u64,
+    projected_saved_cpu_time_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum GateVerdict {
+    Success,
+    Failure,
+}
+
+impl GateVerdict {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum GateFailureClass {
+    PlannerResult,
+    MatrixResult,
+    PlanIo,
+    PlanInvalid,
+    ReceiptLoad,
+    RunIdentity,
+    ExecutionRevision,
+    ReceiptValidation,
+    MetricsBuild,
+}
+
+impl GateFailureClass {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PlannerResult => "planner-result",
+            Self::MatrixResult => "matrix-result",
+            Self::PlanIo => "plan-io",
+            Self::PlanInvalid => "plan-invalid",
+            Self::ReceiptLoad => "receipt-load",
+            Self::RunIdentity => "run-identity",
+            Self::ExecutionRevision => "execution-revision",
+            Self::ReceiptValidation => "receipt-validation",
+            Self::MetricsBuild => "metrics-build",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GateEnvelope {
+    schema_version: u8,
+    verdict: GateVerdict,
+    failure_class: Option<GateFailureClass>,
+    planner_result: JobResult,
+    matrix_result: JobResult,
+    error_summary: Option<String>,
+    plan_digest: Option<String>,
+    policy_mode: Option<PolicyMode>,
+    decision_kind: Option<DecisionKind>,
+    decision_reason: Option<DecisionReason>,
+    full_fallback: Option<bool>,
+    observed_receipt_count: usize,
+    observed_receipt_keys: Vec<CiJobKey>,
+    success_metrics: Option<GateMetrics>,
+}
+
+#[derive(Debug)]
+struct GateFailure {
+    class: GateFailureClass,
+    error: anyhow::Error,
+}
+
+impl GateFailure {
+    fn new(class: GateFailureClass, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            class,
+            error: error.into(),
+        }
+    }
+}
+
+struct PlanObservation {
+    plan: Option<CiImpactPlan>,
+    failure: Option<GateFailure>,
+}
+
+struct ReceiptObservation {
+    receipts: Vec<ReceiptIdentity>,
+    failure: Option<GateFailure>,
+}
+
+pub(crate) fn run(options: &Options) -> Result<()> {
+    run_with_runtime(options, &RuntimeIdentity::from_environment())
+}
+
+fn run_with_runtime(options: &Options, runtime: &RuntimeIdentity) -> Result<()> {
+    let PlanObservation {
+        plan,
+        failure: plan_failure,
+    } = observe_plan(&options.plan_path);
+    let ReceiptObservation {
+        receipts,
+        failure: receipt_failure,
+    } = observe_receipts(&options.receipts_path);
+
+    let gate_result = evaluate_observations(
+        options,
+        runtime,
+        plan.as_ref(),
+        &receipts,
+        plan_failure,
+        receipt_failure,
+    );
+    let (verdict, failure_class, error_summary, success_metrics, failure) = match gate_result {
+        Ok(metrics) => (GateVerdict::Success, None, None, Some(metrics), None),
+        Err(failure) => {
+            let summary = stable_error_summary(&failure.error);
+            (
+                GateVerdict::Failure,
+                Some(failure.class),
+                Some(summary),
+                None,
+                Some(failure),
+            )
+        }
+    };
+    let envelope = GateEnvelope {
+        schema_version: 1,
+        verdict,
+        failure_class,
+        planner_result: options.planner_result,
+        matrix_result: options.matrix_result,
+        error_summary,
+        plan_digest: plan.as_ref().map(|value| value.plan_digest().to_owned()),
+        policy_mode: plan.as_ref().map(CiImpactPlan::policy_mode),
+        decision_kind: plan.as_ref().map(CiImpactPlan::decision_kind),
+        decision_reason: plan.as_ref().map(CiImpactPlan::decision_reason),
+        full_fallback: plan.as_ref().map(CiImpactPlan::full_fallback),
+        observed_receipt_count: receipts.len(),
+        observed_receipt_keys: receipts.iter().map(|receipt| receipt.job_key).collect(),
+        success_metrics,
+    };
+    persist_envelope(options, runtime, &envelope)?;
+    if let Some(failure) = failure {
+        return Err(failure.error);
+    }
+    Ok(())
+}
+
+fn observe_plan(path: &Path) -> PlanObservation {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => {
+            return PlanObservation {
+                plan: None,
+                failure: Some(GateFailure::new(
+                    GateFailureClass::PlanIo,
+                    anyhow::Error::new(error).context(format!("读取 {}", path.display())),
+                )),
+            };
+        }
+    };
+    match CiImpactPlan::from_json(&source) {
+        Ok(plan) => PlanObservation {
+            plan: Some(plan),
+            failure: None,
+        },
+        Err(error) => PlanObservation {
+            plan: None,
+            failure: Some(GateFailure::new(GateFailureClass::PlanInvalid, error)),
+        },
+    }
+}
+
+fn observe_receipts(root: &Path) -> ReceiptObservation {
+    let mut evidence_files = Vec::new();
+    if let Err(error) = collect_evidence(root, &mut evidence_files) {
+        return ReceiptObservation {
+            receipts: Vec::new(),
+            failure: Some(GateFailure::new(GateFailureClass::ReceiptLoad, error)),
+        };
+    }
+    evidence_files.sort();
+    let mut receipts = Vec::with_capacity(evidence_files.len());
+    for path in evidence_files {
+        match load_receipt(&path, root) {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => {
+                return ReceiptObservation {
+                    receipts,
+                    failure: Some(GateFailure::new(GateFailureClass::ReceiptLoad, error)),
+                };
+            }
+        }
+    }
+    ReceiptObservation {
+        receipts,
+        failure: None,
+    }
+}
+
+fn evaluate_observations(
+    options: &Options,
+    runtime: &RuntimeIdentity,
+    plan: Option<&CiImpactPlan>,
+    receipts: &[ReceiptIdentity],
+    plan_failure: Option<GateFailure>,
+    receipt_failure: Option<GateFailure>,
+) -> std::result::Result<GateMetrics, GateFailure> {
+    if options.planner_result != JobResult::Success {
+        return Err(GateFailure::new(
+            GateFailureClass::PlannerResult,
+            anyhow::anyhow!("planner job did not succeed: {:?}", options.planner_result),
+        ));
+    }
+    if options.matrix_result != JobResult::Success {
+        return Err(GateFailure::new(
+            GateFailureClass::MatrixResult,
+            anyhow::anyhow!(
+                "selected CI matrix did not succeed: {:?}",
+                options.matrix_result
+            ),
+        ));
+    }
+    if let Some(failure) = plan_failure {
+        return Err(failure);
+    }
+    let plan = plan.ok_or_else(|| {
+        GateFailure::new(
+            GateFailureClass::PlanInvalid,
+            anyhow::anyhow!("validated CI impact plan is unavailable"),
+        )
+    })?;
+    if let Some(failure) = receipt_failure {
+        return Err(failure);
+    }
+    let run_id = runtime.run_id.as_deref().ok_or_else(|| {
+        GateFailure::new(
+            GateFailureClass::RunIdentity,
+            anyhow::anyhow!("GITHUB_RUN_ID is missing"),
+        )
+    })?;
+    let run_attempt = runtime.run_attempt.as_deref().ok_or_else(|| {
+        GateFailure::new(
+            GateFailureClass::RunIdentity,
+            anyhow::anyhow!("GITHUB_RUN_ATTEMPT is missing"),
+        )
+    })?;
+    let execution_revision = runtime.execution_revision.as_deref().ok_or_else(|| {
+        GateFailure::new(
+            GateFailureClass::RunIdentity,
+            anyhow::anyhow!("GITHUB_SHA is missing"),
+        )
+    })?;
+    if plan.execution_revision() != execution_revision {
+        return Err(GateFailure::new(
+            GateFailureClass::ExecutionRevision,
+            anyhow::anyhow!(
+                "CI impact plan execution revision differs from the current GitHub run"
+            ),
+        ));
+    }
+    evaluate(
+        plan,
+        receipts,
+        JobResult::Success,
+        JobResult::Success,
+        run_id,
+        run_attempt,
+    )
+    .map_err(|error| GateFailure::new(GateFailureClass::ReceiptValidation, error))?;
+    build_metrics(plan, receipts)
+        .map_err(|error| GateFailure::new(GateFailureClass::MetricsBuild, error))
+}
+
+fn persist_envelope(
+    options: &Options,
+    runtime: &RuntimeIdentity,
+    envelope: &GateEnvelope,
+) -> Result<()> {
+    let metrics = serde_json::to_vec_pretty(envelope).context("serialize CI gate envelope")?;
+    atomic_write(&options.metrics_output, &metrics).context("write CI gate metrics envelope")?;
+    if let Some(path) = &runtime.summary_path {
+        atomic_write(path, render_summary(envelope).as_bytes()).context("write CI gate summary")?;
+    }
+    Ok(())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .context("atomic output path has no file name")?
+        .to_string_lossy();
+    let mut temporary = None;
+    for nonce in 0..32u8 {
+        let candidate = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let (temporary_path, mut file) = temporary.context("cannot allocate atomic output file")?;
+    let write_result = (|| -> Result<()> {
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary_path, path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    write_result
+}
+
+fn stable_error_summary(error: &anyhow::Error) -> String {
+    let mut output = String::new();
+    let mut previous_space = false;
+    for character in format!("{error:#}").chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if character.is_whitespace() {
+            if previous_space {
+                continue;
+            }
+            previous_space = true;
+            output.push(' ');
+        } else {
+            previous_space = false;
+            output.push(character);
+        }
+        if output.chars().count() >= 512 {
+            break;
+        }
+    }
+    output.trim().to_owned()
+}
+
+fn markdown_code(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '`' => '\'',
+            '<' => '‹',
+            '>' => '›',
+            value if value.is_control() => ' ',
+            value => value,
+        })
+        .collect()
+}
+
+fn render_summary(envelope: &GateEnvelope) -> String {
+    let observed = envelope
+        .observed_receipt_keys
+        .iter()
+        .map(|key| key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut summary = format!(
+        "## ci-gate\n\n- Result: `{}`\n- Planner/matrix result: `{}` / `{}`\n- Observed receipts (`{}`): `{}`\n",
+        envelope.verdict.as_str(),
+        envelope.planner_result.as_str(),
+        envelope.matrix_result.as_str(),
+        envelope.observed_receipt_count,
+        observed,
+    );
+    if let Some(class) = envelope.failure_class {
+        summary.push_str(&format!("- Failure class: `{}`\n", class.as_str()));
+    }
+    if let Some(error) = &envelope.error_summary {
+        summary.push_str(&format!("- Error summary: `{}`\n", markdown_code(error)));
+    }
+    if let Some(plan_digest) = &envelope.plan_digest {
+        summary.push_str(&format!("- Plan digest: `{plan_digest}`\n"));
+    }
+    if let (Some(mode), Some(kind), Some(reason), Some(fallback)) = (
+        envelope.policy_mode,
+        envelope.decision_kind,
+        envelope.decision_reason,
+        envelope.full_fallback,
+    ) {
+        summary.push_str(&format!(
+            "- Policy/decision: `{:?}` / `{:?}` / `{:?}`\n- Full fallback: `{fallback}`\n",
+            mode, kind, reason
+        ));
+    }
+    if let Some(metrics) = &envelope.success_metrics {
+        let recommended_set = metrics
+            .recommended_job_keys
+            .iter()
+            .map(|key| key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let executed_set = metrics
+            .executed_job_keys
+            .iter()
+            .map(|key| key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        summary.push_str(&format!(
+            "- Recommended set (`{}`): `{recommended_set}`\n- Executed/verified set (`{}`): `{executed_set}`\n- Potential skipped runners: `{}`\n- CPU time: `{}` ms\n- Projected saved CPU time: `{}` ms\n- Peak RSS: `{}` bytes\n- Disk low water: `{}` bytes\n- Compiler cache: `{}` requests / `{}` hits\n",
+            metrics.recommended_jobs,
+            metrics.executed_jobs,
+            metrics.skipped_runner_jobs,
+            metrics.cpu_time_ms,
+            metrics.projected_saved_cpu_time_ms,
+            metrics.peak_rss_bytes,
+            metrics.disk_low_water_bytes,
+            metrics.compiler_cache_requests,
+            metrics.compiler_cache_hits,
+        ));
+    }
+    summary
+}
+
+#[cfg(test)]
+fn load_receipts(root: &Path) -> Result<Vec<ReceiptIdentity>> {
+    let observation = observe_receipts(root);
+    match observation.failure {
+        Some(failure) => Err(failure.error),
+        None => Ok(observation.receipts),
+    }
+}
+
+fn load_receipt(path: &Path, root: &Path) -> Result<ReceiptIdentity> {
+    let source = fs::read_to_string(path).with_context(|| format!("读取 {}", path.display()))?;
+    let evidence = ValidatedEvidence::parse(&source)
+        .with_context(|| format!("parse CI evidence {}", path.display()))?;
+    let artifact = artifact_parent(path, root)?;
+    Ok(ReceiptIdentity {
+        artifact,
+        job_key: evidence.job_key,
+        source_revision: evidence.source_revision,
+        plan_digest: evidence.plan_digest,
+        run_id: evidence.run_id,
+        run_attempt: evidence.run_attempt,
+        started_at: evidence.started_at,
+        finished_at: evidence.finished_at,
+        cpu_time_ms: evidence.resource_usage.cpu_time_ms,
+        peak_rss_bytes: evidence.resource_usage.peak_rss_bytes,
+        disk_low_water_bytes: evidence.disk_free_bytes,
+        compiler_cache_requests: evidence.compiler_cache.requests,
+        compiler_cache_hits: evidence.compiler_cache.hits,
+    })
+}
+
+fn build_metrics(plan: &CiImpactPlan, receipts: &[ReceiptIdentity]) -> Result<GateMetrics> {
+    let started_at = receipts
+        .iter()
+        .map(|receipt| receipt.started_at.as_str())
+        .min()
+        .context("CI metrics start time is missing")?
+        .to_owned();
+    let finished_at = receipts
+        .iter()
+        .map(|receipt| receipt.finished_at.as_str())
+        .max()
+        .context("CI metrics finish time is missing")?
+        .to_owned();
+    let recommended_jobs = plan.jobs().iter().filter(|job| job.recommended()).count();
+    let executed_jobs = plan.jobs().iter().filter(|job| job.execute()).count();
+    let recommended_job_keys = plan
+        .jobs()
+        .iter()
+        .filter(|job| job.recommended())
+        .map(|job| job.key())
+        .collect::<Vec<_>>();
+    let executed_job_keys = plan
+        .jobs()
+        .iter()
+        .filter(|job| job.execute())
+        .map(|job| job.key())
+        .collect::<Vec<_>>();
+    let total_cpu_time_ms = receipts.iter().try_fold(0u64, |total, receipt| {
+        checked_metric_total(total, receipt.cpu_time_ms.unwrap_or(0), "CPU total")
+    })?;
+    let projected_saved_cpu_time_ms = receipts
+        .iter()
+        .filter(|receipt| !recommended_job_keys.contains(&receipt.job_key))
+        .try_fold(0u64, |total, receipt| {
+            checked_metric_total(
+                total,
+                receipt.cpu_time_ms.unwrap_or(0),
+                "projected CPU saving",
+            )
+        })?;
+    Ok(GateMetrics {
+        schema_version: 1,
+        plan_digest: plan.plan_digest().to_owned(),
+        policy_mode: plan.policy_mode(),
+        decision_kind: plan.decision_kind(),
+        decision_reason: plan.decision_reason(),
+        full_fallback: plan.full_fallback(),
+        recommended_job_keys,
+        executed_job_keys,
+        recommended_jobs,
+        executed_jobs,
+        skipped_runner_jobs: CiJobKey::COUNT.saturating_sub(recommended_jobs),
+        started_at,
+        finished_at,
+        cpu_time_ms: total_cpu_time_ms,
+        peak_rss_bytes: receipts
+            .iter()
+            .filter_map(|receipt| receipt.peak_rss_bytes)
+            .max()
+            .unwrap_or(0),
+        disk_low_water_bytes: receipts
+            .iter()
+            .map(|receipt| receipt.disk_low_water_bytes)
+            .min()
+            .context("CI metrics disk low water is missing")?,
+        compiler_cache_requests: receipts.iter().try_fold(0u64, |total, receipt| {
+            checked_metric_total(
+                total,
+                receipt.compiler_cache_requests,
+                "compiler cache request",
+            )
+        })?,
+        compiler_cache_hits: receipts.iter().try_fold(0u64, |total, receipt| {
+            checked_metric_total(total, receipt.compiler_cache_hits, "compiler cache hit")
+        })?,
+        projected_saved_cpu_time_ms,
+    })
+}
+
+fn checked_metric_total(total: u64, value: u64, label: &str) -> Result<u64> {
+    total
+        .checked_add(value)
+        .filter(|sum| *sum <= MAX_JSON_INTEGER)
+        .with_context(|| format!("CI metrics {label} exceeds the JSON safe integer range"))
+}
+
+fn collect_evidence(path: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("ci-gate refuses symlink: {}", path.display());
+    }
+    if metadata.is_file() {
+        if path.file_name().and_then(|name| name.to_str()) == Some("ci-evidence.json") {
+            output.push(path.to_path_buf());
+        }
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("读目录 {}", path.display()))? {
+        collect_evidence(&entry?.path(), output)?;
+    }
+    Ok(())
+}
+
+fn artifact_parent(path: &Path, root: &Path) -> Result<String> {
+    let relative = path
+        .strip_prefix(root)
+        .with_context(|| format!("receipt escapes root: {}", path.display()))?;
+    let first = relative
+        .components()
+        .next()
+        .context("CI evidence is not nested under its artifact directory")?;
+    let std::path::Component::Normal(name) = first else {
+        bail!("CI evidence artifact directory is not a normal path component");
+    };
+    let name = name
+        .to_str()
+        .context("CI evidence artifact directory is not UTF-8")?;
+    if !name.starts_with("ci-evidence-") {
+        bail!("CI evidence top-level artifact directory has an invalid identity");
+    }
+    Ok(name.to_owned())
+}
+
+fn evaluate(
+    plan: &CiImpactPlan,
+    receipts: &[ReceiptIdentity],
+    planner_result: JobResult,
+    matrix_result: JobResult,
+    run_id: &str,
+    run_attempt: &str,
+) -> Result<()> {
+    if planner_result != JobResult::Success {
+        bail!("planner job did not succeed: {planner_result:?}");
+    }
+    if matrix_result != JobResult::Success {
+        bail!("selected CI matrix did not succeed: {matrix_result:?}");
+    }
+    if plan.full_execution_required() && plan.jobs().iter().any(|job| !job.execute()) {
+        bail!("full CI plan did not execute the closed catalog");
+    }
+    let mut expected = BTreeMap::new();
+    for job in plan.jobs() {
+        let canonical = job.key().expected_artifact(run_id, run_attempt);
+        if job.expected_artifact() != canonical {
+            bail!(
+                "CI impact plan artifact identity mismatch for {}",
+                job.key()
+            );
+        }
+        if job.execute() {
+            expected.insert(job.key(), canonical);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for receipt in receipts {
+        if !seen.insert(receipt.job_key) {
+            bail!("duplicate CI evidence receipt for {}", receipt.job_key);
+        }
+        let expected_artifact = expected
+            .get(&receipt.job_key)
+            .with_context(|| format!("unexpected CI evidence receipt for {}", receipt.job_key))?;
+        if receipt.artifact != *expected_artifact {
+            bail!(
+                "CI evidence artifact identity mismatch for {}",
+                receipt.job_key
+            );
+        }
+        if receipt.source_revision != plan.execution_revision() {
+            bail!(
+                "CI evidence source revision mismatch for {}",
+                receipt.job_key
+            );
+        }
+        if receipt.plan_digest != plan.plan_digest() {
+            bail!("CI evidence plan digest mismatch for {}", receipt.job_key);
+        }
+        if receipt.run_id != run_id || receipt.run_attempt != run_attempt {
+            bail!("CI evidence run identity mismatch for {}", receipt.job_key);
+        }
+    }
+    let missing = expected
+        .keys()
+        .copied()
+        .filter(|key| !seen.contains(key))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!("missing CI evidence receipts: {missing:?}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+struct GateFixture {
+    plan: CiImpactPlan,
+    receipts: Vec<ReceiptIdentity>,
+}
+
+#[cfg(test)]
+impl GateFixture {
+    fn new() -> Result<Self> {
+        let plan = crate::ci_impact::test_plan()?;
+        let receipts = plan
+            .jobs()
+            .iter()
+            .filter(|job| job.execute())
+            .map(|job| ReceiptIdentity {
+                artifact: job.expected_artifact().to_owned(),
+                job_key: job.key(),
+                source_revision: plan.execution_revision().to_owned(),
+                plan_digest: plan.plan_digest().to_owned(),
+                run_id: "42".to_owned(),
+                run_attempt: "3".to_owned(),
+                started_at: "2026-07-13T00:00:00Z".to_owned(),
+                finished_at: "2026-07-13T00:01:00Z".to_owned(),
+                cpu_time_ms: Some(1_000),
+                peak_rss_bytes: Some(2_000),
+                disk_low_water_bytes: 3_000,
+                compiler_cache_requests: 4,
+                compiler_cache_hits: 2,
+            })
+            .collect();
+        Ok(Self { plan, receipts })
+    }
+
+    fn evaluate(&self) -> Result<()> {
+        evaluate(
+            &self.plan,
+            &self.receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )
+    }
+
+    fn evaluate_without_first(&self) -> Result<()> {
+        evaluate(
+            &self.plan,
+            &self.receipts[1..],
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )
+    }
+
+    fn evaluate_with_duplicate(&self) -> Result<()> {
+        let mut receipts = self.receipts.clone();
+        receipts.push(receipts[0].clone());
+        evaluate(
+            &self.plan,
+            &receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )
+    }
+
+    fn evaluate_with_wrong_revision(&self) -> Result<()> {
+        let mut receipts = self.receipts.clone();
+        receipts[0].source_revision = "wrong".to_owned();
+        evaluate(
+            &self.plan,
+            &receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )
+    }
+
+    fn evaluate_with_wrong_digest_and_run(&self) -> [Result<()>; 2] {
+        let mut wrong_digest = self.receipts.clone();
+        wrong_digest[0].plan_digest = "c".repeat(64);
+        let mut wrong_run = self.receipts.clone();
+        wrong_run[0].run_attempt = "4".to_owned();
+        [
+            evaluate(
+                &self.plan,
+                &wrong_digest,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3",
+            ),
+            evaluate(
+                &self.plan,
+                &wrong_run,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3",
+            ),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_receipt(
+        root: &Path,
+        plan: &CiImpactPlan,
+        key: CiJobKey,
+        artifact: &str,
+        nested: &str,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<()> {
+        let mut evidence: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/ci_slo/pass.json"))?;
+        evidence["job"]["ciJobKey"] = serde_json::to_value(key)?;
+        evidence["job"]["sourceRevision"] = plan.execution_revision().into();
+        evidence["job"]["planDigest"] = plan.plan_digest().into();
+        evidence["job"]["runId"] = "42".into();
+        evidence["job"]["runAttempt"] = "3".into();
+        mutate(&mut evidence);
+        let directory = root.join(artifact).join(nested);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("ci-evidence.json"),
+            serde_json::to_string_pretty(&evidence)?,
+        )?;
+        Ok(())
+    }
+
+    fn write_exact_receipts(root: &Path, plan: &CiImpactPlan) -> Result<()> {
+        for job in plan.jobs().iter().filter(|job| job.execute()) {
+            write_receipt(root, plan, job.key(), job.expected_artifact(), "ci", |_| {})?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gate_rejects_missing_duplicate_and_mismatched_receipts_red() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        assert!(fixture.evaluate_without_first().is_err());
+        assert!(fixture.evaluate_with_duplicate().is_err());
+        assert!(fixture.evaluate_with_wrong_revision().is_err());
+        assert!(
+            fixture
+                .evaluate_with_wrong_digest_and_run()
+                .into_iter()
+                .all(|result| result.is_err())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gate_accepts_exact_receipt_set_green() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        fixture.evaluate()?;
+        let metrics = build_metrics(&fixture.plan, &fixture.receipts)?;
+        assert_eq!(metrics.recommended_jobs, 1);
+        assert_eq!(metrics.executed_jobs, CiJobKey::COUNT);
+        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 1);
+        assert_eq!(metrics.cpu_time_ms, 14_000);
+        assert_eq!(metrics.projected_saved_cpu_time_ms, 13_000);
+        Ok(())
+    }
+
+    #[test]
+    fn gate_rejects_legacy_evidence_schema() -> Result<()> {
+        let root = crate::testutil::unique_tmp("ci-gate-v3");
+        let artifact = root.join("ci-evidence-ci-meta-workspace-unpartitioned-42-3/ci");
+        fs::create_dir_all(&artifact)?;
+        fs::write(
+            artifact.join("ci-evidence.json"),
+            include_str!("../tests/fixtures/ci_slo/pass.json").replacen(
+                "\"schemaVersion\": 4",
+                "\"schemaVersion\": 3",
+                1,
+            ),
+        )?;
+        assert!(load_receipts(&root).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gate_rejects_evidence_shape_that_slo_rejects_red() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-shared-evidence-validator");
+        let key = CiJobKey::CiMeta;
+        write_receipt(
+            &root,
+            &fixture.plan,
+            key,
+            key.expected_artifact("42", "3").as_str(),
+            "ci",
+            |evidence| {
+                evidence["snapshots"][0]["stage"] = "after-cache".into();
+            },
+        )?;
+        assert!(
+            load_receipts(&root).is_err(),
+            "ci-gate must apply the same closed evidence-v4 shape validation as ci-slo"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_identity_rejects_forged_top_level_with_legitimate_nested_name() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-forged-artifact-parent");
+        let key = CiJobKey::CiMeta;
+        let expected = key.expected_artifact("42", "3");
+        write_receipt(
+            &root,
+            &fixture.plan,
+            key,
+            "ci-evidence-forged-workspace-unpartitioned-42-3",
+            &format!("nested/{expected}/ci"),
+            |_| {},
+        )?;
+        let receipts = load_receipts(&root)?;
+        assert!(
+            evaluate(
+                &fixture.plan,
+                &receipts,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3",
+            )
+            .is_err(),
+            "nested directory names must not impersonate the downloaded artifact identity"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn disk_receipts_cover_green_and_identity_red_matrix() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-disk-receipts");
+        write_exact_receipts(&root, &fixture.plan)?;
+        let receipts = load_receipts(&root)?;
+        evaluate(
+            &fixture.plan,
+            &receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )?;
+
+        let first = fixture.plan.jobs()[0].key();
+        let first_artifact = fixture.plan.jobs()[0].expected_artifact();
+        for (label, mutation) in [
+            ("sha", ("sourceRevision", serde_json::json!("f".repeat(40)))),
+            ("digest", ("planDigest", serde_json::json!("f".repeat(64)))),
+            ("run", ("runAttempt", serde_json::json!("4"))),
+        ] {
+            let red = crate::testutil::unique_tmp(&format!("ci-gate-disk-{label}"));
+            write_exact_receipts(&red, &fixture.plan)?;
+            let path = red.join(first_artifact).join("ci/ci-evidence.json");
+            let mut evidence: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path)?)?;
+            evidence["job"][mutation.0] = mutation.1;
+            fs::write(&path, serde_json::to_string_pretty(&evidence)?)?;
+            let receipts = load_receipts(&red)?;
+            assert!(
+                evaluate(
+                    &fixture.plan,
+                    &receipts,
+                    JobResult::Success,
+                    JobResult::Success,
+                    "42",
+                    "3"
+                )
+                .is_err(),
+                "{label} identity drift must fail"
+            );
+            fs::remove_dir_all(red)?;
+        }
+
+        let duplicate = crate::testutil::unique_tmp("ci-gate-disk-duplicate");
+        write_exact_receipts(&duplicate, &fixture.plan)?;
+        write_receipt(
+            &duplicate,
+            &fixture.plan,
+            first,
+            first_artifact,
+            "duplicate",
+            |_| {},
+        )?;
+        assert!(
+            evaluate(
+                &fixture.plan,
+                &load_receipts(&duplicate)?,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(duplicate)?;
+
+        let wrong_artifact = crate::testutil::unique_tmp("ci-gate-disk-wrong-artifact");
+        write_exact_receipts(&wrong_artifact, &fixture.plan)?;
+        fs::rename(
+            wrong_artifact.join(first_artifact),
+            wrong_artifact.join("ci-evidence-wrong-workspace-unpartitioned-42-3"),
+        )?;
+        assert!(
+            evaluate(
+                &fixture.plan,
+                &load_receipts(&wrong_artifact)?,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(wrong_artifact)?;
+
+        let schema = crate::testutil::unique_tmp("ci-gate-disk-schema");
+        write_exact_receipts(&schema, &fixture.plan)?;
+        let path = schema.join(first_artifact).join("ci/ci-evidence.json");
+        let mut evidence: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        evidence["schemaVersion"] = 3.into();
+        fs::write(path, serde_json::to_string_pretty(&evidence)?)?;
+        assert!(load_receipts(&schema).is_err());
+        fs::remove_dir_all(schema)?;
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gate_failure_paths_persist_closed_envelope_and_safe_summary() -> Result<()> {
+        let root = crate::testutil::unique_tmp("ci-gate-failure-envelope");
+        fs::create_dir_all(&root)?;
+        let options = Options {
+            plan_path: root.join("missing-plan.json"),
+            receipts_path: root.join("missing-receipts"),
+            planner_result: JobResult::Failure,
+            matrix_result: JobResult::Skipped,
+            metrics_output: root.join("metrics.json"),
+        };
+        let runtime = RuntimeIdentity {
+            run_id: Some("42".to_owned()),
+            run_attempt: Some("3".to_owned()),
+            execution_revision: Some("e".repeat(40)),
+            summary_path: Some(root.join("summary.md")),
+        };
+        assert!(run_with_runtime(&options, &runtime).is_err());
+        let metrics: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&options.metrics_output)?)?;
+        assert_eq!(metrics["verdict"], "failure");
+        assert_eq!(metrics["failureClass"], "planner-result");
+        assert_eq!(metrics["plannerResult"], "failure");
+        assert_eq!(metrics["matrixResult"], "skipped");
+        assert_eq!(metrics["observedReceiptCount"], 0);
+        let summary = fs::read_to_string(
+            runtime
+                .summary_path
+                .as_ref()
+                .context("failure fixture summary path is missing")?,
+        )?;
+        assert!(summary.contains("Result: `failure`"));
+        assert!(summary.contains("Failure class: `planner-result`"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn all_failure_stages_persist_a_classified_envelope_before_returning() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-all-failure-envelopes");
+        fs::create_dir_all(&root)?;
+        let plan_path = root.join("plan.json");
+        fs::write(&plan_path, fixture.plan.to_json()?)?;
+        let runtime = RuntimeIdentity {
+            run_id: Some("42".to_owned()),
+            run_attempt: Some("3".to_owned()),
+            execution_revision: Some("e".repeat(40)),
+            summary_path: Some(root.join("summary.md")),
+        };
+
+        let assert_failure = |label: &str,
+                              plan_path: PathBuf,
+                              receipts_path: PathBuf,
+                              planner_result: JobResult,
+                              matrix_result: JobResult,
+                              runtime: &RuntimeIdentity,
+                              expected: &str|
+         -> Result<()> {
+            let metrics_output = root.join(format!("metrics-{label}.json"));
+            let options = Options {
+                plan_path,
+                receipts_path,
+                planner_result,
+                matrix_result,
+                metrics_output: metrics_output.clone(),
+            };
+            assert!(run_with_runtime(&options, runtime).is_err(), "{label}");
+            let envelope: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(metrics_output)?)?;
+            assert_eq!(envelope["verdict"], "failure", "{label}");
+            assert_eq!(envelope["failureClass"], expected, "{label}");
+            Ok(())
+        };
+
+        for planner_result in [JobResult::Failure, JobResult::Cancelled, JobResult::Skipped] {
+            assert_failure(
+                planner_result.as_str(),
+                root.join("absent-plan"),
+                root.join("absent-receipts"),
+                planner_result,
+                JobResult::Skipped,
+                &runtime,
+                "planner-result",
+            )?;
+        }
+        for matrix_result in [JobResult::Failure, JobResult::Cancelled, JobResult::Skipped] {
+            assert_failure(
+                &format!("matrix-{}", matrix_result.as_str()),
+                plan_path.clone(),
+                root.join("absent-receipts"),
+                JobResult::Success,
+                matrix_result,
+                &runtime,
+                "matrix-result",
+            )?;
+        }
+        assert_failure(
+            "plan-io",
+            root.join("absent-plan-io"),
+            root.join("absent-receipts"),
+            JobResult::Success,
+            JobResult::Success,
+            &runtime,
+            "plan-io",
+        )?;
+        let invalid_plan = root.join("invalid-plan.json");
+        fs::write(&invalid_plan, "{}")?;
+        assert_failure(
+            "plan-invalid",
+            invalid_plan,
+            root.join("absent-receipts"),
+            JobResult::Success,
+            JobResult::Success,
+            &runtime,
+            "plan-invalid",
+        )?;
+        let invalid_receipts = root.join("invalid-receipts");
+        let injected_artifact = "ci-evidence-invalid`\n# injected-42-3";
+        fs::create_dir_all(invalid_receipts.join(injected_artifact).join("ci"))?;
+        fs::write(
+            invalid_receipts
+                .join(injected_artifact)
+                .join("ci/ci-evidence.json"),
+            "not-json",
+        )?;
+        assert_failure(
+            "receipt-load",
+            plan_path.clone(),
+            invalid_receipts,
+            JobResult::Success,
+            JobResult::Success,
+            &runtime,
+            "receipt-load",
+        )?;
+        let summary = fs::read_to_string(
+            runtime
+                .summary_path
+                .as_ref()
+                .context("classified failure summary path is missing")?,
+        )?;
+        assert!(!summary.contains("\n# injected"));
+        assert!(!summary.contains("invalid`"));
+        assert_failure(
+            "receipt-validation",
+            plan_path.clone(),
+            root.join("absent-receipts"),
+            JobResult::Success,
+            JobResult::Success,
+            &runtime,
+            "receipt-validation",
+        )?;
+        let exact = root.join("exact-receipts");
+        write_exact_receipts(&exact, &fixture.plan)?;
+        let wrong_execution_revision = RuntimeIdentity {
+            run_id: Some("42".to_owned()),
+            run_attempt: Some("3".to_owned()),
+            execution_revision: Some("f".repeat(40)),
+            summary_path: Some(root.join("summary-execution-revision.md")),
+        };
+        assert_failure(
+            "execution-revision",
+            plan_path.clone(),
+            exact.clone(),
+            JobResult::Success,
+            JobResult::Success,
+            &wrong_execution_revision,
+            "execution-revision",
+        )?;
+
+        let oversized_metrics = root.join("oversized-metrics-receipts");
+        write_exact_receipts(&oversized_metrics, &fixture.plan)?;
+        for job in fixture.plan.jobs().iter().filter(|job| job.execute()) {
+            let path = oversized_metrics
+                .join(job.expected_artifact())
+                .join("ci/ci-evidence.json");
+            let mut evidence: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path)?)?;
+            evidence["snapshots"][4]["resourceUsage"]["cpuTimeMs"] = MAX_JSON_INTEGER.into();
+            fs::write(path, serde_json::to_vec_pretty(&evidence)?)?;
+        }
+        assert_failure(
+            "metrics-build",
+            plan_path.clone(),
+            oversized_metrics,
+            JobResult::Success,
+            JobResult::Success,
+            &runtime,
+            "metrics-build",
+        )?;
+
+        let missing_runtime = RuntimeIdentity {
+            run_id: None,
+            run_attempt: None,
+            execution_revision: None,
+            summary_path: Some(root.join("summary-missing-runtime.md")),
+        };
+        assert_failure(
+            "run-identity",
+            plan_path.clone(),
+            exact,
+            JobResult::Success,
+            JobResult::Success,
+            &missing_runtime,
+            "run-identity",
+        )?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn successful_run_persists_the_existing_resource_metrics_in_the_envelope() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        let root = crate::testutil::unique_tmp("ci-gate-success-envelope");
+        let plan_path = root.join("plan.json");
+        let receipts_path = root.join("receipts");
+        fs::create_dir_all(&root)?;
+        fs::write(&plan_path, fixture.plan.to_json()?)?;
+        write_exact_receipts(&receipts_path, &fixture.plan)?;
+        let options = Options {
+            plan_path,
+            receipts_path,
+            planner_result: JobResult::Success,
+            matrix_result: JobResult::Success,
+            metrics_output: root.join("metrics.json"),
+        };
+        let runtime = RuntimeIdentity {
+            run_id: Some("42".to_owned()),
+            run_attempt: Some("3".to_owned()),
+            execution_revision: Some("e".repeat(40)),
+            summary_path: Some(root.join("summary.md")),
+        };
+        run_with_runtime(&options, &runtime)?;
+        let envelope: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&options.metrics_output)?)?;
+        assert_eq!(envelope["verdict"], "success");
+        assert!(envelope["failureClass"].is_null());
+        assert_eq!(envelope["observedReceiptCount"], CiJobKey::COUNT);
+        assert_eq!(envelope["successMetrics"]["executedJobs"], CiJobKey::COUNT);
+        assert_eq!(
+            envelope["successMetrics"]["recommendedJobs"],
+            fixture
+                .plan
+                .jobs()
+                .iter()
+                .filter(|job| job.recommended())
+                .count()
+        );
+        assert!(
+            fs::read_to_string(
+                runtime
+                    .summary_path
+                    .as_ref()
+                    .context("success fixture summary path is missing")?,
+            )?
+            .contains("Result: `success`")
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn disk_receipts_reject_missing_and_extra_known_jobs() -> Result<()> {
+        let full = GateFixture::new()?;
+        let missing = crate::testutil::unique_tmp("ci-gate-disk-missing");
+        write_exact_receipts(&missing, &full.plan)?;
+        fs::remove_dir_all(missing.join(full.plan.jobs()[0].expected_artifact()))?;
+        assert!(
+            evaluate(
+                &full.plan,
+                &load_receipts(&missing)?,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(missing)?;
+
+        let adaptive = crate::ci_impact::test_adaptive_plan()?;
+        let extra = crate::testutil::unique_tmp("ci-gate-disk-extra-known");
+        write_exact_receipts(&extra, &adaptive)?;
+        let extra_key = CiJobKey::CiSecurity;
+        write_receipt(
+            &extra,
+            &adaptive,
+            extra_key,
+            &extra_key.expected_artifact("42", "3"),
+            "ci",
+            |_| {},
+        )?;
+        assert!(
+            evaluate(
+                &adaptive,
+                &load_receipts(&extra)?,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(extra)?;
+
+        let noncanonical = crate::ci_impact::test_plan_with_noncanonical_artifact()?;
+        let wrong_plan_artifact =
+            crate::testutil::unique_tmp("ci-gate-disk-noncanonical-plan-artifact");
+        write_exact_receipts(&wrong_plan_artifact, &noncanonical)?;
+        assert!(
+            evaluate(
+                &noncanonical,
+                &load_receipts(&wrong_plan_artifact)?,
+                JobResult::Success,
+                JobResult::Success,
+                "42",
+                "3"
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(wrong_plan_artifact)?;
+        Ok(())
+    }
+
+    #[test]
+    fn non_success_job_results_fail_closed() -> Result<()> {
+        let fixture = GateFixture::new()?;
+        for result in [JobResult::Failure, JobResult::Cancelled, JobResult::Skipped] {
+            assert!(
+                evaluate(
+                    &fixture.plan,
+                    &fixture.receipts,
+                    result,
+                    JobResult::Success,
+                    "42",
+                    "3"
+                )
+                .is_err()
+            );
+            assert!(
+                evaluate(
+                    &fixture.plan,
+                    &fixture.receipts,
+                    JobResult::Success,
+                    result,
+                    "42",
+                    "3"
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
+}

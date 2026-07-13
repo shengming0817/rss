@@ -190,11 +190,11 @@ rss/
 source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "crate-graph lint + clippy + 类型系统"(见
 `.claude/rules/rss/ai-robust.md`)。
 
-这些 Medium(CI 门)由 **GitHub Actions split CI lanes** 在 PR 上自动跑并阻断合入：
-`.github/workflows/ci.yml` 精确声明 `ci-meta` / `ci-core` / `ci-security` / `ci-coverage` 四个
-literal reusable jobs；Meta 与 Security 为 root，Core 与 Coverage 仅 `needs: ci-meta`。
-INVARIANT CI-PIPELINE-DELEGATE-01 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定 job、lane、DAG、
-权限和唯一 xtask 委托，不允许 workflow 重列低层门。gate registry 的闭枚举、穷举 dispatch 与唯一/完整断言由
+这些 Medium(CI 门)由 **GitHub Actions typed adaptive CI** 在 PR 上自动执行：
+`.github/workflows/ci.yml` 只保留 `ci-plan`、一个从闭合 `CiJobKey` 派生的动态 matrix executor 与稳定
+`ci-gate`；Shadow 和 develop/schedule/dispatch 执行完整 14-job catalog，未知输入自动 full fallback。
+INVARIANT CI-ADAPTIVE-WORKFLOW-01 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定 planner、
+matrix、always gate、只读权限和唯一 reusable 委托，不允许 workflow 重列路径/job 策略。gate registry 的闭枚举、穷举 dispatch 与唯一/完整断言由
 Rust 编译期证明（Hard），YAML 边界由 xtask/CI 守卫证明（Medium），无依赖人工记忆的 Soft 约束。
 本地仍可用 `cargo xtask ci` 兼容聚合四条 lane 的 46 个唯一 gate；它不是 GitHub workflow lane 或 required check。
 门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门

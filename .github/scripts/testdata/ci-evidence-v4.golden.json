@@ -1,14 +1,17 @@
 {
   "job": {
+    "ciJobKey": "<string>",
     "job": "<string>",
+    "planDigest": "<string>",
     "repository": "<string>",
     "runAttempt": "<string>",
     "runId": "<string>",
     "runnerArch": "<string>",
     "runnerOs": "<string>",
+    "sourceRevision": "<string>",
     "workflow": "<string>"
   },
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "snapshots": [
     {
       "cache": {

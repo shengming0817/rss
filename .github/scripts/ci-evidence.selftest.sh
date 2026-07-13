@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 EVIDENCE="$SCRIPT_DIR/ci-evidence.sh"
 BUDGET="$SCRIPT_DIR/ci-disk-budget.sh"
-GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v3.golden.json"
+GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v4.golden.json"
 TMP_ROOT=${TMPDIR:-/tmp}/ci-evidence-selftest.$$
 FAILURES=0
 
@@ -52,6 +52,10 @@ newline_dir=$(printf 'line\nbreak')
 mkdir -p "$WORKSPACE/$newline_dir"
 ln -s "$TMP_ROOT" "$WORKSPACE/outside-link"
 printf 'fixture\n' >"$WORKSPACE/a/data"
+/usr/bin/git -C "$WORKSPACE" init -q
+/usr/bin/git -C "$WORKSPACE" -c user.name='CI Evidence' -c user.email='ci-evidence@example.invalid' add .
+/usr/bin/git -C "$WORKSPACE" -c user.name='CI Evidence' -c user.email='ci-evidence@example.invalid' commit -qm fixture
+CHECKOUT_REVISION=$(/usr/bin/git -C "$WORKSPACE" rev-parse HEAD)
 
 TOOL_BIN="$TMP_ROOT/tool-bin"
 mkdir "$TOOL_BIN"
@@ -69,6 +73,8 @@ run_evidence() {
     RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" \
     GITHUB_REPOSITORY='owner/repo' GITHUB_WORKFLOW='CI' GITHUB_JOB='test' \
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
+    RSS_CI_JOB_KEY='ci-meta' RSS_CI_SOURCE_REVISION="${TEST_SOURCE_REVISION:-$CHECKOUT_REVISION}" \
+    RSS_CI_PLAN_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     SECRET_CANARY='must-not-leak-7f3a' \
     "$EVIDENCE" "$@" \
     --download-restore-result "${TEST_DOWNLOAD_RESTORE_RESULT:-miss}" --download-restored-footprint-bytes "${TEST_DOWNLOAD_RESTORED_BYTES:-0}" \
@@ -97,6 +103,8 @@ run_evidence_with_path() {
     RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" \
     GITHUB_REPOSITORY='owner/repo' GITHUB_WORKFLOW='CI' GITHUB_JOB='test' \
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
+    RSS_CI_JOB_KEY='ci-meta' RSS_CI_SOURCE_REVISION="${TEST_SOURCE_REVISION:-$CHECKOUT_REVISION}" \
+    RSS_CI_PLAN_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     SECRET_CANARY='must-not-leak-7f3a' \
     "$EVIDENCE" "$@" \
     --download-restore-result "${TEST_DOWNLOAD_RESTORE_RESULT:-miss}" --download-restored-footprint-bytes "${TEST_DOWNLOAD_RESTORED_BYTES:-0}" \
@@ -120,8 +128,15 @@ run_evidence_with_path() {
 
 run_disabled_evidence() {
   evidence_path=$1 home_dir=$2 workspace=$3 output=$4
+  if ! /usr/bin/git -C "$workspace" rev-parse HEAD >/dev/null 2>&1; then
+    /usr/bin/git -C "$workspace" init -q
+    /usr/bin/git -C "$workspace" -c user.name='CI Evidence' -c user.email='ci-evidence@example.invalid' commit --allow-empty -qm fixture
+  fi
+  checkout_revision=$(/usr/bin/git -C "$workspace" rev-parse HEAD)
   env -i PATH="$evidence_path" HOME="$home_dir" CARGO_HOME="$home_dir/.cargo" \
     RUSTUP_HOME="$home_dir/.rustup" GITHUB_WORKSPACE="$workspace" \
+    RSS_CI_JOB_KEY='ci-meta' RSS_CI_SOURCE_REVISION="$checkout_revision" \
+    RSS_CI_PLAN_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     "$EVIDENCE" snapshot start --output "$output" \
     --download-restore-result not-attempted --download-restored-footprint-bytes 0 \
     --download-save-mode read-only --download-candidate-size-bytes 0 --download-save-outcome skipped \
@@ -138,8 +153,11 @@ run_disabled_evidence() {
 expect_success 'start snapshot is created' run_evidence snapshot start --output "$OUTPUT"
 assert_jq 'start snapshot is valid and closed' "$OUTPUT" '
   keys == ["job","schemaVersion","snapshots"] and
-  .schemaVersion == 3 and
-  (.job | keys == ["job","repository","runAttempt","runId","runnerArch","runnerOs","workflow"]) and
+  .schemaVersion == 4 and
+  (.job | keys == ["ciJobKey","job","planDigest","repository","runAttempt","runId","runnerArch","runnerOs","sourceRevision","workflow"]) and
+  .job.ciJobKey == "ci-meta" and
+  .job.sourceRevision == "'"$CHECKOUT_REVISION"'" and
+  .job.planDigest == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and
   (.snapshots[0] | keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","resourceUsage","stage","toolVersions"]) and
   (.snapshots[0].cache | keys == ["compilerCache","download","tools"]) and
   ([.snapshots[0].cache.download,.snapshots[0].cache.tools | keys == ["candidateSizeBytes","restoreResult","restoredFootprintBytes","saveMode","saveOutcome"]] | all) and
@@ -148,6 +166,17 @@ assert_jq 'start snapshot is valid and closed' "$OUTPUT" '
   (.snapshots[0].resourceUsage | keys == ["cpuTimeMs","peakRssBytes"]) and
   (.snapshots[0].filesystem | keys == ["availableBytes","capacityBytes","usedBytes"]) and
   (.snapshots[0].toolVersions | keys == ["cargo","git","rustc"])'
+
+MISMATCH_OUTPUT="$TMP_ROOT/mismatch.json"
+run_evidence_with_mismatched_revision() {
+  TEST_SOURCE_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    run_evidence snapshot start --output "$MISMATCH_OUTPUT"
+}
+expect_failure 'source revision must match the observed checkout HEAD' run_evidence_with_mismatched_revision
+STALE_REVISION_OUTPUT="$TMP_ROOT/stale-revision.json"
+jq '.job.sourceRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$OUTPUT" >"$STALE_REVISION_OUTPUT"
+expect_failure 'existing evidence revision must match the observed checkout HEAD' \
+  run_evidence snapshot after-cache --output "$STALE_REVISION_OUTPUT"
 
 jq -S '(.job[] |= "<string>") |
   .snapshots[0].recordedAt = "<utc>" |
@@ -163,6 +192,11 @@ else
   fail 'schema matches executable golden'
 fi
 
+append_with_mismatched_revision() {
+  TEST_SOURCE_REVISION=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    run_evidence snapshot after-cache --output "$OUTPUT"
+}
+expect_failure 'every append revalidates the observed checkout HEAD' append_with_mismatched_revision
 expect_success 'after-cache appends atomically' run_evidence snapshot after-cache --output "$OUTPUT"
 run_after_build_with_resources() {
   TEST_CPU_TIME_MS=1234 TEST_PEAK_RSS_BYTES=5678 \
@@ -216,8 +250,8 @@ run_bad_byte_count() { TEST_DOWNLOAD_RESTORED_BYTES=-1 run_evidence snapshot sta
 expect_failure 'unknown restore result is rejected' run_bad_restore_result
 expect_failure 'negative cache byte count is rejected' run_bad_byte_count
 
-jq '.schemaVersion = 2 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v2.json"
-expect_failure 'schema v2 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v2.json"
+jq '.schemaVersion = 3 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v3.json"
+expect_failure 'schema v3 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v3.json"
 expect_failure 'scalar compiler cache errors flag has no compatibility shim' \
   run_evidence snapshot start --output "$TMP_ROOT/legacy-errors.json" --compiler-cache-errors 1
 

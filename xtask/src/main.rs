@@ -64,10 +64,17 @@
 //!      [--github-summary]`
 //!                                      严格消费 staged evidence；本地输出 Markdown，GitHub 模式把 annotation
 //!                                      写 stdout、Markdown 写 runner 的 Job Summary 文件。
+//!   `cargo xtask ci-plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
+//!                                      GitHub event/diff → typed 14-job impact plan 与动态 matrix。
+//!   `cargo xtask ci-gate --plan <json> --receipts <dir> --planner-result <result> --matrix-result <result> --metrics-output <json>`
+//!                                      稳定聚合 planner、matrix outcome 与 evidence v4 精确回执集。
 mod archrules;
 mod assembly;
 mod assembly_codegen;
 mod cdc_config;
+mod ci_evidence;
+mod ci_gate;
+mod ci_impact;
 mod ci_lanes;
 mod ci_slo;
 mod cmd;
@@ -186,6 +193,8 @@ enum Command {
         upload_outcome: ci_slo::UploadOutcome,
         summary_mode: ci_slo::SummaryMode,
     },
+    CiPlan(ci_impact::Options),
+    CiGate(ci_gate::Options),
     NextestEvidenceStage,
     NextestEvidenceInspect {
         artifact_root: PathBuf,
@@ -253,6 +262,8 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["audit", rest @ ..] => parse_audit(rest),
         ["ci-integration", rest @ ..] => parse_ci_integration(rest),
         ["ci-slo", rest @ ..] => parse_ci_slo(rest),
+        ["ci-plan", rest @ ..] => ci_impact::parse_options(rest).map(Command::CiPlan),
+        ["ci-gate", rest @ ..] => ci_gate::parse_options(rest).map(Command::CiGate),
         ["nextest-evidence", "stage"] => Ok(Command::NextestEvidenceStage),
         ["nextest-evidence", "inspect", artifact_root] => Ok(Command::NextestEvidenceInspect {
             artifact_root: PathBuf::from(artifact_root),
@@ -693,6 +704,8 @@ fn dispatch(args: &[String]) -> Result<()> {
             upload_outcome,
             summary_mode,
         ),
+        Command::CiPlan(options) => ci_impact::run(&workspace_root()?, &options),
+        Command::CiGate(options) => ci_gate::run(&options),
         Command::NextestEvidenceStage => nextest::stage(&workspace_root()?),
         Command::NextestEvidenceInspect { artifact_root } => nextest::inspect(&artifact_root),
         Command::NextestEvidenceReplay { sidecar } => nextest::replay(&sidecar, &workspace_root()?),
@@ -1553,6 +1566,66 @@ mod tests {
                 "success",
                 "--config",
                 "other.toml",
+            ],
+        ] {
+            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
+        }
+    }
+
+    #[test]
+    fn ci_plan_and_gate_commands_are_exact_and_fail_closed() {
+        assert!(matches!(
+            parse_command(&s(&[
+                "ci-plan",
+                "--event-path",
+                "event.json",
+                "--policy",
+                ".config/ci-impact.toml",
+                "--output",
+                "plan.json",
+                "--github-output",
+                "github-output",
+            ])),
+            Ok(Command::CiPlan(_))
+        ));
+        assert!(matches!(
+            parse_command(&s(&[
+                "ci-gate",
+                "--plan",
+                "plan.json",
+                "--receipts",
+                "receipts",
+                "--planner-result",
+                "success",
+                "--matrix-result",
+                "success",
+                "--metrics-output",
+                "metrics.json",
+            ])),
+            Ok(Command::CiGate(_))
+        ));
+        for args in [
+            vec!["ci-plan"],
+            vec![
+                "ci-plan",
+                "--event-path",
+                "event.json",
+                "--event-path",
+                "other",
+            ],
+            vec!["ci-gate"],
+            vec![
+                "ci-gate",
+                "--plan",
+                "plan.json",
+                "--receipts",
+                "receipts",
+                "--planner-result",
+                "neutral",
+                "--matrix-result",
+                "success",
+                "--metrics-output",
+                "metrics.json",
             ],
         ] {
             assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");

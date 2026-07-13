@@ -148,6 +148,19 @@ done
 
 workspace=${GITHUB_WORKSPACE:-$(pwd)}
 [ -d "$workspace" ] || die 'workspace is not a directory'
+[ -n "${RSS_CI_SOURCE_REVISION:-}" ] || die 'RSS_CI_SOURCE_REVISION is required'
+case "$RSS_CI_SOURCE_REVISION" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]|\
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) die 'RSS_CI_SOURCE_REVISION must be a lowercase 40- or 64-hex object ID' ;;
+esac
+checkout_revision=$(/usr/bin/git -C "$workspace" rev-parse HEAD 2>/dev/null) || die 'cannot observe checkout revision'
+case "$checkout_revision" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]|\
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) die 'observed checkout revision is not a lowercase 40- or 64-hex object ID' ;;
+esac
+[ "$checkout_revision" = "$RSS_CI_SOURCE_REVISION" ] || die 'observed checkout revision does not match planned source revision'
 output_dir=$(dirname -- "$output")
 [ -d "$output_dir" ] || die 'output directory does not exist'
 [ ! -d "$output" ] || die 'output path is a directory'
@@ -159,8 +172,11 @@ trap cleanup EXIT HUP INT TERM
 validate_document() {
   jq -e '
     keys == ["job","schemaVersion","snapshots"] and
-    .schemaVersion == 3 and
-    (.job | type == "object" and keys == ["job","repository","runAttempt","runId","runnerArch","runnerOs","workflow"] and ([.[] | type == "string"] | all)) and
+    .schemaVersion == 4 and
+    (.job | type == "object" and keys == ["ciJobKey","job","planDigest","repository","runAttempt","runId","runnerArch","runnerOs","sourceRevision","workflow"] and ([.[] | type == "string"] | all)) and
+    (.job.ciJobKey | length > 0 and (test("[[:cntrl:]]") | not)) and
+    (.job.sourceRevision | test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
+    (.job.planDigest | test("^[0-9a-f]{64}$")) and
     (.snapshots | type == "array") and
     ([.snapshots[] |
       type == "object" and
@@ -200,6 +216,8 @@ validate_document() {
 if [ -e "$output" ]; then
   [ -f "$output" ] || die 'output path is not a regular file'
   validate_document "$output" || die 'existing evidence is invalid'
+  existing_revision=$(jq -r '.job.sourceRevision' "$output" 2>/dev/null) || die 'cannot inspect existing evidence revision'
+  [ "$existing_revision" = "$checkout_revision" ] || die 'existing evidence revision differs from observed checkout revision'
   current_stages=$(jq -r '[.snapshots[].stage] | join(",")' "$output" 2>/dev/null) || die 'cannot inspect existing evidence'
 else
   current_stages=
@@ -439,16 +457,22 @@ snapshot=$(jq -cn \
 if [ -e "$output" ]; then
   jq --argjson snapshot "$snapshot" '.snapshots += [$snapshot]' "$output" 2>/dev/null >"$tmp" || die 'cannot append snapshot'
 else
+  [ -n "${RSS_CI_JOB_KEY:-}" ] || die 'RSS_CI_JOB_KEY is required'
+  [ -n "${RSS_CI_SOURCE_REVISION:-}" ] || die 'RSS_CI_SOURCE_REVISION is required'
+  [ -n "${RSS_CI_PLAN_DIGEST:-}" ] || die 'RSS_CI_PLAN_DIGEST is required'
   jq -n \
     --arg repository "${GITHUB_REPOSITORY:-}" \
     --arg workflow "${GITHUB_WORKFLOW:-}" \
     --arg job "${GITHUB_JOB:-}" \
+    --arg ciJobKey "$RSS_CI_JOB_KEY" \
+    --arg sourceRevision "$checkout_revision" \
+    --arg planDigest "$RSS_CI_PLAN_DIGEST" \
     --arg runId "${GITHUB_RUN_ID:-}" \
     --arg runAttempt "${GITHUB_RUN_ATTEMPT:-}" \
     --arg runnerOs "${RUNNER_OS:-}" \
     --arg runnerArch "${RUNNER_ARCH:-}" \
     --argjson snapshot "$snapshot" \
-    '{schemaVersion:3,job:{repository:$repository,workflow:$workflow,job:$job,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
+    '{schemaVersion:4,job:{repository:$repository,workflow:$workflow,job:$job,ciJobKey:$ciJobKey,sourceRevision:$sourceRevision,planDigest:$planDigest,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
 fi
 
 validate_document "$tmp" || die 'constructed evidence failed validation'

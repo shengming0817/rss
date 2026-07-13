@@ -719,6 +719,8 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/integration_shards.rs" => INTEGRATION_SHARD_INVARIANT_BINDINGS,
         "xtask/src/nextest.rs" => NEXTEST_INVARIANT_BINDINGS,
         "xtask/src/ci_slo.rs" => CI_SLO_INVARIANT_BINDINGS,
+        "xtask/src/ci_impact.rs" => CI_IMPACT_INVARIANT_BINDINGS,
+        "xtask/src/ci_gate.rs" => CI_GATE_INVARIANT_BINDINGS,
         _ => return Ok(false),
     };
     let found_invariants = extract_invariants(root, path)?;
@@ -841,7 +843,43 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         evidence: "closed exhaustive CI SLO job enum and workflow-parts constructor",
         gates: "native-compile",
     },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_lanes.rs",
+        id: "CI-IMPACT-CATALOG-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "ci_job_catalog generated closed enum, matrix identity, and artifact identity",
+        gates: "native-compile",
+    },
 ];
+
+const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_impact.rs",
+        id: "CI-IMPACT-PLAN-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "private validated plan constructor over the exact typed job catalog",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/ci_impact.rs",
+        id: "CI-IMPACT-POLICY-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "diff and impact synthetic reds with workspace policy anti-vacuity",
+        gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+    },
+];
+
+const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[InvariantCarrierBinding {
+    path: "xtask/src/ci_gate.rs",
+    id: "CI-GATE-RECEIPT-01",
+    facet: None,
+    carrier: "xtask",
+    evidence: "receipt identity synthetic reds with exact-set anti-vacuity",
+    gates: "verify,ci,ci-meta,ci-core,ci-security,ci-coverage,audit,integration",
+}];
 
 const CI_SLO_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {

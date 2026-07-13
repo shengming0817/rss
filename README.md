@@ -10,9 +10,9 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 ## 构建与本地验证
 
-本地保留聚合验证入口；GitHub Actions 将四类合入门映射为 `ci-meta`、`ci-security`、
-`ci-coverage`，以及拆成 `ci-core-prerequisites` 与 `ci-core-tests` 的 Core 拓扑。`ci-meta` 与
-`ci-security` 并行启动；Core prerequisite 只跑一次，两份 Core tests 在其后按 partition 并行：
+本地保留聚合验证入口；GitHub Actions 由 typed `ci-plan` 从闭合 `CiJobKey` 派生唯一动态 matrix，
+执行 `ci-meta`、Core、Security、Coverage、Integration 与 Audit 的合法子集，再由稳定 `ci-gate`
+核对计划、聚合结果和 evidence v4 回执。当前 Shadow 模式仍执行完整 14-job catalog：
 
 ```bash
 make verify                              # 推荐：受控 bootstrap + 完整 verify gate plan
@@ -26,8 +26,9 @@ Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap
 仍执行相同 typed gate plan，并与 wrapper 共用 worktree-local target 默认值；但启动 xtask 的外层 Cargo
 不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
 
-`./hack/cargo.sh xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现六个真实 check 的完整执行语义：
-它不重复运行 Core 的 `ci-core` profile nextest，而 Coverage 复用同一测试语义。需要本地复现真实 checks 时分别运行：
+`./hack/cargo.sh xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现 typed planner、14 个独立 runner、
+artifact 回执或 `ci-gate` 聚合。它不重复运行 Core 的 `ci-core` profile nextest，而 Coverage 复用同一测试
+语义。需要逐项运行 Shadow 14-job catalog 对应的 lane 命令（仍不含 GitHub 调度/证据边界）时运行：
 
 ```bash
 ./hack/cargo.sh xtask ci-meta
@@ -36,6 +37,14 @@ Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap
 ./hack/cargo.sh xtask ci-core-tests --partition 2/2
 ./hack/cargo.sh xtask ci-security
 ./hack/cargo.sh xtask ci-coverage
+./hack/cargo.sh xtask ci-integration --shard postgres-domain
+./hack/cargo.sh xtask ci-integration --shard event-transport --partition 1/2
+./hack/cargo.sh xtask ci-integration --shard event-transport --partition 2/2
+./hack/cargo.sh xtask ci-integration --shard runtime-http-auth --partition 1/2
+./hack/cargo.sh xtask ci-integration --shard runtime-http-auth --partition 2/2
+./hack/cargo.sh xtask ci-integration --shard consistency-fault
+./hack/cargo.sh xtask ci-integration --shard cdc-projection-saga
+./hack/cargo.sh xtask audit
 ```
 
 以下是常用开发检查，并非 `verify` 内部 typed step 的逐条公开命令；完整本地治理门运行

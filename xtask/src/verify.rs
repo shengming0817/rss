@@ -25,7 +25,7 @@
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci` 只供本地一次性跑全部
-//! CI 门。二者与四条 GitHub lane 均经 [`plan_for`] 从 Hard 闭集 registry 派生，杜绝门集漂移。
+//! CI 门。二者与 GitHub typed 14-job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
 //!
 //! **`cargo xtask audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
@@ -39,7 +39,7 @@
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "verify", source = "code" }—— 任一门步失败 ⇒ verify/ci/audit 非零退出（聚合 fail-fast，不吞错）。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "verify", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
-//! INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— GitHub CI workflow
+//! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
 //!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
 //!   `github_ci_workflow_delegates_to_split_xtask_lanes` 强制。
@@ -51,13 +51,14 @@
 //!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
 //!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
 //! INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "ci_tool_adapter_contract_green_and_synthetic_red", anti_vacuity = "github_ci_tool_adapter_contract_is_closed" }—— lane 工具集只能由机器 catalog 经 adapter 派生；workflow/action 不得复制清单或接收任意工具 input，installer immutable SHA 必须同时绑定 uses 与 cache identity，adapter 与 catalog 内容必须绑定 cache key 与 seal，fresh/cache verify 必须先于 PATH 暴露和 cache save，tool-cache epoch 必须为 v4。
-//! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须是闭合、无重复的 committed matrix。
+//! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须只由 typed planner 的动态 matrix 派生。
 //! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
 //! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；四个 live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
-//! INVARIANT: CI-INTEGRATION-MATRIX-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_matrix_predicate_green_and_red", anti_vacuity = "github_integration_workflow_has_integration_shard_matrix" }—— Integration caller 必须是精确七行 typed matrix，逐 shard 委托 reusable workflow，不内联低层门。
 //! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
 //! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，四类 fixture、四个 context env、四种 service、五个 ownership label 与精确 partition 闭集须和 shell/workflow 同步。
 
+#[cfg(test)]
+use crate::ci_lanes::CiJobKey;
 use crate::ci_lanes::{
     CiLane, CompatMembership, CompileKind, GateId, REGISTRY, StandaloneReason, ToolRequirement,
     VerifyMembership,
@@ -811,14 +812,13 @@ macro_rules! define_step_dispatch {
 }
 crate::ci_lanes::gate_catalog!(define_step_dispatch);
 
-/// audit 精简供应链门步计划（issue #1133；GitHub Actions schedule 调 `cargo xtask audit`）。
+/// audit 精简供应链门步计划（issue #1133；统一 GitHub CI 的 typed Audit job 调 `cargo xtask audit`）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；PR 门的
 /// `CompatibilityCi` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
 /// [`step_cargo_audit`] 构造。
 ///
-/// INVARIANT: CI-PIPELINE-DELEGATE-01 { level = "Medium", exec = "verify", source = "code" }—— audit lane 亦经 YAML 委托 `cargo xtask audit`（不内联门命令），
-/// 由 `github_audit_workflow_has_scheduled_audit_lane` 守。
+/// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
 fn audit_plan() -> Vec<Step> {
     plan_for(PlanTarget::Lane(CiLane::Nightly))
 }
@@ -1230,7 +1230,7 @@ pub(crate) fn run_core_execution(
 }
 
 /// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
-/// GitHub Actions schedule 调 `cargo xtask audit`（薄壳唯一入口，CI-PIPELINE-DELEGATE-01 同族）。
+/// GitHub Actions schedule 由 typed matrix 调 `cargo xtask audit`（CI-ADAPTIVE-WORKFLOW-01）。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
 pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -1250,6 +1250,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
 
     fn opts(fast: bool, allow_missing_tools: bool) -> VerifyOpts {
         VerifyOpts {
@@ -2283,7 +2284,7 @@ mod tests {
         Ok(())
     }
 
-    // ---- CI-PIPELINE-DELEGATE-01：GitHub workflow 委托四条 split xtask lane ----
+    // ---- CI-ADAPTIVE-WORKFLOW-01：GitHub workflow 委托 typed dynamic matrix ----
 
     /// setup / workflow 安装步骤只允许 cargo 安装工具；`cargo xtask` 只能作为 lane 委托命令出现。
     const SETUP_CARGO_SUBCOMMANDS: &[&str] = &["install", "binstall"];
@@ -2407,10 +2408,6 @@ mod tests {
         false
     }
 
-    fn command_matches_delegation_form(command: &str, form: &str) -> bool {
-        command == form
-    }
-
     fn command_key_and_rest(line: &str) -> Option<&str> {
         line.strip_prefix("- ")
             .map(str::trim)
@@ -2475,12 +2472,6 @@ mod tests {
         SETUP_CARGO_SUBCOMMANDS.contains(&sub)
     }
 
-    fn line_is_delegate_command(line: &str, forms: &[&str]) -> bool {
-        forms
-            .iter()
-            .any(|form| command_matches_delegation_form(line, form))
-    }
-
     fn line_is_delegation_prologue(line: &str) -> bool {
         matches!(line, "set -euo pipefail")
     }
@@ -2492,43 +2483,6 @@ mod tests {
                 || line_is_delegation_prologue(line)
                 || line_is_setup_cargo_command(line)
         })
-    }
-
-    fn command_script_is_exact_delegation(script: &[&str], forms: &[&str]) -> bool {
-        let mut seen_delegate = false;
-        for line in script
-            .iter()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-        {
-            if line_is_delegation_prologue(line) {
-                continue;
-            }
-            if line_is_delegate_command(line, forms) {
-                if seen_delegate {
-                    return false;
-                }
-                seen_delegate = true;
-                continue;
-            }
-            return false;
-        }
-        seen_delegate
-    }
-
-    fn workflow_delegates_to_xtask_lane(yaml: &str, forms: &[&str]) -> bool {
-        let scripts = yaml_command_scripts(yaml);
-        let mut delegate_count = 0;
-        for script in &scripts {
-            if command_script_is_exact_delegation(script, forms) {
-                delegate_count += 1;
-                continue;
-            }
-            if !command_script_is_setup_only(script) {
-                return false;
-            }
-        }
-        delegate_count == 1
     }
 
     /// 把去注释 / 去缩进的 code 行按 step 边界（`- ` 起头）切块——每块 = 一个 step 的全部字段行（首个 `- ` 前的
@@ -2616,8 +2570,7 @@ mod tests {
         }
     }
 
-    fn yaml_typed_steps(yaml: &str) -> Vec<TypedStep> {
-        let lines = yaml_indented_code_lines(yaml);
+    fn typed_steps_in_lines(lines: &[(usize, &str)]) -> Vec<TypedStep> {
         let mut steps = Vec::new();
         for (steps_index, (steps_indent, text)) in lines.iter().enumerate() {
             if *text != "steps:" || !matches!(*steps_indent, 2 | 4) {
@@ -2642,6 +2595,11 @@ mod tests {
             }
         }
         steps
+    }
+
+    fn yaml_typed_steps(yaml: &str) -> Vec<TypedStep> {
+        let lines = yaml_indented_code_lines(yaml);
+        typed_steps_in_lines(&lines)
     }
 
     fn parse_typed_step(lines: &[(usize, &str)], item_indent: usize) -> TypedStep {
@@ -2724,156 +2682,6 @@ mod tests {
             index += 1;
         }
         step
-    }
-
-    #[derive(Debug, Default)]
-    struct ReusableCallerJob {
-        id: String,
-        fields: Vec<String>,
-        needs: Option<String>,
-        uses: Option<String>,
-        lane: Option<String>,
-        with_fields: Vec<String>,
-        matrix_rows: Option<Vec<Option<(String, String)>>>,
-    }
-
-    fn reusable_caller_jobs(yaml: &str) -> Vec<ReusableCallerJob> {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(jobs_start) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
-        else {
-            return Vec::new();
-        };
-        let jobs_end = lines[jobs_start + 1..]
-            .iter()
-            .position(|(indent, _)| *indent == 0)
-            .map_or(lines.len(), |offset| jobs_start + 1 + offset);
-        let body = &lines[jobs_start + 1..jobs_end];
-        let starts = body
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (indent, line))| {
-                (*indent == 2)
-                    .then(|| line.strip_suffix(':'))
-                    .flatten()
-                    .map(|id| (index, id))
-            })
-            .collect::<Vec<_>>();
-        starts
-            .iter()
-            .enumerate()
-            .map(|(position, (start, id))| {
-                let end = starts
-                    .get(position + 1)
-                    .map_or(body.len(), |(next, _)| *next);
-                parse_reusable_caller_job(id, &body[start + 1..end])
-            })
-            .collect()
-    }
-
-    fn parse_reusable_caller_job(id: &str, lines: &[(usize, &str)]) -> ReusableCallerJob {
-        let mut job = ReusableCallerJob {
-            id: id.to_owned(),
-            ..ReusableCallerJob::default()
-        };
-        for (indent, line) in lines {
-            if *indent == 4 {
-                let Some((key, value)) = line.split_once(':') else {
-                    job.fields.push((*line).to_owned());
-                    continue;
-                };
-                job.fields.push(key.to_owned());
-                match key {
-                    "needs" => job.needs = Some(value.trim().to_owned()),
-                    "uses" => job.uses = Some(value.trim().to_owned()),
-                    _ => {}
-                }
-            } else if *indent == 6
-                && let Some((key, value)) = line.split_once(':')
-            {
-                job.with_fields.push(key.to_owned());
-                if key == "lane" {
-                    job.lane = Some(value.trim().to_owned());
-                }
-            }
-        }
-        job.matrix_rows = parse_core_matrix_rows(lines);
-        job
-    }
-
-    fn parse_core_matrix_rows(lines: &[(usize, &str)]) -> Option<Vec<Option<(String, String)>>> {
-        let strategy_starts = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (indent, line))| {
-                (*indent == 4 && *line == "strategy:").then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let [strategy_start] = strategy_starts.as_slice() else {
-            return None;
-        };
-        let strategy = lines[*strategy_start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 4)
-            .copied()
-            .collect::<Vec<_>>();
-        let strategy_fields = strategy
-            .iter()
-            .filter_map(|(indent, line)| (*indent == 6).then_some(*line))
-            .collect::<Vec<_>>();
-        if strategy_fields != ["fail-fast: false", "matrix:"] {
-            return None;
-        }
-        let matrix_start = strategy
-            .iter()
-            .position(|(indent, line)| *indent == 6 && *line == "matrix:")?;
-        let matrix = strategy[matrix_start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 6)
-            .copied()
-            .collect::<Vec<_>>();
-        if matrix
-            .iter()
-            .filter_map(|(indent, line)| (*indent == 8).then_some(*line))
-            .collect::<Vec<_>>()
-            != ["include:"]
-        {
-            return None;
-        }
-        let include_start = matrix
-            .iter()
-            .position(|(indent, line)| *indent == 8 && *line == "include:")?;
-        let include = matrix[include_start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 8)
-            .copied()
-            .collect::<Vec<_>>();
-        if include.is_empty() || include.iter().any(|(indent, _)| *indent != 10) {
-            return None;
-        }
-        Some(
-            include
-                .iter()
-                .map(|(_, line)| parse_core_partition_row(line))
-                .collect(),
-        )
-    }
-
-    fn parse_core_partition_row(line: &str) -> Option<(String, String)> {
-        let body = line.strip_prefix("- {")?.strip_suffix('}')?;
-        let mut fields = body.split(',').map(str::trim);
-        let partition = fields.next()?.strip_prefix("partition: ")?;
-        let label = fields.next()?.strip_prefix("partition-label: ")?;
-        if fields.next().is_some()
-            || partition.contains("${{")
-            || label.contains("${{")
-            || partition.is_empty()
-            || label.is_empty()
-        {
-            return None;
-        }
-        Some((partition.to_owned(), label.to_owned()))
     }
 
     fn workflow_has_exact_read_permissions(yaml: &str) -> bool {
@@ -2977,52 +2785,15 @@ mod tests {
             .filter_map(|(indent, line)| (*indent == 2).then_some(*line))
             .collect::<Vec<_>>();
         events.sort_unstable();
-        events == ["pull_request:", "push:", "workflow_dispatch:"]
+        events == ["pull_request:", "push:", "schedule:", "workflow_dispatch:"]
             && workflow_event_has_exact_branches(&on_body, "pull_request", &["develop"])
             && workflow_event_has_exact_branches(
                 &on_body,
                 "push",
                 &["develop", "codex/**", "feature/**", "fix/**"],
             )
+            && on_body.contains(&(4, "- cron: \"0 6 * * *\""))
             && workflow_dispatch_is_empty(&on_body)
-    }
-
-    fn reusable_job_matches(
-        job: &ReusableCallerJob,
-        lane: &str,
-        expected_needs: Option<&str>,
-    ) -> bool {
-        let mut actual_fields = job.fields.iter().map(String::as_str).collect::<Vec<_>>();
-        actual_fields.sort_unstable();
-        let expected_fields = if lane == "ci-core-tests" {
-            &["name", "needs", "strategy", "uses", "with"][..]
-        } else if expected_needs.is_some() {
-            &["needs", "uses", "with"][..]
-        } else {
-            &["uses", "with"][..]
-        };
-        job.id == lane
-            && actual_fields == expected_fields
-            && job.needs.as_deref() == expected_needs
-            && job.uses.as_deref() == Some("./.github/workflows/rss-rust-lane.yml")
-            && job.lane.as_deref() == Some(lane)
-            && if lane == "ci-core-tests" {
-                job.with_fields
-                    == [
-                        "fail-fast",
-                        "matrix",
-                        "lane",
-                        "partition",
-                        "partition-label",
-                    ]
-                    && job.matrix_rows
-                        == Some(vec![
-                            Some(("1/2".to_owned(), "1-of-2".to_owned())),
-                            Some(("2/2".to_owned(), "2-of-2".to_owned())),
-                        ])
-            } else {
-                job.with_fields == ["lane"] && job.matrix_rows.is_none()
-            }
     }
 
     fn workflow_has_pr_only_concurrency(yaml: &str) -> bool {
@@ -3042,7 +2813,7 @@ mod tests {
             == [
                 (
                     2,
-                    "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+                    "group: rss-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
                 ),
                 (
                     2,
@@ -3051,74 +2822,357 @@ mod tests {
             ]
     }
 
-    /// CI caller 的结构化闭集谓词：四个 literal job 直接调唯一 reusable workflow，
-    /// Core/Coverage 仅依赖 Meta，Meta/Security 无依赖，不允许额外 job/field 或宽权限。
+    fn root_mapping_has_exact_entries(yaml: &str, mapping: &str, expected: &[&str]) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let marker = format!("{mapping}:");
+        let Some(start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == marker)
+        else {
+            return false;
+        };
+        let entries = lines[start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 0)
+            .filter_map(|(indent, line)| (*indent == 2).then_some(*line))
+            .collect::<Vec<_>>();
+        expected.iter().all(|expected| {
+            let Some((key, _)) = expected.split_once(':') else {
+                return false;
+            };
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .split_once(':')
+                        .is_some_and(|(entry_key, _)| entry_key == key)
+                })
+                .copied()
+                .eq([*expected])
+        })
+    }
+
+    fn caller_steps_are_closed(yaml: &str) -> bool {
+        let steps = yaml_typed_steps(yaml);
+        let names = steps
+            .iter()
+            .map(|step| step.name.as_deref())
+            .collect::<Vec<_>>();
+        if names
+            != [
+                Some("Checkout execution revision"),
+                Some("Build typed CI impact plan"),
+                Some("Upload typed plan"),
+                Some("Checkout scheduled audit revision"),
+                Some("Setup scheduled audit tools"),
+                Some("Run scheduled audit fallback"),
+                Some("Checkout gate implementation"),
+                Some("Download typed plan"),
+                Some("Download closed job receipts"),
+                Some("Verify plan, matrix result, and exact receipts"),
+                Some("Upload aggregate CI metrics"),
+            ]
+        {
+            return false;
+        }
+        let plan_checkout = &steps[0];
+        let planner = &steps[1];
+        let plan_upload = &steps[2];
+        let gate_checkout = &steps[6];
+        let plan_download = &steps[7];
+        let receipt_download = &steps[8];
+        let gate = &steps[9];
+        let metrics_upload = &steps[10];
+
+        let checkout = |step: &TypedStep, depth: &str| {
+            step.uses.as_deref() == Some("actions/checkout@v4")
+                && step.with_exact("persist-credentials", &["false"])
+                && step.with_exact("fetch-depth", &[depth])
+                && step.with_exact("ref", &["${{ github.sha }}"])
+        };
+        checkout(plan_checkout, "0")
+            && checkout(gate_checkout, "1")
+            && planner.id.as_deref() == Some("plan")
+            && planner.env_exact("RSS_CI_FORCE_FULL", &["${{ vars.RSS_CI_FORCE_FULL }}"])
+            && planner.run_exact(&[
+                "set -euo pipefail",
+                "mkdir -p target/ci-impact",
+                "cargo run --locked -p xtask -- ci-plan \\",
+                "--event-path \"$GITHUB_EVENT_PATH\" \\",
+                "--policy .config/ci-impact.toml \\",
+                "--output target/ci-impact/ci-plan.json \\",
+                "--github-output \"$GITHUB_OUTPUT\"",
+            ])
+            && plan_upload.if_expr.as_deref() == Some("${{ always() }}")
+            && plan_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
+            && plan_upload.with_exact(
+                "name",
+                &["ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}"],
+            )
+            && plan_upload.with_exact("path", &["target/ci-impact/ci-plan.json"])
+            && plan_upload.with_exact("if-no-files-found", &["warn"])
+            && plan_upload.with_exact("retention-days", &["30"])
+            && plan_download.continue_on_error.as_deref() == Some("true")
+            && plan_download.uses.as_deref() == Some("actions/download-artifact@v4")
+            && plan_download.with_exact(
+                "name",
+                &["ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}"],
+            )
+            && plan_download.with_exact("path", &["target/ci-plan-download"])
+            && receipt_download.continue_on_error.as_deref() == Some("true")
+            && receipt_download.uses.as_deref() == Some("actions/download-artifact@v4")
+            && receipt_download.with_exact(
+                "pattern",
+                &["ci-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}"],
+            )
+            && receipt_download.with_exact("path", &["target/ci-receipts"])
+            && receipt_download.with_exact("merge-multiple", &["false"])
+            && gate.if_expr.as_deref() == Some("${{ always() }}")
+            && gate.run_exact(&[
+                "set -euo pipefail",
+                "cargo run --locked -p xtask -- ci-gate \\",
+                "--plan target/ci-plan-download/ci-plan.json \\",
+                "--receipts target/ci-receipts \\",
+                "--planner-result \"${{ needs.ci-plan.result }}\" \\",
+                "--matrix-result \"${{ needs.execute.result }}\" \\",
+                "--metrics-output target/ci-gate-metrics.json",
+            ])
+            && metrics_upload.if_expr.as_deref() == Some("${{ always() }}")
+            && metrics_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
+            && metrics_upload.with_exact(
+                "name",
+                &["ci-impact-metrics-${{ github.run_id }}-${{ github.run_attempt }}"],
+            )
+            && metrics_upload.with_exact("path", &["target/ci-gate-metrics.json"])
+            && metrics_upload.with_exact("if-no-files-found", &["error"])
+            && metrics_upload.with_exact("retention-days", &["30"])
+    }
+
+    fn dynamic_execute_job_is_closed(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(jobs) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
+        else {
+            return false;
+        };
+        let Some(execute) = lines[jobs + 1..]
+            .iter()
+            .position(|(indent, line)| *indent == 2 && *line == "execute:")
+            .map(|offset| jobs + 1 + offset)
+        else {
+            return false;
+        };
+        let body = lines[execute + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 2)
+            .copied()
+            .collect::<Vec<_>>();
+        let direct = body
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 4).then_some(*line))
+            .collect::<Vec<_>>();
+        let nested = body
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 6).then_some(*line))
+            .collect::<Vec<_>>();
+        direct
+            == [
+                "name: ${{ matrix.displayName }}",
+                "needs: ci-plan",
+                "strategy:",
+                "uses: ./.github/workflows/rss-rust-lane.yml",
+                "with:",
+            ]
+            && nested
+                == [
+                    "fail-fast: false",
+                    "matrix: ${{ fromJSON(needs.ci-plan.outputs.matrix) }}",
+                    "ci-job-key: ${{ matrix.jobKey }}",
+                    "plan-digest: ${{ matrix.planDigest }}",
+                    "source-revision: ${{ matrix.sourceRevision }}",
+                    "lane: ${{ matrix.lane }}",
+                    "shard: ${{ matrix.shard || '' }}",
+                    "partition: ${{ matrix.partition || '' }}",
+                    "partition-label: ${{ matrix.partitionLabel }}",
+                ]
+    }
+
+    fn workflow_job_body<'a>(yaml: &'a str, job: &str) -> Option<Vec<(usize, &'a str)>> {
+        let lines = yaml_indented_code_lines(yaml);
+        let jobs = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "jobs:")?;
+        let marker = format!("{job}:");
+        let start = lines[jobs + 1..]
+            .iter()
+            .position(|(indent, line)| *indent == 2 && *line == marker)
+            .map(|offset| jobs + 1 + offset)?;
+        Some(
+            lines[start + 1..]
+                .iter()
+                .take_while(|(indent, _)| *indent > 2)
+                .copied()
+                .collect(),
+        )
+    }
+
+    fn direct_job_fields<'a>(body: &[(usize, &'a str)]) -> Vec<&'a str> {
+        body.iter()
+            .filter_map(|(indent, line)| (*indent == 4).then_some(*line))
+            .collect()
+    }
+
+    fn planner_and_gate_jobs_are_closed(yaml: &str) -> bool {
+        let Some(plan) = workflow_job_body(yaml, "ci-plan") else {
+            return false;
+        };
+        let Some(gate) = workflow_job_body(yaml, "ci-gate") else {
+            return false;
+        };
+        let Some(outputs) = plan
+            .iter()
+            .position(|(indent, line)| *indent == 4 && *line == "outputs:")
+        else {
+            return false;
+        };
+        let output_entries = plan[outputs + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 4)
+            .filter_map(|(indent, line)| (*indent == 6).then_some(*line))
+            .collect::<Vec<_>>();
+        direct_job_fields(&plan)
+            == [
+                "name: ci-plan",
+                "runs-on: ubuntu-latest",
+                "timeout-minutes: 15",
+                "outputs:",
+                "steps:",
+            ]
+            && output_entries
+                == [
+                    "matrix: ${{ steps.plan.outputs.matrix }}",
+                    "plan-digest: ${{ steps.plan.outputs.plan-digest }}",
+                    "policy-version: ${{ steps.plan.outputs.policy-version }}",
+                    "decision-kind: ${{ steps.plan.outputs.decision-kind }}",
+                    "full-fallback: ${{ steps.plan.outputs.full-fallback }}",
+                    "recommended-count: ${{ steps.plan.outputs.recommended-count }}",
+                    "executed-count: ${{ steps.plan.outputs.executed-count }}",
+                ]
+            && direct_job_fields(&gate)
+                == [
+                    "name: ci-gate",
+                    "if: ${{ always() }}",
+                    "needs: [ci-plan, execute]",
+                    "runs-on: ubuntu-latest",
+                    "timeout-minutes: 20",
+                    "steps:",
+                ]
+    }
+
+    fn scheduled_audit_fallback_is_closed(yaml: &str) -> bool {
+        let Some(body) = workflow_job_body(yaml, "scheduled-audit-fallback") else {
+            return false;
+        };
+        if direct_job_fields(&body)
+            != [
+                "name: scheduled-audit-fallback",
+                "if: ${{ always() && github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}",
+                "needs: ci-plan",
+                "runs-on: ubuntu-latest",
+                "timeout-minutes: 120",
+                "steps:",
+            ]
+        {
+            return false;
+        }
+        let steps = typed_steps_in_lines(&body);
+        if steps
+            .iter()
+            .map(|step| step.name.as_deref())
+            .collect::<Vec<_>>()
+            != [
+                Some("Checkout scheduled audit revision"),
+                Some("Setup scheduled audit tools"),
+                Some("Run scheduled audit fallback"),
+            ]
+        {
+            return false;
+        }
+        let checkout = &steps[0];
+        let setup = &steps[1];
+        let audit = &steps[2];
+        checkout.uses.as_deref() == Some("actions/checkout@v4")
+            && checkout.with.len() == 3
+            && checkout.with_exact("persist-credentials", &["false"])
+            && checkout.with_exact("fetch-depth", &["1"])
+            && checkout.with_exact("ref", &["${{ github.sha }}"])
+            && setup.uses.as_deref() == Some("./.github/actions/setup-rss-ci")
+            && setup.with.len() == 7
+            && setup.with_exact("lane", &["audit"])
+            && setup.with_exact("profile", &["audit"])
+            && setup.with_exact("toolchain", &["1.96.0"])
+            && setup.with_exact("nightly", &["\"\""])
+            && setup.with_exact("tool-cache-epoch", &["v4"])
+            && setup.with_exact("writer-mode", &["false"])
+            && setup.with_exact("evidence-enabled", &["false"])
+            && audit.run_exact(&["set -euo pipefail", "cargo run --locked -p xtask -- audit"])
+    }
+
+    /// CI caller 的结构化闭集谓词：唯一 planner → typed dynamic matrix → always aggregate gate。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
-        let jobs = reusable_caller_jobs(yaml);
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(jobs_start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
+        else {
+            return false;
+        };
+        let jobs = lines[jobs_start + 1..]
+            .iter()
+            .filter_map(|(indent, line)| (*indent == 2).then(|| line.strip_suffix(':')).flatten())
+            .collect::<Vec<_>>();
         workflow_has_only_safe_ci_events(yaml)
             && workflow_has_exact_read_permissions(yaml)
             && workflow_has_pr_only_concurrency(yaml)
-            && jobs.len() == 5
-            && yaml.contains("partition: ${{ matrix.partition }}")
-            && yaml.contains("partition-label: ${{ matrix.partition-label }}")
-            && [
-                ("ci-meta", None),
-                ("ci-core-prerequisites", Some("ci-meta")),
-                ("ci-core-tests", Some("ci-core-prerequisites")),
-                ("ci-security", None),
-                ("ci-coverage", Some("ci-meta")),
-            ]
-            .iter()
-            .all(|(lane, expected_needs)| {
-                jobs.iter()
-                    .find(|job| job.id == *lane)
-                    .is_some_and(|job| reusable_job_matches(job, lane, *expected_needs))
-            })
-    }
-
-    /// Thin callers may only select a literal member of the closed lane set.  Match the
-    /// `uses` and `with.lane` fields, never display names, comments, env, or run text.
-    fn workflow_calls_reusable_lane(yaml: &str, lane: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let jobs_start = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "jobs:");
-        let Some(jobs_start) = jobs_start else {
-            return false;
-        };
-        let jobs = &lines[jobs_start + 1..];
-        let job_fields = jobs
-            .iter()
-            .filter(|(indent, _)| *indent == 4)
-            .map(|(_, line)| *line)
-            .collect::<Vec<_>>();
-        let with_fields = jobs
-            .iter()
-            .filter(|(indent, _)| *indent == 6)
-            .map(|(_, line)| *line)
-            .collect::<Vec<_>>();
-        let permission_fields = lines
-            .iter()
-            .skip_while(|(indent, line)| !(*indent == 0 && *line == "permissions:"))
-            .skip(1)
-            .take_while(|(indent, _)| *indent > 0)
-            .collect::<Vec<_>>();
-        matches!(
-            lane,
-            "ci-meta" | "ci-core" | "ci-security" | "ci-coverage" | "integration" | "audit"
-        ) && !lines
-            .iter()
-            .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
             && jobs
+                == [
+                    "ci-plan",
+                    "execute",
+                    "scheduled-audit-fallback",
+                    "ci-gate",
+                ]
+            && caller_steps_are_closed(yaml)
+            && dynamic_execute_job_is_closed(yaml)
+            && planner_and_gate_jobs_are_closed(yaml)
+            && scheduled_audit_fallback_is_closed(yaml)
+            && yaml.matches("fromJSON(needs.ci-plan.outputs.matrix)").count() == 1
+            && yaml.matches("uses: ./.github/workflows/rss-rust-lane.yml").count() == 1
+            && yaml.contains("cargo run --locked -p xtask -- ci-plan")
+            && yaml.contains("--policy .config/ci-impact.toml")
+            && yaml.contains("RSS_CI_FORCE_FULL: ${{ vars.RSS_CI_FORCE_FULL }}")
+            && yaml.contains("ci-job-key: ${{ matrix.jobKey }}")
+            && yaml.contains("plan-digest: ${{ matrix.planDigest }}")
+            && yaml.contains("source-revision: ${{ matrix.sourceRevision }}")
+            && yaml.contains("lane: ${{ matrix.lane }}")
+            && yaml.contains("shard: ${{ matrix.shard || '' }}")
+            && yaml.contains("partition: ${{ matrix.partition || '' }}")
+            && yaml.contains("partition-label: ${{ matrix.partitionLabel }}")
+            && yaml.contains("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}\n    needs: [ci-plan, execute]")
+            && yaml.contains("cargo run --locked -p xtask -- ci-gate")
+            && yaml.contains("--planner-result \"${{ needs.ci-plan.result }}\"")
+            && yaml.contains("--matrix-result \"${{ needs.execute.result }}\"")
+            && yaml.contains("--metrics-output target/ci-gate-metrics.json")
+            && yaml.contains("name: ci-impact-metrics-${{ github.run_id }}-${{ github.run_attempt }}")
+            && !yaml.contains("pull_request_target")
+            && !yaml.contains("paths:")
+            && !yaml.contains("paths-ignore:")
+            && !yaml.contains("id-token: write")
+            && !yaml.contains("contents: write")
+            && !yaml.contains("matrix:\n        include:")
+            && !lines
                 .iter()
-                .filter(|(indent, line)| *indent == 2 && line.ends_with(':'))
-                .count()
-                == 1
-            && job_fields == ["uses: ./.github/workflows/rss-rust-lane.yml", "with:"]
-            && with_fields == [format!("lane: {lane}")]
-            && permission_fields.len() == 1
-            && permission_fields[0].0 == 2
-            && permission_fields[0].1 == "contents: read"
+                .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
     }
 
     /// 被 workflow 引用的本地 composite action 也是 CI 执行面。setup action 只能安装工具，不得把 build /
@@ -3306,7 +3360,8 @@ mod tests {
             && adapter_binds_its_content_to_seal
     }
 
-    /// 真实 committed 执行面：三个 caller 只绑定 literal lane，生命周期只存在于 reusable workflow。
+    /// 真实 committed 执行面：planner、动态 executor、定时审计 fallback 与 aggregate gate 闭合；
+    /// lane 生命周期只存在于 reusable workflow。
     #[test]
     fn github_resource_evidence_workflows_have_lifecycle() -> anyhow::Result<()> {
         let root = workspace_root()?;
@@ -3315,21 +3370,14 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", ci_path.display()))?;
         assert!(
             pipeline_delegates_to_xtask_ci(&ci_yaml),
-            "{} 须以四个 literal jobs 调用唯一 reusable workflow",
+            "{} 须以 planner、typed dynamic matrix、定时审计 fallback 与稳定 gate 调用唯一 reusable workflow",
             ci_path.display()
         );
-        for (workflow, lane) in [("integration.yml", "integration"), ("audit.yml", "audit")] {
-            let path = root.join(".github/workflows").join(workflow);
-            let yaml = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
-            let delegates = if lane == "integration" {
-                github_integration_workflow_has_shard_matrix(&yaml)
-            } else {
-                workflow_calls_reusable_lane(&yaml, lane)
-            };
+        for removed in ["integration.yml", "audit.yml"] {
+            let path = root.join(".github/workflows").join(removed);
             assert!(
-                delegates,
-                "{} 须以 literal lane 调用唯一 reusable workflow",
+                !path.exists(),
+                "{} 已由 typed dynamic matrix 取代，不得保留双轨",
                 path.display()
             );
         }
@@ -3504,90 +3552,86 @@ mod tests {
     }
 
     fn split_ci_caller_fixture() -> &'static str {
-        r#"name: CI
-on:
-  pull_request:
-    branches: [develop]
-  push:
-    branches: [develop, "codex/**", "feature/**", "fix/**"]
-  workflow_dispatch:
-permissions:
-  contents: read
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-jobs:
-  ci-meta:
-    uses: ./.github/workflows/rss-rust-lane.yml
-    with:
-      lane: ci-meta
-  ci-core-prerequisites:
-    needs: ci-meta
-    uses: ./.github/workflows/rss-rust-lane.yml
-    with:
-      lane: ci-core-prerequisites
-  ci-core-tests:
-    name: ci-core-tests / ${{ matrix.partition }}
-    needs: ci-core-prerequisites
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { partition: 1/2, partition-label: 1-of-2 }
-          - { partition: 2/2, partition-label: 2-of-2 }
-    uses: ./.github/workflows/rss-rust-lane.yml
-    with:
-      lane: ci-core-tests
-      partition: ${{ matrix.partition }}
-      partition-label: ${{ matrix.partition-label }}
-  ci-security:
-    uses: ./.github/workflows/rss-rust-lane.yml
-    with:
-      lane: ci-security
-  ci-coverage:
-    needs: ci-meta
-    uses: ./.github/workflows/rss-rust-lane.yml
-    with:
-      lane: ci-coverage
-"#
+        include_str!("../../.github/workflows/ci.yml")
     }
 
     #[test]
-    fn split_ci_caller_predicate_green_and_synthetic_red() {
+    fn split_ci_caller_predicate_green_and_synthetic_red() -> anyhow::Result<()> {
         let green = split_ci_caller_fixture();
         assert!(pipeline_delegates_to_xtask_ci(green), "anti-vacuity");
+        let fallback_setup = "      - name: Setup scheduled audit tools\n        uses: ./.github/actions/setup-rss-ci\n        with:\n          lane: audit\n          profile: audit\n          toolchain: 1.96.0\n          nightly: \"\"\n          tool-cache-epoch: v4\n          writer-mode: false\n          evidence-enabled: false\n\n";
+        let setup_moved_to_gate = green.replacen(fallback_setup, "", 1).replacen(
+            "    steps:\n      - name: Checkout gate implementation",
+            &format!("    steps:\n{fallback_setup}      - name: Checkout gate implementation"),
+            1,
+        );
         for (name, red) in [
-            ("missing", green.replacen("  ci-security:\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: ci-security\n", "", 1)),
-            ("extra", format!("{green}  ci-extra:\n    uses: ./.github/workflows/rss-rust-lane.yml\n    with:\n      lane: ci-meta\n")),
-            ("rename", green.replacen("ci-security:", "security:", 1)),
-            ("lane-swap", green.replacen("lane: ci-core-tests", "lane: ci-coverage", 1)),
-            ("missing-partition", green.replacen("          - { partition: 2/2, partition-label: 2-of-2 }\n", "", 1)),
-            ("duplicate-partition", green.replacen("          - { partition: 2/2, partition-label: 2-of-2 }", "          - { partition: 1/2, partition-label: 1-of-2 }", 1)),
-            ("extra-partition", green.replacen("          - { partition: 2/2, partition-label: 2-of-2 }", "          - { partition: 2/2, partition-label: 2-of-2 }\n          - { partition: 3/3, partition-label: 3-of-3 }", 1)),
-            ("dynamic-partition", green.replacen("partition: 1/2, partition-label: 1-of-2", "partition: ${{ matrix.dynamic }}, partition-label: 1-of-2", 1)),
-            ("include-to-exclude", green.replacen("        include:", "        exclude:", 1)),
-            ("rows-under-other-key", green.replacen("        include:", "        other:", 1)),
-            ("wrong-needs", green.replacen("needs: ci-meta", "needs: ci-security", 1)),
-            ("dynamic-lane", green.replacen("lane: ci-meta", "lane: ${{ inputs.lane }}", 1)),
-            ("inline-run", green.replacen("    uses: ./.github/workflows/rss-rust-lane.yml", "    run: cargo build --workspace\n    uses: ./.github/workflows/rss-rust-lane.yml", 1)),
-            ("always", green.replacen("    needs: ci-meta", "    needs: ci-meta\n    if: ${{ always() }}", 1)),
+            ("missing-plan", green.replacen("  ci-plan:\n", "  plan-missing:\n", 1)),
+            ("extra-job", format!("{green}\n  bypass:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")),
+            ("static-matrix", green.replacen("      matrix: ${{ fromJSON(needs.ci-plan.outputs.matrix) }}", "      matrix:\n        include:\n          - { lane: ci-meta }", 1)),
+            ("untyped-lane", green.replacen("lane: ${{ matrix.lane }}", "lane: ci-meta", 1)),
+            ("missing-job-key", green.replacen("      ci-job-key: ${{ matrix.jobKey }}\n", "", 1)),
+            ("missing-plan-digest", green.replacen("      plan-digest: ${{ matrix.planDigest }}\n", "", 1)),
+            ("missing-source", green.replacen("      source-revision: ${{ matrix.sourceRevision }}\n", "", 1)),
+            ("gate-not-always", green.replacen("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}", "  ci-gate:\n    name: ci-gate\n    if: ${{ success() }}", 1)),
+            ("gate-missing-matrix-result", green.replacen("            --matrix-result \"${{ needs.execute.result }}\"", "", 1)),
             ("permission", green.replacen("contents: read", "contents: write", 1)),
-            ("missing-concurrency", green.replacen("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n", "", 1)),
+            ("missing-concurrency", green.replacen("concurrency:\n  group: rss-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n", "", 1)),
             ("branch-cancellation", green.replacen("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "cancel-in-progress: true", 1)),
+            ("missing-event-concurrency-domain", green.replacen("group: rss-ci-${{ github.event_name }}-", "group: rss-ci-", 1)),
             ("unstable-concurrency-key", green.replacen("github.event.pull_request.number || github.ref", "github.run_id", 1)),
             ("unsafe-trigger", green.replacen("  workflow_dispatch:", "  pull_request_target:\n  workflow_dispatch:", 1)),
-            ("pr-activity-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    types: [closed]", 1)),
             ("pr-path-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    paths: [\"src/**\"]", 1)),
-            ("push-path-ignore", green.replacen("  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]", "  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]\n    paths-ignore: [\"docs/**\"]", 1)),
-            ("push-branches-ignore", green.replacen("  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]", "  push:\n    branches: [develop, \"codex/**\", \"feature/**\", \"fix/**\"]\n    branches-ignore: [\"release/**\"]", 1)),
+            ("push-missing-codex", green.replacen(", \"codex/**\"", "", 1)),
+            ("push-missing-feature", green.replacen(", \"feature/**\"", "", 1)),
+            ("push-missing-fix", green.replacen(", \"fix/**\"", "", 1)),
+            ("push-extra-branch", green.replacen(", \"fix/**\"]", ", \"fix/**\", \"release/**\"]", 1)),
             ("manual-input", green.replacen("  workflow_dispatch:", "  workflow_dispatch:\n    inputs:\n      lane:\n        required: false", 1)),
-            ("missing-develop", green.replacen("branches: [develop]", "branches: []", 1)),
-            ("wrong-develop", green.replacen("branches: [develop]", "branches: [main]", 1)),
-            ("extra-push-branch", green.replacen("\"fix/**\"]", "\"fix/**\", \"release/**\"]", 1)),
-            ("field-camouflage", format!("env:\n  pull_request:\n    branches: [develop]\n{}", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    types: [closed]", 1))),
+            ("full-override-bypass", green.replacen("${{ vars.RSS_CI_FORCE_FULL }}", "false", 1)),
+            ("plan-upload-name", green.replacen("name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}", "name: stale-plan", 1)),
+            ("plan-download-name", green.replacen("name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}", "name: stale-plan", 2)),
+            ("receipt-pattern", green.replacen("pattern: ci-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}", "pattern: ci-evidence-*", 1)),
+            ("receipt-merge", green.replacen("merge-multiple: false", "merge-multiple: true", 1)),
+            ("gate-missing-plan-path", green.replacen("            --plan target/ci-plan-download/ci-plan.json \\\n", "", 1)),
+            ("gate-missing-receipts-path", green.replacen("            --receipts target/ci-receipts \\\n", "", 1)),
+            ("planner-overwrites-plan", green.replacen("            --github-output \"$GITHUB_OUTPUT\"", "            --github-output \"$GITHUB_OUTPUT\"\n          : > target/ci-impact/ci-plan.json", 1)),
+            ("gate-replaces-receipts", green.replacen("          cargo run --locked -p xtask -- ci-gate \\\n", "          rm -rf target/ci-receipts\n          cargo run --locked -p xtask -- ci-gate \\\n", 1)),
+            ("planner-extra-step", green.replacen("      - name: Upload typed plan", "      - name: Bypass planner\n        run: true\n\n      - name: Upload typed plan", 1)),
+            ("missing-audit-fallback", green.replacen("  scheduled-audit-fallback:\n", "  removed-audit-fallback:\n", 1)),
+            ("audit-fallback-not-always", green.replacen("if: ${{ always() && github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}", "if: ${{ github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}", 1)),
+            ("audit-fallback-not-schedule-only", green.replacen("github.event_name == 'schedule'", "github.event_name != 'pull_request'", 1)),
+            ("audit-fallback-no-planner-failure", green.replacen("needs.ci-plan.result != 'success'", "needs.ci-plan.result == 'success'", 1)),
+            ("audit-fallback-checkout-ref", green.replacen("      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n          fetch-depth: 1\n          ref: ${{ github.sha }}", "      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n          fetch-depth: 1\n          ref: develop", 1)),
+            ("audit-fallback-checkout-credentials", green.replacen("      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: false", "      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: true", 1)),
+            ("audit-fallback-lane", green.replacen("      - name: Setup scheduled audit tools\n        uses: ./.github/actions/setup-rss-ci\n        with:\n          lane: audit", "      - name: Setup scheduled audit tools\n        uses: ./.github/actions/setup-rss-ci\n        with:\n          lane: ci-security", 1)),
+            ("audit-fallback-profile", green.replacen("          profile: audit", "          profile: ci-security", 1)),
+            ("audit-fallback-toolchain", green.replacen("          toolchain: 1.96.0", "          toolchain: stable", 1)),
+            ("audit-fallback-epoch", green.replacen("          tool-cache-epoch: v4", "          tool-cache-epoch: v3", 1)),
+            ("audit-fallback-writer", green.replacen("          writer-mode: false", "          writer-mode: true", 1)),
+            ("audit-fallback-evidence", green.replacen("          evidence-enabled: false", "          evidence-enabled: true", 1)),
+            ("audit-fallback-command", green.replacen("          cargo run --locked -p xtask -- audit", "          cargo audit", 1)),
+            ("audit-fallback-step-moved-to-gate", setup_moved_to_gate),
+            ("audit-fallback-extra-step", green.replacen("    steps:\n      - name: Checkout scheduled audit revision", "    steps:\n      - name: Bypass scheduled audit\n        run: true\n\n      - name: Checkout scheduled audit revision", 1)),
+            (
+                "metrics-missing-warn",
+                green.replacen("if-no-files-found: error", "if-no-files-found: warn", 1),
+            ),
         ] {
             assert!(!pipeline_delegates_to_xtask_ci(&red), "caller weakening `{name}` must fail closed");
         }
+        for step in [
+            "Build typed CI impact plan",
+            "Verify plan, matrix result, and exact receipts",
+        ] {
+            for field in ["name", "env"] {
+                let red = camouflage_named_step_run(green, step, field)?;
+                assert!(
+                    !pipeline_delegates_to_xtask_ci(&red),
+                    "caller `{step}` run camouflage in `{field}` must fail closed"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -3603,7 +3647,7 @@ jobs:
         }
     }
 
-    /// 真实 committed 文件必须已切换为四个 literal reusable jobs。
+    /// 真实 committed 文件必须已切换为 planner、动态 executor、定时审计 fallback 与稳定 gate。
     #[test]
     fn github_ci_workflow_delegates_to_split_xtask_lanes() -> anyhow::Result<()> {
         let path = workspace_root()?
@@ -3614,7 +3658,7 @@ jobs:
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             pipeline_delegates_to_xtask_ci(&yaml),
-            ".github/workflows/ci.yml 须精确声明 ci-meta/core/security/coverage 四个 literal reusable jobs 与 Meta DAG"
+            ".github/workflows/ci.yml 须精确声明 planner、typed dynamic matrix、定时审计 fallback 与稳定 gate"
         );
         let action_path = workspace_root()?
             .join(".github")
@@ -3864,24 +3908,19 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
 
     // ---- 供应链定时刷新 lane 守卫（issue #1133）----
 
-    /// xtask audit 委托的规范形（至少一种须在 YAML 出现，anti-vacuity）：alias 形与 CI 锁定入口形。
-    const XTASK_AUDIT_FORMS: &[&str] =
-        &["cargo xtask audit", "cargo run --locked -p xtask -- audit"];
-
     /// GitHub audit workflow 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。
     /// YAML 须同时满足——① 顶层 `schedule:` 键（GitHub Actions 定时触发）；② `workflow_dispatch:` 手动 backstop；
     /// ③ audit 委托形在**真实 script 命令**；④ 每个 `cargo run` 都是完整 xtask audit 委托形，其他 cargo 子命令仅限安装。
     fn github_audit_workflow_has_scheduled_lane(yaml: &str) -> bool {
         workflow_has_top_level_on_event(yaml, "schedule")
             && workflow_has_top_level_on_event(yaml, "workflow_dispatch")
-            && (workflow_delegates_to_xtask_lane(yaml, XTASK_AUDIT_FORMS)
-                || workflow_calls_reusable_lane(yaml, "audit"))
+            && pipeline_delegates_to_xtask_ci(yaml)
     }
 
     /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
     #[test]
     fn scheduled_audit_lane_predicate_green_and_red() {
-        let green = "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\njobs:\n  audit:\n    steps:\n      - run: cargo install cargo-binstall\n      - run: cargo run --locked -p xtask -- audit\n";
+        let green = include_str!("../../.github/workflows/ci.yml");
         assert!(
             github_audit_workflow_has_scheduled_lane(green),
             "完整定时 lane 应为真"
@@ -3897,51 +3936,9 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ),
             "缺 workflow_dispatch backstop"
         );
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                &green.replace("cargo run --locked -p xtask -- audit", "cargo xtask ci")
-            ),
-            "缺 audit 委托形"
-        );
-        // 红：内联 `cargo audit` 门命令（不委托 xtask）——门逻辑须单源在 xtask。
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(&format!("{green}  - script: cargo audit\n")),
-            "内联 cargo audit 门命令"
-        );
-        // 红（codex F1 核心）：全部关键字仅在**注释**里、无真实结构 → 结构绑定守卫不满足
-        //（旧裸 `yaml.contains` 谓词会误判为真）。安装步使 cargo 命令白名单通过，隔离出结构断言失败。
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                "# schedule:\n# workflow_dispatch:\n# cargo run --locked -p xtask -- audit\nsteps:\n  - run: cargo install cargo-binstall\n"
-            ),
-            "关键字仅在注释里不应满足守卫（fail-closed）"
-        );
-        // 红：`schedule:` / `workflow_dispatch:` 不在顶层 `on:` 下，不能凑出触发器。
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                "env:\n  schedule: true\njobs:\n  audit:\n    workflow_dispatch: true\n    steps:\n      - run: cargo run --locked -p xtask -- audit\n"
-            ),
-            "触发器键不在顶层 on 块下不应满足守卫（fail-closed）"
-        );
-        // 红（codex F1 核心）：audit 委托形仅在 **displayName**（字符串字段值）、无真实 audit script → 不满足。
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: cargo install cargo-binstall\n    name: 'cargo run --locked -p xtask -- audit'\n"
-            ),
-            "audit 形仅在 displayName 不应满足守卫（fail-closed）"
-        );
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: cargo run --locked -p xtask -- audit --allow-missing-tools\n"
-            ),
-            "audit lane 不得在 workflow 中宽限缺工具"
-        );
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                "on:\n  schedule:\n    - cron: \"0 6 * * *\"\n  workflow_dispatch:\nsteps:\n  - run: |\n      exit 0\n      cargo run --locked -p xtask -- audit\n"
-            ),
-            "audit 委托命令不可被前置控制流绕过"
-        );
+        assert!(!github_audit_workflow_has_scheduled_lane(
+            &green.replace("- cron: \"0 6 * * *\"", "- cron: \"0 7 * * *\"")
+        ));
     }
 
     /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 `cargo xtask audit` 委托
@@ -3951,12 +3948,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let path = workspace_root()?
             .join(".github")
             .join("workflows")
-            .join("audit.yml");
+            .join("ci.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             github_audit_workflow_has_scheduled_lane(&yaml),
-            ".github/workflows/audit.yml 须含 `schedule:` 定时刷新 lane 且经 `cargo xtask audit` 委托"
+            ".github/workflows/ci.yml 须以 typed full plan 承载每日 audit 刷新"
         );
         Ok(())
     }
@@ -4015,54 +4012,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         yaml: &str,
         expected_shards: &[&str],
     ) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(jobs_start) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
-        else {
-            return false;
-        };
-        let jobs_body = lines[jobs_start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 0)
-            .copied()
-            .collect::<Vec<_>>();
-        let jobs = jobs_body
-            .iter()
-            .filter_map(|(indent, line)| (*indent == 2).then(|| line.strip_suffix(':')).flatten())
-            .collect::<Vec<_>>();
-        let top_fields = jobs_body
-            .iter()
-            .filter_map(|(indent, line)| {
-                (*indent == 4)
-                    .then(|| line.split_once(':').map(|(key, _)| key))
-                    .flatten()
-            })
-            .collect::<Vec<_>>();
-        workflow_has_only_safe_ci_events(yaml)
-            && workflow_has_exact_read_permissions(yaml)
-            && workflow_has_pr_only_concurrency(yaml)
-            && jobs == ["integration"]
-            && top_fields == ["name", "strategy", "uses", "with"]
-            && lines.contains(&(
-                4,
-                "name: integration / ${{ matrix.shard }} / ${{ matrix.partition-label }}",
-            ))
-            && lines.contains(&(6, "fail-fast: false"))
-            && expected_shards == expected_integration_shards()
-            && integration_matrix_rows(yaml) == Some(expected_integration_rows())
-            && lines.contains(&(4, "uses: ./.github/workflows/rss-rust-lane.yml"))
-            && lines.contains(&(6, "lane: integration"))
-            && lines.contains(&(6, "shard: ${{ matrix.shard }}"))
-            && lines.contains(&(6, "partition: ${{ matrix.partition }}"))
-            && lines.contains(&(6, "partition-label: ${{ matrix.partition-label }}"))
-            && !yaml.contains("continue-on-error")
-            && !yaml.contains("cargo nextest")
-            && !yaml.contains("--allow-missing-tools")
-            && !yaml.contains("fromJSON")
-            && !lines
-                .iter()
-                .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
+        expected_shards == expected_integration_shards()
+            && pipeline_delegates_to_xtask_ci(yaml)
+            && yaml.contains("shard: ${{ matrix.shard || '' }}")
+            && yaml.contains("partition: ${{ matrix.partition || '' }}")
     }
 
     fn github_integration_workflow_has_shard_matrix(yaml: &str) -> bool {
@@ -4113,10 +4066,45 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         Some(allowlist.split('|').map(str::to_owned).collect())
     }
 
+    fn expected_reusable_lanes() -> Vec<&'static str> {
+        let mut lanes = Vec::new();
+        for job in CiJobKey::ALL {
+            let lane = job.lane_kind().workflow_name();
+            if !lanes.contains(&lane) {
+                lanes.push(lane);
+            }
+        }
+        lanes
+    }
+
+    fn closed_lane_case(step: &TypedStep) -> Option<Vec<&str>> {
+        let start = step
+            .run
+            .iter()
+            .position(|line| line == "case \"$RSS_LANE\" in")?;
+        let body = step.run[start + 1..]
+            .iter()
+            .take_while(|line| line.as_str() != "esac");
+        Some(
+            body.filter_map(|line| {
+                let (arm, _) = line.split_once(')')?;
+                (arm != "*"
+                    && !arm.is_empty()
+                    && arm.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    }))
+                .then_some(arm)
+            })
+            .collect(),
+        )
+    }
+
     #[test]
     fn integration_matrix_predicate_green_and_red() {
-        let green = include_str!("../../.github/workflows/integration.yml");
+        let green = include_str!("../../.github/workflows/ci.yml");
         assert!(github_integration_workflow_has_shard_matrix(green));
+        assert!(integration_matrix_rows(green).is_none());
+        assert_eq!(expected_integration_rows().len(), 7);
         let mut future_catalog = expected_integration_shards();
         future_catalog.push("future-shard");
         assert!(
@@ -4124,9 +4112,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             "catalog 新增 shard 而 committed matrix 未同步时必须 red"
         );
         for red in [
-            green.replacen("          - { shard: postgres-domain, partition: \"\", partition-label: unpartitioned }\n", "", 1),
-            green.replace("fail-fast: false", "fail-fast: true"),
-            green.replace("shard: ${{ matrix.shard }}", "shard: fromJSON(env.SHARDS)"),
+            green.replace("shard: ${{ matrix.shard || '' }}", "shard: postgres-domain"),
+            green.replace("partition: ${{ matrix.partition || '' }}", "partition: ''"),
+            green.replace(
+                "fromJSON(needs.ci-plan.outputs.matrix)",
+                "fromJSON(env.SHARDS)",
+            ),
             green.replace(
                 "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
                 "cancel-in-progress: true",
@@ -4135,8 +4126,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "github.event.pull_request.number || github.ref",
                 "github.run_id",
             ),
-            format!("{green}    continue-on-error: true\n"),
-            format!("{green}    run: cargo nextest run\n"),
+            format!("{green}\n  bypass:\n    runs-on: ubuntu-latest\n"),
         ] {
             assert!(!github_integration_workflow_has_shard_matrix(&red));
         }
@@ -4147,12 +4137,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let path = workspace_root()?
             .join(".github")
             .join("workflows")
-            .join("integration.yml");
+            .join("ci.yml");
         let yaml = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         assert!(
             github_integration_workflow_has_shard_matrix(&yaml),
-            ".github/workflows/integration.yml must contain the exact closed shard matrix"
+            ".github/workflows/ci.yml must derive integration rows from the typed planner"
         );
         Ok(())
     }
@@ -5190,6 +5180,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             steps[i].uses.as_deref() == Some("actions/checkout@v4")
                 && steps[i].with_exact("persist-credentials", &["false"])
                 && steps[i].with_exact("fetch-depth", &["0"])
+                && steps[i].with_exact("ref", &["${{ inputs.source-revision }}"])
         });
         let tool_save_ok = save_tools.is_some_and(|i| {
             let step = &steps[i];
@@ -5301,6 +5292,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 && step.run_has_line("integration)")
                 && step.run_has_line("audit)")
                 && step.run_has_line("*) exit 64 ;;")
+                && closed_lane_case(step) == Some(expected_reusable_lanes())
         });
         let xtask_ok = xtask.is_some_and(|i| {
             let step = &steps[i];
@@ -5321,6 +5313,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 && step.run_has_line("integration)")
                 && step.run_contains("args=(ci-integration --shard \"$RSS_SHARD\")")
                 && step.run_contains("args+=(--partition \"$RSS_PARTITION\")")
+                && closed_lane_case(step) == Some(expected_reusable_lanes())
                 && step.env_exact(
                     "RSS_INTERNAL_SCCACHE_PATH",
                     &["${{ steps.setup.outputs.compiler-cache-path }}"],
@@ -5525,10 +5518,19 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .any(|(indent, line)| *indent == 2 && *line == "workflow_call:")
             && lines
                 .iter()
-                .any(|(indent, line)| *indent == 8 && *line == "required: true")
+                .filter(|(indent, line)| *indent == 8 && *line == "required: true")
+                .count()
+                == 4
             && lines
                 .iter()
-                .any(|(indent, line)| *indent == 8 && *line == "type: string")
+                .filter(|(indent, line)| *indent == 8 && *line == "required: false")
+                .count()
+                == 3
+            && lines
+                .iter()
+                .filter(|(indent, line)| *indent == 8 && *line == "type: string")
+                .count()
+                == 7
             && lines
                 .iter()
                 .any(|(indent, line)| *indent == 2 && *line == "contents: read")
@@ -5538,6 +5540,15 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             && lines
                 .iter()
                 .any(|(indent, line)| *indent == 2 && *line == "CARGO_BUILD_JOBS: 2")
+            && root_mapping_has_exact_entries(
+                yaml,
+                "env",
+                &[
+                    "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
+                    "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
+                    "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
+                ],
+            )
             && start.is_some_and(|i| {
                 steps[i].env_exact("CARGO_TARGET_DIR", &["${{ runner.temp }}/rss-cargo-target"])
             })
@@ -6058,9 +6069,36 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn reusable_rust_lane_guard_rejects_semantic_weakening() -> anyhow::Result<()> {
         let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
         let green = std::fs::read_to_string(&path)?;
+        assert!(root_mapping_has_exact_entries(
+            &green,
+            "env",
+            &[
+                "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
+                "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
+                "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
+            ],
+        ));
+        let green_steps = yaml_typed_steps(&green);
+        let checkout = green_steps
+            .iter()
+            .find(|step| step.name.as_deref() == Some("Checkout"))
+            .context("checkout step")?;
+        assert!(checkout.with_exact("ref", &["${{ inputs.source-revision }}"]));
+        for id in ["policy", "xtask"] {
+            let step = green_steps
+                .iter()
+                .find(|step| step.id.as_deref() == Some(id))
+                .context("closed lane step")?;
+            assert_eq!(
+                closed_lane_case(step),
+                Some(expected_reusable_lanes()),
+                "{id}"
+            );
+        }
         assert!(reusable_rust_lane_is_hardened(&green));
         assert_eq!(
             integration_policy_shards(&green),
@@ -6075,6 +6113,22 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         );
         for (needle, replacement) in [
             ("required: true", "required: false"),
+            (
+                "ref: ${{ inputs.source-revision }}",
+                "ref: ${{ github.sha }}",
+            ),
+            (
+                "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
+                "RSS_CI_JOB_KEY: ci-meta",
+            ),
+            (
+                "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
+                "RSS_CI_PLAN_DIGEST: stale",
+            ),
+            (
+                "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
+                "RSS_CI_SOURCE_REVISION: ${{ github.sha }}",
+            ),
             (" && github.ref_protected", ""),
             ("profile=ci", "profile=shared"),
             (
@@ -6727,31 +6781,28 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     #[test]
     fn thin_lane_callers_reject_dynamic_or_expanded_execution() -> anyhow::Result<()> {
         let root = workspace_root()?.join(".github/workflows");
-        for (file, lane) in [("integration.yml", "integration"), ("audit.yml", "audit")] {
-            let green = std::fs::read_to_string(root.join(file))?;
-            let delegates = |yaml: &str| {
-                if lane == "integration" {
-                    github_integration_workflow_has_shard_matrix(yaml)
-                } else {
-                    workflow_calls_reusable_lane(yaml, lane)
-                }
-            };
-            assert!(delegates(&green));
-            for (index, red) in [
-                green.replace(&format!("lane: {lane}"), "lane: ${{ inputs.lane }}"),
-                green.replace(
-                    "uses: ./.github/workflows/rss-rust-lane.yml",
-                    "name: ./.github/workflows/rss-rust-lane.yml",
-                ),
-                green.replace("contents: read", "contents: write"),
-                format!("{green}\nenv:\n  RSS_CACHE_WRITER: true\n"),
-                format!("{green}\nsteps:\n  - run: true\n"),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                assert!(!delegates(&red), "caller red {index}");
-            }
+        for removed in ["integration.yml", "audit.yml"] {
+            assert!(
+                !root.join(removed).exists(),
+                "legacy caller {removed} must stay deleted"
+            );
+        }
+        let green = std::fs::read_to_string(root.join("ci.yml"))?;
+        assert!(pipeline_delegates_to_xtask_ci(&green));
+        for (index, red) in [
+            green.replace("lane: ${{ matrix.lane }}", "lane: integration"),
+            green.replace(
+                "uses: ./.github/workflows/rss-rust-lane.yml",
+                "name: ./.github/workflows/rss-rust-lane.yml",
+            ),
+            green.replace("contents: read", "contents: write"),
+            format!("{green}\nenv:\n  RSS_CACHE_WRITER: true\n"),
+            format!("{green}\nsteps:\n  - run: true\n"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!pipeline_delegates_to_xtask_ci(&red), "caller red {index}");
         }
         Ok(())
     }

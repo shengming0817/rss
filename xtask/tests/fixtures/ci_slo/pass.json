@@ -1,9 +1,12 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "job": {
     "repository": "rss",
     "workflow": "CI",
     "job": "lane",
+    "ciJobKey": "ci-meta",
+    "sourceRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "planDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "runId": "42",
     "runAttempt": "3",
     "runnerOs": "Linux",

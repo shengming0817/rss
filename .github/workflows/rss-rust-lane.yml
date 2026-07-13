@@ -3,6 +3,18 @@ name: RSS Rust lane
 on:
   workflow_call:
     inputs:
+      ci-job-key:
+        description: Closed CiJobKey derived by the typed planner.
+        required: true
+        type: string
+      plan-digest:
+        description: Canonical typed plan digest bound into job evidence.
+        required: true
+        type: string
+      source-revision:
+        description: Exact merge revision executed by this lane.
+        required: true
+        type: string
       lane:
         description: Closed CI lane identifier.
         required: true
@@ -32,6 +44,9 @@ env:
   CARGO_BUILD_JOBS: 2
   RSS_NIGHTLY_PINNED: nightly-2026-04-16
   RSS_CI_EVIDENCE_FILE: ci-evidence.json
+  RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}
+  RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}
+  RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}
   RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
@@ -46,6 +61,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          ref: ${{ inputs.source-revision }}
 
       - name: Capture start evidence
         timeout-minutes: 2
