@@ -51,7 +51,8 @@ expect_failure_stderr_contains() {
 }
 
 # The executable catalog is the only source of lane/backend/version policy.
-expect_output 'ci-meta installs the outer compiler cache' 'sccache@0.15.0' "$ADAPTER" specs --lane ci-meta --backend all
+expect_output 'ci-meta seals compiler cache plus digest-pinned promtool' 'sccache@0.15.0,promtool@3.5.3' "$ADAPTER" specs --lane ci-meta --backend all
+expect_output 'ci-meta promtool uses the hermetic docker backend' 'promtool@3.5.3' "$ADAPTER" specs --lane ci-meta --backend docker
 expect_output 'prerequisites use only binstall tools' \
   'cargo-dylint@6.0.1,dylint-link@6.0.1' \
   "$ADAPTER" specs --lane ci-core-prerequisites --backend binstall
@@ -72,7 +73,7 @@ expect_output 'audit shares the security set' \
 expect_failure 'unknown lane fails closed' "$ADAPTER" specs --lane unknown --backend all
 expect_failure 'unknown backend fails closed' "$ADAPTER" specs --lane audit --backend mystery
 expect_output 'all tools preserve canonical catalog order' \
-  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0' \
+  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0,promtool@3.5.3' \
   "$ADAPTER" specs --lane all --backend all
 expect_output 'sccache spec is derived from the catalog' \
   'sccache|0.15.0|install-action|.install-action/bin/sccache|sccache' \
@@ -252,11 +253,30 @@ sed -i.bak 's/dylint-link 6\.0\.1 (path+file:\/\/\/tmp\/forged)\" = \[\"dylint-l
 expect_failure 'wrong dylint-link receipt binary fails closed' \
   "$ADAPTER" verify --mode fresh --lane ci-core-prerequisites --root "$ROOT"
 
-# Seals bind adapter identity, lane/request set, safe paths, and regular executables.
+# Seals bind adapter identity, lane/request set, safe paths, regular executables, and OCI digest.
+FAKE_DOCKER_BIN="$TMP_ROOT/fake-docker-bin"
+mkdir -p "$FAKE_DOCKER_BIN"
+make_binary "$FAKE_DOCKER_BIN/docker" \
+  "printf '%s\n' 'promtool, version 3.5.3 (branch: HEAD, revision: fixture)'"
+PATH="$FAKE_DOCKER_BIN:$PATH"
+export PATH
 rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
 make_binary "$ROOT/.install-action/bin/sccache" \
   "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
-expect_success 'ci-meta creates a compiler-cache-only seal' \
+expect_success 'ci-meta creates a compiler-cache and OCI policy seal' \
+  "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+if grep -Fq 'prom/prometheus@sha256:ddc2493835a1509976d5e4e0c94199c4f843ce1f42dd6bcfc8231ba734a93ff7' "$ROOT/.rss-tool-seal-v1"; then
+  pass 'seal records the exact promtool image digest'
+else fail 'seal records the exact promtool image digest'; fi
+expect_failure 'missing docker fails the fresh promtool probe closed' \
+  env PATH=/usr/bin:/bin "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+BAD_DOCKER_BIN="$TMP_ROOT/bad-docker-bin"
+mkdir -p "$BAD_DOCKER_BIN"
+make_binary "$BAD_DOCKER_BIN/docker" \
+  "printf '%s\n' 'promtool, version 3.5.2 (branch: HEAD, revision: fixture)'"
+expect_failure 'promtool version mismatch fails the fresh probe closed' \
+  env PATH="$BAD_DOCKER_BIN:/usr/bin:/bin" "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
+expect_success 'exact promtool version restores the fresh seal after negative probes' \
   "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
 cp "$SEAL" "$TMP_ROOT/empty-seal" 2>/dev/null || true
 printf '\n# identity change\n' >>"$LEGAL"

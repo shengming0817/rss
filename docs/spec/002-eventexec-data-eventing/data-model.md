@@ -29,20 +29,48 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 |----|------|------|
 | id | uuid PK | entry id |
 | event_id | text UNIQUE | 幂等 key（EventId/IdemKey，opaque 全局唯一；不强绑 UUID 格式，跨租户唯一性由 IdemKey 全局唯一保证，见 migration 注释） |
+| tenant_id | uuid | tenant scope（RLS / same-ID redrive scope） |
 | domain | text | 归属域（per-domain relay 读） |
 | topic | text | dotted topic |
-| contract_id | text | 契约 id |
+| contract_id / contract_version / schema_hash | text | 契约与 schema identity |
 | payload | bytea | 已编码 payload |
 | metadata | jsonb | envelope: broker-visible `trace`/`correlation`/`tenantId`/`tenantAuthority`/`occurredAt`；persisted-only `subjectId`/`actor`；不序列化完整 Principal 或含 PII（refs: FR-020） |
 | status | text | pending/publishing/published/dlx（值集冻结） |
+| seq / partition_key | bigint / text NULL | 表级单调顺序；非空 partition 内 head-of-line gate |
 | retry_count | int default 0 | |
 | retry_after | timestamptz NULL | 瞬态失败延后 |
-| lease_token | uuid NULL | relay CAS fencing |
+| lease_token / lease_until | uuid / timestamptz NULL | publishing 状态的 relay CAS fencing pair |
+| published_at / dlx_at | timestamptz NULL | 与 terminal status 双向绑定的权威终态时间 |
+| same_id_delivery_phase | text | `automatic` / `redrive` 闭值集 |
+| automatic_retry_deadline | timestamptz NULL | 首次 automatic claim 冻结的绝对 deadline |
+| same_id_redrive_deadline | timestamptz NULL | 首次 DLX 冻结的绝对 redrive deadline |
 | created_at/updated_at | timestamptz | |
 
-- Index: `(domain, status, retry_after)`（relay 扫未发）；`(created_at)`（清理）。
-- 状态机：`pending → publishing → published`；`publishing →(永久/预算耗尽)→ dlx`；`publishing →(瞬态)→ pending(+retry_after)`。
-- CAS：status 转移以 `lease_token` 比对（防并发双发）。
+- Index: `(domain,status,retry_after)` 候选扫描；`(domain,lease_until) WHERE status='publishing'` stale
+  reclaim；`(domain,partition_key,seq) WHERE partition_key IS NOT NULL AND status<>'published'` 队头 gate；
+  `(published_at) WHERE status='published'` retention。
+- 状态机：`automatic: pending → publishing → published|dlx|pending(retry)`；deadline 内 operator redrive
+  `dlx → redrive:pending → publishing → published|dlx|pending(retry)`。redrive 只切 phase、清
+  retry/lease/terminal 时间，两个绝对 deadline 不变；到期 preflight 不调用 broker，并 settle 到 DLX。
+- CAS：status 转移同时比对 `lease_token + lease_until`。首次 claim 以 `COALESCE` 冻结 automatic deadline，
+  首次 DLX 以 `COALESCE` 冻结 redrive deadline；operator 在 redrive deadline 到期后得到 typed `Expired`
+  且不 mutation。
+
+### event_delivery_policy（P4/P5 correctness singleton）
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| singleton | boolean PK | 唯一行且必须为 true |
+| policy_revision | text | 固定 `same-id-delivery-v1` |
+| automatic_retry_window_seconds | bigint | 86400（24h） |
+| same_id_redrive_horizon_seconds | bigint | 86400（24h） |
+| safety_margin_seconds | bigint | 86400（24h） |
+| inbox_receipt_retention_seconds | bigint | 604800（7d） |
+
+- DB CHECK 强制所有值为正且 `inbox retention > automatic + redrive + safety`；runtime 通过短生命周期
+  migrator/maintenance 连接读取，要求唯一行、revision 和四值与 release 完全一致，否则启动 fail-closed。
+- `rss_app` 无表权限；outbox maintenance 与 inbox receipt maintenance owner 经固定 SECURITY DEFINER
+  函数读取。正确性策略没有环境变量或 caller override。
 
 ### inbox_receipts（P5）
 | 列 | 类型 | 说明 |
@@ -59,7 +87,11 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 | committed_at | timestamptz NULL | done receipt time |
 
 - PK: `(tenant_id, event_id, consumer_group)`。claim = tenant-scoped INSERT，stale reclaim 仅在 domain/topic/contract/schema identity 一致时更新 lease；identity mismatch 返回 invariant。
-- 保留期清理（#1210/#1650）：`PgInboxSweeper` 经 `rss_sweep_inbox_receipts(retain_seconds)` 删 `status='done' AND committed_at ≤ now()-retain` 的去重记录（`claimed` 行不删）；默认 **7 天**（`INBOX_RECEIPT_RETENTION_SECONDS`），**必须严格大于**最大重投窗口（`max_redelivery_window_secs`≈1023s，NServiceBus 去重铁律——低于/等于即迟到重投误判 Fresh 重复执行），编译期 const 断言 + 运行期 sweep fail-closed 双档守（INBOX-RECEIPT-RETENTION-FLOOR-01）。清理索引 `(status, committed_at)`。完整三表保留期契约见 `docs/ops/…-outbox-relay-observability.md §保留期清理`。
+- 保留期清理（#1210/#1650）：`PgInboxSweeper` 经零参数 `rss_sweep_inbox_receipts()` 从上述 DB policy
+  读取固定 7d，删 `status='done' AND committed_at ≤ DB clock-7d` 的去重记录（`claimed` 行不删），每 tick
+  最多 1000 条；没有 retain 参数 overload。7d 严格覆盖 automatic 24h + redrive 24h + safety 24h，避免
+  receipt 先清理后同 event id 再执行。清理索引 `(status, committed_at)`。完整三表保留期契约见
+  `docs/ops/…-outbox-relay-observability.md §保留期清理`。
 - runtime durable event consumer 以 PostgreSQL `inbox_receipts` 为单一幂等 claimer；Redis 不再作为 event consumer 去重后端。claim 前必须已解析 `IdemKey`、验证 schema header 与 tenantAuthority，并构造 `InboxReceiptContext`。
 
 ### dead_letter（P7）
@@ -89,8 +121,9 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 - 内部 DLQ API 区分分页 `DlqListResult { data, has_more, next_cursor }`、`DlqReplayRequest`
   （consumer/saga dead_letter → 新 outbox id）与 `DlqRedriveRequest`（outbox dlx → 原 outbox 行恢复
   pending）。replay/redrive 均必须携带 `OperatorDlqCapability`；replay 的 dead_letter id 先经 typed
-  `DeadLetterId` UUID parse，非法输入不进入 SQL cast。replay/redrive 必须先用同一 `KeyProvider` 解密，
-  plaintext row/shape 必须失败；consumer replay 不删除原死信、不重置 `inbox_receipts done`。
+  `DeadLetterId` UUID parse，非法输入不进入 SQL cast。只有 replay 使用同一 `KeyProvider` 解密；
+  `redrive-outbox` 是 payload-free 原 outbox 状态转换。plaintext replay row/shape 必须失败；consumer replay
+  不删除原死信、不重置 `inbox_receipts done`。outbox redrive deadline 到期返回 typed `Expired`，不修改行。
 - 保留期清理（#1210）：`PgDeadLetterStore::sweep` 删 `last_attempt_at ≤ now()-retain` 的死信（**全域**，所有行均终结）；默认/最小 **30 天**（`DEAD_LETTER_RETENTION_SECONDS`，合规导向）。清理索引 `(last_attempt_at)`（migration 0021）。语义由「immutable append（只 INSERT）」改为「保留期内不可变、超期清理」——`rss_app` 无直接 DELETE，仅可调用 NOLOGIN maintenance owner 承载的 `rss_sweep_dead_letter(bigint)` 固定函数；清理前冷存储导出（合规归档）见 #1536。
 
 ### saga_instances / saga_journal（P9 + #1632）
@@ -175,7 +208,8 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
 
 ## 状态机汇总
 
-- **outbox entry**：pending→publishing→{published | dlx | pending(retry)}。
+- **outbox entry**：`automatic:pending→publishing→{published|dlx|pending(retry)}`；deadline 内
+  `dlx→redrive:pending→publishing→{published|dlx|pending(retry)}`，两个 absolute deadline 单调冻结不延长。
 - **inbox claim**：absent→claimed→done（重投见 claimed/done 即 Duplicate）。
 - **saga**：running→{succeeded | compensating→{compensated(failed 终态) | dead-letter}}。
 - **reconcile entity**：observe→{settled | requeue_after | transient-backoff}；leader 丢 lease→cancel。

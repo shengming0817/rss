@@ -25,6 +25,13 @@ const ALLOWED_RUNTIME_FUNCTIONS: &[&str] = &[
     "issue_authorized_dlq_capability",
     "issue_authorized_reconcile_capability",
 ];
+const ALLOWED_RUNTIME_SUBJECT_FUNCTION: &str = "verified_dlq_operator_subject";
+
+#[derive(Clone, Copy)]
+enum Funnel {
+    Capability,
+    VerifiedSubject,
+}
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
@@ -52,19 +59,39 @@ impl<'tcx> LateLintPass<'tcx> for RssDlqOperatorCallsite {
         let Res::Def(DefKind::AssocFn | DefKind::Fn, did) = cx.qpath_res(qpath, expr.hir_id) else {
             return;
         };
-        if is_dlq_operator_funnel_did(cx, did) && !caller_is_allowed(cx, expr.hir_id) {
-            emit(cx, expr.hir_id, expr.span);
+        let Some(funnel) = guarded_funnel(cx, did) else {
+            return;
+        };
+        if !caller_is_allowed(cx, expr.hir_id, funnel) {
+            emit(cx, expr.hir_id, expr.span, funnel);
         }
     }
 }
 
-fn is_dlq_operator_funnel_did(cx: &LateContext<'_>, did: DefId) -> bool {
-    cx.tcx.crate_name(did.krate).as_str() == "eventexec"
-        && cx.tcx.item_name(did).as_str() == "issue_for_authorized_operator"
-        && matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. })
+fn guarded_funnel(cx: &LateContext<'_>, did: DefId) -> Option<Funnel> {
+    if cx.tcx.crate_name(did.krate).as_str() != "eventexec"
+        || !matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. })
+    {
+        return None;
+    }
+    match cx.tcx.item_name(did).as_str() {
+        "issue_for_authorized_operator" => Some(Funnel::Capability),
+        "from_verified" if impl_self_type_named(cx, did, "VerifiedOperatorSubject") => {
+            Some(Funnel::VerifiedSubject)
+        }
+        _ => None,
+    }
 }
 
-fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
+fn impl_self_type_named(cx: &LateContext<'_>, did: DefId, expected: &str) -> bool {
+    cx.tcx
+        .type_of(cx.tcx.parent(did))
+        .instantiate_identity()
+        .ty_adt_def()
+        .is_some_and(|adt| cx.tcx.item_name(adt.did()).as_str() == expected)
+}
+
+fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId, funnel: Funnel) -> bool {
     let crate_name = cx.tcx.crate_name(LOCAL_CRATE);
     if ALLOWED_CALLER_CRATES.contains(&crate_name.as_str()) {
         return true;
@@ -75,24 +102,38 @@ fn caller_is_allowed(cx: &LateContext<'_>, hir_id: HirId) -> bool {
     let parent = cx.tcx.hir_get_parent_item(hir_id);
     let parent_def_id = parent.to_def_id();
     let item_name = cx.tcx.item_name(parent_def_id);
-    if !ALLOWED_RUNTIME_FUNCTIONS.contains(&item_name.as_str()) {
-        return false;
-    }
     let def_path = cx.tcx.def_path_str(parent_def_id);
-    ALLOWED_RUNTIME_FUNCTIONS.contains(&def_path.as_str())
+    match funnel {
+        Funnel::Capability => {
+            ALLOWED_RUNTIME_FUNCTIONS.contains(&item_name.as_str())
+                && ALLOWED_RUNTIME_FUNCTIONS.contains(&def_path.as_str())
+        }
+        Funnel::VerifiedSubject => {
+            item_name.as_str() == ALLOWED_RUNTIME_SUBJECT_FUNCTION
+                && def_path == ALLOWED_RUNTIME_SUBJECT_FUNCTION
+        }
+    }
 }
 
-fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
+fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: Funnel) {
+    let (message, help) = match funnel {
+        Funnel::Capability => (
+            "operator capability 仅 admin/PDP 边界可签发：`issue_for_authorized_operator` 不得在此 crate 调用",
+            "在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许精确的 authenticated+authorized wrapper，其它 crate 经请求 DTO 接收",
+        ),
+        Funnel::VerifiedSubject => (
+            "verified operator subject 仅认证/PDP 边界可构造：`from_verified` 不得在此调用",
+            "httpserve 只能在完成认证/PDP 后构造；runtime 只能经 top-level `verified_dlq_operator_subject` wrapper 构造",
+        ),
+    };
     span_lint_hir_and_then(
         cx,
         RSS_DLQ_OPERATOR_CALLSITE,
         hir_id,
         span,
-        "operator capability 仅 admin/PDP 边界可签发：`issue_for_authorized_operator` 不得在此 crate 调用",
+        message,
         |diag| {
-            diag.help(
-                "在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许精确的 authenticated+authorized wrapper，其它 crate 经请求 DTO 接收",
-            );
+            diag.help(help);
         },
     );
 }

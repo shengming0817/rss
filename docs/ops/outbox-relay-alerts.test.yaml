@@ -1,0 +1,65 @@
+rule_files:
+  - outbox-relay-alerts.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # A counter created at 1 stays invisible to increase() even after several
+  # unchanged scrapes. Filtering zero increase before `or` lets the new-series
+  # branch page until the 10m offset exists, then stop for the unchanged series.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_same_id_window_expired_total{domain="orders",contract_id="order.created.v1",tenant_id="tenant-a",phase="automatic"}'
+        values: '_x10 1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OutboxSameIdWindowExpired
+        exp_alerts:
+          - exp_labels:
+              domain: orders
+              phase: automatic
+              severity: critical
+            exp_annotations:
+              summary: "Outbox same-ID 投递窗口到期（domain=orders, phase=automatic）"
+              description: "近 10min outbox_same_id_window_expired_total 增长/首次 series 信号 1；broker publish 已被 fail-closed 跳过。检查 DLX、partition blocked 与 dlq.maintenance audit，不从 metric 查 event id 或 deadline。"
+      - eval_time: 12m
+        alertname: OutboxSameIdWindowExpired
+        exp_alerts:
+          - exp_labels:
+              domain: orders
+              phase: automatic
+              severity: critical
+            exp_annotations:
+              summary: "Outbox same-ID 投递窗口到期（domain=orders, phase=automatic）"
+              description: "近 10min outbox_same_id_window_expired_total 增长/首次 series 信号 1；broker publish 已被 fail-closed 跳过。检查 DLX、partition blocked 与 dlq.maintenance audit，不从 metric 查 event id 或 deadline。"
+      - eval_time: 21m
+        alertname: OutboxSameIdWindowExpired
+        exp_alerts: []
+
+  # A series that already existed at the offset boundary and did not increase is
+  # not a new expiry. This locks out repeated pages for an old non-zero counter.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_same_id_window_expired_total{domain="billing",contract_id="invoice.issued.v1",tenant_id="tenant-b",phase="redrive"}'
+        values: '7x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: OutboxSameIdWindowExpired
+        exp_alerts: []
+
+  # Existing series still use increase(), so a later expiry remains observable.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_same_id_window_expired_total{domain="shipping",contract_id="shipment.created.v1",tenant_id="tenant-c",phase="automatic"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: OutboxSameIdWindowExpired
+        exp_alerts:
+          - exp_labels:
+              domain: shipping
+              phase: automatic
+              severity: critical
+            exp_annotations:
+              summary: "Outbox same-ID 投递窗口到期（domain=shipping, phase=automatic）"
+              description: "近 10min outbox_same_id_window_expired_total 增长/首次 series 信号 10；broker publish 已被 fail-closed 跳过。检查 DLX、partition blocked 与 dlq.maintenance audit，不从 metric 查 event id 或 deadline。"

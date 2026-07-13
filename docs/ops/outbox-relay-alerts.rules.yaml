@@ -4,7 +4,9 @@
 # 与 docs/ops/202606250430-002-outbox-relay-observability.md。改 metric 名/label 须同步 eventexec emit site
 # （relay / consumer metrics）+ 本文件 + 上述文档。
 #
-# 校验：promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
+# 校验：
+#   promtool check rules docs/ops/outbox-relay-alerts.rules.yaml
+#   (cd docs/ops && promtool test rules outbox-relay-alerts.test.yaml)
 #
 # 注：outbox settle/backlog gauge/counter 均带 `domain`,`contract_id`,`tenant_id` label。
 # 告警按 domain 聚合：depth=sum by(domain)，oldest age=max by(domain)，outbox/consumer DLX/requeue=sum by(domain)；
@@ -32,6 +34,28 @@ groups:
         annotations:
           summary: "Outbox entries 进入 DLX（domain={{ $labels.domain }}）"
           description: "近 10min outbox_dlx_total 增长 {{ $value }}（domain={{ $labels.domain }}）；永久失败事件需人工巡检 DLX 行（adapters/postgres outbox status='dlx'）。"
+
+      # 同一 event id 的 automatic/redrive 绝对窗口到期：preflight 不再调用 broker，并将行留在 DLX。
+      # increase > 0 先过滤零增长 series，避免 `or` 左值为 0 时遮住右侧首次-series 分支；右侧只在当前值
+      # 非零且 10min offset 尚不存在时补捉首次单次事件。
+      # 连续旧 series 有 offset，不走补偿分支；新 series 满 10min 后也自动退出，避免持续重复告警。
+      - alert: OutboxSameIdWindowExpired
+        expr: |
+          sum by (domain, phase) (
+            (increase(outbox_same_id_window_expired_total[10m]) > 0)
+            or
+            (
+              (outbox_same_id_window_expired_total > 0)
+              unless
+              (outbox_same_id_window_expired_total offset 10m)
+            )
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox same-ID 投递窗口到期（domain={{ $labels.domain }}, phase={{ $labels.phase }}）"
+          description: "近 10min outbox_same_id_window_expired_total 增长/首次 series 信号 {{ $value }}；broker publish 已被 fail-closed 跳过。检查 DLX、partition blocked 与 dlq.maintenance audit，不从 metric 查 event id 或 deadline。"
 
       # 积压深度持续高（次级信号；阈值按部署容量调，此处保守 10k 兜底防无界增长）。
       # 新增 contract/tenant label 后先按 domain 求和；for:5m 承担持续性判断，避免先对各 scope

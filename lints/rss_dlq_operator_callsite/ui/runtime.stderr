@@ -1,5 +1,5 @@
 warning: operator capability 仅 admin/PDP 边界可签发：`issue_for_authorized_operator` 不得在此 crate 调用
-  --> $DIR/runtime.rs:20:16
+  --> $DIR/runtime.rs:27:16
    |
 LL |     let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -7,13 +7,29 @@ LL |     let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_opera
    = help: 在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许精确的 authenticated+authorized wrapper，其它 crate 经请求 DTO 接收
    = note: `#[warn(rss_dlq_operator_callsite)]` on by default
 
+warning: verified operator subject 仅认证/PDP 边界可构造：`from_verified` 不得在此调用
+  --> $DIR/runtime.rs:28:20
+   |
+LL |     let _subject = eventexec::VerifiedOperatorSubject::from_verified("operator:mallory");
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: httpserve 只能在完成认证/PDP 后构造；runtime 只能经 top-level `verified_dlq_operator_subject` wrapper 构造
+
 warning: operator capability 仅 admin/PDP 边界可签发：`issue_for_authorized_operator` 不得在此 crate 调用
-  --> $DIR/runtime.rs:29:9
+  --> $DIR/runtime.rs:38:9
    |
 LL |         eventexec::OperatorDlqCapability::issue_for_authorized_operator()
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: 在 allowlist 的 admin/PDP 授权路径中签发 capability；runtime CLI 仅允许精确的 authenticated+authorized wrapper，其它 crate 经请求 DTO 接收
 
-warning: 2 warnings emitted
+warning: verified operator subject 仅认证/PDP 边界可构造：`from_verified` 不得在此调用
+  --> $DIR/runtime.rs:44:9
+   |
+LL |         eventexec::VerifiedOperatorSubject::from_verified(raw)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: httpserve 只能在完成认证/PDP 后构造；runtime 只能经 top-level `verified_dlq_operator_subject` wrapper 构造
+
+warning: 4 warnings emitted
 

@@ -491,6 +491,150 @@ pub struct DlqRedriveRequest {
     capability: OperatorDlqCapability,
 }
 
+/// Audited change ticket authorizing an expired outbox terminal resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxResolutionChangeTicket(String);
+
+impl OutboxResolutionChangeTicket {
+    pub fn parse(raw: &str) -> Result<Self, DlqError> {
+        parse_resolution_text(raw, 128).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Operator subject already verified by the maintenance authentication boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedOperatorSubject(String);
+
+impl VerifiedOperatorSubject {
+    /// Construct only after service-token verification and exact grant authorization succeed.
+    pub fn from_verified(raw: &str) -> Result<Self, DlqError> {
+        parse_resolution_text(raw, 256).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn parse_resolution_text(raw: &str, max_len: usize) -> Result<String, DlqError> {
+    let value = raw.trim();
+    if value.is_empty()
+        || value != raw
+        || value.len() > max_len
+        || value.chars().any(char::is_control)
+    {
+        return Err(DlqError::InvalidResolutionInput);
+    }
+    Ok(value.to_owned())
+}
+
+/// Closed terminal strategy for an expired, partition-blocking outbox DLX row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxExpiredResolutionKind {
+    AcceptedGap,
+    Compensated,
+}
+
+impl OutboxExpiredResolutionKind {
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::AcceptedGap => "accepted_gap",
+            Self::Compensated => "compensated",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, DlqError> {
+        match raw {
+            "accepted_gap" => Ok(Self::AcceptedGap),
+            "compensated" => Ok(Self::Compensated),
+            _ => Err(DlqError::InvalidResolutionInput),
+        }
+    }
+}
+
+/// Typed, capability-bearing request for resolving an expired outbox DLX head.
+#[derive(Debug, Clone)]
+pub struct OutboxExpiredResolutionRequest {
+    tenant: vocab::TenantId,
+    event_id: IdemKey,
+    kind: OutboxExpiredResolutionKind,
+    evidence_event_id: Option<IdemKey>,
+    change_ticket: OutboxResolutionChangeTicket,
+    operator_subject: VerifiedOperatorSubject,
+    capability: OperatorDlqCapability,
+}
+
+impl OutboxExpiredResolutionRequest {
+    pub fn accepted_gap(
+        tenant: vocab::TenantId,
+        event_id: IdemKey,
+        change_ticket: OutboxResolutionChangeTicket,
+        operator_subject: VerifiedOperatorSubject,
+        capability: OperatorDlqCapability,
+    ) -> Self {
+        Self {
+            tenant,
+            event_id,
+            kind: OutboxExpiredResolutionKind::AcceptedGap,
+            evidence_event_id: None,
+            change_ticket,
+            operator_subject,
+            capability,
+        }
+    }
+
+    pub fn compensated(
+        tenant: vocab::TenantId,
+        event_id: IdemKey,
+        evidence_event_id: IdemKey,
+        change_ticket: OutboxResolutionChangeTicket,
+        operator_subject: VerifiedOperatorSubject,
+        capability: OperatorDlqCapability,
+    ) -> Self {
+        Self {
+            tenant,
+            event_id,
+            kind: OutboxExpiredResolutionKind::Compensated,
+            evidence_event_id: Some(evidence_event_id),
+            change_ticket,
+            operator_subject,
+            capability,
+        }
+    }
+
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    pub fn event_id(&self) -> &IdemKey {
+        &self.event_id
+    }
+
+    pub fn kind(&self) -> OutboxExpiredResolutionKind {
+        self.kind
+    }
+
+    pub fn evidence_event_id(&self) -> Option<&IdemKey> {
+        self.evidence_event_id.as_ref()
+    }
+
+    pub fn change_ticket(&self) -> &OutboxResolutionChangeTicket {
+        &self.change_ticket
+    }
+
+    pub fn operator_subject(&self) -> &VerifiedOperatorSubject {
+        &self.operator_subject
+    }
+
+    pub fn capability(&self) -> OperatorDlqCapability {
+        self.capability
+    }
+}
+
 impl DlqRedriveRequest {
     pub fn new(
         tenant: vocab::TenantId,
@@ -536,6 +680,26 @@ impl DlqReplayOutcome {
 pub enum DlqRedriveOutcome {
     Redriven,
     NotFound,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxExpiredResolutionOutcome {
+    Resolved,
+    NotFound,
+    NotExpired,
+    EvidenceRejected,
+}
+
+impl OutboxExpiredResolutionOutcome {
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::NotFound => "not_found",
+            Self::NotExpired => "not_expired",
+            Self::EvidenceRejected => "evidence_rejected",
+        }
+    }
 }
 
 impl DlqRedriveOutcome {
@@ -543,6 +707,7 @@ impl DlqRedriveOutcome {
         match self {
             Self::Redriven => "redriven",
             Self::NotFound => "not_found",
+            Self::Expired => "expired",
         }
     }
 }
@@ -554,6 +719,8 @@ pub enum DlqMutationKind {
     DeadLetterReplay,
     /// Outbox relay DLX row restored to pending.
     OutboxDlxRedrive,
+    /// Expired outbox DLX row resolved to an audited terminal state.
+    OutboxDlxResolveExpired,
 }
 
 impl DlqMutationKind {
@@ -561,6 +728,7 @@ impl DlqMutationKind {
         match self {
             Self::DeadLetterReplay => "dead_letter_replay",
             Self::OutboxDlxRedrive => "outbox_dlx_redrive",
+            Self::OutboxDlxResolveExpired => "outbox_dlx_resolve_expired",
         }
     }
 }
@@ -579,6 +747,12 @@ impl DlqMutationMetricOutcome {
     }
 
     pub fn redrive(outcome: DlqRedriveOutcome) -> Self {
+        Self {
+            label: outcome.as_label(),
+        }
+    }
+
+    pub fn resolve_expired(outcome: OutboxExpiredResolutionOutcome) -> Self {
         Self {
             label: outcome.as_label(),
         }
@@ -617,6 +791,8 @@ pub enum DlqError {
     FactConflict(#[source] consistency::OutboxFactConflict),
     #[error("dlq store failed")]
     Store,
+    #[error("expired outbox resolution input is invalid")]
+    InvalidResolutionInput,
 }
 
 impl DlqError {
@@ -632,6 +808,7 @@ impl DlqError {
             Self::PayloadKeyForbidden => "payload_key_forbidden",
             Self::FactConflict(_) => "fact_conflict",
             Self::Store => "store",
+            Self::InvalidResolutionInput => "invalid_resolution_input",
         }
     }
 }
@@ -667,6 +844,17 @@ pub fn record_dlq_outbox_redrive(tenant: vocab::TenantId, outcome: DlqRedriveOut
     );
 }
 
+pub fn record_outbox_expired_resolution(
+    tenant: vocab::TenantId,
+    outcome: OutboxExpiredResolutionOutcome,
+) {
+    record_dlq_redrive_metric(
+        tenant,
+        DlqMutationKind::OutboxDlxResolveExpired,
+        DlqMutationMetricOutcome::resolve_expired(outcome),
+    );
+}
+
 pub fn record_dlq_mutation_error(tenant: vocab::TenantId, kind: DlqMutationKind, error: &DlqError) {
     record_dlq_redrive_metric(tenant, kind, DlqMutationMetricOutcome::error(error));
 }
@@ -684,6 +872,10 @@ pub trait DlqStore: Send + Sync {
         &self,
         request: DlqRedriveRequest,
     ) -> Result<DlqRedriveOutcome, DlqError>;
+    async fn resolve_expired_outbox(
+        &self,
+        request: OutboxExpiredResolutionRequest,
+    ) -> Result<OutboxExpiredResolutionOutcome, DlqError>;
 }
 
 fn compare_summary(a: &DlqEntrySummary, b: &DlqEntrySummary) -> std::cmp::Ordering {
@@ -1030,6 +1222,55 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
+    // reason: typed operator fixtures are fixed non-empty values and a canonical tenant/event id.
+    fn expired_outbox_resolution_request_is_typed_and_shape_closed() {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant");
+        let event_id = IdemKey::parse("evt-blocked").expect("canonical event id");
+        let evidence = IdemKey::parse("evt-compensation").expect("canonical evidence id");
+        let ticket = OutboxResolutionChangeTicket::parse("CHG-1742").expect("valid ticket");
+        let subject =
+            VerifiedOperatorSubject::from_verified("operator:alice").expect("verified subject");
+        let capability = OperatorDlqCapability::issue_for_authorized_operator();
+
+        let accepted = OutboxExpiredResolutionRequest::accepted_gap(
+            tenant,
+            event_id.clone(),
+            ticket.clone(),
+            subject.clone(),
+            capability,
+        );
+        assert_eq!(accepted.kind(), OutboxExpiredResolutionKind::AcceptedGap);
+        assert!(accepted.evidence_event_id().is_none());
+
+        let compensated = OutboxExpiredResolutionRequest::compensated(
+            tenant,
+            event_id,
+            evidence.clone(),
+            ticket,
+            subject,
+            capability,
+        );
+        assert_eq!(compensated.kind(), OutboxExpiredResolutionKind::Compensated);
+        assert_eq!(compensated.evidence_event_id(), Some(&evidence));
+        assert_eq!(
+            OutboxExpiredResolutionOutcome::Resolved.as_label(),
+            "resolved"
+        );
+        assert_eq!(
+            OutboxExpiredResolutionOutcome::EvidenceRejected.as_label(),
+            "evidence_rejected"
+        );
+        for dirty in [" CHG-1742", "CHG-1742 ", "CHG-1742\n"] {
+            assert!(matches!(
+                OutboxResolutionChangeTicket::parse(dirty),
+                Err(DlqError::InvalidResolutionInput)
+            ));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     // reason: metric fixture uses a known canonical tenant id.
     fn dlq_redrive_metric_uses_closed_kind_and_outcome_labels() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1038,6 +1279,11 @@ mod tests {
             .expect("canonical tenant");
         metrics::with_local_recorder(&recorder, || {
             record_dlq_replay(tenant, DlqReplayOutcome::Inserted);
+            record_dlq_outbox_redrive(tenant, DlqRedriveOutcome::Expired);
+            record_outbox_expired_resolution(
+                tenant,
+                OutboxExpiredResolutionOutcome::EvidenceRejected,
+            );
             record_dlq_mutation_error(
                 tenant,
                 DlqMutationKind::OutboxDlxRedrive,
@@ -1053,7 +1299,13 @@ mod tests {
         );
         assert!(rendered.contains("dead_letter_replay"), "{rendered}");
         assert!(rendered.contains("outbox_dlx_redrive"), "{rendered}");
+        assert!(
+            rendered.contains("outbox_dlx_resolve_expired"),
+            "{rendered}"
+        );
         assert!(rendered.contains("inserted"), "{rendered}");
+        assert!(rendered.contains("expired"), "{rendered}");
         assert!(rendered.contains("not_found"), "{rendered}");
+        assert!(rendered.contains("evidence_rejected"), "{rendered}");
     }
 }

@@ -9,8 +9,9 @@ use diport::{
 use eventexec::{
     DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
     DlqListResult, DlqMutationKind, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
-    DlqReplayRequest, DlqStore, record_dlq_mutation_error, record_dlq_outbox_redrive,
-    record_dlq_replay,
+    DlqReplayRequest, DlqStore, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+    record_dlq_mutation_error, record_dlq_outbox_redrive, record_dlq_replay,
+    record_outbox_expired_resolution,
 };
 
 use crate::PgStore;
@@ -285,13 +286,73 @@ impl DlqStore for PgDlqStore {
 
         let outcome = match result {
             Ok(1) => Ok(DlqRedriveOutcome::Redriven),
-            Ok(_) => Ok(DlqRedriveOutcome::NotFound),
+            Ok(-1) => Ok(DlqRedriveOutcome::Expired),
+            Ok(0) => Ok(DlqRedriveOutcome::NotFound),
+            Ok(_) => Err(DlqError::Store),
             Err(err) => Err(err),
         };
         match &outcome {
             Ok(outcome) => record_dlq_outbox_redrive(tenant, *outcome),
             Err(err) => {
                 record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxRedrive, err);
+            }
+        }
+        outcome
+    }
+
+    async fn resolve_expired_outbox(
+        &self,
+        request: OutboxExpiredResolutionRequest,
+    ) -> Result<OutboxExpiredResolutionOutcome, DlqError> {
+        let tenant = request.tenant();
+        let event_id = request.event_id().as_str().to_owned();
+        let kind = request.kind().as_label();
+        let evidence_event_id = request
+            .evidence_event_id()
+            .map(|value| value.as_str().to_owned());
+        let change_ticket = request.change_ticket().as_str().to_owned();
+        let operator_subject = request.operator_subject().as_str().to_owned();
+        let result = self
+            .tenant_pool
+            .write(
+                infra_tenant_scope(tenant),
+                move |conn| {
+                    Box::pin(async move {
+                        let row: (i64,) = sqlx::query_as(
+                            r#"
+                            SELECT rss_outbox_resolve_expired(
+                                $1, $2::uuid, $3, $4, $5, $6
+                            )
+                            "#,
+                        )
+                        .bind(event_id)
+                        .bind(tenant.to_string())
+                        .bind(kind)
+                        .bind(change_ticket)
+                        .bind(operator_subject)
+                        .bind(evidence_event_id)
+                        .fetch_one(conn.conn())
+                        .await
+                        .map_err(db_error("resolve_expired.update_outbox"))?;
+                        Ok(row.0)
+                    })
+                },
+                db_error("resolve_expired.tx"),
+            )
+            .await;
+
+        let outcome = match result {
+            Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved),
+            Ok(0) => Ok(OutboxExpiredResolutionOutcome::NotFound),
+            Ok(-1) => Ok(OutboxExpiredResolutionOutcome::NotExpired),
+            Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected),
+            Ok(_) => Err(DlqError::Store),
+            Err(error) => Err(error),
+        };
+        match &outcome {
+            Ok(outcome) => record_outbox_expired_resolution(tenant, *outcome),
+            Err(error) => {
+                record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxResolveExpired, error)
             }
         }
         outcome

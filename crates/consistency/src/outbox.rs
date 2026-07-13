@@ -823,7 +823,7 @@ pub trait OutboxSource {
 /// 由 sweeper 背景 worker（`eventexec::sweeper_loop`）周期驱动：删除一张 durable 表中**已终结**且
 /// 超过保留期的行，返回删除条数，防表无界增长。「已终结」由各 adapter impl 自行定义谓词——
 /// - `outbox`：`status='published'`（已成功投递；dlx 行保留供运维巡检，不删）；
-/// - `inbox_receipts`：`status='done'`（永久去重记录）；
+/// - `inbox_receipts`：`status='done'`（provider retention 窗口内的去重记录）；
 /// - `dead_letter`：全部行（死信均终结，按 `last_attempt_at` 老化清理）。
 ///
 /// 删除 SQL（含表名 + 终结谓词 + 时间列）在 adapter，本 crate 只冻接缝；时间谓词在 adapter 端用

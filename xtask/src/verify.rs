@@ -105,6 +105,10 @@ enum InternalCheck {
     WsDepsDrift,
     /// docs/rules + docs/spec 中 command/outbox tenant-aware 签名漂移门（DOC-CONTRACTS-01）。
     DocContracts,
+    /// digest-pinned promtool rules + consuming tests（PROMTOOL-RULES-01）。
+    PromtoolRules,
+    /// same-ID SQL/Rust/ops cross-carrier closure（OUTBOX-SAME-ID-WINDOW-01）。
+    OutboxSameIdGuard,
     /// consistency crash matrix fixture/DSL 骨架门（CONSISTENCY-CRASH-FIXTURE-01）。
     ConsistencyFixtures,
     /// runtime event transport consumer 禁回 Redis claimer（EVENT-TRANSPORT-PG-INBOX-01）。
@@ -115,7 +119,7 @@ enum InternalCheck {
     RuntimeBaseline,
     /// SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）。
     RuntimeDepsGuard,
-    /// ArchRules 派生索引 + 11 行持久化 funnel matrix 文档漂移门。
+    /// ArchRules 派生索引 + 14 行持久化 funnel matrix 文档漂移门。
     ArchRules,
     CodegenCheck,
     /// active LocalTx manifest/generated/owner route/test typed marker closure.
@@ -279,6 +283,22 @@ fn step_doc_contracts() -> Step {
         id: GateId::DocContracts,
         args: &[],
         kind: StepKind::Internal(InternalCheck::DocContracts),
+        env: &[],
+    }
+}
+fn step_promtool_rules() -> Step {
+    Step {
+        id: GateId::PromtoolRules,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::PromtoolRules),
+        env: &[],
+    }
+}
+fn step_outbox_same_id_guard() -> Step {
+    Step {
+        id: GateId::OutboxSameIdGuard,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::OutboxSameIdGuard),
         env: &[],
     }
 }
@@ -1096,6 +1116,10 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         }
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::DocContracts => run_check(&doc_contracts::DocContracts),
+        InternalCheck::PromtoolRules => crate::promtool::run(),
+        InternalCheck::OutboxSameIdGuard => {
+            run_check(&crate::outbox_same_id_guard::OutboxSameIdGuard)
+        }
         InternalCheck::ConsistencyFixtures => run_check(&consistency_fixtures::ConsistencyFixtures),
         InternalCheck::EventTransportGuard => {
             run_check(&crate::event_transport_guard::EventTransportGuard)
@@ -1267,7 +1291,7 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() {
-        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 30);
+        assert_eq!(labels(&plan_for(PlanTarget::Lane(CiLane::Meta))).len(), 32);
         assert_eq!(
             labels(&plan_for(PlanTarget::Lane(CiLane::Security))),
             vec!["deny", "audit"]
@@ -1351,14 +1375,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_keeps_48_unique_gates_and_supersedes_nextest() {
+    fn ci_lane_compatibility_plan_keeps_50_unique_gates_and_supersedes_nextest() {
         let plan = plan_for(PlanTarget::CompatibilityCi);
-        assert_eq!(plan.len(), 48);
+        assert_eq!(plan.len(), 50);
         assert!(!labels(&plan).contains(&"default-test-runner"));
         let mut ids: Vec<_> = plan.iter().map(|step| step.id as usize).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 48);
+        assert_eq!(ids.len(), 50);
     }
 
     #[test]
@@ -1386,6 +1410,8 @@ mod tests {
                 "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
+                "promtool-rules",
+                "outbox-same-id-guard",
                 "consistency-fixtures",
                 "event-transport-guard",
                 "inbox-cutover-guard",
@@ -1487,6 +1513,8 @@ mod tests {
                 "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
+                "promtool-rules",
+                "outbox-same-id-guard",
                 "consistency-fixtures",
                 "event-transport-guard",
                 "inbox-cutover-guard",
@@ -1541,6 +1569,8 @@ mod tests {
                     "shipped-feature-guard",
                     "wsdeps-drift",
                     "doc-contracts",
+                    "promtool-rules",
+                    "outbox-same-id-guard",
                     "consistency-fixtures",
                     "event-transport-guard",
                     "inbox-cutover-guard",
@@ -2014,6 +2044,8 @@ mod tests {
                 "shipped-feature-guard",
                 "wsdeps-drift",
                 "doc-contracts",
+                "promtool-rules",
+                "outbox-same-id-guard",
                 "consistency-fixtures",
                 "event-transport-guard",
                 "inbox-cutover-guard",
@@ -2129,6 +2161,8 @@ mod tests {
             "shipped-feature-guard",
             "wsdeps-drift",
             "doc-contracts",
+            "promtool-rules",
+            "outbox-same-id-guard",
             "consistency-fixtures",
             "event-transport-guard",
             "inbox-cutover-guard",

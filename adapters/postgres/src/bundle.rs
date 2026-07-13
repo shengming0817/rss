@@ -71,6 +71,7 @@ use tokio_util::sync::CancellationToken;
 use crate::PgOutbox;
 #[cfg(feature = "domain-audit")]
 use crate::consumer_tx::PgAuditConsumerTx;
+use crate::delivery_policy::EventDeliveryPolicy;
 use crate::projection_events::ProjectionWriteRegistry;
 #[cfg(feature = "domain-settings")]
 use crate::{
@@ -168,6 +169,7 @@ pub struct PgRuntimeDeps {
 pub struct PgRuntimeHandle {
     store: Arc<PgStore>,
     audit_admin_store: Option<Arc<PgStore>>,
+    delivery_policy: EventDeliveryPolicy,
     projection_registry: ProjectionWriteRegistry,
     readiness: Arc<PgDbReadiness>,
     rls_ready: Arc<AtomicBool>,
@@ -203,6 +205,7 @@ impl PgReadinessSamplerFactory {
 pub struct PgMaintenanceDeps {
     store: Arc<PgStore>,
     audit_admin_store: Option<Arc<PgStore>>,
+    _delivery_policy: EventDeliveryPolicy,
     clock: Arc<dyn Clock>,
 }
 
@@ -301,6 +304,7 @@ impl PgRuntimeDeps {
     ) -> Result<Self, PgError> {
         let migrator = PgStore::connect(migrator_config).await?;
         migrator.run_migrations().await?;
+        let delivery_policy = migrator.load_event_delivery_policy().await?;
         migrator
             .verify_config_legacy_plaintext_policy(legacy_config_plaintext_policy)
             .await?;
@@ -325,6 +329,7 @@ impl PgRuntimeDeps {
             handle: PgRuntimeHandle {
                 store,
                 audit_admin_store,
+                delivery_policy,
                 projection_registry: ProjectionWriteRegistry::from_generated(projection_inputs),
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
@@ -338,9 +343,11 @@ impl PgRuntimeDeps {
     ) -> Result<PgMaintenanceDeps, PgError> {
         let store = Arc::new(PgStore::connect(migrator_config).await?);
         store.run_migrations().await?;
+        let delivery_policy = store.load_event_delivery_policy().await?;
         Ok(PgMaintenanceDeps {
             store,
             audit_admin_store: None,
+            _delivery_policy: delivery_policy,
             clock: Arc::new(PgMaintenanceSystemClock),
         })
     }
@@ -355,11 +362,13 @@ impl PgRuntimeDeps {
     ) -> Result<PgMaintenanceDeps, PgError> {
         let store = Arc::new(PgStore::connect(migrator_config).await?);
         store.run_migrations().await?;
+        let delivery_policy = store.load_event_delivery_policy().await?;
         let audit_admin_store = Arc::new(PgStore::connect(audit_admin_config).await?);
         audit_admin_store.verify_audit_admin_capability().await?;
         Ok(PgMaintenanceDeps {
             store,
             audit_admin_store: Some(audit_admin_store),
+            _delivery_policy: delivery_policy,
             clock: Arc::new(PgMaintenanceSystemClock),
         })
     }
@@ -385,6 +394,7 @@ impl PgRuntimeDeps {
         let PgRuntimeHandle {
             store,
             audit_admin_store,
+            delivery_policy: _,
             projection_registry: _,
             readiness,
             rls_ready: _,
@@ -430,6 +440,7 @@ impl PgRuntimeHandle {
         PgInfraDeps {
             store: Arc::clone(&self.store),
             projection_registry: self.projection_registry,
+            delivery_policy: self.delivery_policy,
         }
     }
 
@@ -468,6 +479,7 @@ impl PgRuntimeHandle {
         Self {
             store: Arc::new(PgStore { pool }),
             audit_admin_store: None,
+            delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
@@ -488,6 +500,7 @@ impl PgRuntimeDeps {
             handle: PgRuntimeHandle {
                 store,
                 audit_admin_store,
+                delivery_policy: EventDeliveryPolicy::release(),
                 projection_registry: ProjectionWriteRegistry::empty(),
                 readiness: Arc::new(PgDbReadiness::new()),
                 rls_ready: Arc::new(AtomicBool::new(true)),
@@ -503,6 +516,7 @@ impl PgRuntimeHandle {
         Self {
             store,
             audit_admin_store: None,
+            delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
             readiness: Arc::new(PgDbReadiness::new()),
             rls_ready: Arc::new(AtomicBool::new(true)),
@@ -1117,6 +1131,7 @@ impl PgDomainDeps<caps::Audit> {
 pub struct PgInfraDeps {
     store: Arc<PgStore>,
     projection_registry: ProjectionWriteRegistry,
+    delivery_policy: EventDeliveryPolicy,
 }
 
 impl PgInfraDeps {
@@ -1160,28 +1175,13 @@ impl PgInfraDeps {
         self.store.dead_letter(payload_protector)
     }
 
-    /// DLQ inspection/replay API（internal Rust surface，#1214）。`dead_letter` replay 与 `outbox` redrive
-    /// 由类型分开，避免把 consumer 重放误当 broker redrive。
-    #[must_use]
-    pub fn dlq(&self, payload_protector: DlxPayloadProtector) -> PgDlqStore {
-        self.store
-            .dlq_with_projection_registry(payload_protector, self.projection_registry)
-    }
-
-    /// Payload-free DLQ inspection/redrive API. Consumer dead_letter replay requires [`Self::dlq`]
-    /// because it decrypts `dead_letter.original_entry`.
-    #[must_use]
-    pub fn dlq_without_payload_replay(&self) -> PgDlqStore {
-        self.store.dlq_without_payload_replay()
-    }
-
     /// inbox_receipts 保留期清理 sweeper（**全域**，跨 consumer_group / 域，#1210）。
     ///
-    /// impl `consistency::RetentionSweeper`——删除超 `INBOX_RECEIPT_RETENTION_SECONDS`（默认 7 天）的 `done`
+    /// impl `consistency::RetentionSweeper`——仅接受启动时从数据库冻结策略加载的保留期，删除超期 `done`
     /// 去重记录。全域语义 ⇒ 归 framework/global infra 句柄（非 per-domain `PgDomainDeps`）。
     #[must_use]
     pub fn inbox_sweeper(&self) -> PgInboxSweeper {
-        self.store.inbox_sweeper()
+        self.store.inbox_sweeper(self.delivery_policy)
     }
 
     /// sessions 过期行维护清理器（全域，固定 `expires_at <= now()` 谓词，#1233）。
@@ -1518,7 +1518,6 @@ mod tests {
         let _ = infra.inbox();
         let _ = infra.outbox_maintenance();
         let _ = infra.dead_letter(payload_protector());
-        let _ = infra.dlq(payload_protector());
         let _ = infra.inbox_sweeper();
         let _ = infra.session_sweeper();
         let _ = infra.checkpoint();
@@ -1542,6 +1541,7 @@ mod tests {
         let deps = PgMaintenanceDeps {
             store: Arc::clone(&primary),
             audit_admin_store: Some(Arc::clone(&audit_admin)),
+            _delivery_policy: EventDeliveryPolicy::release(),
             clock: Arc::new(EpochClock),
         };
 
@@ -1567,6 +1567,7 @@ mod tests {
         let deps = PgMaintenanceDeps {
             store: lazy_store(),
             audit_admin_store: None,
+            _delivery_policy: EventDeliveryPolicy::release(),
             clock: Arc::new(EpochClock),
         };
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;

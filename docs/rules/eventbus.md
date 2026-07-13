@@ -100,6 +100,40 @@ exactly-once，也不能撤销已经成功的 publish。duplicate 由 tenant-sco
 固定为 40s；preflight 不足不得发 broker 请求，timeout/confirm 不确定结果仍按 at-least-once 语义以稳定
 身份重试，不能把本地超时解释为 broker 未收到。
 
+### 有界 same-ID 投递窗口
+
+ref: Spring Modulith spring-modulith-events/spring-modulith-events-jdbc/src/main/java/org/springframework/modulith/events/jdbc/JdbcEventPublicationRepositoryV2.java@c75f173e5201208d8129b4cd8c112defb1158c67
+
+Spring Modulith 的 JDBC publication repository 用同一 publication id 做完成与重新提交的原子状态转换；RSS
+沿用稳定 id + 数据库原子状态转换，但明确偏离其时间语义：上游只有最小重提交 age，没有 maximum same-ID
+horizon。RSS 由数据库 singleton `event_delivery_policy(policy_revision='same-id-delivery-v1')` 冻结本 release 的
+自动重试 24h、operator redrive 24h、安全余量 24h 与 inbox receipt 7d，并由 CHECK 强制
+`7d > 24h + 24h + 24h`，并对每个 interval 设置 10 年硬上界，阻止 interval/timestamp 溢出。runtime 启动时读取且只接受这一组精确值；revision、行数或值漂移均 fail-closed。
+这些是正确性策略，不提供环境变量或调用方 override。
+
+outbox 行的 `same_id_delivery_phase` 闭合于 `automatic|redrive`，并持久化两个绝对 deadline。首次 claim 只在
+`automatic_retry_deadline` 为空时冻结为 claim 时刻 + 24h；首次进入 DLX 只在
+`same_id_redrive_deadline` 为空时冻结，并同时受 automatic deadline + 24h 与 DLX settled-at + 24h 的较早者
+约束。operator redrive 只切 phase 为 `redrive`、恢复 pending 并清 retry/lease/terminal 时间，不延长或重算
+任一 deadline。
+
+每次 broker publish 前，数据库 preflight 除 lease budget 外还检查当前 phase 的绝对 deadline。deadline 已到
+时不调用 broker，relay 将同一行 settle 到 DLX，写安全失败摘要，并发射
+`outbox_same_id_window_expired_total{domain,contract_id,tenant_id,phase}`；`phase` 仅为
+`automatic|redrive`。operator 对已过 redrive deadline 的操作返回 typed `Expired`，不修改 outbox 行，
+`dlq_redrive_total{kind="outbox_dlx_redrive",outcome="expired"}` 与 `dlq.maintenance` finish failure audit
+共同留证。过期行不能再做 same-ID publish；它保持 DLX 并继续阻塞 partition，直到经唯一
+`resolve-expired-outbox` terminal funnel 结清。该 funnel 只允许已过期的当前 tenant DLX，闭合策略为：
+
+- `accepted_gap`：必须不携带 evidence event；
+- `compensated`：必须引用同 tenant、已 `published`、且 `causation_id` 等于被阻塞 event ID 的 outbox evidence。
+
+成功时原行进入显式 terminal `abandoned`并写 `abandoned_at`，使 partition successor 可继续 claim；
+`outbox_expired_resolutions` 以 tenant、blocked event、resolution kind、change ticket、已验证 operator subject、
+可选 evidence event 和 DB 时间形成 append-only durable evidence。change ticket/operator subject 在 typed API 与 DB
+同时拒绝空值、首尾空白、控制字符和超长值。serving `rss_app` 对 resolution 表和函数均无权；
+只有 NOLOGIN maintenance owner 持有精确函数权限。
+
 稳定 event ID 是幂等锚，不是 exactly-once 保证。MDM 变更、设备命令、外部 API 等事务外副作用仍须透传稳定 idempotency key，或由 reconcile 闭环收敛；不得因 relay CAS 或 Inbox receipt 省略外部系统自己的幂等边界。
 
 **事实同一性（OUTBOX-FACT-FUNNEL-01）**：mutable 与 CDC 模式共用
@@ -279,13 +313,15 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
   tenant 是 outbox envelope 的必填 typed 输入，adapter 将其落为列；同一 business key 在不同 tenant 下不共享
   head-of-partition gate。
 
-**dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽）会**阻塞**该 partition 直到运维 re-drive
-（`eventexec::DlqRedriveRequest` → 当前 tenant scope 内
-`outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL, lease_until=NULL, published_at=NULL, dlx_at=NULL`）
-——这是与「串行有序」一致的唯一选择（放行后继破坏 in-order 不变式）。`outbox.status='dlx'` 仍是 relay
+**dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽 / same-ID deadline 到期）会**阻塞**该 partition，且只在
+redrive deadline 尚未到期时允许运维 re-drive（`eventexec::DlqRedriveRequest` → 当前 tenant scope 内
+`outbox.status='pending', same_id_delivery_phase='redrive', retry_count=0, retry_after=NULL, lease_token=NULL, lease_until=NULL, published_at=NULL, dlx_at=NULL`；两个绝对 deadline 原值保留）
+——这是与「串行有序」一致的唯一选择（放行未结清后继破坏 in-order 不变式）。deadline 过期后只能经上述
+terminal resolution 把队头结清为 `abandoned`；claim blocker 只把 `published|abandoned` 视为 resolved。`outbox.status='dlx'` 仍是 relay
 状态与 partition ordering gate；统一 DLQ 审计行写入 `dead_letter(source_kind='outbox_relay')`，不搬迁/删除
-原 outbox 行；redrive 清除 `dlx_at` 后，既往 DLX 历史继续由 append-only `dead_letter` 留存。代价有界且可观测：
-dlx `error!` 日志 + 行保留（sweep 不删）+ backlog `oldest_age` 增长。
+原 outbox 行；expired redrive 不修改行也不解除 partition gate，成功 redrive 清除 `dlx_at` 后，既往 DLX 历史
+继续由 append-only `dead_letter` 留存。代价有界且可观测：dlx `error!` 日志 + 行保留（sweep 不删）+
+backlog `oldest_age` 增长 + same-ID expiry counter。
 **已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
 聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 claim-only，
 被 gate 的后继仍计入 backlog depth（否则 stalled partition 对 SLO 失明）。INVARIANT: OUTBOX-PARTITION-ORDER-01。
@@ -375,24 +411,27 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
   `RSS_VAULT_ADDR` / `RSS_VAULT_TOKEN` / `RSS_VAULT_TRANSIT_MOUNT`；broker tenant authority 另必填
 	  `RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL`，可选 `RSS_TENANT_AUTHORITY_TTL_SECS`（默认 3600）和
 	  `RSS_TENANT_AUTHORITY_CLOCK_SKEW_SECS`（默认 60，上限 300）。`rss dlq replay-dead-letter`
-	  需要同一 DLX payload key provider；`list` / `inspect` / `redrive-outbox` 是 payload-free 路径，不因
+	  需要同一 DLX payload key provider；`list` / `inspect` / `redrive-outbox` / `resolve-expired-outbox` 是 payload-free 路径，不因
 	  Vault/key provider 不可用而阻断。DLX list API 只返回 payload 长度与摘要元数据，
   不返回 payload 内容；返回 `DlqListResult { data, has_more, next_cursor }`，`next_cursor` 是
   `(last_attempt_epoch_secs DESC, kind, id)` keyset cursor，调用方必须用它稳定续页，不能用 offset 或假设一次
   `Vec` 即完整队列。
 - Runtime 提供 tenant-scoped operator CLI：`rss dlq list` / `inspect` / `replay-dead-letter` /
-  `redrive-outbox`。所有命令必须带 `--operator-service-token`、`--operator-tenant`、`--tenant`；授权由
+  `redrive-outbox` 与 `resolve-expired-outbox`。所有命令必须带 `--operator-service-token`、`--operator-tenant`、`--tenant`；授权由
   service token PDP 验证（`jti` 经 Postgres 持久 replay guard 原子记录，跨 CLI 进程防重放）+
   `RSS_DLQ_OPERATOR_GRANTS=subject|action|tenant` 精确 grant 共同决定。`list` 支持 `--source` / `--domain` /
   `--contract-id` / `--cursor` 精确收窄，filter 集合覆盖 `OutboxPartitionBlocked{tenant_id,domain,contract_id}`
   告警标签。审计 kind 固定为
   `dlq.maintenance`，action 固定为 `dlq.<action>.start|finish`。v1 不提供 destructive `skip` 或旧命令别名；
-  partition unblock 定义为 redrive outbox DLX 队头后让 relay 正常发布。
+  partition unblock 定义为 deadline 内 redrive outbox DLX 队头后让 relay 正常发布。CLI 经离线
+  `PgRuntimeDeps::setup_maintenance` 使用 migrator/maintenance 连接；长期 serving role `rss_app` 被显式撤销
+  `rss_outbox_redrive(text,uuid)` 或 `rss_outbox_resolve_expired(text,uuid,text,text,text,text)` EXECUTE，不能取得 mutation 权限。
 - Consumer `dead_letter` replay 必须传 `OperatorDlqCapability`、typed `DeadLetterId` 与调用方提供的新
   `IdemKey`，由同一 `KeyProvider` 解密原 payload 后插入一条新的 outbox 行；不得删除原 `dead_letter`，
   不得重置 `inbox_receipts done`，不得直接 broker replay。replay 从 `dead_letter.metadata` 恢复 schema header
   并写入 outbox `contract_version` / `schema_hash` 物理列；缺失或非法 fail-closed。Outbox relay DLX redrive 同样必须传
-  `OperatorDlqCapability`，只恢复原 outbox 行为 `pending`；outbox DLX payload 副本保留在 `dead_letter`
+  `OperatorDlqCapability`；deadline 内只恢复原 outbox 行为 `pending`、切换到 `redrive` phase 并保留两个绝对
+  deadline，已过期则返回 typed `Expired` 且不 mutation。outbox DLX payload 副本保留在 `dead_letter`
   用于审计，不参与 redrive。Saga 与 projection `dead_letter` 只作审计与诊断，不支持 replay 成 outbox；
   projection poison `message_id` 固定为 `projection:<owner>:<projection_id>:<lsn>`，重复写入必须幂等。
   Projection read-model shadow replay 不从 DLQ 恢复，必须走 `rss projections replay`，输入源是

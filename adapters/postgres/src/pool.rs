@@ -101,6 +101,12 @@ pub enum PgError {
     /// projection input binding registry 刷新失败（启动关键路径）。
     #[error("postgres projection input binding registry refresh failed")]
     ProjectionBindings(#[source] sqlx::Error),
+    /// Frozen same-ID delivery policy could not be loaded from the migrator-owned singleton.
+    #[error("postgres event delivery policy probe failed")]
+    EventDeliveryPolicyProbe(#[source] sqlx::Error),
+    /// The database policy is missing, duplicated, invalid, overflowing, or mismatched to binary.
+    #[error("postgres event delivery policy does not match this binary")]
+    EventDeliveryPolicyMismatch,
 }
 
 /// 启动期 legacy plaintext `ConfigValue` 行策略。

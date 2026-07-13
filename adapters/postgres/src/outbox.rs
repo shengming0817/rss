@@ -69,9 +69,9 @@ const _: () = {
     assert!(OUTBOX_PUBLISH_LEASE_BUDGET_SECONDS < LEASE_TTL_SECONDS);
 };
 
-/// outbox status 值集——**生产单源**（F8）。所有 SQL 谓词 / SET 一律 `.bind(STATUS_*)`，不再内联裸
-/// 字符串；与 migration `0002` 的 `CHECK (status IN (...))` 由 `status_consts_match_migration_check`
-/// 解析对齐守（两处漂移即单测红，Medium anti-vacuity），单测亦复用同一单源。
+/// outbox status 值集测试锚点。生产 INSERT 省略状态并依赖数据库 `pending` default；状态迁移 SQL 由固定
+/// SECURITY DEFINER 函数持有。测试常量与 migration CHECK 由 `status_consts_match_migration_check` 对齐守。
+#[cfg(test)]
 pub(crate) const STATUS_PENDING: &str = "pending";
 // reason(dead_code): 0031 SECURITY DEFINER SQL owns relay state transitions; constants remain test
 // anchors for migration CHECK/status drift.
@@ -81,8 +81,16 @@ pub(crate) const STATUS_PUBLISHING: &str = "publishing";
 #[allow(dead_code)]
 pub(crate) const STATUS_PUBLISHED: &str = "published";
 pub(crate) const STATUS_DLX: &str = "dlx";
+#[cfg(test)]
+pub(crate) const STATUS_ABANDONED: &str = "abandoned";
 const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
 const OUTBOX_RELAY_ENVELOPE_DLX_SUMMARY: &str = "outbox relay envelope validation failed";
+const OUTBOX_AUTOMATIC_WINDOW_EXPIRED_SUMMARY: &str =
+    "outbox same-ID automatic delivery window expired";
+const OUTBOX_REDRIVE_WINDOW_EXPIRED_SUMMARY: &str =
+    "outbox same-ID redrive delivery window expired";
+const OUTBOX_AUTOMATIC_WINDOW_EXPIRED_REASON: &str = "automatic_window_expired";
+const OUTBOX_REDRIVE_WINDOW_EXPIRED_REASON: &str = "redrive_window_expired";
 const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
 #[derive(sqlx::FromRow)]
 struct ClaimedOutboxRow {
@@ -243,6 +251,60 @@ impl OutboxLease {
 
     fn deadline_epoch_micros(&self) -> i64 {
         self.deadline_epoch_micros
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishPreflight {
+    Allowed,
+    LostLease,
+    AutomaticExpired,
+    RedriveExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PublishPreflightDiscriminantError;
+
+impl TryFrom<i16> for PublishPreflight {
+    type Error = PublishPreflightDiscriminantError;
+
+    fn try_from(value: i16) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Allowed),
+            1 => Ok(Self::LostLease),
+            2 => Ok(Self::AutomaticExpired),
+            3 => Ok(Self::RedriveExpired),
+            _ => Err(PublishPreflightDiscriminantError),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SameIdDeliveryPhase {
+    Automatic,
+    Redrive,
+}
+
+impl SameIdDeliveryPhase {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Redrive => "redrive",
+        }
+    }
+
+    const fn dlx_summary(self) -> &'static str {
+        match self {
+            Self::Automatic => OUTBOX_AUTOMATIC_WINDOW_EXPIRED_SUMMARY,
+            Self::Redrive => OUTBOX_REDRIVE_WINDOW_EXPIRED_SUMMARY,
+        }
+    }
+
+    const fn failure_reason(self) -> &'static str {
+        match self {
+            Self::Automatic => OUTBOX_AUTOMATIC_WINDOW_EXPIRED_REASON,
+            Self::Redrive => OUTBOX_REDRIVE_WINDOW_EXPIRED_REASON,
+        }
     }
 }
 
@@ -1001,9 +1063,9 @@ pub(crate) async fn append_outbox<E: OutboxWriteEntry>(
         r#"
         INSERT INTO outbox (
             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
-            payload, metadata, status, partition_key, causation_id
+            payload, metadata, partition_key, causation_id
         )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
         ON CONFLICT (event_id) DO NOTHING
         RETURNING fact_fingerprint
         "#,
@@ -1017,7 +1079,6 @@ pub(crate) async fn append_outbox<E: OutboxWriteEntry>(
     .bind(fact.schema_hash())
     .bind(fact.payload())
     .bind(fact.metadata_json())
-    .bind(STATUS_PENDING)
     .bind(fact.partition_key())
     .bind(fact.causation_id())
     .fetch_optional(tx.conn())
@@ -1056,9 +1117,9 @@ pub(crate) async fn append_replayed_outbox(
         r#"
         INSERT INTO outbox (
             event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
-            payload, metadata, status, partition_key, causation_id
+            payload, metadata, partition_key, causation_id
         )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NULL, $11)
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9::jsonb, NULL, $10)
         ON CONFLICT (event_id) DO NOTHING
         RETURNING fact_fingerprint
         "#,
@@ -1072,7 +1133,6 @@ pub(crate) async fn append_replayed_outbox(
     .bind(fact.schema_hash())
     .bind(fact.payload())
     .bind(fact.metadata_json())
-    .bind(STATUS_PENDING)
     .bind(fact.causation_id())
     .fetch_optional(tx.conn())
     .await?;
@@ -1268,9 +1328,9 @@ impl OutboxSource for PgOutbox {
     /// 保证同 tenant partition 内按 seq 顺序串行投递。
     /// `partition_key IS NULL` 的行保持原语义——无序并行，不受 gate 约束。
     ///
-    /// - **dlx fail-closed 语义**：队头进 dlx（`b.status <> 'published'`，dlx 计「未结清」）会**阻塞**该
-    ///   partition 直到运维经 `DlqStore::redrive_outbox` / `rss_outbox_redrive(text, uuid)` re-drive
-    ///   ——这是与「serial in order」一致的唯一选择。
+    /// - **dlx fail-closed 语义**：队头进 dlx 会**阻塞**该 partition。deadline 前可经
+    ///   `DlqStore::redrive_outbox` 保留 same-ID 重投；deadline 到期后只能经显式 terminal resolution
+    ///   将队头结清为 `abandoned`，不再允许 same-ID broker publish。
     /// - **已知前提**：`b.seq < o.seq` 队头判据假设同 partition 行按 seq 序提交，成立条件是同 partition 写入由
     ///   聚合根并发控制（行锁/version CAS）串行化（partition = aggregate 标准契约）。
     /// - **backlog 注意**：head-of-partition gate 是 **claim-only by design**——被 gate 的后继仍计入 backlog
@@ -1343,8 +1403,29 @@ impl OutboxRelay for PgOutbox {
     async fn relay(&self, claimed: Self::Claim) -> Result<consistency::Disposition, EngineError> {
         let event_id = claimed.idem_key().as_str();
         self.validate_claim_provider(&claimed)?;
-        if !lease_can_publish(&self.pool, &claimed).await? {
-            return Err(lost_lease_error(event_id, "pre_publish_budget"));
+        match publish_preflight(&self.pool, &claimed).await? {
+            PublishPreflight::Allowed => {}
+            PublishPreflight::LostLease => {
+                return Err(lost_lease_error(event_id, "pre_publish_budget"));
+            }
+            PublishPreflight::AutomaticExpired => {
+                return self
+                    .settle_delivery_window_expired(
+                        claimed.subject().tenant_id(),
+                        &claimed,
+                        SameIdDeliveryPhase::Automatic,
+                    )
+                    .await;
+            }
+            PublishPreflight::RedriveExpired => {
+                return self
+                    .settle_delivery_window_expired(
+                        claimed.subject().tenant_id(),
+                        &claimed,
+                        SameIdDeliveryPhase::Redrive,
+                    )
+                    .await;
+            }
         }
         let tenant = claimed.subject().tenant_id();
         let publish_result = match self.publish_claimed(&claimed).await {
@@ -1370,6 +1451,35 @@ impl OutboxRelay for PgOutbox {
 }
 
 impl PgOutbox {
+    async fn settle_delivery_window_expired(
+        &self,
+        tenant: vocab::TenantId,
+        claimed: &PgClaimedOutboxEntry,
+        phase: SameIdDeliveryPhase,
+    ) -> Result<consistency::Disposition, EngineError> {
+        let event_id = claimed.idem_key().as_str();
+        match settle_dlx(
+            &self.tenant_pool,
+            &self.payload_protector,
+            DlxSettlement {
+                tenant,
+                claimed,
+                error_summary: phase.dlx_summary(),
+                relay_failure_reason: Some(phase.failure_reason()),
+            },
+        )
+        .await?
+        {
+            DlxSettleOutcome::Settled(_) => {
+                record_same_id_window_expired(claimed.domain(), claimed.subject(), phase);
+                Ok(consistency::Disposition::Reject)
+            }
+            DlxSettleOutcome::LostLease => {
+                Err(lost_lease_error(event_id, "settle_delivery_window_expired"))
+            }
+        }
+    }
+
     fn validate_claim_provider(&self, claimed: &PgClaimedOutboxEntry) -> Result<(), EngineError> {
         if Arc::ptr_eq(&self.provider, &claimed.provider) {
             return Ok(());
@@ -1599,6 +1709,21 @@ fn record_relay_envelope_validation_failure(
     .increment(1);
 }
 
+fn record_same_id_window_expired(
+    domain: &vocab::DomainName,
+    subject: &OutboxMetricSubject,
+    phase: SameIdDeliveryPhase,
+) {
+    metrics::counter!(
+        "outbox_same_id_window_expired_total",
+        "domain" => domain.as_str().to_owned(),
+        "contract_id" => subject.contract_id().as_str().to_owned(),
+        "tenant_id" => subject.tenant_id().to_string(),
+        "phase" => phase.as_label(),
+    )
+    .increment(1);
+}
+
 /// publish 失败处置（抽出控制 `relay` 认知复杂度 ≤15）：永久错误首投即 dlx、预算耗尽 → dlx；否则退避 retry
 /// （#1212，分流谓词见 [`dlx_decision`]）。
 ///
@@ -1698,7 +1823,9 @@ fn log_envelope_validation_failed(
 ///
 /// **排障路径**：relay 侧 Entry 不携 partition_key；dlx 冻结某 partition 时，运维可经
 /// `SELECT partition_key, domain FROM outbox WHERE event_id = $event_id` 定位被冻结的 partition，
-/// 再经 `DlqStore::redrive_outbox`（底层固定函数 `rss_outbox_redrive(text, uuid)`）解冻队头并放行后继。
+/// deadline 前可经 `DlqStore::redrive_outbox`重投；deadline 到期后 redrive 必须拒绝，只能经
+/// `DlqStore::resolve_expired_outbox` 提交 tenant-scoped resolution evidence 并结清为 `abandoned`，
+/// 然后放行后继。
 /// 主动 partition 级监控信号（batch dlx gauge）见 issue **#1406**（不在本 PR）。
 fn log_dlx(event_id: &str, attempts: i32, permanent: bool, reason: &'static str) {
     tracing::error!(target: "postgres", event_id, attempts, permanent, reason, "outbox: publish failed, moved to dlx");
@@ -1874,24 +2001,33 @@ fn settle_outcome(rows_affected: u64) -> SettleOutcome {
 
 /// 发布成功后把行置 published（以 `lease_token` 比对，防 stale 持租者结算）。
 /// `pub(crate)`：integration 测试做 lease fencing 断言。
-async fn lease_can_publish(
+async fn publish_preflight(
     pool: &sqlx::PgPool,
     claimed: &PgClaimedOutboxEntry,
-) -> Result<bool, EngineError> {
-    sqlx::query_scalar::<_, bool>("SELECT rss_outbox_lease_can_publish($1, $2::uuid, $3)")
-        .bind(claimed.idem_key().as_str())
-        .bind(claimed.lease_token())
-        .bind(claimed.lease_deadline_epoch_micros())
-        .fetch_one(pool)
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                target: "postgres",
-                error = %secure::redact_error(&error),
-                "outbox: lease publish-budget preflight failed"
-            );
-            EngineError::new(EngineErrorKind::Transient)
-        })
+) -> Result<PublishPreflight, EngineError> {
+    let discriminant =
+        sqlx::query_scalar::<_, i16>("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
+            .bind(claimed.idem_key().as_str())
+            .bind(claimed.lease_token())
+            .bind(claimed.lease_deadline_epoch_micros())
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "postgres",
+                    error = %secure::redact_error(&error),
+                    "outbox: lease publish-budget preflight failed"
+                );
+                EngineError::new(EngineErrorKind::Transient)
+            })?;
+    PublishPreflight::try_from(discriminant).map_err(|_| {
+        tracing::error!(
+            target: "postgres",
+            discriminant,
+            "outbox: unknown publish preflight discriminant"
+        );
+        EngineError::new(EngineErrorKind::Invariant)
+    })
 }
 
 pub(crate) async fn settle_published(
@@ -2174,8 +2310,9 @@ fn dlx_decision(is_permanent: bool, new_count: i32) -> bool {
 
 /// 指数退避（秒），上限 3600。`retry_count` 是当前已重试次数（0-based，即 UPDATE 前的值）。
 ///
-/// backoff = min(2^retry_count, 3600)。`const fn` ⇒ 可在 [`max_redelivery_window_secs`] 的 const
-/// 求值与下游 `const { assert!(..) }` 编译期断言中复用（`.min()` 非 const，故展开成显式 `if`）。
+/// backoff = min(2^retry_count, 3600)。数据库冻结 policy 独立限定 same-ID 重投绝对窗口；
+/// 该函数只描述窗口内单次重试退避。
+#[cfg(test)]
 pub(crate) const fn backoff_seconds(retry_count: i32) -> i64 {
     const MAX_BACKOFF: i64 = 3600;
     if retry_count < 0 {
@@ -2190,22 +2327,6 @@ pub(crate) const fn backoff_seconds(retry_count: i32) -> i64 {
     if val < MAX_BACKOFF { val } else { MAX_BACKOFF }
 }
 
-/// outbox 发布侧最坏重投窗口（秒）：`Σ backoff_seconds(0..MAX_PUBLISH_ATTEMPTS)`——一条 entry 从首投到
-/// 耗尽重试预算（转 dlx）期间所有退避之和（当前策略 = 1+2+…+512 = 1023s）。
-///
-/// `inbox_receipts` 保留期下限校验引用此窗口（NServiceBus 去重铁律：去重保留期必须 > 重投窗口，否则迟到重投被
-/// 误判 Fresh 重复执行；见 `inbox.rs` INVARIANT INBOX-RECEIPT-RETENTION-FLOOR-01）。`const fn` ⇒ 可在
-/// `const { assert!(..) }` 编译期断言中求值（把铁律上移到常量层，违反即编译失败，非运行期治理测试）。
-pub(crate) const fn max_redelivery_window_secs() -> i64 {
-    let mut total = 0i64;
-    let mut rc = 0i32;
-    while rc < MAX_PUBLISH_ATTEMPTS {
-        total += backoff_seconds(rc);
-        rc += 1;
-    }
-    total
-}
-
 // ── 单测 ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2217,12 +2338,11 @@ mod tests {
         AppendFingerprintObservation, CanonicalOutboxFact, ClaimHydrationError, ClaimedOutboxRow,
         LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OUTBOX_CLAIM_BATCH_MAX, OutboxAppendError,
         OutboxEnvelope, OutboxLease, OutboxLeaseError, OutboxMetadata, OutboxWriteEntry,
-        RelayEnvelopeValidationReason, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED,
-        STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
-        classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
-        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient,
-        publish_request, record_relay_envelope_validation_failure, unix_secs,
-        validate_publish_request_envelope,
+        PublishPreflight, RelayEnvelopeValidationReason, STATUS_ABANDONED, STATUS_DLX,
+        STATUS_PENDING, STATUS_PUBLISHED, STATUS_PUBLISHING, apply_schema_headers_from_columns,
+        backoff_seconds, classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
+        hydrate_envelope_metadata, metadata_with_ambient, publish_request,
+        record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
     };
     use diport::{
         EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
@@ -2272,6 +2392,25 @@ mod tests {
             OutboxLease::hydrate("f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(), 0),
             Err(OutboxLeaseError::Deadline)
         ));
+    }
+
+    #[test]
+    fn publish_preflight_discriminants_are_closed_and_fail_unknown() {
+        assert_eq!(PublishPreflight::try_from(0), Ok(PublishPreflight::Allowed));
+        assert_eq!(
+            PublishPreflight::try_from(1),
+            Ok(PublishPreflight::LostLease)
+        );
+        assert_eq!(
+            PublishPreflight::try_from(2),
+            Ok(PublishPreflight::AutomaticExpired)
+        );
+        assert_eq!(
+            PublishPreflight::try_from(3),
+            Ok(PublishPreflight::RedriveExpired)
+        );
+        assert!(PublishPreflight::try_from(-1).is_err());
+        assert!(PublishPreflight::try_from(4).is_err());
     }
 
     #[test]
@@ -2820,7 +2959,7 @@ mod tests {
         const { assert!(LEASE_TTL_SECONDS > 0) };
     }
 
-    // F8 anti-vacuity：解析 0002 migration 的 `CHECK (status IN (...))` 子句，断言与生产 const 集同源
+    // F8 anti-vacuity：解析 forward migration 的最终 `CHECK (status IN (...))` 子句，断言与生产 const 集同源
     // （SQL 全经 .bind(STATUS_*)，此测试守 const ↔ migration 不漂移；两处任一改动不同步即红）。
     // 集合相等比较隐式覆盖「四常量互异」——migration 四值互异，若两常量重复则集合不等而失败。
     #[test]
@@ -2828,7 +2967,8 @@ mod tests {
     // reason: 测试解析编译期 include_str! 的已知 migration 文本，CHECK 子句缺失即应 fail（测试本身的断言），
     // item-level carve-out（error-handling.md §Carve-out）。
     fn status_consts_match_migration_check() {
-        const MIGRATION: &str = include_str!("../migrations/0003_create_outbox.sql");
+        const MIGRATION: &str =
+            include_str!("../migrations/0060_bound_same_id_delivery_window.sql");
         let in_pos = MIGRATION
             .find("status IN (")
             .expect("migration must declare status CHECK IN clause");
@@ -2845,11 +2985,12 @@ mod tests {
             STATUS_PUBLISHING,
             STATUS_PUBLISHED,
             STATUS_DLX,
+            STATUS_ABANDONED,
         ];
         const_values.sort_unstable();
         assert_eq!(
             migration_values, const_values,
-            "outbox status const 集与 migration 0002 CHECK 漂移"
+            "outbox status const 集与 migration 0060 CHECK 漂移"
         );
     }
 
@@ -3124,6 +3265,160 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    // reason: static migration-contract test must fail loudly when the reviewed SQL shape drifts.
+    fn same_id_delivery_window_migration_is_breaking_and_fail_closed() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0060_bound_same_id_delivery_window.sql");
+        for needle in [
+            "CREATE TABLE event_delivery_policy",
+            "automatic_retry_window_seconds bigint NOT NULL",
+            "same_id_redrive_horizon_seconds bigint NOT NULL",
+            "safety_margin_seconds bigint NOT NULL",
+            "inbox_receipt_retention_seconds bigint NOT NULL",
+            "same_id_delivery_phase text NOT NULL DEFAULT 'automatic'",
+            "automatic_retry_deadline timestamptz",
+            "same_id_redrive_deadline timestamptz",
+            "abandoned_at timestamptz",
+            "CREATE TABLE outbox_expired_resolutions",
+            "CREATE FUNCTION rss_outbox_resolve_expired(",
+            "status IN ('pending', 'publishing', 'published', 'dlx', 'abandoned')",
+            "CREATE FUNCTION rss_outbox_publish_preflight(",
+            "CREATE FUNCTION rss_sweep_inbox_receipts()",
+            "DROP FUNCTION rss_outbox_lease_can_publish(text, uuid, bigint)",
+            "DROP FUNCTION rss_sweep_inbox_receipts(bigint)",
+            "REVOKE ALL ON FUNCTION rss_outbox_redrive(text, uuid) FROM rss_app",
+            "REVOKE INSERT ON outbox FROM rss_app",
+            "GRANT INSERT (",
+        ] {
+            assert!(MIGRATION.contains(needle), "0060 drift: missing {needle}");
+        }
+        let (_, column_grant_tail) = MIGRATION
+            .split_once("GRANT INSERT (")
+            .expect("0060 must replace broad INSERT with a column grant");
+        let (column_grant, _) = column_grant_tail
+            .split_once(") ON outbox TO rss_app;")
+            .expect("0060 column grant must target rss_app outbox INSERT");
+        for fact_column in [
+            "event_id",
+            "tenant_id",
+            "domain",
+            "topic",
+            "contract_id",
+            "contract_version",
+            "schema_hash",
+            "payload",
+            "metadata",
+            "partition_key",
+            "causation_id",
+        ] {
+            assert!(
+                column_grant.lines().any(|line| {
+                    line.trim()
+                        .trim_end_matches(',')
+                        .eq_ignore_ascii_case(fact_column)
+                }),
+                "0060 must grant the immutable fact column {fact_column}"
+            );
+        }
+        for state_column in [
+            "status",
+            "same_id_delivery_phase",
+            "automatic_retry_deadline",
+            "same_id_redrive_deadline",
+            "abandoned_at",
+            "retry_count",
+            "retry_after",
+            "lease_token",
+            "lease_until",
+            "published_at",
+            "dlx_at",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                !column_grant.lines().any(|line| {
+                    line.trim()
+                        .trim_end_matches(',')
+                        .eq_ignore_ascii_case(state_column)
+                }),
+                "0060 must keep database-owned column {state_column} out of the app grant"
+            );
+        }
+        assert!(
+            !MIGRATION
+                .contains("GRANT EXECUTE ON FUNCTION rss_outbox_redrive(text, uuid) TO rss_app"),
+            "serving rss_app must not retain the operator redrive capability"
+        );
+        const VALIDATION: &str =
+            include_str!("../migrations/0061_validate_same_id_delivery_constraints.sql");
+        assert_eq!(VALIDATION.matches("ALTER TABLE outbox").count(), 1);
+        assert_eq!(VALIDATION.matches("VALIDATE CONSTRAINT").count(), 1);
+        assert!(VALIDATION.contains("VALIDATE CONSTRAINT outbox_same_id_state_valid"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: static source-contract test must fail loudly when a production INSERT loses its fingerprint terminator.
+    fn production_outbox_inserts_supply_fact_columns_only() {
+        let source = include_str!("outbox.rs");
+        let insert_start = ["INSERT INTO ", "outbox ("].concat();
+        let insert_end = ["RETURNING fact_", "fingerprint"].concat();
+        let blocks: Vec<&str> = source
+            .match_indices(&insert_start)
+            .map(|(start, _)| {
+                let tail = &source[start..];
+                let end = tail
+                    .find(&insert_end)
+                    .expect("every production outbox insert must return its fingerprint");
+                &tail[..end]
+            })
+            .collect();
+        assert_eq!(
+            blocks.len(),
+            2,
+            "mutable and replay funnels must stay unique"
+        );
+        for block in blocks {
+            for fact_column in [
+                "event_id",
+                "tenant_id",
+                "domain",
+                "topic",
+                "contract_id",
+                "contract_version",
+                "schema_hash",
+                "payload",
+                "metadata",
+                "partition_key",
+                "causation_id",
+            ] {
+                assert!(
+                    block.contains(fact_column),
+                    "production INSERT must supply fact column {fact_column}: {block}"
+                );
+            }
+            for state_column in [
+                "status",
+                "retry_count",
+                "retry_after",
+                "lease_token",
+                "lease_until",
+                "published_at",
+                "dlx_at",
+                "same_id_delivery_phase",
+                "automatic_retry_deadline",
+                "same_id_redrive_deadline",
+            ] {
+                assert!(
+                    !block.contains(state_column),
+                    "production INSERT must not forge DB-owned {state_column}: {block}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn runtime_serving_migration_hardens_current_outbox_runtime_dml_to_functions() {
         const LEGACY_GRANTS: &str = include_str!("../migrations/0030_grant_runtime_serving.sql");
         const HARDENING: &str = include_str!("../migrations/0031_harden_outbox_tenant_scope.sql");
@@ -3197,20 +3492,6 @@ mod tests {
             assert!(cur <= 3600, "exceeds cap at retry_count={rc}");
             prev = cur;
         }
-    }
-
-    // max_redelivery_window_secs = Σ backoff_seconds(0..MAX_PUBLISH_ATTEMPTS)。当前策略 10 次：
-    // 1+2+4+8+16+32+64+128+256+512 = 1023s。anti-vacuity：窗口 > 0（供 inbox 保留期下限编译期断言引用）。
-    #[test]
-    fn max_redelivery_window_secs_sums_backoffs() {
-        let expected: i64 = (0..MAX_PUBLISH_ATTEMPTS).map(backoff_seconds).sum();
-        assert_eq!(
-            max_redelivery_window_secs(),
-            expected,
-            "window must equal Σ backoff over the retry budget"
-        );
-        assert_eq!(max_redelivery_window_secs(), 1023, "current policy = 1023s");
-        assert!(max_redelivery_window_secs() > 0, "window must be positive");
     }
 
     // ── hydrate_envelope_metadata 表驱动（#1160 A4）──────────────────────────

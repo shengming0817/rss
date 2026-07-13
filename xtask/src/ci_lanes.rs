@@ -442,6 +442,28 @@ macro_rules! gate_catalog {
                         BOTH_INCLUDED,
                     )
             ),
+            PromtoolRules => (step_promtool_rules, Some("xtask/src/promtool.rs"),
+                gate(
+                        GateId::PromtoolRules,
+                        "promtool-rules",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
+            OutboxSameIdGuard => (step_outbox_same_id_guard, Some("xtask/src/outbox_same_id_guard.rs"),
+                gate(
+                        GateId::OutboxSameIdGuard,
+                        "outbox-same-id-guard",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        BOTH_INCLUDED,
+                    )
+            ),
             ConsistencyFixtures => (step_consistency_fixtures, Some("xtask/src/consistency_fixtures.rs"),
                 gate(
                         GateId::ConsistencyFixtures,

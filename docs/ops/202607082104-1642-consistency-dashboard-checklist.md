@@ -19,6 +19,8 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 - Health listener is anonymous NoAuth and must stay loopback / cluster-internal only.
 - Allowed label values are the documented closed sets. Do not add dashboard variables from free-form
   input.
+- Interpret `phase` per metric: relay tick uses `claim|publish`; same-ID expiry uses
+  `automatic|redrive`. Do not merge both metrics into one phase selector.
 - Forbidden label sources: payload, error text, partition key, topic when not already a metric
   label, subject, actor, request input, handler error, event id, dead-letter id, saga id, step name,
   device id, command id, ack id, dispatch key, raw broker metadata, token, secret or URL credential.
@@ -32,6 +34,7 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | Outbox partition blocked | `sum by (domain, contract_id, tenant_id) (outbox_partition_blocked_depth)` | `domain`, `contract_id`, `tenant_id` | `OutboxPartitionBlocked`; inspect DLX head, no partition key in metric |
 | Outbox publish disposition | `sum by (domain, status) (rate(outbox_publish_total[5m]))` | `domain`, `status` | Requeue storm / reject path diagnosis |
 | Outbox DLX rate | `sum by (domain) (rate(outbox_dlx_total[5m]))` | `domain` | `OutboxDlxGrowth`; identify tenant before tenant-scoped DLQ CLI |
+| Outbox same-ID window expiry | `sum by (domain, phase) ((increase(outbox_same_id_window_expired_total[10m]) > 0) or ((outbox_same_id_window_expired_total > 0) unless (outbox_same_id_window_expired_total offset 10m)))` | `domain`, `phase` (`automatic`/`redrive`) | `OutboxSameIdWindowExpired`; filtering zero increase prevents it from masking the `unless offset` first-series arm; broker publish was skipped, inspect DLX and maintenance audit |
 | Relay tick P95 | `histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))` | `phase` | `OutboxRelayTickSlow`; split claim vs publish pressure |
 | Consumer settle outcome | `sum by (domain, action, outcome) (rate(consumer_settle_total[5m]))` | `domain`, `action`, `outcome` | Broker settle failures and reject/requeue mix |
 | Consumer DLX write | `sum by (domain, outcome) (increase(consumer_dlx_write_total[5m]))` | `domain`, `outcome` | `ConsumerDlxWriteError`; DLX audit write failed |

@@ -308,7 +308,8 @@ mod tests {
         })
     }
 
-    /// claim → commit(Held) → 再 try_claim = Duplicate（done 永久去重）。
+    /// claim → commit(Held) → 再 try_claim = Duplicate（该 state 中 done 为 terminal；durable provider 可按
+    /// 自身 retention 策略回收 receipt）。
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     // reason: 状态机断言测试——store.try_claim/commit 在 in-mem 实现中恒 Ok，item-level carve-out。

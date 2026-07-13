@@ -38,6 +38,7 @@ mod cotx;
 mod credential_repo;
 mod dead_letter;
 mod dead_letter_payload;
+mod delivery_policy;
 mod dlq;
 mod emitter;
 #[cfg(feature = "fault-matrix-test-support")]
@@ -142,7 +143,7 @@ mod integration_tests;
 #[cfg(all(test, feature = "integration"))]
 mod test_pg;
 
-pub use inbox::{INBOX_RECEIPT_RETENTION_SECONDS, PgInboxStore, PgInboxSweeper};
+pub use inbox::{PgInboxStore, PgInboxSweeper};
 pub use pool::{LegacyConfigPlaintextPolicy, PgConfig, PgError, PgPassword, PoolReadiness};
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。

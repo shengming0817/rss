@@ -112,10 +112,12 @@ use crypto::RustCryptoMacVerifier;
 use diport::{DynKeyProvider, DynManagedResource, ManagedResource, ShutdownError};
 use eventexec::{
     DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
-    DlqRedriveRequest, DlqReplayRequest, DlqStore, OperatorDlqCapability,
-    OperatorReconcileCapability, ProjectionHarness, ProjectionId, ProjectionReplayProjector,
-    ProjectionSelector, ProjectionStop, ProjectionTargetRegistry, ProjectionVersion,
-    ReconcileOperatorStore, ReconcileTargetSummary, projection_runner_once,
+    DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore, OperatorDlqCapability,
+    OperatorReconcileCapability, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
+    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, ProjectionHarness, ProjectionId,
+    ProjectionReplayProjector, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry,
+    ProjectionVersion, ReconcileOperatorStore, ReconcileTargetSummary, VerifiedOperatorSubject,
+    projection_runner_once,
 };
 use postgres::{
     ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
@@ -1979,6 +1981,12 @@ enum DlqCliCommand {
     RedriveOutbox {
         event_id: IdemKey,
     },
+    ResolveExpiredOutbox {
+        event_id: IdemKey,
+        change_ticket: OutboxResolutionChangeTicket,
+        resolution_kind: OutboxExpiredResolutionKind,
+        evidence_event_id: Option<IdemKey>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1987,6 +1995,7 @@ enum DlqMaintenanceAction {
     Inspect,
     ReplayDeadLetter,
     RedriveOutbox,
+    ResolveExpiredOutbox,
 }
 
 impl DlqMaintenanceAction {
@@ -1996,6 +2005,7 @@ impl DlqMaintenanceAction {
             "inspect" => Ok(Self::Inspect),
             "replay-dead-letter" => Ok(Self::ReplayDeadLetter),
             "redrive-outbox" => Ok(Self::RedriveOutbox),
+            "resolve-expired-outbox" => Ok(Self::ResolveExpiredOutbox),
             other => anyhow::bail!(
                 "unknown DLQ maintenance action in {DLQ_OPERATOR_GRANTS_ENV}: {other}"
             ),
@@ -2008,6 +2018,7 @@ impl DlqMaintenanceAction {
             Self::Inspect => "inspect",
             Self::ReplayDeadLetter => "replay-dead-letter",
             Self::RedriveOutbox => "redrive-outbox",
+            Self::ResolveExpiredOutbox => "resolve-expired-outbox",
         }
     }
 }
@@ -2019,6 +2030,7 @@ impl DlqCliCommand {
             Self::Inspect { .. } => DlqMaintenanceAction::Inspect,
             Self::ReplayDeadLetter { .. } => DlqMaintenanceAction::ReplayDeadLetter,
             Self::RedriveOutbox { .. } => DlqMaintenanceAction::RedriveOutbox,
+            Self::ResolveExpiredOutbox { .. } => DlqMaintenanceAction::ResolveExpiredOutbox,
         }
     }
 
@@ -2035,7 +2047,7 @@ struct DlqMaintenanceGrant {
 }
 
 fn dlq_cli_usage() -> &'static str {
-    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> [--producer-domain <domain>] [--consumer-domain <domain>] ..."
+    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox|resolve-expired-outbox --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> [--producer-domain <domain>] [--consumer-domain <domain>] ..."
 }
 
 fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
@@ -2081,6 +2093,9 @@ struct DlqRawArgs {
     dead_letter_id: Option<DeadLetterId>,
     replay_id: Option<IdemKey>,
     event_id: Option<IdemKey>,
+    change_ticket: Option<OutboxResolutionChangeTicket>,
+    resolution_kind: Option<OutboxExpiredResolutionKind>,
+    evidence_event_id: Option<IdemKey>,
 }
 
 impl Default for DlqRawArgs {
@@ -2101,6 +2116,9 @@ impl Default for DlqRawArgs {
             dead_letter_id: None,
             replay_id: None,
             event_id: None,
+            change_ticket: None,
+            resolution_kind: None,
+            evidence_event_id: None,
         }
     }
 }
@@ -2224,6 +2242,33 @@ fn parse_dlq_raw_args(args: &[String]) -> anyhow::Result<DlqRawArgs> {
                     })?,
                 )?;
             }
+            "--change-ticket" => {
+                let value = next_cli_value(&mut it, "--change-ticket")?;
+                set_cli_arg_once(
+                    &mut parsed.change_ticket,
+                    "--change-ticket",
+                    OutboxResolutionChangeTicket::parse(value)
+                        .context("--change-ticket is invalid")?,
+                )?;
+            }
+            "--resolution-kind" => {
+                let value = next_cli_value(&mut it, "--resolution-kind")?;
+                set_cli_arg_once(
+                    &mut parsed.resolution_kind,
+                    "--resolution-kind",
+                    OutboxExpiredResolutionKind::parse(value)
+                        .context("--resolution-kind must be accepted_gap|compensated")?,
+                )?;
+            }
+            "--evidence-event-id" => {
+                let value = next_cli_value(&mut it, "--evidence-event-id")?;
+                set_cli_arg_once(
+                    &mut parsed.evidence_event_id,
+                    "--evidence-event-id",
+                    IdemKey::parse(value)
+                        .with_context(|| format!("--evidence-event-id is invalid: {value}"))?,
+                )?;
+            }
             other => anyhow::bail!("unknown dlq command argument: {other}"),
         }
     }
@@ -2239,7 +2284,7 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
     anyhow::ensure!(
         matches!(
             subcommand,
-            "list" | "inspect" | "replay-dead-letter" | "redrive-outbox"
+            "list" | "inspect" | "replay-dead-letter" | "redrive-outbox" | "resolve-expired-outbox"
         ),
         "unknown dlq subcommand: {subcommand}; {}",
         dlq_cli_usage()
@@ -2253,7 +2298,12 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
                 "list does not accept --kind or --id"
             );
             anyhow::ensure!(
-                raw.dead_letter_id.is_none() && raw.replay_id.is_none() && raw.event_id.is_none(),
+                raw.dead_letter_id.is_none()
+                    && raw.replay_id.is_none()
+                    && raw.event_id.is_none()
+                    && raw.change_ticket.is_none()
+                    && raw.resolution_kind.is_none()
+                    && raw.evidence_event_id.is_none(),
                 "list does not accept mutation target flags"
             );
             DlqCliCommand::List {
@@ -2276,7 +2326,12 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
                 "inspect does not accept list filters"
             );
             anyhow::ensure!(
-                raw.dead_letter_id.is_none() && raw.replay_id.is_none() && raw.event_id.is_none(),
+                raw.dead_letter_id.is_none()
+                    && raw.replay_id.is_none()
+                    && raw.event_id.is_none()
+                    && raw.change_ticket.is_none()
+                    && raw.resolution_kind.is_none()
+                    && raw.evidence_event_id.is_none(),
                 "inspect does not accept mutation target flags"
             );
             let kind = raw
@@ -2301,7 +2356,10 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
                     && !raw.limit_seen
                     && raw.kind.is_none()
                     && raw.id.is_none()
-                    && raw.event_id.is_none(),
+                    && raw.event_id.is_none()
+                    && raw.change_ticket.is_none()
+                    && raw.resolution_kind.is_none()
+                    && raw.evidence_event_id.is_none(),
                 "replay-dead-letter only accepts --dead-letter-id and --replay-id target flags"
             );
             DlqCliCommand::ReplayDeadLetter {
@@ -2326,7 +2384,10 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
                     && raw.kind.is_none()
                     && raw.id.is_none()
                     && raw.dead_letter_id.is_none()
-                    && raw.replay_id.is_none(),
+                    && raw.replay_id.is_none()
+                    && raw.change_ticket.is_none()
+                    && raw.resolution_kind.is_none()
+                    && raw.evidence_event_id.is_none(),
                 "redrive-outbox only accepts --event-id target flag"
             );
             DlqCliCommand::RedriveOutbox {
@@ -2334,6 +2395,48 @@ fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
                     .event_id
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("--event-id is required"))?,
+            }
+        }
+        "resolve-expired-outbox" => {
+            anyhow::ensure!(
+                raw.source.is_none()
+                    && raw.producer_domain.is_none()
+                    && raw.consumer_domain.is_none()
+                    && raw.contract_id.is_none()
+                    && raw.cursor.is_none()
+                    && !raw.limit_seen
+                    && raw.kind.is_none()
+                    && raw.id.is_none()
+                    && raw.dead_letter_id.is_none()
+                    && raw.replay_id.is_none(),
+                "resolve-expired-outbox only accepts resolution target flags"
+            );
+            let event_id = raw
+                .event_id
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("--event-id is required"))?;
+            let change_ticket = raw
+                .change_ticket
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("--change-ticket is required"))?;
+            let resolution_kind = raw
+                .resolution_kind
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("--resolution-kind is required"))?;
+            let evidence_event_id = raw.evidence_event_id.take();
+            anyhow::ensure!(
+                matches!(
+                    (resolution_kind, evidence_event_id.is_some()),
+                    (OutboxExpiredResolutionKind::AcceptedGap, false)
+                        | (OutboxExpiredResolutionKind::Compensated, true)
+                ),
+                "accepted_gap forbids --evidence-event-id; compensated requires it"
+            );
+            DlqCliCommand::ResolveExpiredOutbox {
+                event_id,
+                change_ticket,
+                resolution_kind,
+                evidence_event_id,
             }
         }
         _ => unreachable!("subcommand checked"),
@@ -2453,6 +2556,15 @@ fn dlq_command_resource_id(parsed: &DlqCliArgs) -> String {
             )
         }
         DlqCliCommand::RedriveOutbox { event_id } => format!("event_id={}", event_id.as_str()),
+        DlqCliCommand::ResolveExpiredOutbox {
+            event_id,
+            resolution_kind,
+            ..
+        } => format!(
+            "event_id={} resolution_kind={}",
+            event_id.as_str(),
+            resolution_kind.as_label()
+        ),
     };
     format!(
         "operation={} tenant={} {}",
@@ -2462,7 +2574,7 @@ fn dlq_command_resource_id(parsed: &DlqCliArgs) -> String {
     )
 }
 
-async fn verified_dlq_operator_subject(
+async fn authenticate_dlq_operator_subject(
     service_token: &str,
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
@@ -2511,7 +2623,7 @@ async fn dlq_operator_subject(
         }
     };
     let operator_pdp = diport::DynPdp::from_ref(&operator_provider);
-    let subject = match verified_dlq_operator_subject(
+    let subject = match authenticate_dlq_operator_subject(
         &parsed.operator_service_token,
         parsed.operator_tenant,
         operator_pdp,
@@ -2565,6 +2677,16 @@ async fn dlq_operator_subject(
     Ok(subject)
 }
 
+/// The single bridge from an authenticated + exactly authorized DLQ principal to the typed
+/// terminal-resolution witness. Callers must invoke this only after `dlq_operator_subject` has
+/// completed service-token verification and the exact action/tenant grant check.
+fn verified_dlq_operator_subject(
+    operator_subject: &str,
+) -> anyhow::Result<VerifiedOperatorSubject> {
+    VerifiedOperatorSubject::from_verified(operator_subject)
+        .context("verified DLQ operator subject is invalid")
+}
+
 fn dlq_summary_json_line(summary: &DlqEntrySummary) -> anyhow::Result<String> {
     let value = serde_json::json!({
         "kind": summary.kind().as_label(),
@@ -2590,11 +2712,86 @@ fn print_dlq_summary(summary: &DlqEntrySummary) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DlqCommandOutcome {
+    Completed,
+    Expired,
+    Rejected(&'static str),
+}
+
+fn dlq_redrive_result_line(
+    tenant: vocab::TenantId,
+    event_id: &IdemKey,
+    outcome: DlqRedriveOutcome,
+) -> String {
+    format!(
+        "operation=redrive-outbox tenant={tenant} event_id={} outcome={}",
+        event_id.as_str(),
+        outcome.as_label()
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+// reason: the helper receives one closed CLI command's typed fields plus its authorized witnesses.
+async fn run_expired_outbox_resolution<S: DlqStore>(
+    store: &S,
+    tenant: vocab::TenantId,
+    event_id: &IdemKey,
+    change_ticket: &OutboxResolutionChangeTicket,
+    resolution_kind: OutboxExpiredResolutionKind,
+    evidence_event_id: Option<&IdemKey>,
+    capability: OperatorDlqCapability,
+    operator_subject: &VerifiedOperatorSubject,
+) -> anyhow::Result<DlqCommandOutcome> {
+    let request = match resolution_kind {
+        OutboxExpiredResolutionKind::AcceptedGap => OutboxExpiredResolutionRequest::accepted_gap(
+            tenant,
+            event_id.clone(),
+            change_ticket.clone(),
+            operator_subject.clone(),
+            capability,
+        ),
+        OutboxExpiredResolutionKind::Compensated => {
+            let evidence_event_id = evidence_event_id
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("compensated evidence invariant"))?;
+            OutboxExpiredResolutionRequest::compensated(
+                tenant,
+                event_id.clone(),
+                evidence_event_id,
+                change_ticket.clone(),
+                operator_subject.clone(),
+                capability,
+            )
+        }
+    };
+    let outcome = store.resolve_expired_outbox(request).await?;
+    println!(
+        "operation=resolve-expired-outbox tenant={} event_id={} resolution_kind={} outcome={}",
+        tenant,
+        event_id.as_str(),
+        resolution_kind.as_label(),
+        outcome.as_label()
+    );
+    match outcome {
+        OutboxExpiredResolutionOutcome::Resolved | OutboxExpiredResolutionOutcome::NotFound => {
+            Ok(DlqCommandOutcome::Completed)
+        }
+        OutboxExpiredResolutionOutcome::NotExpired => {
+            Ok(DlqCommandOutcome::Rejected("not_expired"))
+        }
+        OutboxExpiredResolutionOutcome::EvidenceRejected => {
+            Ok(DlqCommandOutcome::Rejected("evidence_rejected"))
+        }
+    }
+}
+
 async fn run_dlq_command_inner<S: DlqStore>(
     store: &S,
     parsed: &DlqCliArgs,
     capability: OperatorDlqCapability,
-) -> anyhow::Result<()> {
+    operator_subject: &VerifiedOperatorSubject,
+) -> anyhow::Result<DlqCommandOutcome> {
     match &parsed.command {
         DlqCliCommand::List {
             source,
@@ -2631,7 +2828,7 @@ async fn run_dlq_command_inner<S: DlqStore>(
                 result.has_more(),
                 result.next_cursor().unwrap_or("none")
             );
-            Ok(())
+            Ok(DlqCommandOutcome::Completed)
         }
         DlqCliCommand::Inspect { target } => {
             let summary = store
@@ -2649,7 +2846,7 @@ async fn run_dlq_command_inner<S: DlqStore>(
                     event_id.as_str()
                 ),
             }
-            Ok(())
+            Ok(DlqCommandOutcome::Completed)
         }
         DlqCliCommand::ReplayDeadLetter {
             dead_letter_id,
@@ -2670,7 +2867,7 @@ async fn run_dlq_command_inner<S: DlqStore>(
                 replay_id.as_str(),
                 outcome.as_label()
             );
-            Ok(())
+            Ok(DlqCommandOutcome::Completed)
         }
         DlqCliCommand::RedriveOutbox { event_id } => {
             let outcome = store
@@ -2681,12 +2878,33 @@ async fn run_dlq_command_inner<S: DlqStore>(
                 ))
                 .await?;
             println!(
-                "operation=redrive-outbox tenant={} event_id={} outcome={}",
-                parsed.tenant,
-                event_id.as_str(),
-                outcome.as_label()
+                "{}",
+                dlq_redrive_result_line(parsed.tenant, event_id, outcome)
             );
-            Ok(())
+            match outcome {
+                DlqRedriveOutcome::Expired => Ok(DlqCommandOutcome::Expired),
+                DlqRedriveOutcome::Redriven | DlqRedriveOutcome::NotFound => {
+                    Ok(DlqCommandOutcome::Completed)
+                }
+            }
+        }
+        DlqCliCommand::ResolveExpiredOutbox {
+            event_id,
+            change_ticket,
+            resolution_kind,
+            evidence_event_id,
+        } => {
+            run_expired_outbox_resolution(
+                store,
+                parsed.tenant,
+                event_id,
+                change_ticket,
+                *resolution_kind,
+                evidence_event_id.as_ref(),
+                capability,
+                operator_subject,
+            )
+            .await
         }
     }
 }
@@ -2813,16 +3031,25 @@ where
         }
     };
     let capability = issue_authorized_dlq_capability();
-    let command_result = match runtime.dlq_store(&session, &parsed.command) {
-        Ok(store) => run_dlq_command_inner(&store, &parsed, capability).await,
-        Err(err) => Err(err),
-    };
-    let finish_outcome = if command_result.is_ok() {
-        MaintenanceAuditOutcome::Success
-    } else {
-        MaintenanceAuditOutcome::Failure {
-            reason: "run_error",
+    // This wrapper is deliberately created only after service-token verification and exact
+    // action/tenant grant authorization have both succeeded in `operator_subject`.
+    let verified_operator_subject = verified_dlq_operator_subject(&operator_subject);
+    let command_result = match (
+        verified_operator_subject,
+        runtime.dlq_store(&session, &parsed.command),
+    ) {
+        (Ok(operator_subject), Ok(store)) => {
+            run_dlq_command_inner(&store, &parsed, capability, &operator_subject).await
         }
+        (Err(err), _) | (_, Err(err)) => Err(err),
+    };
+    let finish_outcome = match &command_result {
+        Ok(DlqCommandOutcome::Completed) => MaintenanceAuditOutcome::Success,
+        Ok(DlqCommandOutcome::Expired) => MaintenanceAuditOutcome::Failure { reason: "expired" },
+        Ok(DlqCommandOutcome::Rejected(reason)) => MaintenanceAuditOutcome::Failure { reason },
+        Err(_) => MaintenanceAuditOutcome::Failure {
+            reason: "run_error",
+        },
     };
     let audit_result = runtime
         .record_dlq_maintenance_audit(
@@ -2836,7 +3063,15 @@ where
         .context("record DLQ maintenance finish audit");
     runtime.shutdown(session).await;
     audit_result?;
-    command_result.with_context(|| format!("DLQ command failed: {resource_id}"))
+    match command_result.with_context(|| format!("DLQ command failed: {resource_id}"))? {
+        DlqCommandOutcome::Completed => Ok(()),
+        DlqCommandOutcome::Expired => {
+            anyhow::bail!("DLQ command failed: {resource_id}: redrive horizon expired")
+        }
+        DlqCommandOutcome::Rejected(reason) => {
+            anyhow::bail!("DLQ command failed: {resource_id}: {reason}")
+        }
+    }
 }
 
 fn issue_authorized_dlq_capability() -> OperatorDlqCapability {
@@ -6783,6 +7018,8 @@ mod tests {
     const DLQ_FIXTURE_DEAD_LETTER_ID: &str = "11111111-1111-4111-8111-111111111111";
     const DLQ_FIXTURE_REPLAY_ID: &str = "evt-dlq-replay";
     const DLQ_FIXTURE_EVENT_ID: &str = "evt-outbox-dlx";
+    const DLQ_FIXTURE_EVIDENCE_EVENT_ID: &str = "evt-outbox-compensation";
+    const DLQ_FIXTURE_CHANGE_TICKET: &str = "CHG-1742";
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum FakeDlqAuditOutcome {
@@ -6822,6 +7059,13 @@ mod tests {
             tenant: vocab::TenantId,
             event_id: String,
         },
+        ResolveExpiredOutbox {
+            tenant: vocab::TenantId,
+            event_id: String,
+            resolution_kind: OutboxExpiredResolutionKind,
+            evidence_event_id: Option<String>,
+            operator_subject: String,
+        },
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6834,6 +7078,9 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FakeDlqStoreMode {
         Success,
+        NotFound,
+        Expired,
+        EvidenceRejected,
         StoreFailure,
     }
 
@@ -6857,7 +7104,10 @@ mod tests {
 
         fn maybe_fail(&self) -> Result<(), DlqError> {
             match self.mode {
-                FakeDlqStoreMode::Success => Ok(()),
+                FakeDlqStoreMode::Success
+                | FakeDlqStoreMode::NotFound
+                | FakeDlqStoreMode::Expired
+                | FakeDlqStoreMode::EvidenceRejected => Ok(()),
                 FakeDlqStoreMode::StoreFailure => Err(DlqError::Store),
             }
         }
@@ -6918,8 +7168,38 @@ mod tests {
                 tenant: request.tenant(),
                 event_id: request.event_id().as_str().to_owned(),
             });
-            self.maybe_fail()?;
-            Ok(eventexec::DlqRedriveOutcome::Redriven)
+            match self.mode {
+                FakeDlqStoreMode::Success => Ok(eventexec::DlqRedriveOutcome::Redriven),
+                FakeDlqStoreMode::NotFound => Ok(eventexec::DlqRedriveOutcome::NotFound),
+                FakeDlqStoreMode::Expired => Ok(eventexec::DlqRedriveOutcome::Expired),
+                FakeDlqStoreMode::EvidenceRejected | FakeDlqStoreMode::StoreFailure => {
+                    Err(DlqError::Store)
+                }
+            }
+        }
+
+        async fn resolve_expired_outbox(
+            &self,
+            request: OutboxExpiredResolutionRequest,
+        ) -> Result<OutboxExpiredResolutionOutcome, DlqError> {
+            self.push(FakeDlqCommandRecord::ResolveExpiredOutbox {
+                tenant: request.tenant(),
+                event_id: request.event_id().as_str().to_owned(),
+                resolution_kind: request.kind(),
+                evidence_event_id: request
+                    .evidence_event_id()
+                    .map(|event_id| event_id.as_str().to_owned()),
+                operator_subject: request.operator_subject().as_str().to_owned(),
+            });
+            match self.mode {
+                FakeDlqStoreMode::Success => Ok(OutboxExpiredResolutionOutcome::Resolved),
+                FakeDlqStoreMode::NotFound => Ok(OutboxExpiredResolutionOutcome::NotFound),
+                FakeDlqStoreMode::Expired => Ok(OutboxExpiredResolutionOutcome::NotExpired),
+                FakeDlqStoreMode::EvidenceRejected => {
+                    Ok(OutboxExpiredResolutionOutcome::EvidenceRejected)
+                }
+                FakeDlqStoreMode::StoreFailure => Err(DlqError::Store),
+            }
         }
     }
 
@@ -7195,7 +7475,7 @@ mod tests {
     }
 
     #[test]
-    fn dlq_args_parse_replay_and_redrive() -> anyhow::Result<()> {
+    fn dlq_args_parse_replay_redrive_and_expired_resolution() -> anyhow::Result<()> {
         let replay = parse_dlq_args(&dlq_control_args(
             "replay-dead-letter",
             &[
@@ -7222,6 +7502,50 @@ mod tests {
             redrive.command,
             DlqCliCommand::RedriveOutbox { ref event_id }
                 if event_id.as_str() == DLQ_FIXTURE_EVENT_ID
+        ));
+
+        let accepted_gap = parse_dlq_args(&dlq_control_args(
+            "resolve-expired-outbox",
+            &[
+                "--event-id",
+                DLQ_FIXTURE_EVENT_ID,
+                "--change-ticket",
+                DLQ_FIXTURE_CHANGE_TICKET,
+                "--resolution-kind",
+                "accepted_gap",
+            ],
+        ))?;
+        assert!(matches!(
+            accepted_gap.command,
+            DlqCliCommand::ResolveExpiredOutbox {
+                ref event_id,
+                ref change_ticket,
+                resolution_kind: OutboxExpiredResolutionKind::AcceptedGap,
+                evidence_event_id: None,
+            } if event_id.as_str() == DLQ_FIXTURE_EVENT_ID
+                && change_ticket.as_str() == DLQ_FIXTURE_CHANGE_TICKET
+        ));
+
+        let compensated = parse_dlq_args(&dlq_control_args(
+            "resolve-expired-outbox",
+            &[
+                "--event-id",
+                DLQ_FIXTURE_EVENT_ID,
+                "--change-ticket",
+                DLQ_FIXTURE_CHANGE_TICKET,
+                "--resolution-kind",
+                "compensated",
+                "--evidence-event-id",
+                DLQ_FIXTURE_EVIDENCE_EVENT_ID,
+            ],
+        ))?;
+        assert!(matches!(
+            compensated.command,
+            DlqCliCommand::ResolveExpiredOutbox {
+                resolution_kind: OutboxExpiredResolutionKind::Compensated,
+                evidence_event_id: Some(ref evidence_event_id),
+                ..
+            } if evidence_event_id.as_str() == DLQ_FIXTURE_EVIDENCE_EVENT_ID
         ));
         Ok(())
     }
@@ -7282,6 +7606,50 @@ mod tests {
                     &["--event-id", DLQ_FIXTURE_EVENT_ID, "--limit", "1"],
                 ),
             ),
+            (
+                "accepted gap rejects evidence",
+                dlq_control_args(
+                    "resolve-expired-outbox",
+                    &[
+                        "--event-id",
+                        DLQ_FIXTURE_EVENT_ID,
+                        "--change-ticket",
+                        DLQ_FIXTURE_CHANGE_TICKET,
+                        "--resolution-kind",
+                        "accepted_gap",
+                        "--evidence-event-id",
+                        DLQ_FIXTURE_EVIDENCE_EVENT_ID,
+                    ],
+                ),
+            ),
+            (
+                "compensated requires evidence",
+                dlq_control_args(
+                    "resolve-expired-outbox",
+                    &[
+                        "--event-id",
+                        DLQ_FIXTURE_EVENT_ID,
+                        "--change-ticket",
+                        DLQ_FIXTURE_CHANGE_TICKET,
+                        "--resolution-kind",
+                        "compensated",
+                    ],
+                ),
+            ),
+            (
+                "dirty change ticket is rejected",
+                dlq_control_args(
+                    "resolve-expired-outbox",
+                    &[
+                        "--event-id",
+                        DLQ_FIXTURE_EVENT_ID,
+                        "--change-ticket",
+                        " CHG-1742",
+                        "--resolution-kind",
+                        "accepted_gap",
+                    ],
+                ),
+            ),
         ];
 
         for (name, candidate) in cases {
@@ -7312,6 +7680,23 @@ mod tests {
             "{DLQ_FIXTURE_OPERATOR}|redrive-outbox|{DLQ_FIXTURE_OTHER_TENANT}"
         ))?;
         assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &parsed, &wrong_tenant).is_err());
+
+        let resolution = parse_dlq_args(&dlq_control_args(
+            "resolve-expired-outbox",
+            &[
+                "--event-id",
+                DLQ_FIXTURE_EVENT_ID,
+                "--change-ticket",
+                DLQ_FIXTURE_CHANGE_TICKET,
+                "--resolution-kind",
+                "accepted_gap",
+            ],
+        ))?;
+        let resolution_grant = parse_dlq_operator_grants(&format!(
+            "{DLQ_FIXTURE_OPERATOR}|resolve-expired-outbox|{DLQ_FIXTURE_TENANT}"
+        ))?;
+        authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &resolution, &resolution_grant)?;
+        assert!(authorize_dlq_operator(DLQ_FIXTURE_OPERATOR, &resolution, &grants).is_err());
 
         assert!(parse_dlq_operator_grants("").is_err());
         assert!(parse_dlq_operator_grants("subject|skip|tenant").is_err());
@@ -7495,6 +7880,28 @@ mod tests {
                     event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
                 },
             ),
+            (
+                DlqMaintenanceAction::ResolveExpiredOutbox,
+                dlq_control_args(
+                    "resolve-expired-outbox",
+                    &[
+                        "--event-id",
+                        DLQ_FIXTURE_EVENT_ID,
+                        "--change-ticket",
+                        DLQ_FIXTURE_CHANGE_TICKET,
+                        "--resolution-kind",
+                        "accepted_gap",
+                    ],
+                ),
+                "event_id=evt-outbox-dlx resolution_kind=accepted_gap",
+                FakeDlqCommandRecord::ResolveExpiredOutbox {
+                    tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                    event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
+                    resolution_kind: OutboxExpiredResolutionKind::AcceptedGap,
+                    evidence_event_id: None,
+                    operator_subject: DLQ_FIXTURE_OPERATOR.to_owned(),
+                },
+            ),
         ];
 
         for (action, command_args, target, expected_command) in cases {
@@ -7534,6 +7941,141 @@ mod tests {
             FakeDlqAuditOutcome::Failure {
                 reason: "run_error".to_owned(),
             },
+        );
+        assert!(matches!(
+            runtime.command_records().as_slice(),
+            [FakeDlqCommandRecord::RedriveOutbox { .. }]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dlq_control_lifecycle_audits_expired_redrive_and_returns_error() -> anyhow::Result<()>
+    {
+        let tenant = vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?;
+        let event_id = IdemKey::parse(DLQ_FIXTURE_EVENT_ID)?;
+        let output = dlq_redrive_result_line(tenant, &event_id, DlqRedriveOutcome::Expired);
+        assert_eq!(
+            output,
+            format!(
+                "operation=redrive-outbox tenant={DLQ_FIXTURE_TENANT} \
+                 event_id={DLQ_FIXTURE_EVENT_ID} outcome=expired"
+            )
+        );
+
+        let runtime = FakeDlqControlRuntime::verified(FakeDlqStoreMode::Expired);
+        let result = run_dlq_control_command_with_runtime(
+            &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+            &runtime,
+        )
+        .await;
+        let Err(err) = result else {
+            anyhow::bail!("expired same-ID redrive must fail");
+        };
+        let error_text = format!("{err:#}");
+        assert!(
+            error_text.contains("expired"),
+            "expired redrive must remain distinguishable from a store failure: {error_text}"
+        );
+        assert!(
+            !error_text.to_ascii_lowercase().contains("store"),
+            "expired redrive must not be disguised as a store error: {error_text}"
+        );
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert_dlq_lifecycle_audit(
+            &runtime,
+            DlqMaintenanceAction::RedriveOutbox,
+            "event_id=evt-outbox-dlx",
+            FakeDlqAuditOutcome::Failure {
+                reason: "expired".to_owned(),
+            },
+        );
+        for audit in runtime.audit_records() {
+            for forbidden in ["payload", "metadata", "partition", "error"] {
+                assert!(
+                    !audit.resource_id.contains(forbidden),
+                    "audit resource must exclude {forbidden}: {}",
+                    audit.resource_id
+                );
+            }
+        }
+        assert!(matches!(
+            runtime.command_records().as_slice(),
+            [FakeDlqCommandRecord::RedriveOutbox { .. }]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dlq_verified_subject_is_injected_and_resolution_rejections_are_safely_audited()
+    -> anyhow::Result<()> {
+        let command = dlq_control_args(
+            "resolve-expired-outbox",
+            &[
+                "--event-id",
+                DLQ_FIXTURE_EVENT_ID,
+                "--change-ticket",
+                DLQ_FIXTURE_CHANGE_TICKET,
+                "--resolution-kind",
+                "accepted_gap",
+            ],
+        );
+        for (mode, reason) in [
+            (FakeDlqStoreMode::Expired, "not_expired"),
+            (FakeDlqStoreMode::EvidenceRejected, "evidence_rejected"),
+        ] {
+            let runtime = FakeDlqControlRuntime::verified(mode);
+            let result = run_dlq_control_command_with_runtime(&command, &runtime).await;
+            let Err(error) = result else {
+                anyhow::bail!("terminal resolution rejection must return a non-zero outcome");
+            };
+            assert!(format!("{error:#}").contains(reason));
+            assert_eq!(
+                runtime.command_records(),
+                vec![FakeDlqCommandRecord::ResolveExpiredOutbox {
+                    tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                    event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
+                    resolution_kind: OutboxExpiredResolutionKind::AcceptedGap,
+                    evidence_event_id: None,
+                    operator_subject: DLQ_FIXTURE_OPERATOR.to_owned(),
+                }],
+                "the typed request subject must come from the verified runtime principal"
+            );
+            assert_dlq_lifecycle_audit(
+                &runtime,
+                DlqMaintenanceAction::ResolveExpiredOutbox,
+                "event_id=evt-outbox-dlx resolution_kind=accepted_gap",
+                FakeDlqAuditOutcome::Failure {
+                    reason: reason.to_owned(),
+                },
+            );
+            for audit in runtime.audit_records() {
+                assert!(!audit.resource_id.contains(DLQ_FIXTURE_CHANGE_TICKET));
+                for forbidden in ["payload", "metadata", "partition", "error"] {
+                    assert!(!audit.resource_id.contains(forbidden));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dlq_control_lifecycle_keeps_not_found_redrive_successful() -> anyhow::Result<()> {
+        let runtime = FakeDlqControlRuntime::verified(FakeDlqStoreMode::NotFound);
+        run_dlq_control_command_with_runtime(
+            &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+            &runtime,
+        )
+        .await?;
+
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert_dlq_lifecycle_audit(
+            &runtime,
+            DlqMaintenanceAction::RedriveOutbox,
+            "event_id=evt-outbox-dlx",
+            FakeDlqAuditOutcome::Success,
         );
         assert!(matches!(
             runtime.command_records().as_slice(),

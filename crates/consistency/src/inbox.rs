@@ -377,7 +377,8 @@ impl InboxState {
 ///   `Duplicate`。过期 claim 经 TTL 重捞（claimed 超 `lease_ttl` 未续租即可被新 token 接管），修
 ///   crash-after-claim 时 key 永久 `Duplicate` 的丢消息风险（硬崩溃下 `release` 走不到，#1213）。
 /// - `extend`：claimed(token) 续租（刷新 lease 到期点）；token 匹配 → `Held`，不符 → `Lost`（已被重捞）。
-/// - `commit`：claimed(token)→done（CAS）；token 匹配 → `Held`（永久去重），不符 → `Lost`（**hard-fence**）。
+/// - `commit`：claimed(token)→done（CAS）；token 匹配 → `Held`（receipt 保留期间去重），不符 → `Lost`
+///   （**hard-fence**）。done receipt 的保留期由 provider 策略决定；本 trait 不承诺永久保存。
 /// - `release`：claimed(token)→absent（CAS）；token 不符为 no-op（不误删他人 claim）。
 ///
 /// 长 handler 由消费方后台按 `lease_ttl/3` 周期调 `extend` 续租；租约丢失（`Lost`）触发 cancel + hard-fence
@@ -411,7 +412,8 @@ pub trait InboxStore {
         lease: &LeaseToken,
     ) -> Result<LeaseOutcome, EngineError>;
 
-    /// claimed→done（CAS）：仅当 `lease` 仍匹配时标记永久去重。`Held` 提交成功 / `Lost` 租约已失（勿 Ack）。
+    /// claimed→done（CAS）：仅当 `lease` 仍匹配时写入 terminal receipt。`Held` 提交成功 / `Lost` 租约已失
+    /// （勿 Ack）。该 receipt 存续期间同 key 为 `Duplicate`；保留期由 provider 决定。
     ///
     /// 对 absent / 已被重捞的行返回 `Lost`（hard-fence：消费方降级 Requeue、不移除 broker 投递）。
     async fn commit(

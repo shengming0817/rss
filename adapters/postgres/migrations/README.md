@@ -107,8 +107,8 @@ CLI 进程全局生效。唯一键 `(nonce)` 提供原子 insert-if-absent；`ex
 主键、contract/schema header、trace/correlation、lease CAS 状态与 `FORCE RLS` 同迁移落地。该表是可变
 claim/commit 状态，不是 append-only ledger，因此授予 `rss_app` SELECT/INSERT/UPDATE/DELETE。
 
-`0039` 安装 `rss_sweep_inbox_receipts(bigint)` SECURITY DEFINER 保留期维护函数，随后完成 #1650 pre-GA
-runtime receipt storage cutover；不引入 dual write、兼容 shim 或回填迁移。
+`0039` 最初安装 `rss_sweep_inbox_receipts(bigint)` SECURITY DEFINER 保留期维护函数，随后完成 #1650 pre-GA
+runtime receipt storage cutover；`0060` 破坏式删除该签名并以 policy-bound 零参数函数取代，不保留 overload。
 
 `0041` 新增 `reconcile_targets` / `reconcile_leases` / `reconcile_attempts` /
 `reconcile_actions` tenant 表，作为 L4 reconcile 的 durable target / lease / append-only ledger schema。
@@ -195,7 +195,8 @@ retention 只按 `published_at` 的 partial index 清理，DLX 继续保留供�
 1. 先停止全部旧 relay 实例；旧 binary 依赖的 poll/acquire 与 settle overload 会被删除，禁止新旧版本滚动混跑。
 2. 确认 `outbox <= 10 GiB`、无长事务持锁，维护窗口可覆盖 publishing deadline 回填、terminal token 清理、CHECK 与 partial index 替换。migration 以 5 秒 lock timeout / 5 分钟 statement timeout fail-fast。
 3. 运行唯一正式 migration runner；若发现 `publishing` 行缺 token 则终止，不伪造所有权。失败后只做新的 forward-only 修复，不恢复旧函数。
-4. 验证 `rss_app` 仅有新 claim/settle/redrive/backlog 函数 EXECUTE，旧 poll/acquire 及旧 settle 签名不存在；再启动新 binary。
+4. 在 0057 cutover 当时验证 `rss_app` 仅有新 claim/settle/redrive/backlog 函数 EXECUTE，旧 poll/acquire 及旧
+   settle 签名不存在；再启动新 binary。升级到 0060 后 redrive 权限按 0060 runbook 从 `rss_app` 撤销。
 
 `0058` / `0059` 将 `secret_refs` 固化为正版本、serving role append-only。SQLx applies pending migrations in
 version order，并在某一版本 apply 失败时立即返回；因此异常发生后 0058 remains the first pending migration，
@@ -220,6 +221,56 @@ no later forward migration can run first。不可把 forward-only 原则误作�
 并撤销 `rss_app` 的 UPDATE/DELETE。0059 在独立 migration transaction 中 `VALIDATE CONSTRAINT`，避免把安装约束
 的强锁持有到历史扫描结束。部署前确认无长事务占用 `secret_refs` DDL 锁；5 秒内无法取得锁会中止启动，移除阻塞
 事务后重跑，禁止修改已发布迁移。
+
+ref: Spring Modulith spring-modulith-events/spring-modulith-events-jdbc/src/main/java/org/springframework/modulith/events/jdbc/JdbcEventPublicationRepositoryV2.java@c75f173e5201208d8129b4cd8c112defb1158c67
+
+`0060` 以数据库 singleton `event_delivery_policy` 冻结 `same-id-delivery-v1`：automatic retry 86400s、
+same-ID redrive 86400s、safety 86400s、inbox receipt retention 604800s；CHECK 强制 retention 严格大于前三段
+之和。runtime/maintenance setup 通过 migrator/maintenance 连接读取唯一行，并要求 revision 与四值和 release
+常量完全相等，否则启动 fail-closed；没有正确性环境变量或 caller override。
+
+0060 为 mutable outbox 新增 `same_id_delivery_phase=automatic|redrive`、
+`automatic_retry_deadline` 与 `same_id_redrive_deadline`。首次 claim 用 `COALESCE` 冻结 automatic 绝对 deadline；
+首次 mark DLX 用 `COALESCE` 冻结 redrive 绝对 deadline；redrive 只切到 `redrive` phase、清 retry/lease/terminal
+时间，绝不刷新两个 deadline。publish preflight 在 broker I/O 前检查当前 phase deadline；到期路径不调用 broker，
+settle 到 DLX。tenant-scoped `rss_outbox_redrive(text,uuid)` 对已过 deadline 返回 `-1`，不修改行，adapter 映射为
+typed `Expired`。
+
+0060 同时删除 `rss_sweep_inbox_receipts(bigint)` 并安装零参数 `rss_sweep_inbox_receipts()`：函数从 policy 读取
+7d，只删 done receipt，每次按确定顺序最多 1000 行。旧 retain 参数签名不存在。`rss_app` 继续只可 EXECUTE
+claim/publish-preflight/mark-DLX 与零参数 inbox sweep；`rss_outbox_redrive(text,uuid)` 归
+`rss_outbox_maintenance` 所有，PUBLIC 与 `rss_app` 均被显式 REVOKE，operator CLI 只能走离线
+`PgRuntimeDeps::setup_maintenance` 的 migrator/maintenance 连接。
+
+### 0060 breaking cutover runbook（一次性、无兼容路径）
+
+1. **冻结旧执行面。** 停止全部旧 relay；停止并清点仍可执行 `rss dlq redrive-outbox` 的旧 CLI、cron 与 job。
+   禁止新旧 binary 滚动混跑，因为 0060 会替换 claim/preflight/mark-DLX 与 inbox sweep 函数签名/语义。
+2. **历史 DLX inventory。** 用 DB owner 的只读受控 session 导出历史 outbox DLX 的 tenant、event id、domain、
+   contract id、`dlx_at` 与状态计数，保存到受控审计存储并记录 checksum/时间窗；不导出 payload/metadata，
+   不写入普通日志、PR 或工单。该 inventory 是 cutover 后人工恢复决策的依据，不是 redrive allowlist。
+3. **容量与锁预检。** 在 primary DB host 以 DB owner 运行
+   `docs/ops/0060-outbox-capacity-gate.sh`，必须 PASS；它同时检查 10 GiB 表上限、data/WAL/archive 磁盘余量、
+   archive 新 segment 和 replica inventory/lag。还须确认无长事务持有 outbox 或 inbox_receipts DDL 锁；维护
+   窗口须覆盖全 outbox deadline 回填与约束安装。0060 的 lock timeout 为 5s、statement timeout 为 5min，
+   任一失败即保持 rollout 停止，只允许新的 forward-only 修复。
+4. **执行 migration。** 运行唯一正式 migration runner。0060 用同一个 materialized cutover timestamp 给每条
+   历史 outbox 写两个 deadline；因此历史 pending/publishing/DLX 在切换后立即过期，不获得新的 automatic 或
+   redrive 24h 窗口。此 fail-closed 语义防止已可能被清理 receipt 的旧 event id 再次产生 durable effect。
+5. **验证 schema/policy/权限。** 确认 policy 恰有一行且 revision/四值精确；outbox phase 无闭集外值、历史
+   两 deadline 等于 cutover；`to_regprocedure('rss_sweep_inbox_receipts(bigint)') IS NULL` 且
+   `to_regprocedure('rss_sweep_inbox_receipts()') IS NOT NULL`；
+   `has_function_privilege('rss_app','rss_outbox_redrive(text,uuid)','EXECUTE') = false`，函数 owner 为
+   `rss_outbox_maintenance`，`rss_app` 只保留新 relay 与零参数 inbox sweep 所需 EXECUTE。
+6. **启动新版本。** 只有全部验证通过才启动新 binary/relay。历史 DLX 继续保留作审计；对其 same-ID redrive
+   返回 typed `Expired` 且不 mutation。不得 reset deadline、恢复旧函数、启动旧 CLI 或新增 bypass 路径。
+
+#### 0060 可执行容量门与中止门
+
+容量、exact WAL archive、replica NULL lag、libpq owner credential、SQLx advisory-lock runner 身份以及
+0060/0061 transaction watchdog 的完整执行说明，单一维护在
+`docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` 的「0060 breaking rollout」章节。执行值只由
+`docs/ops/0060-outbox-capacity-gate.sh` 持有；本 migration ledger 不复制阈值、命令或取消查询。
 
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；

@@ -1079,11 +1079,11 @@ fn wire_inbox_sweeper(
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let config = SweeperConfig::new(postgres::INBOX_RECEIPT_RETENTION_SECONDS, timing.sweep)
+    let sweeper = pg.infra().inbox_sweeper();
+    let config = SweeperConfig::new(sweeper.retention_seconds(), timing.sweep)
         .context("build inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let sweeper = pg.infra().inbox_sweeper();
     let worker: WorkerSpec = Box::new(move |token| {
         let loop_health = Arc::clone(&worker_health);
         let loop_token = token.clone();

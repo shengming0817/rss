@@ -154,6 +154,7 @@ integration_shard_catalog! {
         units: [
             ("postgres", "postgres", Lib, Serial),
             ("postgres", "feature_manifest", Test, Parallel),
+            ("postgres", "migration_ops_contract", Test, Parallel),
             ("postgres", "tx_capability_trybuild", Test, Parallel),
             ("runtime", "settings_secret_e2e", Test, Serial),
         ],

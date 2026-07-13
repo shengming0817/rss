@@ -18,6 +18,8 @@
 //!   `cargo xtask layer-deps`            source-centric 分层依赖 lint（成员 Cargo.toml [dependencies] → §分层 矩阵，CI 门）
 //!   `cargo xtask wsdeps-drift`          workspace.dependencies pin↔lock 漂移门（#1185，CI 门）
 //!   `cargo xtask doc-contracts`         文档契约片段漂移门（command/outbox tenant-aware 签名，CI 门）
+//!   `cargo xtask promtool-rules`         固定摘要 promtool 规则 + consumer test 门（CI 门）
+//!   `cargo xtask outbox-same-id-guard`   same-ID SQL/Rust/ops 完整闭包门（CI 门）
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
 //!   `cargo xtask consistency local-only-effects`
 //!                                      active LocalOnly HTTP effect profile 治理门（#1689，CI 门）
@@ -98,10 +100,12 @@ mod layerdeps;
 mod layers;
 mod localtx_coverage;
 mod migrations;
+mod outbox_same_id_guard;
 mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
 mod postgres_feature_matrix;
+mod promtool;
 mod publicapi;
 mod reconcile_outbox_command_guard;
 mod repo_scope_guard;
@@ -151,6 +155,8 @@ enum Command {
     LayerDeps,
     WsDepsDrift,
     DocContracts,
+    PromtoolRules,
+    OutboxSameIdGuard,
     ConsistencyFixtures,
     ConsistencyLocalOnlyEffects,
     ConsistencyReport {
@@ -245,6 +251,8 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["doc-contracts"] => Ok(Command::DocContracts),
+        ["promtool-rules"] => Ok(Command::PromtoolRules),
+        ["outbox-same-id-guard"] => Ok(Command::OutboxSameIdGuard),
         ["consistency-fixtures"] => Ok(Command::ConsistencyFixtures),
         ["consistency", rest @ ..] => parse_consistency(rest),
         ["localtx-coverage"] => Ok(Command::LocalTxCoverage),
@@ -646,6 +654,10 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::LayerDeps => diagnostic::run_check(&layerdeps::LayerDeps),
         Command::WsDepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
         Command::DocContracts => diagnostic::run_check(&doc_contracts::DocContracts),
+        Command::PromtoolRules => promtool::run(),
+        Command::OutboxSameIdGuard => {
+            diagnostic::run_check(&outbox_same_id_guard::OutboxSameIdGuard)
+        }
         Command::ConsistencyFixtures => {
             diagnostic::run_check(&consistency_fixtures::ConsistencyFixtures)
         }
@@ -788,6 +800,21 @@ mod tests {
         );
         assert!(parse_command(&s(&["localtx-coverage", "--check"])).is_err());
         assert!(parse_command(&s(&["localtx_coverage"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_same_id_and_promtool_gates_are_exact() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["outbox-same-id-guard"]))?,
+            Command::OutboxSameIdGuard
+        );
+        assert_eq!(
+            parse_command(&s(&["promtool-rules"]))?,
+            Command::PromtoolRules
+        );
+        assert!(parse_command(&s(&["outbox-same-id-guard", "extra"])).is_err());
+        assert!(parse_command(&s(&["promtool-rules", "--allow-missing"])).is_err());
         Ok(())
     }
 

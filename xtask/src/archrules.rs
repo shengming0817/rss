@@ -4,7 +4,7 @@
 //! baseline），不引入手写规则目录；文档仅作为 `doc_ref`。
 //! INVARIANT: ARCHRULES-VERIFY-GATE-01 { level = "Medium", exec = "verify", source = "code" } —— [`ArchRules`] 作为 no-compile governance gate 接入 verify/ci，
 //! 缺 carrier / fixture / gate 证据时 fail-closed。
-//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 11 个持久化 funnel 仅引用真实 rule key，强度和证明从 carrier 反向派生。
+//! INVARIANT: PERSISTENCE-FUNNEL-MATRIX-01 { level = "Medium", exec = "verify", source = "code", facet = "derived-matrix" } —— 14 个持久化 funnel 仅引用真实 rule key，强度和证明从 carrier 反向派生。
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::workspace_root;
@@ -238,6 +238,16 @@ const FUNNELS: &[FunnelSpec] = &[
         },
     },
     FunnelSpec {
+        key: "same-id-delivery",
+        source_issues: &[1742],
+        upstream: &[invariant("OUTBOX-SAME-ID-WINDOW-01")],
+        downstream: &[invariant("INBOX-RECEIPTS-CUTOVER-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "automatic retry、operator redrive 与 receipt retention 跨 SQL/Rust/ops 的载体集合属于运行时事实",
+            why_no_low_cost_hardening: "DB CHECK/ACL 与 Rust 闭枚举各自为 Hard；跨语言闭包由 same-ID synthetic-red/anti-vacuity 守卫表达",
+        },
+    },
+    FunnelSpec {
         key: "command-journal",
         source_issues: &[1441],
         upstream: &[invariant_facet(
@@ -332,7 +342,7 @@ pub(crate) fn matrix(action: MatrixAction) -> Result<()> {
                 .with_context(|| format!("写入 matrix `{}`", path.display()))?;
             eprintln!("archrules matrix: 已写入 {MATRIX_DOC}");
         }
-        MatrixAction::Check => eprintln!("archrules matrix: 13 行与 committed 文档一致"),
+        MatrixAction::Check => eprintln!("archrules matrix: 14 行与 committed 文档一致"),
     }
     Ok(())
 }
@@ -344,15 +354,15 @@ fn validate_matrix(
 ) -> Result<Vec<Finding<Rule>>> {
     let mut findings = Vec::new();
     let mut expected_issues = (1422_u32..=1442).collect::<BTreeSet<_>>();
-    expected_issues.extend([1677, 1678]);
+    expected_issues.extend([1677, 1678, 1742]);
     let mut actual_issues = BTreeSet::new();
     let mut seen_issues = BTreeSet::new();
     let mut keys = BTreeSet::new();
-    if FUNNELS.len() != 13 {
+    if FUNNELS.len() != 14 {
         findings.push(finding(
             Rule::MatrixCoverage,
             "FUNNELS",
-            format!("必须恰好 13 行，实际 {} 行", FUNNELS.len()),
+            format!("必须恰好 14 行，实际 {} 行", FUNNELS.len()),
         ));
     }
     for funnel in FUNNELS {
@@ -425,7 +435,7 @@ fn validate_matrix(
             Rule::MatrixCoverage,
             "source issues",
             format!(
-                "来源 issue 并集必须恰为 #1422..#1442；missing={:?}, extra={:?}",
+                "来源 issue 并集必须恰为 #1422..#1442 + #1677/#1678/#1742；missing={:?}, extra={:?}",
                 expected_issues
                     .difference(&actual_issues)
                     .collect::<Vec<_>>(),
@@ -614,7 +624,7 @@ fn render_matrix(records: &[RuleRecord]) -> Result<String> {
     }
     out.push_str(
         "\n## Verification\n\n\
-`cargo xtask archrules matrix --check` 校验固定 13 行、#1422–#1442 + #1677–#1678 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
+`cargo xtask archrules matrix --check` 校验固定 14 行、#1422–#1442 + #1677/#1678/#1742 精确覆盖、边界非空、无 Soft、Hard carrier 证明、Medium synthetic-red/anti-vacuity 与文档漂移。该检查随 `archrules` 进入 `verify`/`ci`。\n",
     );
     Ok(out)
 }
@@ -2313,6 +2323,16 @@ const XTASK_GATE_DECLARATIONS: &[GateDeclaration] = &[
         role: GateDeclarationRole::PlanStep,
     },
     GateDeclaration {
+        path: "xtask/src/promtool.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
+        path: "xtask/src/outbox_same_id_guard.rs",
+        tokens: META_TOKENS,
+        role: GateDeclarationRole::PlanStep,
+    },
+    GateDeclaration {
         path: "xtask/src/event_transport_guard.rs",
         tokens: META_TOKENS,
         role: GateDeclarationRole::PlanStep,
@@ -3537,14 +3557,14 @@ members = ["rss_demo"]
 
     #[test]
     fn funnel_matrix_has_exact_rows_and_issue_partition() -> Result<()> {
-        assert_eq!(FUNNELS.len(), 13);
+        assert_eq!(FUNNELS.len(), 14);
         let issues = FUNNELS
             .iter()
             .flat_map(|funnel| funnel.source_issues.iter().copied())
             .collect::<Vec<_>>();
-        assert_eq!(issues.len(), 23, "每个来源 issue 必须且只能归属一行");
+        assert_eq!(issues.len(), 24, "每个来源 issue 必须且只能归属一行");
         let mut expected = (1422_u32..=1442).collect::<BTreeSet<_>>();
-        expected.extend([1677, 1678]);
+        expected.extend([1677, 1678, 1742]);
         assert_eq!(issues.iter().copied().collect::<BTreeSet<_>>(), expected);
         let pg_runtime = FUNNELS
             .iter()
@@ -3592,7 +3612,7 @@ members = ["rss_demo"]
     fn real_workspace_archrules_and_derived_matrix_pass() -> Result<()> {
         let (summary, findings) = ArchRules.check()?;
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(summary.contains("13 行持久化 funnel"), "{summary}");
+        assert!(summary.contains("14 行持久化 funnel"), "{summary}");
         matrix(MatrixAction::Check)?;
         Ok(())
     }

@@ -350,6 +350,46 @@ async fn runtime_assertion_pool(
         .await?)
 }
 
+fn isolated_database_config(p: &testkit::PgConnParams, database: &str) -> PgConfig {
+    PgConfig::new(
+        p.host.clone(),
+        p.port,
+        database.to_string(),
+        p.username.clone(),
+        PgPassword::new(p.password.clone()),
+    )
+    .with_ssl_mode(PgSslMode::Prefer)
+    .with_acquire_timeout(std::time::Duration::from_secs(5))
+}
+
+async fn create_isolated_database(store: &PgStore, prefix: &str) -> Result<String, sqlx::Error> {
+    let suffix = unique_event_id("db").replace('-', "_");
+    let database = format!("{prefix}_{suffix}_test");
+    debug_assert!(
+        database
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    );
+    sqlx::query(&format!("CREATE DATABASE \"{database}\""))
+        .execute(&store.pool)
+        .await?;
+    Ok(database)
+}
+
+async fn drop_isolated_database(store: &PgStore, database: &str) -> Result<(), sqlx::Error> {
+    debug_assert!(
+        database
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    );
+    sqlx::query(&format!(
+        "DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)"
+    ))
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pool_connects_and_shuts_down() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -365,6 +405,68 @@ async fn migrator_applies_and_is_idempotent() -> TestResult {
     store.run_migrations().await?; // 再跑：checksum 命中 → 幂等 no-op
     store.shutdown().await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    let database = create_isolated_database(&admin, "delivery_policy_startup").await?;
+    let config = isolated_database_config(fixture.params(), &database);
+
+    let verdict: TestResult = async {
+        let mutator = PgStore::connect(&config).await?;
+        mutator.run_migrations().await?;
+        sqlx::query("DELETE FROM event_delivery_policy")
+            .execute(&mutator.pool)
+            .await?;
+        mutator.shutdown().await?;
+
+        let runtime_missing =
+            PgRuntimeDeps::setup(&config, &config, EMPTY_PROJECTION_INPUT_GENERATION, &[]).await;
+        assert!(matches!(
+            runtime_missing,
+            Err(crate::PgError::EventDeliveryPolicyMismatch)
+        ));
+        let maintenance_missing = PgRuntimeDeps::setup_maintenance(&config).await;
+        assert!(matches!(
+            maintenance_missing,
+            Err(crate::PgError::EventDeliveryPolicyMismatch)
+        ));
+
+        let mutator = PgStore::connect(&config).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO event_delivery_policy (
+                singleton, policy_revision, automatic_retry_window_seconds,
+                same_id_redrive_horizon_seconds, safety_margin_seconds,
+                inbox_receipt_retention_seconds
+            )
+            VALUES (true, 'same-id-delivery-v1', 86401, 86400, 86400, 604800)
+            "#,
+        )
+        .execute(&mutator.pool)
+        .await?;
+        mutator.shutdown().await?;
+
+        let runtime_drift =
+            PgRuntimeDeps::setup(&config, &config, EMPTY_PROJECTION_INPUT_GENERATION, &[]).await;
+        assert!(matches!(
+            runtime_drift,
+            Err(crate::PgError::EventDeliveryPolicyMismatch)
+        ));
+        let maintenance_drift = PgRuntimeDeps::setup_maintenance(&config).await;
+        assert!(matches!(
+            maintenance_drift,
+            Err(crate::PgError::EventDeliveryPolicyMismatch)
+        ));
+        Ok(())
+    }
+    .await;
+
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4472,6 +4574,16 @@ async fn set_outbox_terminal_for_test(
                 WHEN $1 = 'publishing' THEN now() + interval '60 seconds'
                 ELSE NULL
             END,
+            automatic_retry_deadline = CASE
+                WHEN $1 IN ('publishing', 'published', 'dlx') THEN
+                    COALESCE(automatic_retry_deadline, now() + interval '24 hours')
+                ELSE automatic_retry_deadline
+            END,
+            same_id_redrive_deadline = CASE
+                WHEN $1 = 'dlx' THEN
+                    COALESCE(same_id_redrive_deadline, now() + interval '24 hours')
+                ELSE same_id_redrive_deadline
+            END,
             published_at = CASE
                 WHEN $1 = 'published' THEN now() - make_interval(secs => $2::double precision)
                 ELSE NULL
@@ -6103,6 +6215,7 @@ async fn conf_backdate_publishing(store: &PgStore, event_id: String) -> Result<(
     sqlx::query(
         "UPDATE outbox \
          SET status='publishing', lease_token = gen_random_uuid(), \
+             automatic_retry_deadline = COALESCE(automatic_retry_deadline, now() + interval '24 hours'), \
              created_at = now() - make_interval(secs => $1), \
              updated_at = now() - make_interval(secs => $1), \
              lease_until = now() - interval '10 seconds' \
@@ -7325,6 +7438,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
     let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
     sqlx::query(
         "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+         automatic_retry_deadline=COALESCE(automatic_retry_deadline, now()+interval '24 hours'), \
          updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
          WHERE event_id = $2",
     )
@@ -7350,6 +7464,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
         .await?;
     sqlx::query(
         "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+         automatic_retry_deadline=COALESCE(automatic_retry_deadline, now()+interval '24 hours'), \
          updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
          WHERE event_id = $2",
     )
@@ -7659,15 +7774,15 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     .bind(&event_id)
     .fetch_one(&store.pool)
     .await?;
-    let short_budget: bool =
-        sqlx::query_scalar("SELECT rss_outbox_lease_can_publish($1, $2::uuid, $3)")
+    let short_budget: i16 =
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
             .bind(&event_id)
             .bind(claim.lease_token())
             .bind(short_deadline)
             .fetch_one(&store.pool)
             .await?;
     assert!(
-        !short_budget,
+        short_budget == 1,
         "49 seconds cannot fund a 40-second publish plus settle margin"
     );
 
@@ -7679,15 +7794,15 @@ async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
     .bind(&event_id)
     .fetch_one(&store.pool)
     .await?;
-    let full_budget: bool =
-        sqlx::query_scalar("SELECT rss_outbox_lease_can_publish($1, $2::uuid, $3)")
+    let full_budget: i16 =
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
             .bind(&event_id)
             .bind(claim.lease_token())
             .bind(full_deadline)
             .fetch_one(&store.pool)
             .await?;
     assert!(
-        full_budget,
+        full_budget == 0,
         "55 seconds must satisfy the 50-second preflight budget"
     );
 
@@ -7898,7 +8013,7 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
     let ctx = test_inbox_ctx(&grp);
 
     // 回拨 receipt 时间锚（2h 前）：done 用 committed_at，claimed 用 claimed_at。
-    async fn backdate(store: &PgStore, event_id: &str, grp: &str) -> TestResult {
+    async fn backdate(store: &PgStore, event_id: &str, grp: &str, age_seconds: i64) -> TestResult {
         let ctx = test_inbox_ctx(grp);
         sqlx::query(
             "UPDATE inbox_receipts \
@@ -7907,7 +8022,7 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
                  updated_at = now() - make_interval(secs => $1) \
              WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
         )
-        .bind(7200i64)
+        .bind(age_seconds)
         .bind(ctx.tenant_id().to_string())
         .bind(event_id)
         .bind(grp)
@@ -7928,7 +8043,9 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
         inbox.commit(&ctx, &k_old, &lease_old).await.unwrap(),
         LeaseOutcome::Held
     );
-    backdate(&store, &key_old, &grp).await?;
+    let sweeper = store.inbox_sweeper(crate::delivery_policy::EventDeliveryPolicy::release());
+    let retention = sweeper.retention_seconds();
+    backdate(&store, &key_old, &grp, i64::try_from(retention + 3600)?).await?;
 
     // 2) recent done（anti-vacuity）：claim → commit，不回拨。
     let key_recent = unique_event_id("inbox-sweep-recent");
@@ -7957,10 +8074,9 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
             .unwrap(),
         SeenState::Fresh
     );
-    backdate(&store, &key_claimed, &grp).await?;
+    backdate(&store, &key_claimed, &grp, i64::try_from(retention + 3600)?).await?;
 
-    // sweep 保留期 1h：仅 old done（2h 前）被删。
-    let deleted = store.inbox_sweeper().sweep(3600).await?;
+    let deleted = sweeper.sweep(retention).await?;
     assert!(deleted >= 1, "至少删除老 done 行: deleted={deleted}");
 
     let cnt = |event_id: String| {
@@ -7984,6 +8100,11 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
         cnt(key_claimed).await?,
         1,
         "claimed 行（非 done）不应被 sweep 删"
+    );
+    assert_eq!(
+        inbox.try_claim(&ctx, &k_old, &LeaseToken::mint()).await?,
+        SeenState::Fresh,
+        "once the frozen receipt retention window is swept, the same key is Fresh again"
     );
 
     store.shutdown().await?;
@@ -8106,6 +8227,8 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
     ];
     let mut old_done_keys = Vec::new();
 
+    let sweeper = store.inbox_sweeper(crate::delivery_policy::EventDeliveryPolicy::release());
+    let retention = sweeper.retention_seconds();
     for group in &groups {
         let inbox = store.inbox();
         let ctx = test_inbox_ctx(group);
@@ -8124,7 +8247,7 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
             "UPDATE inbox_receipts SET committed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
              WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
         )
-        .bind(7200i64)
+        .bind(i64::try_from(retention + 3600)?)
         .bind(ctx.tenant_id().to_string())
         .bind(&event_id)
         .bind(group)
@@ -8155,7 +8278,7 @@ async fn t_inbox_sweeper_removes_old_done_across_consumer_groups() -> TestResult
     .execute(&store.pool)
     .await?;
 
-    let deleted = store.inbox_sweeper().sweep(3600).await?;
+    let deleted = sweeper.sweep(retention).await?;
     assert!(deleted >= 2, "至少删除两个 group 的 old done 行");
 
     for (event_id, group) in old_done_keys {
@@ -8220,13 +8343,11 @@ async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
     .execute(&store.pool)
     .await?;
 
-    let invalid_retain = crate::outbox::max_redelivery_window_secs() as u64;
-    let err = match store.inbox_sweeper().sweep(invalid_retain).await {
+    let sweeper = store.inbox_sweeper(crate::delivery_policy::EventDeliveryPolicy::release());
+    let invalid_retain = sweeper.retention_seconds() - 1;
+    let err = match sweeper.sweep(invalid_retain).await {
         Ok(_) => {
-            return Err(std::io::Error::other(
-                "retain_seconds 等于 redelivery floor 应 fail-closed",
-            )
-            .into());
+            return Err(std::io::Error::other("非冻结策略 retain_seconds 应 fail-closed").into());
         }
         Err(err) => err,
     };
@@ -8246,18 +8367,18 @@ async fn t_inbox_sweeper_invalid_retain_preserves_rows() -> TestResult {
     Ok(())
 }
 
-/// `rss_app` 直调固定 SECURITY DEFINER 函数也必须被 DB 侧保留期下限挡住。
+/// `rss_app` 只能直调读取冻结策略的无参数 SECURITY DEFINER 函数；旧自由 retain 签名不存在。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
-async fn t_inbox_sweeper_rss_app_direct_call_rejects_retain_below_floor() -> TestResult {
+async fn t_inbox_sweeper_rss_app_uses_frozen_policy_without_free_retain_argument() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &store).await?;
-    let group = unique_domain("inbox-sweep-sql-retain-floor");
+    let group = unique_domain("inbox-sweep-sql-frozen-policy");
     let inbox = store.inbox();
     let ctx = test_inbox_ctx(&group);
-    let event_id = unique_event_id("inbox-sweep-sql-retain-floor-done");
+    let event_id = unique_event_id("inbox-sweep-sql-frozen-policy-done");
     let key = IdemKey::parse(&event_id).unwrap();
     let lease = LeaseToken::mint();
     assert_eq!(
@@ -8272,26 +8393,22 @@ async fn t_inbox_sweeper_rss_app_direct_call_rejects_retain_below_floor() -> Tes
         "UPDATE inbox_receipts SET committed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
          WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
     )
-    .bind(7200i64)
+    .bind(8 * 24 * 3600i64)
     .bind(ctx.tenant_id().to_string())
     .bind(&event_id)
     .bind(&group)
     .execute(&store.pool)
     .await?;
 
-    let invalid_retain = crate::outbox::max_redelivery_window_secs();
-    let result = sqlx::query("SELECT rss_sweep_inbox_receipts($1)")
-        .bind(invalid_retain)
-        .execute(&app.pool)
-        .await;
-    let Err(err) = result else {
-        return Err("rss_app direct inbox sweep must reject retain at redelivery floor".into());
-    };
-    assert!(
-        err.to_string()
-            .contains("rss_sweep_inbox_receipts retain seconds"),
-        "unexpected rss_app direct sweep error: {err}"
-    );
+    let old_signature: Option<String> =
+        sqlx::query_scalar("SELECT to_regprocedure('rss_sweep_inbox_receipts(bigint)')::text")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(old_signature, None);
+    let deleted: i64 = sqlx::query_scalar("SELECT rss_sweep_inbox_receipts()")
+        .fetch_one(&app.pool)
+        .await?;
+    assert!(deleted >= 1);
 
     let row: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM inbox_receipts WHERE tenant_id = $1::uuid AND event_id = $2 AND consumer_group = $3",
@@ -8301,7 +8418,7 @@ async fn t_inbox_sweeper_rss_app_direct_call_rejects_retain_below_floor() -> Tes
     .bind(&group)
     .fetch_one(&store.pool)
     .await?;
-    assert_eq!(row.0, 1, "DB guard 拒绝后 old done row 必须保留");
+    assert_eq!(row.0, 0, "DB 固定策略必须删除超 7 天 old done row");
 
     app.shutdown().await?;
     store.shutdown().await?;
@@ -9168,9 +9285,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         OperatorDlqCapability,
     };
 
-    let (pg, store) = connect_pg().await?;
+    let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
-    let app = connect_pg_rss_app_role(&pg, &store).await?;
     let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
     let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
     let domain = unique_domain("dlq-outbox");
@@ -9231,7 +9347,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     .execute(&store.pool)
     .await?;
 
-    let dlq = app.dlq_with_projection_registry(
+    let dlq = store.dlq_with_projection_registry(
         test_dlx_payload_protector(),
         crate::projection_events::ProjectionWriteRegistry::from_generated(TEST_PROJECTION_INPUTS),
     );
@@ -9269,6 +9385,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         sqlx::query(
             "UPDATE outbox \
              SET status = 'dlx', published_at = NULL, \
+                 automatic_retry_deadline = COALESCE(automatic_retry_deadline, clock_timestamp() + interval '24 hours'), \
+                 same_id_redrive_deadline = COALESCE(same_id_redrive_deadline, clock_timestamp() + interval '24 hours'), \
                  dlx_at = to_timestamp($2), updated_at = to_timestamp($3) \
              WHERE event_id = $1",
         )
@@ -9460,7 +9578,753 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         "the redriven row must disappear while unrelated current DLX rows remain"
     );
 
-    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+async fn seed_outbox_dlx(store: &PgStore, domain: &str, event_id: &str) -> TestResult {
+    let entry = make_entry(event_id);
+    let env = make_test_env(domain, "same-id-window");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    let (publisher, _) = RecordingPublisher::always_permanent();
+    let relay = make_pg_outbox_for_domain(store, domain, publisher);
+    let claim = claim_entry_for_relay(&relay, event_id).await?;
+    assert_eq!(relay.relay(claim).await?, Disposition::Reject);
+    Ok(())
+}
+
+async fn direct_outbox_redrive(
+    pool: sqlx::PgPool,
+    tenant: vocab::TenantId,
+    event_id: String,
+) -> Result<i64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+    let outcome = sqlx::query_scalar("SELECT rss_outbox_redrive($1, $2::uuid)")
+        .bind(event_id)
+        .bind(tenant.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid ids and mutex assertions fail loud.
+async fn same_id_automatic_deadline_is_frozen_and_expiry_never_calls_broker() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let domain = unique_domain("same-id-automatic");
+    let event_id = unique_event_id("same-id-automatic");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "same-id-automatic");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let (first_publisher, first_calls) = RecordingPublisher::always_ok();
+    let first = make_pg_outbox_for_domain(&store, &domain, first_publisher);
+    let first_claim = claim_entry_for_relay(&first, &event_id).await?;
+    let first_deadline: (String, bool, i64) = sqlx::query_as(
+        "SELECT same_id_delivery_phase, same_id_redrive_deadline IS NULL, \
+                EXTRACT(EPOCH FROM automatic_retry_deadline)::bigint \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(first_deadline.0, "automatic");
+    assert!(first_deadline.1);
+    assert!(first_deadline.2 >= first_claim.claim_epoch_seconds() + 86_399);
+
+    let retry: i64 = sqlx::query_scalar("SELECT rss_outbox_settle_retry($1, $2::uuid, $3)")
+        .bind(&event_id)
+        .bind(first_claim.lease_token())
+        .bind(first_claim.lease_deadline_epoch_micros())
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(retry, 1);
+
+    let (second_publisher, second_calls) = RecordingPublisher::always_ok();
+    let restarted = make_pg_outbox_for_domain(&store, &domain, second_publisher);
+    sqlx::query("UPDATE outbox SET retry_after = NULL WHERE event_id = $1")
+        .bind(&event_id)
+        .execute(&store.pool)
+        .await?;
+    let second_claim = claim_entry_for_relay(&restarted, &event_id).await?;
+    let deadline_after_restart: i64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM automatic_retry_deadline)::bigint FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(deadline_after_restart, first_deadline.2);
+
+    sqlx::query(
+        "UPDATE outbox SET automatic_retry_deadline = clock_timestamp() WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await?;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics_handle = recorder.handle();
+    let disposition = metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(restarted.relay(second_claim))
+        })
+    })?;
+    assert_eq!(disposition, Disposition::Reject);
+    assert_eq!(*first_calls.lock().unwrap(), 0);
+    assert_eq!(*second_calls.lock().unwrap(), 0);
+
+    let terminal: (String, String, bool, bool) = sqlx::query_as(
+        "SELECT status, same_id_delivery_phase, same_id_redrive_deadline IS NOT NULL, \
+                automatic_retry_deadline <= clock_timestamp() \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        terminal,
+        ("dlx".to_string(), "automatic".to_string(), true, true)
+    );
+    let durable_reason: (String, String) = sqlx::query_as(
+        "SELECT error_summary, metadata->>'relayFailureReason' FROM dead_letter \
+         WHERE message_id = $1 ORDER BY last_attempt_at DESC LIMIT 1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        durable_reason,
+        (
+            "outbox same-ID automatic delivery window expired".to_string(),
+            "automatic_window_expired".to_string(),
+        )
+    );
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("outbox_same_id_window_expired_total"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("phase=\"automatic\""), "{rendered}");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid typed identifiers and inspect a test-only mutex.
+async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let tenant = test_tenant();
+    let domain = unique_domain("same-id-redrive-preflight");
+    let event_id = unique_event_id("same-id-redrive-preflight");
+    seed_outbox_dlx(&store, &domain, &event_id).await?;
+
+    let redriven = store
+        .dlq_without_payload_replay()
+        .redrive_outbox(DlqRedriveRequest::new(
+            tenant,
+            IdemKey::parse(&event_id).unwrap(),
+            OperatorDlqCapability::issue_for_authorized_operator(),
+        ))
+        .await?;
+    assert_eq!(redriven, DlqRedriveOutcome::Redriven);
+
+    let (publisher, calls) = RecordingPublisher::always_ok();
+    let relay = make_pg_outbox_for_domain(&store, &domain, publisher);
+    let claim = claim_entry_for_relay(&relay, &event_id).await?;
+    sqlx::query(
+        "UPDATE outbox SET same_id_redrive_deadline = clock_timestamp() WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await?;
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics_handle = recorder.handle();
+    let disposition = metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(relay.relay(claim))
+        })
+    })?;
+    assert_eq!(disposition, Disposition::Reject);
+    assert_eq!(*calls.lock().unwrap(), 0);
+
+    let durable: (String, String, String) = sqlx::query_as(
+        "SELECT o.status, o.same_id_delivery_phase, d.metadata->>'relayFailureReason' \
+         FROM outbox AS o JOIN dead_letter AS d ON d.message_id = o.event_id \
+         WHERE o.event_id = $1 ORDER BY d.last_attempt_at DESC LIMIT 1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            "dlx".to_string(),
+            "redrive".to_string(),
+            "redrive_window_expired".to_string(),
+        )
+    );
+    let rendered = metrics_handle.render();
+    assert!(
+        rendered.contains("outbox_same_id_window_expired_total"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("phase=\"redrive\""), "{rendered}");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid typed identifiers.
+async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_is_atomic()
+-> TestResult {
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let tenant = test_tenant();
+    let cap = OperatorDlqCapability::issue_for_authorized_operator();
+    let dlq = store.dlq_without_payload_replay();
+
+    let domain = unique_domain("same-id-manual");
+    let event_id = unique_event_id("same-id-manual");
+    seed_outbox_dlx(&store, &domain, &event_id).await?;
+    let original_deadline: String =
+        sqlx::query_scalar("SELECT same_id_redrive_deadline::text FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    let redriven = dlq
+        .redrive_outbox(DlqRedriveRequest::new(
+            tenant,
+            IdemKey::parse(&event_id).unwrap(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(redriven, DlqRedriveOutcome::Redriven);
+    let claim = claimed_entry_for_event(&store, &event_id).await?;
+    let remark: Option<i32> =
+        sqlx::query_scalar("SELECT retry_count FROM rss_outbox_mark_dlx($1, $2::uuid, $3)")
+            .bind(&event_id)
+            .bind(claim.lease_token())
+            .bind(claim.lease_deadline_epoch_micros())
+            .fetch_optional(&store.pool)
+            .await?;
+    assert!(remark.is_some());
+    let preserved: (String, String) = sqlx::query_as(
+        "SELECT same_id_delivery_phase, same_id_redrive_deadline::text \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(preserved, ("redrive".to_string(), original_deadline));
+
+    sqlx::query(
+        "UPDATE outbox SET same_id_redrive_deadline = clock_timestamp() WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await?;
+    let before: (String, String) =
+        sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics_handle = recorder.handle();
+    let expired =
+        metrics::with_local_recorder(&recorder, || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(dlq.redrive_outbox(
+                    DlqRedriveRequest::new(tenant, IdemKey::parse(&event_id).unwrap(), cap),
+                ))
+            })
+        })?;
+    assert_eq!(expired, DlqRedriveOutcome::Expired);
+    let after: (String, String) =
+        sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        after, before,
+        "Expired must not update any outbox column or xmin"
+    );
+    assert!(metrics_handle.render().contains("expired"));
+
+    let concurrent_id = unique_event_id("same-id-concurrent");
+    seed_outbox_dlx(&store, &domain, &concurrent_id).await?;
+    let calls = (0..8).map(|_| {
+        let dlq = store.dlq_without_payload_replay();
+        let event_key = IdemKey::parse(&concurrent_id).unwrap();
+        async move {
+            dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
+                .await
+        }
+    });
+    let outcomes = futures::future::try_join_all(calls).await?;
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == DlqRedriveOutcome::Redriven)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == DlqRedriveOutcome::NotFound)
+            .count(),
+        7
+    );
+
+    let expired_concurrent_id = unique_event_id("same-id-expired-concurrent");
+    seed_outbox_dlx(&store, &domain, &expired_concurrent_id).await?;
+    sqlx::query(
+        "UPDATE outbox SET same_id_redrive_deadline = clock_timestamp() WHERE event_id = $1",
+    )
+    .bind(&expired_concurrent_id)
+    .execute(&store.pool)
+    .await?;
+    let calls = (0..8).map(|_| {
+        let dlq = store.dlq_without_payload_replay();
+        let event_key = IdemKey::parse(&expired_concurrent_id).unwrap();
+        async move {
+            dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
+                .await
+        }
+    });
+    let outcomes = futures::future::try_join_all(calls).await?;
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| *outcome == DlqRedriveOutcome::Expired)
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid ids; exact timestamp comparisons exercise DB policy branches.
+async fn same_id_first_dlx_deadline_uses_both_exact_least_branches() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let domain = unique_domain("same-id-least");
+    let cases = [
+        (unique_event_id("same-id-least-automatic"), "-1 hour", true),
+        (unique_event_id("same-id-least-dlx"), "1 hour", false),
+    ];
+
+    for (event_id, automatic_offset, automatic_branch) in cases {
+        let entry = make_entry(&event_id);
+        let env = make_test_env(&domain, "same-id-least");
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+        let claim = claimed_entry_for_event(&store, &event_id).await?;
+        sqlx::query(
+            "UPDATE outbox SET automatic_retry_deadline = clock_timestamp() + $2::interval \
+             WHERE event_id = $1",
+        )
+        .bind(&event_id)
+        .bind(automatic_offset)
+        .execute(&store.pool)
+        .await?;
+        let marked: Option<i32> =
+            sqlx::query_scalar("SELECT retry_count FROM rss_outbox_mark_dlx($1, $2::uuid, $3)")
+                .bind(&event_id)
+                .bind(claim.lease_token())
+                .bind(claim.lease_deadline_epoch_micros())
+                .fetch_optional(&store.pool)
+                .await?;
+        assert!(marked.is_some());
+
+        let exact: (bool, bool) = sqlx::query_as(
+            r#"
+            SELECT same_id_redrive_deadline = automatic_retry_deadline
+                       + make_interval(secs => policy.same_id_redrive_horizon_seconds::double precision),
+                   same_id_redrive_deadline = dlx_at
+                       + make_interval(secs => policy.same_id_redrive_horizon_seconds::double precision)
+            FROM outbox CROSS JOIN event_delivery_policy AS policy
+            WHERE event_id = $1 AND policy.singleton
+            "#,
+        )
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            exact,
+            (automatic_branch, !automatic_branch),
+            "LEAST branch must equal exactly one policy-derived absolute deadline"
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid typed identifiers and exact durable-state assertions.
+async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks_successor()
+-> TestResult {
+    use consistency::PartitionKey;
+    use eventexec::{
+        DlqStore as _, OperatorDlqCapability, OutboxExpiredResolutionOutcome,
+        OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+    };
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let tenant = test_tenant();
+    let other_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let domain = unique_domain("expired-resolution-gap");
+    let partition = PartitionKey::parse("expired-resolution-gap-partition").unwrap();
+    let head_id = unique_event_id("expired-resolution-head");
+    let successor_id = unique_event_id("expired-resolution-successor");
+    for event_id in [&head_id, &successor_id] {
+        let entry = make_entry(event_id);
+        let env = make_test_env(&domain, "expired-resolution")
+            .with_partition_key_opt(Some(partition.clone()));
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE outbox
+        SET status = 'dlx',
+            automatic_retry_deadline = clock_timestamp() - interval '25 hours',
+            same_id_redrive_deadline = clock_timestamp() + interval '1 hour',
+            dlx_at = clock_timestamp(),
+            updated_at = clock_timestamp()
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(&head_id)
+    .execute(&store.pool)
+    .await?;
+
+    let blocked: Vec<String> =
+        sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
+            .bind(&domain)
+            .fetch_all(&store.pool)
+            .await?;
+    assert!(
+        !blocked.iter().any(|id| id == &successor_id),
+        "an unresolved DLX head must block its successor"
+    );
+
+    let dlq = store.dlq_without_payload_replay();
+    let cap = OperatorDlqCapability::issue_for_authorized_operator();
+    let ticket = OutboxResolutionChangeTicket::parse("CHG-1742")?;
+    let subject = VerifiedOperatorSubject::from_verified("verified-operator")?;
+    let unexpired_before: (String, String) =
+        sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
+            .bind(&head_id)
+            .fetch_one(&store.pool)
+            .await?;
+    let unexpired = dlq
+        .resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
+            tenant,
+            IdemKey::parse(&head_id).unwrap(),
+            ticket.clone(),
+            subject.clone(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(unexpired, OutboxExpiredResolutionOutcome::NotExpired);
+    let unexpired_after: (String, String) =
+        sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
+            .bind(&head_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(unexpired_after, unexpired_before);
+
+    sqlx::query(
+        "UPDATE outbox SET same_id_redrive_deadline = clock_timestamp() WHERE event_id = $1",
+    )
+    .bind(&head_id)
+    .execute(&store.pool)
+    .await?;
+    let wrong_tenant = dlq
+        .resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
+            other_tenant,
+            IdemKey::parse(&head_id).unwrap(),
+            ticket.clone(),
+            subject.clone(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(wrong_tenant, OutboxExpiredResolutionOutcome::NotFound);
+
+    let mut direct = store.pool.begin().await?;
+    crate::cotx::set_local_tenant(&mut direct, tenant).await?;
+    let invalid_text: i64 = sqlx::query_scalar(
+        "SELECT rss_outbox_resolve_expired($1, $2::uuid, 'accepted_gap', \
+                 ' CHG-1742', E'verified\\noperator', NULL)",
+    )
+    .bind(&head_id)
+    .bind(tenant.to_string())
+    .fetch_one(&mut *direct)
+    .await?;
+    direct.rollback().await?;
+    assert_eq!(
+        invalid_text, -2,
+        "SQL function must reject dirty evidence text instead of normalizing it"
+    );
+
+    let resolved = dlq
+        .resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
+            tenant,
+            IdemKey::parse(&head_id).unwrap(),
+            ticket,
+            subject,
+            cap,
+        ))
+        .await?;
+    assert_eq!(resolved, OutboxExpiredResolutionOutcome::Resolved);
+    let terminal: (String, bool, bool, bool) = sqlx::query_as(
+        "SELECT status, abandoned_at IS NOT NULL, dlx_at IS NULL, published_at IS NULL \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&head_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(terminal, ("abandoned".to_owned(), true, true, true));
+    let evidence: (String, String, String, Option<String>, bool) = sqlx::query_as(
+        "SELECT resolution_kind, change_ticket, operator_subject, evidence_event_id, \
+                verified_at = (SELECT abandoned_at FROM outbox WHERE event_id = $1) \
+         FROM outbox_expired_resolutions WHERE blocked_event_id = $1",
+    )
+    .bind(&head_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        evidence,
+        (
+            "accepted_gap".to_owned(),
+            "CHG-1742".to_owned(),
+            "verified-operator".to_owned(),
+            None,
+            true,
+        )
+    );
+
+    let released: Vec<String> =
+        sqlx::query_scalar("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
+            .bind(&domain)
+            .fetch_all(&store.pool)
+            .await?;
+    assert!(
+        released.iter().any(|id| id == &successor_id),
+        "abandoned is an explicit resolved terminal and must release the successor"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid typed identifiers and exact concurrent outcome counts.
+async fn expired_outbox_compensation_requires_published_causation_and_resolution_is_single_winner()
+-> TestResult {
+    use diport::EnvelopeCausationId;
+    use eventexec::{
+        DlqStore as _, OperatorDlqCapability, OutboxExpiredResolutionOutcome,
+        OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+    };
+
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let tenant = test_tenant();
+    let cap = OperatorDlqCapability::issue_for_authorized_operator();
+    let domain = unique_domain("expired-resolution-compensated");
+    let head_id = unique_event_id("expired-compensated-head");
+    let bad_evidence_id = unique_event_id("expired-compensated-bad-evidence");
+    let evidence_id = unique_event_id("expired-compensated-evidence");
+
+    for (event_id, causation_id) in [
+        (&head_id, None),
+        (&bad_evidence_id, None),
+        (&evidence_id, Some(head_id.as_str())),
+    ] {
+        let entry = make_entry(event_id);
+        let env = make_test_env(&domain, "expired-compensated").with_causation_id_opt(
+            causation_id.map(|value| EnvelopeCausationId::from_opaque(value).unwrap()),
+        );
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE outbox
+        SET status = CASE WHEN event_id = $1 THEN 'dlx' ELSE 'published' END,
+            automatic_retry_deadline = clock_timestamp() + interval '24 hours',
+            same_id_redrive_deadline = CASE WHEN event_id = $1
+                                            THEN clock_timestamp() - interval '1 second'
+                                            ELSE NULL END,
+            published_at = CASE WHEN event_id = $1 THEN NULL ELSE clock_timestamp() END,
+            dlx_at = CASE WHEN event_id = $1 THEN clock_timestamp() ELSE NULL END,
+            updated_at = clock_timestamp()
+        WHERE event_id = ANY($2)
+        "#,
+    )
+    .bind(&head_id)
+    .bind(vec![
+        head_id.clone(),
+        bad_evidence_id.clone(),
+        evidence_id.clone(),
+    ])
+    .execute(&store.pool)
+    .await?;
+
+    let dlq = store.dlq_without_payload_replay();
+    let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-COMP")?;
+    let subject = VerifiedOperatorSubject::from_verified("verified-operator")?;
+    let rejected = dlq
+        .resolve_expired_outbox(OutboxExpiredResolutionRequest::compensated(
+            tenant,
+            IdemKey::parse(&head_id).unwrap(),
+            IdemKey::parse(&bad_evidence_id).unwrap(),
+            ticket.clone(),
+            subject.clone(),
+            cap,
+        ))
+        .await?;
+    assert_eq!(rejected, OutboxExpiredResolutionOutcome::EvidenceRejected);
+
+    let resolved = dlq
+        .resolve_expired_outbox(OutboxExpiredResolutionRequest::compensated(
+            tenant,
+            IdemKey::parse(&head_id).unwrap(),
+            IdemKey::parse(&evidence_id).unwrap(),
+            ticket,
+            subject,
+            cap,
+        ))
+        .await?;
+    assert_eq!(resolved, OutboxExpiredResolutionOutcome::Resolved);
+    let durable: (String, String) = sqlx::query_as(
+        "SELECT resolution_kind, evidence_event_id FROM outbox_expired_resolutions \
+         WHERE blocked_event_id = $1",
+    )
+    .bind(&head_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(durable, ("compensated".to_owned(), evidence_id));
+
+    let concurrent_id = unique_event_id("expired-resolution-concurrent");
+    seed_outbox_dlx(&store, &domain, &concurrent_id).await?;
+    sqlx::query(
+        "UPDATE outbox SET same_id_redrive_deadline = clock_timestamp() WHERE event_id = $1",
+    )
+    .bind(&concurrent_id)
+    .execute(&store.pool)
+    .await?;
+    let calls = (0..8).map(|_| {
+        let dlq = store.dlq_without_payload_replay();
+        let event_id = IdemKey::parse(&concurrent_id).unwrap();
+        let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-CONCURRENT").unwrap();
+        let subject = VerifiedOperatorSubject::from_verified("verified-operator").unwrap();
+        async move {
+            dlq.resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
+                tenant, event_id, ticket, subject, cap,
+            ))
+            .await
+        }
+    });
+    let outcomes = futures::future::try_join_all(calls).await?;
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == OutboxExpiredResolutionOutcome::Resolved)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == OutboxExpiredResolutionOutcome::NotFound)
+            .count(),
+        7
+    );
+
+    let invalid_evidence = sqlx::query(
+        r#"
+        INSERT INTO outbox_expired_resolutions (
+            tenant_id, blocked_event_id, resolution_kind, change_ticket,
+            operator_subject, evidence_event_id, verified_at
+        ) VALUES ($1::uuid, $2, 'accepted_gap', ' leading-space',
+                  E'verified\noperator', NULL, clock_timestamp())
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(unique_event_id("invalid-resolution-evidence"))
+    .execute(&store.pool)
+    .await;
+    assert!(
+        matches!(
+            invalid_evidence,
+            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("23514")
+        ),
+        "DB CHECK must reject whitespace/control characters: {invalid_evidence:?}"
+    );
+
     store.shutdown().await?;
     Ok(())
 }
@@ -10001,11 +10865,7 @@ async fn generated_fingerprint_allows_real_claim_settle_and_redrive() -> TestRes
         marked.is_some(),
         "mark DLX must update the generated column row"
     );
-    let redriven: i64 = sqlx::query_scalar("SELECT rss_outbox_redrive($1, $2::uuid)")
-        .bind(&dlx_id)
-        .bind(test_tenant().to_string())
-        .fetch_one(&store.pool)
-        .await?;
+    let redriven = direct_outbox_redrive(store.pool.clone(), test_tenant(), dlx_id.clone()).await?;
     assert_eq!(
         redriven, 1,
         "redrive must update exactly one generated column row"
@@ -11189,6 +12049,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
         if stale {
             sqlx::query(
                 "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+                 automatic_retry_deadline=COALESCE(automatic_retry_deadline, now()+interval '24 hours'), \
                  created_at=now()-make_interval(secs => $1), updated_at=now()-make_interval(secs => $1), \
                  lease_until=now()-interval '10 seconds' WHERE event_id = $2",
             )
@@ -11199,6 +12060,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
         } else {
             sqlx::query(
                 "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+                 automatic_retry_deadline=COALESCE(automatic_retry_deadline, now()+interval '24 hours'), \
                  updated_at=now(), lease_until=now()+interval '60 seconds' WHERE event_id = $1",
             )
             .bind(&eid)
@@ -12066,6 +12928,16 @@ async fn outbox_terminal_timestamp_checks_reject_invalid_state_combinations() ->
                     WHEN $1 = 'publishing' THEN now() + interval '60 seconds'
                     ELSE NULL
                 END,
+                automatic_retry_deadline = CASE
+                    WHEN $1 IN ('publishing', 'published', 'dlx') THEN
+                        COALESCE(automatic_retry_deadline, now() + interval '24 hours')
+                    ELSE automatic_retry_deadline
+                END,
+                same_id_redrive_deadline = CASE
+                    WHEN $1 = 'dlx' THEN
+                        COALESCE(same_id_redrive_deadline, now() + interval '24 hours')
+                    ELSE same_id_redrive_deadline
+                END,
                 published_at = CASE WHEN $2 THEN now() ELSE NULL END,
                 dlx_at = CASE WHEN $3 THEN now() ELSE NULL END
             WHERE event_id = $4
@@ -12134,11 +13006,12 @@ async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestRe
         JOIN pg_roles owner ON owner.oid = p.proowner
         WHERE p.oid IN (
             'rss_outbox_claim_batch(text, bigint)'::regprocedure,
-            'rss_outbox_lease_can_publish(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_publish_preflight(text, uuid, bigint)'::regprocedure,
             'rss_outbox_settle_published(text, uuid, bigint)'::regprocedure,
             'rss_outbox_settle_retry(text, uuid, bigint)'::regprocedure,
             'rss_outbox_mark_dlx(text, uuid, bigint)'::regprocedure,
             'rss_outbox_redrive(text, uuid)'::regprocedure,
+            'rss_outbox_resolve_expired(text, uuid, text, text, text, text)'::regprocedure,
             'rss_sweep_outbox_published(bigint)'::regprocedure,
             'rss_outbox_sample_backlog(text)'::regprocedure
         )
@@ -12147,7 +13020,7 @@ async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestRe
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(functions.len(), 8);
+    assert_eq!(functions.len(), 9);
     for (signature, owner, owner_can_login, security_definer, fixed_path, no_public, app_exec) in
         functions
     {
@@ -12159,7 +13032,323 @@ async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestRe
         assert!(security_definer, "SECURITY DEFINER drift: {signature}");
         assert!(fixed_path, "search_path drift: {signature}");
         assert!(no_public, "PUBLIC execute drift: {signature}");
-        assert!(app_exec, "rss_app execute drift: {signature}");
+        if signature.starts_with("rss_outbox_redrive")
+            || signature.starts_with("rss_outbox_resolve_expired")
+        {
+            assert!(
+                !app_exec,
+                "serving rss_app must not execute operator redrive"
+            );
+        } else {
+            assert!(app_exec, "rss_app execute drift: {signature}");
+        }
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn event_delivery_policy_constraints_loader_and_acl_fail_closed() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+
+    let privileges: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_table_privilege('rss_app', 'event_delivery_policy', 'SELECT'),
+               has_table_privilege('rss_app', 'event_delivery_policy', 'INSERT'),
+               has_table_privilege('rss_app', 'event_delivery_policy', 'UPDATE'),
+               has_table_privilege('rss_app', 'event_delivery_policy', 'DELETE'),
+               has_function_privilege('rss_app', 'rss_outbox_redrive(text, uuid)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_resolve_expired(text, uuid, text, text, text, text)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_publish_preflight(text, uuid, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_sweep_inbox_receipts()', 'EXECUTE')
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        privileges,
+        (false, false, false, false, false, false, true, true)
+    );
+
+    let resolution_acl: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_table_privilege('rss_app', 'outbox_expired_resolutions', 'SELECT'),
+               has_table_privilege('rss_app', 'outbox_expired_resolutions', 'INSERT'),
+               has_table_privilege('rss_app', 'outbox_expired_resolutions', 'UPDATE'),
+               has_table_privilege('rss_app', 'outbox_expired_resolutions', 'DELETE'),
+               has_table_privilege('rss_outbox_maintenance', 'outbox_expired_resolutions', 'SELECT'),
+               has_table_privilege('rss_outbox_maintenance', 'outbox_expired_resolutions', 'INSERT'),
+               has_table_privilege('rss_outbox_maintenance', 'outbox_expired_resolutions', 'UPDATE'),
+               has_table_privilege('rss_outbox_maintenance', 'outbox_expired_resolutions', 'DELETE')
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        resolution_acl,
+        (false, false, false, false, true, true, false, false),
+        "resolution evidence is maintenance-only append-only data"
+    );
+
+    let old_functions: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT to_regprocedure('rss_outbox_lease_can_publish(text,uuid,bigint)')::text, \
+                to_regprocedure('rss_sweep_inbox_receipts(bigint)')::text",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(old_functions, (None, None));
+
+    let table_insert =
+        sqlx::query_scalar::<_, bool>("SELECT has_table_privilege('rss_app', 'outbox', 'INSERT')")
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        !table_insert,
+        "rss_app must not retain table-wide outbox INSERT"
+    );
+    let insert_columns: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT column_name
+        FROM information_schema.column_privileges
+        WHERE table_schema = 'public'
+          AND table_name = 'outbox'
+          AND grantee = 'rss_app'
+          AND privilege_type = 'INSERT'
+        ORDER BY column_name
+        "#,
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        insert_columns,
+        [
+            "causation_id",
+            "contract_id",
+            "contract_version",
+            "domain",
+            "event_id",
+            "metadata",
+            "partition_key",
+            "payload",
+            "schema_hash",
+            "tenant_id",
+            "topic",
+        ],
+        "rss_app may insert only immutable outbox fact inputs"
+    );
+
+    let allowed_event_id = unique_event_id("outbox-column-grant-allowed");
+    let metadata = serde_json::json!({
+        "tenantId": COTX_TENANT_A,
+        "schemaVersion": "v1",
+        "schemaHash": TEST_SCHEMA_HASH,
+    })
+    .to_string();
+    {
+        let mut tx = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(COTX_TENANT_A)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO outbox (
+                event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+                payload, metadata, partition_key, causation_id
+            )
+            VALUES ($1, $2::uuid, 'test', 'test.event', 'test.contract', 'v1', $3,
+                    decode('00', 'hex'), $4::jsonb, NULL, NULL)
+            "#,
+        )
+        .bind(&allowed_event_id)
+        .bind(COTX_TENANT_A)
+        .bind(TEST_SCHEMA_HASH)
+        .bind(&metadata)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+    let allowed_state: (String, String, bool, bool) = sqlx::query_as(
+        "SELECT status, same_id_delivery_phase, automatic_retry_deadline IS NULL, \
+                same_id_redrive_deadline IS NULL FROM outbox WHERE event_id = $1",
+    )
+    .bind(&allowed_event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        allowed_state,
+        ("pending".to_string(), "automatic".to_string(), true, true),
+        "fact-only INSERT must obtain the database-owned initial state"
+    );
+
+    for (event_id, forged_column, forged_value) in [
+        (
+            unique_event_id("outbox-forge-automatic-deadline"),
+            "automatic_retry_deadline",
+            "clock_timestamp() + interval '100 years'",
+        ),
+        (
+            unique_event_id("outbox-forge-redrive-infinity"),
+            "same_id_redrive_deadline",
+            "timestamptz 'infinity'",
+        ),
+    ] {
+        let mut tx = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(COTX_TENANT_A)
+            .execute(&mut *tx)
+            .await?;
+        let statement = format!(
+            r#"
+            INSERT INTO outbox (
+                event_id, tenant_id, domain, topic, contract_id, contract_version, schema_hash,
+                payload, metadata, partition_key, causation_id, {forged_column}
+            )
+            VALUES ($1, $2::uuid, 'test', 'test.event', 'test.contract', 'v1', $3,
+                    decode('00', 'hex'), $4::jsonb, NULL, NULL, {forged_value})
+            "#
+        );
+        let forged = sqlx::query(&statement)
+            .bind(&event_id)
+            .bind(COTX_TENANT_A)
+            .bind(TEST_SCHEMA_HASH)
+            .bind(&metadata)
+            .execute(&mut *tx)
+            .await;
+        assert!(
+            matches!(
+                forged,
+                Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")
+            ),
+            "rss_app deadline forgery must fail by column ACL: {forged:?}"
+        );
+        tx.rollback().await?;
+        let inserted: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(
+            inserted, 0,
+            "rejected deadline forgery must not insert a row"
+        );
+    }
+
+    for statement in [
+        "UPDATE event_delivery_policy SET automatic_retry_window_seconds = 0",
+        "UPDATE event_delivery_policy SET same_id_redrive_horizon_seconds = -1",
+        "UPDATE event_delivery_policy SET inbox_receipt_retention_seconds = automatic_retry_window_seconds + same_id_redrive_horizon_seconds + safety_margin_seconds",
+        "UPDATE event_delivery_policy SET automatic_retry_window_seconds = 9223372036854775807, same_id_redrive_horizon_seconds = 9223372036854775807, safety_margin_seconds = 9223372036854775807, inbox_receipt_retention_seconds = 9223372036854775807",
+        "INSERT INTO event_delivery_policy (singleton, policy_revision, automatic_retry_window_seconds, same_id_redrive_horizon_seconds, safety_margin_seconds, inbox_receipt_retention_seconds) VALUES (true, 'same-id-delivery-v1', 86400, 86400, 86400, 604800)",
+    ] {
+        let result = sqlx::query(statement).execute(&store.pool).await;
+        assert!(
+            result.is_err(),
+            "policy constraint must reject: {statement}"
+        );
+    }
+
+    sqlx::query(
+        "UPDATE event_delivery_policy SET automatic_retry_window_seconds = automatic_retry_window_seconds + 1",
+    )
+    .execute(&store.pool)
+    .await?;
+    assert!(matches!(
+        store.load_event_delivery_policy().await,
+        Err(crate::PgError::EventDeliveryPolicyMismatch)
+    ));
+    sqlx::query("DELETE FROM event_delivery_policy")
+        .execute(&store.pool)
+        .await?;
+    assert!(matches!(
+        store.load_event_delivery_policy().await,
+        Err(crate::PgError::EventDeliveryPolicyMismatch)
+    ));
+
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_same_id_checks_reject_each_invalid_state_without_mutation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let event_id = unique_event_id("outbox-same-id-checks");
+    let entry = make_entry(&event_id);
+    let env = make_test_env("same_id_check", "test.contract");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    type RowSnapshot = (String, String);
+    let snapshot: RowSnapshot = sqlx::query_as(
+        "SELECT to_jsonb(o)::text, o.xmin::text FROM outbox AS o WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let invalid_updates = [
+        (
+            "phase closed",
+            "UPDATE outbox SET same_id_delivery_phase = 'invalid' WHERE event_id = $1",
+        ),
+        (
+            "publishing requires automatic deadline",
+            "UPDATE outbox SET status = 'publishing', lease_token = gen_random_uuid(), \
+             lease_until = clock_timestamp() + interval '1 hour' WHERE event_id = $1",
+        ),
+        (
+            "published requires automatic deadline",
+            "UPDATE outbox SET status = 'published', published_at = clock_timestamp() \
+             WHERE event_id = $1",
+        ),
+        (
+            "dlx requires redrive deadline",
+            "UPDATE outbox SET status = 'dlx', dlx_at = clock_timestamp(), \
+             automatic_retry_deadline = clock_timestamp() + interval '1 hour' \
+             WHERE event_id = $1",
+        ),
+        (
+            "redrive phase requires redrive deadline",
+            "UPDATE outbox SET same_id_delivery_phase = 'redrive', \
+             automatic_retry_deadline = clock_timestamp() + interval '1 hour' \
+             WHERE event_id = $1",
+        ),
+        (
+            "redrive deadline requires automatic deadline",
+            "UPDATE outbox SET same_id_redrive_deadline = clock_timestamp() + interval '1 hour' \
+             WHERE event_id = $1",
+        ),
+    ];
+    for (case, statement) in invalid_updates {
+        let rejected = sqlx::query(statement)
+            .bind(&event_id)
+            .execute(&store.pool)
+            .await;
+        assert!(
+            matches!(
+                rejected,
+                Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("23514")
+            ),
+            "{case} must fail by CHECK: {rejected:?}"
+        );
+        let after: RowSnapshot = sqlx::query_as(
+            "SELECT to_jsonb(o)::text, o.xmin::text FROM outbox AS o WHERE event_id = $1",
+        )
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(after, snapshot, "{case} must leave the row unchanged");
     }
 
     store.shutdown().await?;
@@ -12282,6 +13471,122 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
     }
 }
 
+/// 0060 upgrades the real 0059 ledger, backfills every historical state to one expired cutover,
+/// and removes all free-horizon function surfaces.
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0060_upgrades_0059_and_expires_all_historical_same_id_paths() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(59).run(&store.pool).await?;
+
+    let fixtures = [
+        (unique_event_id("0060-pending"), "pending"),
+        (unique_event_id("0060-publishing"), "publishing"),
+        (unique_event_id("0060-published"), "published"),
+        (unique_event_id("0060-dlx"), "dlx"),
+    ];
+    for (event_id, _) in &fixtures {
+        let entry = make_entry(event_id);
+        let env = make_test_env("migration_0060_upgrade", "migration.same-id");
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    for (event_id, status) in &fixtures {
+        sqlx::query(
+            r#"
+            UPDATE outbox
+            SET status = $1,
+                lease_token = CASE WHEN $1 = 'publishing' THEN gen_random_uuid() ELSE NULL END,
+                lease_until = CASE WHEN $1 = 'publishing' THEN clock_timestamp() + interval '1 hour' ELSE NULL END,
+                published_at = CASE WHEN $1 = 'published' THEN clock_timestamp() ELSE NULL END,
+                dlx_at = CASE WHEN $1 = 'dlx' THEN clock_timestamp() ELSE NULL END,
+                updated_at = clock_timestamp()
+            WHERE event_id = $2
+            "#,
+        )
+        .bind(status)
+        .bind(event_id)
+        .execute(&store.pool)
+        .await?;
+    }
+
+    sqlx::migrate!("./migrations").run(&store.pool).await?;
+    type HistoricalState = (String, String, bool, bool, bool);
+    let states: Vec<HistoricalState> = sqlx::query_as(
+        "SELECT event_id, same_id_delivery_phase, \
+                automatic_retry_deadline = same_id_redrive_deadline, \
+                automatic_retry_deadline <= clock_timestamp(), \
+                same_id_redrive_deadline <= clock_timestamp() \
+         FROM outbox WHERE event_id = ANY($1) ORDER BY event_id",
+    )
+    .bind(
+        fixtures
+            .iter()
+            .map(|fixture| fixture.0.clone())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(states.len(), 4);
+    assert!(
+        states
+            .iter()
+            .all(|state| { state.1 == "automatic" && state.2 && state.3 && state.4 })
+    );
+
+    let pending_claim = claimed_entry_for_event(&store, &fixtures[0].0).await?;
+    let preflight: i16 =
+        sqlx::query_scalar("SELECT rss_outbox_publish_preflight($1, $2::uuid, $3)")
+            .bind(&fixtures[0].0)
+            .bind(pending_claim.lease_token())
+            .bind(pending_claim.lease_deadline_epoch_micros())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        preflight, 2,
+        "historical pending claim must expire before broker I/O"
+    );
+
+    let redrive =
+        direct_outbox_redrive(store.pool.clone(), test_tenant(), fixtures[3].0.clone()).await?;
+    assert_eq!(redrive, -1, "historical DLX must be immediately Expired");
+    let legacy_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM (VALUES
+            ('rss_outbox_lease_can_publish(text,uuid,bigint)'),
+            ('rss_sweep_inbox_receipts(bigint)')
+        ) AS legacy(signature)
+        WHERE to_regprocedure(signature) IS NOT NULL
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(legacy_count, 0);
+
+    let validated: (i64, bool) = sqlx::query_as(
+        "SELECT count(*)::bigint, bool_and(convalidated) \
+         FROM pg_constraint \
+         WHERE conrelid = 'outbox'::regclass AND conname = 'outbox_same_id_state_valid'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        validated,
+        (1, true),
+        "0061 must validate one composite state scan"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 0057 必须能由 SQLx 的真实迁移账本从 0056 升级，且保留/回填所有既有状态。
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_0057_upgrades_real_through_0056_database() -> TestResult {
@@ -12337,7 +13642,7 @@ async fn migration_0057_upgrades_real_through_0056_database() -> TestResult {
         .await?;
     }
 
-    sqlx::migrate!("./migrations").run(&store.pool).await?;
+    migrations_through(57).run(&store.pool).await?;
 
     type UpgradeState = (String, String, i32, bool, bool, Option<i64>, bool, bool);
     let states: BTreeMap<String, UpgradeState> = sqlx::query_as::<_, UpgradeState>(
@@ -13008,7 +14313,7 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     let can_execute: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
         SELECT has_function_privilege('rss_app', 'rss_outbox_claim_batch(text, bigint)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_outbox_lease_can_publish(text, uuid, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_publish_preflight(text, uuid, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_settle_retry(text, uuid, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_mark_dlx(text, uuid, bigint)', 'EXECUTE'),
@@ -13021,7 +14326,7 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     .await?;
     assert_eq!(
         can_execute,
-        (true, true, true, true, true, true, true, true),
+        (true, true, true, true, true, false, true, true),
         "rss_app should only receive the fixed outbox function surface"
     );
     let legacy_present: Vec<String> = sqlx::query_scalar(
@@ -13030,6 +14335,7 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         FROM (VALUES
             ('rss_outbox_poll_pending(text,bigint)'),
             ('rss_outbox_acquire_lease(text)'),
+            ('rss_outbox_lease_can_publish(text,uuid,bigint)'),
             ('rss_outbox_settle_published(text,uuid)'),
             ('rss_outbox_settle_retry(text,integer,bigint,uuid)'),
             ('rss_outbox_settle_retry(text,integer,bigint,uuid,bigint)'),
@@ -13092,6 +14398,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
     // 模拟 H 崩溃：status=publishing, lease_until 已过期。
     sqlx::query(
         "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+         automatic_retry_deadline=COALESCE(automatic_retry_deadline, now()+interval '24 hours'), \
          updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
          WHERE event_id = $2",
     )
