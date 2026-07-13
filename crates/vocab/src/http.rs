@@ -228,6 +228,68 @@ pub enum HttpRouteAuth {
     ServiceOwned,
 }
 
+/// Sealed ownership identity carried by every generated HTTP route.
+///
+/// Ownership is independent from [`ContractBinding::domain`]: framework contracts retain their
+/// publishing domain while serving and reporting consume this explicit owner carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpContractOwner(HttpContractOwnerKind);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpContractOwnerKind {
+    Domain(&'static str),
+    Framework,
+}
+
+impl HttpContractOwner {
+    /// Construct a domain-owned generated route.
+    #[must_use]
+    pub const fn domain(domain: &'static str) -> Self {
+        assert!(
+            valid_owner_domain(domain),
+            "HTTP contract owner domain must be a canonical crate name"
+        );
+        Self(HttpContractOwnerKind::Domain(domain))
+    }
+
+    /// Construct a framework-owned generated route.
+    #[must_use]
+    pub const fn framework() -> Self {
+        Self(HttpContractOwnerKind::Framework)
+    }
+
+    /// Return the owner domain, or `None` for framework-owned contracts.
+    #[must_use]
+    pub const fn domain_name(self) -> Option<&'static str> {
+        match self.0 {
+            HttpContractOwnerKind::Domain(domain) => Some(domain),
+            HttpContractOwnerKind::Framework => None,
+        }
+    }
+
+    /// Whether this is the framework owner sentinel.
+    #[must_use]
+    pub const fn is_framework(self) -> bool {
+        matches!(self.0, HttpContractOwnerKind::Framework)
+    }
+}
+
+const fn valid_owner_domain(domain: &str) -> bool {
+    let bytes = domain.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// Successful response status declared by an HTTP contract.
 ///
 /// The inner value is private so generated metadata can only carry a validated 2xx status.
@@ -271,6 +333,7 @@ pub enum HttpIdempotency {
 /// serving code receives that value together with the handler and can only read its accessors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpRouteEvidence {
+    owner: HttpContractOwner,
     contract: ContractBinding,
     path: &'static str,
     method: &'static str,
@@ -314,6 +377,7 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn from_static(
+        owner: HttpContractOwner,
         contract: ContractBinding,
         path: &'static str,
         method: &'static str,
@@ -326,6 +390,7 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
     ) -> Self {
         Self {
             evidence: HttpRouteEvidence::from_static(
+                owner,
                 contract,
                 path,
                 method,
@@ -358,6 +423,7 @@ impl HttpRouteEvidence {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn from_static(
+        owner: HttpContractOwner,
         contract: ContractBinding,
         path: &'static str,
         method: &'static str,
@@ -384,6 +450,7 @@ impl HttpRouteEvidence {
         );
 
         Self {
+            owner,
             contract,
             path,
             method,
@@ -395,6 +462,12 @@ impl HttpRouteEvidence {
             consistency_level,
             effect_profile,
         }
+    }
+
+    /// Contract owner independently generated from the manifest owner field.
+    #[must_use]
+    pub const fn owner(&self) -> HttpContractOwner {
+        self.owner
     }
 
     /// Contract ownership and schema binding.
@@ -477,6 +550,7 @@ mod tests {
     const EFFECTS: &[HttpEffectKind] = &[HttpEffectKind::Auth, HttpEffectKind::Read];
     const PROFILE: HttpEffectProfile = HttpEffectProfile::new(EFFECTS);
     const EVIDENCE: HttpRouteEvidence = HttpRouteEvidence::from_static(
+        HttpContractOwner::domain("identity"),
         CONTRACT,
         "/v1/profile",
         "GET",
@@ -491,6 +565,7 @@ mod tests {
 
     #[test]
     fn evidence_exposes_the_atomic_generated_values() {
+        assert_eq!(EVIDENCE.owner().domain_name(), Some("identity"));
         assert_eq!(EVIDENCE.contract(), CONTRACT);
         assert_eq!(EVIDENCE.contract_id(), "identity.profile");
         assert_eq!(EVIDENCE.path(), "/v1/profile");
@@ -515,6 +590,7 @@ mod tests {
         enum Marker {}
 
         let binding = HttpRouteBinding::<Marker, OutboxFact>::from_static(
+            HttpContractOwner::framework(),
             CONTRACT,
             "/v1/profile",
             "GET",
@@ -530,6 +606,7 @@ mod tests {
             binding.evidence().consistency_level(),
             HttpConsistencyLevel::OutboxFact
         );
+        assert!(binding.evidence().owner().is_framework());
         assert_eq!(binding.evidence().success_status().get(), 202);
         assert_eq!(
             binding.evidence().idempotency(),
@@ -571,6 +648,7 @@ mod tests {
     #[should_panic(expected = "must be absolute")]
     fn relative_path_is_rejected() {
         let _ = HttpRouteEvidence::from_static(
+            HttpContractOwner::domain("identity"),
             CONTRACT,
             "v1/profile",
             "GET",
@@ -588,6 +666,7 @@ mod tests {
     #[should_panic(expected = "cannot carry resource scope")]
     fn public_resource_scope_is_rejected() {
         let _ = HttpRouteEvidence::from_static(
+            HttpContractOwner::domain("identity"),
             CONTRACT,
             "/v1/profile",
             "GET",

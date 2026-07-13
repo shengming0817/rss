@@ -2,6 +2,7 @@ name = "identityaudit"
 profile = "demo"
 domains = ["identity", "audit"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"

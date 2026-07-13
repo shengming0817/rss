@@ -329,6 +329,7 @@ pub mod list_entries {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("audit"),
             CONTRACT,
             PATH,
             "GET",
@@ -342,6 +343,7 @@ pub mod list_entries {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "audit_v1::list_entries",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -685,6 +687,7 @@ pub mod list_tenant_entries {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("audit"),
             CONTRACT,
             PATH,
             "GET",
@@ -698,6 +701,7 @@ pub mod list_tenant_entries {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "audit_v1::list_tenant_entries",
         route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: ::vocab::LocalTxBoundary::SingleDomain,

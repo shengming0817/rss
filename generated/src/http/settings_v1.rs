@@ -199,6 +199,7 @@ pub enum RouteMarker {}
 /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
 pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
     ::vocab::HttpRouteBinding::from_static(
+        ::vocab::HttpContractOwner::domain("settings"),
         CONTRACT,
         PATH,
         "POST",
@@ -212,6 +213,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFac
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: super::HttpSpec = super::HttpSpec {
+    mount_key: "settings_v1",
     route: ROUTE.evidence(),
     local_tx: None,
     resource_sharing: super::HttpResourceSharingSpec {

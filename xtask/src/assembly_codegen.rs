@@ -148,7 +148,8 @@ fn plan_target(root: &Path, assembly_dir: &Path) -> Result<Option<Target>> {
     let source_label = relative_label(root, &manifest_path);
     ensure_safe_source_label(&source_label)?;
     validate_manifest(&manifest, &source_label)?;
-    let content = render_modules(&manifest, &source_label, &source)?;
+    let framework_routes = framework_http_routes(root, &manifest)?;
+    let content = render_modules(&manifest, &framework_routes, &source_label, &source)?;
     let actual = read_owned_target(&output_path)?;
     Ok(Some(Target {
         path: output_path,
@@ -237,6 +238,7 @@ fn ensure_owned(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn render_modules(
     manifest: &AssemblyManifest,
+    framework_routes: &[String],
     source_label: &str,
     source: &[u8],
 ) -> Result<String> {
@@ -291,8 +293,52 @@ pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
             "        crate::domains::{module}::tests::test_binding()\n            .await\n            .context(\"wire test domain '{module}'\")?,\n"
         ));
     }
-    code.push_str("    ])\n}\n");
+    code.push_str("    ])\n}\n\n");
+    if manifest.name == "runtime" || !framework_routes.is_empty() {
+        code.push_str("pub const FRAMEWORK_HTTP_ROUTES: &[bootstrap::FrameworkHttpRoute] = &[\n");
+        for route in framework_routes {
+            code.push_str(&format!(
+                "    bootstrap::FrameworkHttpRoute::new({route}),\n"
+            ));
+        }
+        code.push_str("];\n\n");
+        code.push_str(
+            "pub fn register_framework_routes(registry: &mut bootstrap::Registry) -> Result<(), bootstrap::KernelError> {\n",
+        );
+        if framework_routes.is_empty() {
+            code.push_str("    let _ = registry;\n    Ok(())\n}\n");
+        } else {
+            code.push_str(
+                "    bootstrap::FrameworkRoutes::register(&crate::framework_routes::ROUTES, registry)\n}\n",
+            );
+        }
+    }
     crate::codegen::format_rust(&code)
+}
+
+fn framework_http_routes(root: &Path, manifest: &AssemblyManifest) -> Result<Vec<String>> {
+    use crate::contract::manifest::{ContractKind, ContractOwner, Lifecycle};
+
+    let contracts = crate::contract::discover(&root.join("contracts"))?;
+    let by_id = contracts
+        .iter()
+        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut routes = Vec::new();
+    for contract_id in &manifest.framework_contracts {
+        let contract = by_id
+            .get(contract_id.as_str())
+            .with_context(|| format!("unknown framework contract `{contract_id}`"))?;
+        if contract.manifest.lifecycle != Lifecycle::Active
+            || contract.manifest.owner != ContractOwner::Framework
+        {
+            bail!("framework contract `{contract_id}` must be active and framework-owned")
+        }
+        if contract.manifest.kind == ContractKind::Http {
+            routes.push(crate::codegen::rendered_http_route_evidence_path(contract)?);
+        }
+    }
+    Ok(routes)
 }
 
 fn listener_variant(kind: AssemblyListenerKind) -> &'static str {
@@ -390,6 +436,7 @@ mod tests {
 profile = "demo"
 domains = [{domains}]
 topology = "durable-shared"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -433,6 +480,7 @@ outputs = ["resources"]
         let parsed = AssemblyManifest::from_toml_str(&source)?;
         let rendered = render_modules(
             &parsed,
+            &[],
             "assemblies/runtime/assembly.toml",
             source.as_bytes(),
         )?;
@@ -470,6 +518,29 @@ outputs = ["resources"]
         assert!(rendered.contains("ratelimit::GovernorLimiter"));
         assert!(!rendered.contains("std::env"));
         syn::parse_file(&rendered)?;
+        Ok(())
+    }
+
+    #[test]
+    fn framework_routes_render_as_typed_expected_evidence_and_single_funnel() -> Result<()> {
+        let source = manifest(r#""identity""#).replace(
+            "frameworkContracts = []",
+            "frameworkContracts = [\"framework.status\"]",
+        );
+        let parsed = AssemblyManifest::from_toml_str(&source)?;
+        let rendered = render_modules(
+            &parsed,
+            &["::generated::http::framework_v1::status::ROUTE.evidence()".to_string()],
+            "assemblies/runtime/assembly.toml",
+            source.as_bytes(),
+        )?;
+        assert!(rendered.contains("pub const FRAMEWORK_HTTP_ROUTES"));
+        assert!(rendered.contains("bootstrap::FrameworkHttpRoute::new("));
+        assert!(rendered.contains("::generated::http::framework_v1::status::ROUTE.evidence()"));
+        assert!(rendered.contains(
+            "bootstrap::FrameworkRoutes::register(&crate::framework_routes::ROUTES, registry)"
+        ));
+        assert!(!rendered.contains("contract_id =="));
         Ok(())
     }
 

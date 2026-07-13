@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "status": "failed",
+  "activeHttpContractCount": 2,
+  "findings": [
+    {
+      "rule": "forbiddenStateEffect",
+      "subject": "crates/demo/src/lib.rs:7",
+      "detail": "escaped | cell\\path\nline [link](https://example.invalid) ![img](x) <em>raw</em> `tick` *strong* & amp"
+    },
+    {
+      "rule": "missingRouteBinding",
+      "subject": "z.remote",
+      "detail": "canonical production Domain::init mount is missing"
+    }
+  ],
+  "contracts": [
+    {
+      "contractId": "a.local",
+      "owner": "demo",
+      "method": "GET",
+      "path": "/v1/a",
+      "consistencyLevel": "LocalOnly",
+      "effects": [
+        "read",
+        "cross-tenant-audit"
+      ],
+      "route": {
+        "mountStatus": "mounted",
+        "mountSources": [
+          "crates/demo/src/lib.rs:7"
+        ]
+      },
+      "effectProof": {
+        "kind": "localOnlyStatic",
+        "status": "failed",
+        "stateKind": "classified",
+        "effectClass": "ReadEffect",
+        "privilegeClass": "LocalPrivilege"
+      },
+      "findings": [
+        {
+          "rule": "forbiddenStateEffect",
+          "subject": "crates/demo/src/lib.rs:7",
+          "detail": "escaped | cell\\path\nline [link](https://example.invalid) ![img](x) <em>raw</em> `tick` *strong* & amp"
+        }
+      ]
+    },
+    {
+      "contractId": "z.remote",
+      "owner": "demo",
+      "method": "POST",
+      "path": "/v1/z",
+      "consistencyLevel": "LocalTx",
+      "effects": [
+        "auth",
+        "transaction"
+      ],
+      "route": {
+        "mountStatus": "missing",
+        "mountSources": []
+      },
+      "effectProof": {
+        "kind": "declarationOnly",
+        "status": "notApplicable",
+        "stateKind": null,
+        "effectClass": null,
+        "privilegeClass": null
+      },
+      "findings": [
+        {
+          "rule": "missingRouteBinding",
+          "subject": "z.remote",
+          "detail": "canonical production Domain::init mount is missing"
+        }
+      ]
+    }
+  ]
+}

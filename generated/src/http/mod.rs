@@ -3,6 +3,8 @@
 /// HTTP serving metadata generated from `contract.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpSpec {
+    /// Canonical `Domain::init` mount identity derived from generated module + discovered slug.
+    pub mount_key: &'static str,
     pub route: ::vocab::HttpRouteEvidence,
     pub local_tx: Option<LocalTxSpec>,
     pub resource_sharing: HttpResourceSharingSpec,

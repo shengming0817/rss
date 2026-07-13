@@ -249,6 +249,7 @@ pub(crate) fn assemble_authed_routers_from(
     audit_clock: Arc<dyn diport::Clock>,
     get: impl Fn(&str) -> Option<String> + Copy,
 ) -> anyhow::Result<Vec<AssembledListener>> {
+    crate::modules_gen::register_framework_routes(registry).context("register framework routes")?;
     let primary_authorizer = registry
         .take_primary_authorizer()
         .context("take Primary route authorizer")?;
@@ -260,7 +261,13 @@ pub(crate) fn assemble_authed_routers_from(
     // 叠加 peer-IP-after-proxy 退化（RealIP follow-up），本限流当前为单实例 best-effort 防护。
     let rate_limiter = Arc::new(GovernorLimiter::new(default_rate_quota()));
     let mut out = Vec::new();
-    for (listener, routes) in registry.finalize_routes().context("finalize_routes")? {
+    let finalized_routes = registry.finalize_routes().context("finalize_routes")?;
+    bootstrap::validate_framework_serving(
+        &finalized_routes,
+        crate::modules_gen::FRAMEWORK_HTTP_ROUTES,
+    )
+    .context("validate framework serving")?;
+    for (listener, routes) in finalized_routes {
         let scheme = auth_scheme_from(listener, get).context("resolve listener auth scheme")?;
         let plan = AuthPlan::new(listener, scheme).context("build auth plan")?;
         let mtls_health = if scheme == AuthScheme::Mtls {

@@ -2,13 +2,16 @@
 //!
 //! INVARIANT: LOCAL-ONLY-EFFECTS-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "forged_observation_provenance_is_rejected", anti_vacuity = "governed_observation_provenance_is_accepted" }.
 
+use crate::ReportFormat;
 use crate::contract::DiscoveredContract;
 use crate::contract::manifest::{
     ConsistencyLevel, ContractKind, ContractOwner, EffectKind, HttpMethod, Lifecycle,
 };
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -29,6 +32,94 @@ pub(crate) enum Rule {
     ForgedObservationEvidence,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReportStatus {
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum MountStatus {
+    Mounted,
+    Missing,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ProofKind {
+    LocalOnlyStatic,
+    DeclarationOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ProofStatus {
+    Passed,
+    Failed,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum StateKind {
+    Stateless,
+    Ordinary,
+    Classified,
+    Opaque,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportFinding {
+    rule: String,
+    subject: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutePosture {
+    mount_status: MountStatus,
+    mount_sources: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectProof {
+    kind: ProofKind,
+    status: ProofStatus,
+    state_kind: Option<StateKind>,
+    effect_class: Option<String>,
+    privilege_class: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContractPosture {
+    contract_id: String,
+    owner: String,
+    method: String,
+    path: String,
+    consistency_level: String,
+    effects: Vec<String>,
+    route: RoutePosture,
+    effect_proof: EffectProof,
+    findings: Vec<ReportFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsistencyReport {
+    schema_version: u8,
+    status: ReportStatus,
+    active_http_contract_count: usize,
+    findings: Vec<ReportFinding>,
+    contracts: Vec<ContractPosture>,
+}
+
 pub(crate) struct LocalOnlyEffects;
 
 impl GovernanceCheck for LocalOnlyEffects {
@@ -46,7 +137,7 @@ impl GovernanceCheck for LocalOnlyEffects {
 #[derive(Debug, Clone)]
 struct Contract {
     id: String,
-    owner: String,
+    serving_scope: ServingScope,
     key: String,
     method: String,
     path: String,
@@ -72,6 +163,382 @@ fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
         ),
         findings,
     ))
+}
+
+/// Collect and render the complete report before the sole stdout write. Collection or
+/// serialization errors therefore cannot leave a plausible partial artifact behind.
+pub(crate) fn run_report(format: ReportFormat) -> Result<()> {
+    let root = crate::workspace_root()?;
+    let stdout = std::io::stdout();
+    run_report_with(format, || collect_report(&root), &mut stdout.lock())
+}
+
+fn run_report_with<W, C>(format: ReportFormat, collect: C, writer: &mut W) -> Result<()>
+where
+    W: Write,
+    C: FnOnce() -> Result<ConsistencyReport>,
+{
+    let report = collect()?;
+    let rendered = render_report(&report, format)?;
+    writer
+        .write_all(rendered.as_bytes())
+        .context("write consistency posture report")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ServingScope {
+    Domain(String),
+    Framework(String),
+}
+
+impl ServingScope {
+    fn matches_owner(&self, owner: vocab::HttpContractOwner) -> bool {
+        match self {
+            Self::Domain(domain) => owner.domain_name() == Some(domain.as_str()),
+            Self::Framework(_) => owner.is_framework(),
+        }
+    }
+}
+
+fn serving_scope(root: &Path, route: vocab::HttpRouteEvidence) -> Result<ServingScope> {
+    match route.owner().domain_name() {
+        Some(domain) => Ok(ServingScope::Domain(domain.to_string())),
+        None if route.owner().is_framework() => Ok(ServingScope::Framework(
+            framework_serving_assembly(root, route.contract_id())?,
+        )),
+        None => bail!("generated HTTP route has an unrecognized owner"),
+    }
+}
+
+fn canonical_evidence_for_scope(
+    root: &Path,
+    scope: &ServingScope,
+) -> Result<crate::localtx_coverage::CanonicalServingEvidence> {
+    let source = match scope {
+        ServingScope::Domain(owner) => {
+            crate::localtx_coverage::ServingEvidenceSource::Domain(owner)
+        }
+        ServingScope::Framework(assembly) => {
+            crate::localtx_coverage::ServingEvidenceSource::Framework(assembly)
+        }
+    };
+    crate::localtx_coverage::canonical_serving_evidence(root, source)
+        .map_err(|error| sanitized(root, error))
+}
+
+fn collect_report(root: &Path) -> Result<ConsistencyReport> {
+    collect_report_with_specs(root, generated::http::SPECS)
+}
+
+fn collect_report_with_specs(
+    root: &Path,
+    specs: &[generated::http::HttpSpec],
+) -> Result<ConsistencyReport> {
+    let mut serving_scopes = BTreeSet::new();
+    let mut scopes_by_contract = BTreeMap::new();
+    let mut identities = BTreeSet::new();
+    for spec in specs {
+        let route = spec.route;
+        if !identities.insert(route.contract_id()) {
+            bail!(
+                "duplicate generated active HTTP contract `{}`",
+                route.contract_id()
+            );
+        }
+        let scope = serving_scope(root, route)?;
+        serving_scopes.insert(scope.clone());
+        scopes_by_contract.insert(route.contract_id(), scope);
+    }
+
+    let mut serving_evidence = BTreeMap::new();
+    let mut proof_sources = BTreeMap::new();
+    for scope in serving_scopes {
+        let evidence = canonical_evidence_for_scope(root, &scope)?;
+        if specs.iter().any(|spec| {
+            scopes_by_contract.get(spec.route.contract_id()) == Some(&scope)
+                && spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly
+                && mount_requires_source(evidence.mounts.get(spec.mount_key))
+        }) {
+            proof_sources.insert(
+                scope.clone(),
+                ProofSource::load(root, &scope, &evidence.reachable_production_sources)?,
+            );
+        }
+        serving_evidence.insert(scope, evidence);
+    }
+
+    let mut contracts = Vec::new();
+    for spec in specs {
+        let route = spec.route;
+        let scope = scopes_by_contract
+            .get(route.contract_id())
+            .ok_or_else(|| anyhow!("missing canonical serving scope"))?;
+        let evidence = serving_evidence
+            .get(scope)
+            .ok_or_else(|| anyhow!("missing canonical serving evidence"))?;
+        contracts.push(build_contract_posture(
+            spec,
+            scope,
+            evidence.mounts.get(spec.mount_key),
+            proof_sources.get(scope),
+        )?);
+    }
+    finalize_report(contracts)
+}
+
+fn framework_serving_assembly(root: &Path, contract_id: &str) -> Result<String> {
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(root.join("assemblies")).context("read assemblies")? {
+        let entry = entry.context("read assembly entry")?;
+        if !entry
+            .file_type()
+            .context("read assembly entry type")?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = entry.path().join("assembly.toml");
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).context("read assembly manifest")?;
+        let manifest = assembly_schema::AssemblyManifest::from_toml_str(&text)
+            .context("parse assembly manifest")?;
+        if manifest
+            .framework_contracts
+            .iter()
+            .any(|declared| declared == contract_id)
+        {
+            matches.push(manifest.name);
+        }
+    }
+    matches.sort();
+    match matches.as_slice() {
+        [assembly] => Ok(assembly.clone()),
+        [] => bail!("framework contract `{contract_id}` has no serving assembly"),
+        _ => bail!("framework contract `{contract_id}` has ambiguous serving assemblies"),
+    }
+}
+
+fn finalize_report(mut contracts: Vec<ContractPosture>) -> Result<ConsistencyReport> {
+    contracts.sort_by(|a, b| {
+        (&a.contract_id, &a.method, &a.path).cmp(&(&b.contract_id, &b.method, &b.path))
+    });
+    let mut findings: Vec<_> = contracts
+        .iter()
+        .flat_map(|contract| contract.findings.iter().cloned())
+        .collect();
+    findings.sort();
+    findings.dedup();
+    Ok(ConsistencyReport {
+        schema_version: 1,
+        status: if findings.is_empty() {
+            ReportStatus::Passed
+        } else {
+            ReportStatus::Failed
+        },
+        active_http_contract_count: contracts.len(),
+        findings,
+        contracts,
+    })
+}
+
+fn build_contract_posture(
+    spec: &generated::http::HttpSpec,
+    serving_scope: &ServingScope,
+    mounts: Option<&BTreeSet<crate::localtx_coverage::CanonicalRouteMount>>,
+    source: Option<&ProofSource>,
+) -> Result<ContractPosture> {
+    let route = spec.route;
+    if !serving_scope.matches_owner(route.owner()) {
+        bail!("serving scope disagrees with generated HTTP contract owner");
+    }
+    let owner = route.owner().domain_name().unwrap_or("_framework");
+    let (mount_status, mount_sources) = mount_posture(mounts);
+    let mut findings: Vec<ReportFinding> = mount_finding(route.contract_id(), mount_status)
+        .into_iter()
+        .collect();
+    let local_only = route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly;
+    let effect_proof = if local_only {
+        findings.extend(
+            route
+                .effect_profile()
+                .effects()
+                .iter()
+                .copied()
+                .filter_map(forbidden_generated_effect_wire)
+                .map(|effect| ReportFinding {
+                    rule: "forbiddenStateEffect".to_string(),
+                    subject: route.contract_id().to_string(),
+                    detail: format!("LocalOnly declaration contains forbidden effect `{effect}`"),
+                }),
+        );
+        let mut proof = LocalOnlyProofEvaluation {
+            state_kind: None,
+            effect_class: None,
+            privilege_class: None,
+            findings: Vec::new(),
+        };
+        if let Some(mounts) = mounts {
+            let contract = Contract {
+                id: route.contract_id().to_string(),
+                serving_scope: serving_scope.clone(),
+                key: spec.mount_key.to_string(),
+                method: route.method().to_string(),
+                path: route.path().to_string(),
+                subject: route.contract_id().to_string(),
+            };
+            proof = evaluate_localonly_mount(&contract, mounts, source)?;
+            findings.extend(proof.findings.iter().map(report_finding));
+        }
+        EffectProof {
+            kind: ProofKind::LocalOnlyStatic,
+            status: if findings.is_empty() {
+                ProofStatus::Passed
+            } else {
+                ProofStatus::Failed
+            },
+            state_kind: proof.state_kind,
+            effect_class: proof.effect_class,
+            privilege_class: proof.privilege_class,
+        }
+    } else {
+        EffectProof {
+            kind: ProofKind::DeclarationOnly,
+            status: ProofStatus::NotApplicable,
+            state_kind: None,
+            effect_class: None,
+            privilege_class: None,
+        }
+    };
+    findings.sort();
+    findings.dedup();
+    Ok(ContractPosture {
+        contract_id: route.contract_id().to_string(),
+        owner: owner.to_string(),
+        method: route.method().to_string(),
+        path: route.path().to_string(),
+        consistency_level: consistency_wire(route.consistency_level()).to_string(),
+        effects: canonical_effects(route.effect_profile().effects()),
+        route: RoutePosture {
+            mount_status,
+            mount_sources,
+        },
+        effect_proof,
+        findings,
+    })
+}
+
+fn mount_finding(contract_id: &str, status: MountStatus) -> Option<ReportFinding> {
+    let (rule, detail) = match status {
+        MountStatus::Mounted => return None,
+        MountStatus::Missing => (
+            "missingRouteBinding",
+            "canonical production Domain::init mount is missing",
+        ),
+        MountStatus::Ambiguous => (
+            "opaqueSourceScope",
+            "canonical production route has conflicting mount evidence",
+        ),
+    };
+    Some(ReportFinding {
+        rule: rule.to_string(),
+        subject: contract_id.to_string(),
+        detail: detail.to_string(),
+    })
+}
+
+fn render_report(report: &ConsistencyReport, format: ReportFormat) -> Result<String> {
+    validate_report(report)?;
+    match format {
+        ReportFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(report)?)),
+        ReportFormat::Markdown => Ok(render_markdown(report)),
+    }
+}
+
+fn validate_report(report: &ConsistencyReport) -> Result<()> {
+    if report.schema_version != 1 {
+        bail!("unsupported consistency report schema version");
+    }
+    if report.active_http_contract_count != report.contracts.len() {
+        bail!("activeHttpContractCount does not match contracts");
+    }
+    if report.status == ReportStatus::Passed
+        && (!report.findings.is_empty()
+            || report
+                .contracts
+                .iter()
+                .any(|contract| !contract.findings.is_empty()))
+    {
+        bail!("passed consistency report contains findings");
+    }
+    Ok(())
+}
+
+fn render_markdown(report: &ConsistencyReport) -> String {
+    let mut output = format!(
+        "# Consistency / Effect Posture\n\nStatus: **{}** · Active HTTP contracts: **{}** · Findings: **{}**\n\n| Contract | Owner | Method | Path | Consistency | Effects | Mount | LocalOnly Proof | Findings |\n|---|---|---|---|---|---|---|---|---|\n",
+        match report.status {
+            ReportStatus::Passed => "passed",
+            ReportStatus::Failed => "failed",
+        },
+        report.active_http_contract_count,
+        report.findings.len()
+    );
+    for contract in &report.contracts {
+        let proof = match contract.effect_proof.kind {
+            ProofKind::DeclarationOnly => "declarationOnly/notApplicable".to_string(),
+            ProofKind::LocalOnlyStatic => format!(
+                "localOnlyStatic/{}; state={}; effect={}; privilege={}",
+                proof_status_wire(contract.effect_proof.status),
+                option_state_wire(contract.effect_proof.state_kind),
+                contract
+                    .effect_proof
+                    .effect_class
+                    .as_deref()
+                    .unwrap_or("null"),
+                contract
+                    .effect_proof
+                    .privilege_class
+                    .as_deref()
+                    .unwrap_or("null")
+            ),
+        };
+        let mount = format!(
+            "{}{}",
+            mount_status_wire(contract.route.mount_status),
+            if contract.route.mount_sources.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", contract.route.mount_sources.join(", "))
+            }
+        );
+        let findings = if contract.findings.is_empty() {
+            "—".to_string()
+        } else {
+            contract
+                .findings
+                .iter()
+                .map(|finding| {
+                    format!("{} @ {}: {}", finding.rule, finding.subject, finding.detail)
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            literal_cell(&contract.contract_id),
+            literal_cell(&contract.owner),
+            literal_cell(&contract.method),
+            literal_cell(&contract.path),
+            literal_cell(&contract.consistency_level),
+            literal_cell(&contract.effects.join(", ")),
+            literal_cell(&mount),
+            literal_cell(&proof),
+            literal_cell(&findings),
+        ));
+    }
+    output
 }
 
 fn discover_without_absolute_paths(root: &Path) -> Result<Vec<DiscoveredContract>> {
@@ -100,9 +567,14 @@ fn contracts_and_profile_findings(
         let method = required_method(manifest.method, &subject, &manifest.id)?
             .as_wire()
             .to_string();
-        let owner = match &manifest.owner {
-            ContractOwner::Domain(owner) if owner == &manifest.domain => owner.clone(),
-            _ => bail!(
+        let serving_scope = match &manifest.owner {
+            ContractOwner::Domain(owner) if owner == &manifest.domain => {
+                ServingScope::Domain(owner.clone())
+            }
+            ContractOwner::Framework => {
+                ServingScope::Framework(framework_serving_assembly(root, &manifest.id)?)
+            }
+            ContractOwner::Domain(_) => bail!(
                 "{subject}: LocalOnly contract `{}` must have its domain as owner",
                 manifest.id
             ),
@@ -132,7 +604,7 @@ fn contracts_and_profile_findings(
         }
         contracts.push(Contract {
             id: manifest.id.clone(),
-            owner,
+            serving_scope,
             key: generated_key(&manifest.domain, &manifest.version, item.slug.as_deref()),
             method,
             path,
@@ -145,15 +617,21 @@ fn contracts_and_profile_findings(
 
 fn source_findings(root: &Path, contracts: &[Contract]) -> Result<Vec<Finding>> {
     let generated = generated_localonly_routes(root)?;
-    let mut by_owner: BTreeMap<&str, Vec<&Contract>> = BTreeMap::new();
+    let mut by_scope: BTreeMap<&ServingScope, Vec<&Contract>> = BTreeMap::new();
     for contract in contracts {
-        by_owner.entry(&contract.owner).or_default().push(contract);
+        by_scope
+            .entry(&contract.serving_scope)
+            .or_default()
+            .push(contract);
     }
     let mut findings = Vec::new();
-    for (owner, owned) in by_owner {
-        let evidence = crate::localtx_coverage::canonical_owner_evidence(root, owner)
-            .map_err(|error| sanitized(root, error))?;
-        let source = OwnerSource::load(root, owner, &evidence.reachable_production_sources)?;
+    for (scope, owned) in by_scope {
+        let evidence = canonical_evidence_for_scope(root, scope)?;
+        let source = owned
+            .iter()
+            .any(|contract| mount_requires_source(evidence.mounts.get(&contract.key)))
+            .then(|| ProofSource::load(root, scope, &evidence.reachable_production_sources))
+            .transpose()?;
         for contract in owned {
             if !generated.contains(&contract.key) || !evidence.mounts.contains_key(&contract.key) {
                 findings.push(contract_finding(
@@ -164,53 +642,90 @@ fn source_findings(root: &Path, contracts: &[Contract]) -> Result<Vec<Finding>> 
                     &contract.subject,
                     "unknown",
                     "unknown",
-                    "generated typed ROUTE or canonical Domain::init mount is missing",
+                    "generated typed ROUTE or canonical serving mount is missing",
                 ));
                 continue;
             }
-            let Some(mounts) = evidence.mounts.get(&contract.key) else {
-                findings.push(contract_finding(
-                    Rule::MissingRouteBinding,
-                    &contract.id,
-                    &contract.method,
-                    &contract.path,
-                    &contract.subject,
-                    "unknown",
-                    "unknown",
-                    "mounted endpoint expression cannot be resolved",
-                ));
-                continue;
-            };
-            if mounts.len() != 1 {
-                findings.push(contract_finding(
-                    Rule::OpaqueSourceScope,
-                    &contract.id,
-                    &contract.method,
-                    &contract.path,
-                    &contract.subject,
-                    "unknown",
-                    "unknown",
-                    "route has conflicting endpoint/state evidence (dead or unmounted spoof included)",
-                ));
-                continue;
-            }
-            let Some(mount) = mounts.iter().next() else {
-                continue;
-            };
-            use crate::localtx_coverage::CanonicalMountedState;
-            match &mount.state {
-                CanonicalMountedState::Stateless => {}
-                CanonicalMountedState::Ordinary => findings.push(contract_finding(
-                    Rule::UnclassifiedState,
-                    &contract.id,
-                    &contract.method,
-                    &contract.path,
-                    &contract.subject,
-                    "unknown",
-                    "unknown",
-                    "LocalOnly endpoint uses ordinary with_state",
-                )),
-                CanonicalMountedState::Opaque => findings.push(contract_finding(
+            let mounts = evidence
+                .mounts
+                .get(&contract.key)
+                .ok_or_else(|| anyhow!("canonical mount disappeared during evaluation"))?;
+            findings.extend(evaluate_localonly_mount(contract, mounts, source.as_ref())?.findings);
+        }
+    }
+    Ok(findings)
+}
+
+#[derive(Debug)]
+struct LocalOnlyProofEvaluation {
+    state_kind: Option<StateKind>,
+    effect_class: Option<String>,
+    privilege_class: Option<String>,
+    findings: Vec<Finding>,
+}
+
+fn evaluate_localonly_mount(
+    contract: &Contract,
+    mounts: &BTreeSet<crate::localtx_coverage::CanonicalRouteMount>,
+    source: Option<&ProofSource>,
+) -> Result<LocalOnlyProofEvaluation> {
+    let mut evaluation = LocalOnlyProofEvaluation {
+        state_kind: None,
+        effect_class: None,
+        privilege_class: None,
+        findings: Vec::new(),
+    };
+    if mounts.len() != 1 {
+        evaluation.findings.push(contract_finding(
+            Rule::OpaqueSourceScope,
+            &contract.id,
+            &contract.method,
+            &contract.path,
+            &contract.subject,
+            "unknown",
+            "unknown",
+            "route has conflicting endpoint/state evidence (dead or unmounted spoof included)",
+        ));
+        return Ok(evaluation);
+    }
+    let mount = mounts
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow!("one canonical mount expected"))?;
+    use crate::localtx_coverage::CanonicalMountedState;
+    match &mount.state {
+        CanonicalMountedState::Stateless => evaluation.state_kind = Some(StateKind::Stateless),
+        CanonicalMountedState::Ordinary => {
+            evaluation.state_kind = Some(StateKind::Ordinary);
+            evaluation.findings.push(contract_finding(
+                Rule::UnclassifiedState,
+                &contract.id,
+                &contract.method,
+                &contract.path,
+                &contract.subject,
+                "unknown",
+                "unknown",
+                "LocalOnly endpoint uses ordinary with_state",
+            ));
+        }
+        CanonicalMountedState::Opaque => {
+            evaluation.state_kind = Some(StateKind::Opaque);
+            evaluation.findings.push(contract_finding(
+                Rule::OpaqueSourceScope,
+                &contract.id,
+                &contract.method,
+                &contract.path,
+                &mount.source,
+                "unknown",
+                "unknown",
+                "classified state expression is opaque",
+            ));
+        }
+        CanonicalMountedState::Classified(expression) => {
+            evaluation.state_kind = Some(StateKind::Classified);
+            let source = source.context("classified LocalOnly source evidence is missing")?;
+            let Some(state) = source.state_name(&mount.source, expression) else {
+                evaluation.findings.push(contract_finding(
                     Rule::OpaqueSourceScope,
                     &contract.id,
                     &contract.method,
@@ -218,70 +733,68 @@ fn source_findings(root: &Path, contracts: &[Contract]) -> Result<Vec<Finding>> 
                     &mount.source,
                     "unknown",
                     "unknown",
-                    "classified state expression is opaque",
-                )),
-                CanonicalMountedState::Classified(expression) => {
-                    let state = source.state_name(&mount.source, expression);
-                    let Some(state) = state else {
-                        findings.push(contract_finding(
-                            Rule::OpaqueSourceScope,
-                            &contract.id,
-                            &contract.method,
-                            &contract.path,
-                            &mount.source,
-                            "unknown",
-                            "unknown",
-                            "classified state expression is not a canonical named struct",
+                    "classified state expression is not a canonical named struct",
+                ));
+                return Ok(evaluation);
+            };
+            match source.classify_state(&state) {
+                Ok(classification) => {
+                    evaluation.effect_class = Some(classification.effect.clone());
+                    evaluation.privilege_class = Some(classification.privilege.clone());
+                    if classification.privilege == "CrossTenantPrivilege" {
+                        evaluation.findings.push(classified_finding(
+                            Rule::CrossTenantPrivilege,
+                            contract,
+                            &state,
+                            &classification,
                         ));
-                        continue;
-                    };
-                    match source.classify_state(&state) {
-                        Ok(classification) => {
-                            if classification.privilege == "CrossTenantPrivilege" {
-                                findings.push(classified_finding(
-                                    Rule::CrossTenantPrivilege,
-                                    contract,
-                                    &state,
-                                    &classification,
-                                ));
-                            }
-                            if !matches!(
-                                classification.effect.as_str(),
-                                "ReadEffect" | "AuthEffect"
-                            ) {
-                                findings.push(classified_finding(
-                                    Rule::ForbiddenStateEffect,
-                                    contract,
-                                    &state,
-                                    &classification,
-                                ));
-                            }
-                        }
-                        Err(error) => {
-                            let error = format!("state `{state}`: {error}");
-                            let subject = diagnostic_source(&error)
-                                .unwrap_or_else(|| contract.subject.clone());
-                            findings.push(contract_finding(
-                                if source.states.contains_key(&state) {
-                                    Rule::OpaqueSourceScope
-                                } else {
-                                    Rule::UnclassifiedState
-                                },
-                                &contract.id,
-                                &contract.method,
-                                &contract.path,
-                                &subject,
-                                "unknown",
-                                "unknown",
-                                &error,
-                            ));
-                        }
                     }
+                    if !matches!(classification.effect.as_str(), "ReadEffect" | "AuthEffect") {
+                        evaluation.findings.push(classified_finding(
+                            Rule::ForbiddenStateEffect,
+                            contract,
+                            &state,
+                            &classification,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    let error = format!("state `{state}`: {error}");
+                    let subject =
+                        diagnostic_source(&error).unwrap_or_else(|| contract.subject.clone());
+                    evaluation.findings.push(contract_finding(
+                        if source.states.contains_key(&state) {
+                            Rule::OpaqueSourceScope
+                        } else {
+                            Rule::UnclassifiedState
+                        },
+                        &contract.id,
+                        &contract.method,
+                        &contract.path,
+                        &subject,
+                        "unknown",
+                        "unknown",
+                        &error,
+                    ));
                 }
             }
         }
     }
-    Ok(findings)
+    Ok(evaluation)
+}
+
+fn mount_requires_source(
+    mounts: Option<&BTreeSet<crate::localtx_coverage::CanonicalRouteMount>>,
+) -> bool {
+    use crate::localtx_coverage::CanonicalMountedState;
+    matches!(
+        mounts.and_then(|mounts| {
+            let mut mounts = mounts.iter();
+            let only = mounts.next()?;
+            mounts.next().is_none().then_some(&only.state)
+        }),
+        Some(CanonicalMountedState::Classified(_))
+    )
 }
 
 /// Closes the runtime-observation provenance seam left deliberately open by `testkit`'s zero
@@ -966,7 +1479,7 @@ struct TypeAlias {
     subject: String,
 }
 
-struct OwnerSource {
+struct ProofSource {
     states: BTreeMap<String, StateImpl>,
     structs: BTreeMap<String, StructInfo>,
     ports: BTreeMap<String, PortClass>,
@@ -975,8 +1488,8 @@ struct OwnerSource {
     trusted_port_macros: BTreeSet<String>,
 }
 
-impl OwnerSource {
-    fn load(root: &Path, owner: &str, reachable: &BTreeSet<String>) -> Result<Self> {
+impl ProofSource {
+    fn load(root: &Path, scope: &ServingScope, reachable: &BTreeSet<String>) -> Result<Self> {
         let mut this = Self {
             states: BTreeMap::new(),
             structs: BTreeMap::new(),
@@ -990,18 +1503,20 @@ impl OwnerSource {
             let text =
                 std::fs::read_to_string(&file).with_context(|| format!("read `{subject}`"))?;
             let syntax = syn::parse_file(&text).with_context(|| format!("parse `{subject}`"))?;
-            collect_trusted_port_macro_definitions(
-                &syntax.items,
-                subject,
-                owner,
-                &mut this.trusted_port_macros,
-            )?;
-            collect_items(&syntax.items, subject, owner, &mut this)?;
+            if let ServingScope::Domain(owner) = scope {
+                collect_trusted_port_macro_definitions(
+                    &syntax.items,
+                    subject,
+                    owner,
+                    &mut this.trusted_port_macros,
+                )?;
+            }
+            collect_items(&syntax.items, subject, scope, &mut this)?;
             let bindings = binding_types(&syntax, &this.structs);
             this.bindings.insert(subject.clone(), bindings);
         }
         collect_diport_capabilities(root, &mut this.ports)?;
-        if !this.ports.is_empty() && this.trusted_port_macros.is_empty() {
+        if matches!(scope, ServingScope::Domain(_)) && this.trusted_port_macros.is_empty() {
             bail!("owner port classifications lack a canonical owner-sealed macro definition");
         }
         Ok(this)
@@ -1298,7 +1813,12 @@ impl PortClass {
     }
 }
 
-fn collect_items(items: &[Item], subject: &str, owner: &str, out: &mut OwnerSource) -> Result<()> {
+fn collect_items(
+    items: &[Item],
+    subject: &str,
+    scope: &ServingScope,
+    out: &mut ProofSource,
+) -> Result<()> {
     for item in items {
         if !attrs_are_production(item_attrs(item)) {
             continue;
@@ -1306,17 +1826,21 @@ fn collect_items(items: &[Item], subject: &str, owner: &str, out: &mut OwnerSour
         match item {
             Item::Struct(item) => collect_struct(item, subject, &mut out.structs)?,
             Item::Impl(item) => collect_state_impl(item, subject, &mut out.states)?,
-            Item::Macro(item) => collect_port_macro(
-                item,
-                subject,
-                owner,
-                &out.trusted_port_macros,
-                &mut out.ports,
-            )?,
+            Item::Macro(item) => {
+                if let ServingScope::Domain(owner) = scope {
+                    collect_port_macro(
+                        item,
+                        subject,
+                        owner,
+                        &out.trusted_port_macros,
+                        &mut out.ports,
+                    )?;
+                }
+            }
             Item::Type(item) => collect_type_alias(item, subject, &mut out.type_aliases)?,
             Item::Mod(item) => {
                 if let Some((_, nested)) = &item.content {
-                    collect_items(nested, subject, owner, out)?;
+                    collect_items(nested, subject, scope, out)?;
                 }
             }
             _ => {}
@@ -2017,8 +2541,279 @@ fn forbidden_effect_wire(effect: EffectKind) -> Option<&'static str> {
         EffectKind::CrossTenantAudit => Some("cross-tenant-audit"),
     }
 }
+
+fn forbidden_generated_effect_wire(effect: vocab::HttpEffectKind) -> Option<&'static str> {
+    match effect {
+        vocab::HttpEffectKind::Read
+        | vocab::HttpEffectKind::Auth
+        | vocab::HttpEffectKind::Projection => None,
+        other => Some(http_effect_wire(other)),
+    }
+}
+
+fn canonical_effects(effects: &[vocab::HttpEffectKind]) -> Vec<String> {
+    let mut effects = effects.to_vec();
+    effects.sort_by_key(|effect| *effect as u8);
+    effects
+        .into_iter()
+        .map(http_effect_wire)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn http_effect_wire(effect: vocab::HttpEffectKind) -> &'static str {
+    match effect {
+        vocab::HttpEffectKind::Read => "read",
+        vocab::HttpEffectKind::Auth => "auth",
+        vocab::HttpEffectKind::Projection => "projection",
+        vocab::HttpEffectKind::Write => "write",
+        vocab::HttpEffectKind::Transaction => "transaction",
+        vocab::HttpEffectKind::Outbox => "outbox",
+        vocab::HttpEffectKind::Publish => "publish",
+        vocab::HttpEffectKind::Workflow => "workflow",
+        vocab::HttpEffectKind::Saga => "saga",
+        vocab::HttpEffectKind::Reconcile => "reconcile",
+        vocab::HttpEffectKind::Worker => "worker",
+        vocab::HttpEffectKind::CrossTenantAudit => "cross-tenant-audit",
+    }
+}
+
+fn consistency_wire(level: vocab::HttpConsistencyLevel) -> &'static str {
+    match level {
+        vocab::HttpConsistencyLevel::LocalOnly => "LocalOnly",
+        vocab::HttpConsistencyLevel::LocalTx => "LocalTx",
+        vocab::HttpConsistencyLevel::OutboxFact => "OutboxFact",
+        vocab::HttpConsistencyLevel::WorkflowEventual => "WorkflowEventual",
+        vocab::HttpConsistencyLevel::DeviceLatent => "DeviceLatent",
+    }
+}
+
+fn mount_posture(
+    mounts: Option<&BTreeSet<crate::localtx_coverage::CanonicalRouteMount>>,
+) -> (MountStatus, Vec<String>) {
+    let Some(mounts) = mounts else {
+        return (MountStatus::Missing, Vec::new());
+    };
+    let sources = mounts.iter().map(|mount| mount.source.clone()).collect();
+    let status = if mounts.len() == 1 {
+        MountStatus::Mounted
+    } else if mounts.is_empty() {
+        MountStatus::Missing
+    } else {
+        MountStatus::Ambiguous
+    };
+    (status, sources)
+}
+
+fn report_finding(finding: &Finding) -> ReportFinding {
+    ReportFinding {
+        rule: match finding.rule {
+            Rule::MissingRouteBinding => "missingRouteBinding",
+            Rule::UnclassifiedState => "unclassifiedState",
+            Rule::ForbiddenStateEffect => "forbiddenStateEffect",
+            Rule::CrossTenantPrivilege => "crossTenantPrivilege",
+            Rule::OpaqueSourceScope => "opaqueSourceScope",
+            Rule::ForgedObservationEvidence => "forgedObservationEvidence",
+        }
+        .to_string(),
+        subject: finding.subject.clone(),
+        detail: finding.detail.clone(),
+    }
+}
+
+fn proof_status_wire(status: ProofStatus) -> &'static str {
+    match status {
+        ProofStatus::Passed => "passed",
+        ProofStatus::Failed => "failed",
+        ProofStatus::NotApplicable => "notApplicable",
+    }
+}
+
+fn mount_status_wire(status: MountStatus) -> &'static str {
+    match status {
+        MountStatus::Mounted => "mounted",
+        MountStatus::Missing => "missing",
+        MountStatus::Ambiguous => "ambiguous",
+    }
+}
+
+fn option_state_wire(state: Option<StateKind>) -> &'static str {
+    match state {
+        Some(StateKind::Stateless) => "stateless",
+        Some(StateKind::Ordinary) => "ordinary",
+        Some(StateKind::Classified) => "classified",
+        Some(StateKind::Opaque) => "opaque",
+        None => "null",
+    }
+}
+
+fn literal_cell(value: &str) -> String {
+    let mut encoded = String::from("<code>");
+    for character in value.replace("\r\n", "\n").replace('\r', "\n").chars() {
+        encoded.push_str(match character {
+            '\n' => "<br>",
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '|' => "&#124;",
+            '\\' => "&#92;",
+            '[' => "&#91;",
+            ']' => "&#93;",
+            '(' => "&#40;",
+            ')' => "&#41;",
+            '!' => "&#33;",
+            '`' => "&#96;",
+            '*' => "&#42;",
+            '_' => "&#95;",
+            '~' => "&#126;",
+            '"' => "&quot;",
+            '\'' => "&#39;",
+            _ => {
+                encoded.push(character);
+                continue;
+            }
+        });
+    }
+    encoded.push_str("</code>");
+    encoded
+}
 fn sanitized(root: &Path, error: anyhow::Error) -> anyhow::Error {
     anyhow!(format!("{error:#}").replace(root.to_string_lossy().as_ref(), "."))
+}
+
+#[cfg(test)]
+fn test_http_spec(
+    contract_id: &'static str,
+    mount_key: &'static str,
+    level: vocab::HttpConsistencyLevel,
+    effects: &'static [vocab::HttpEffectKind],
+) -> generated::http::HttpSpec {
+    test_http_spec_with_owner(
+        vocab::HttpContractOwner::domain("seed"),
+        contract_id,
+        mount_key,
+        level,
+        effects,
+    )
+}
+
+#[cfg(test)]
+fn test_http_spec_with_owner(
+    owner: vocab::HttpContractOwner,
+    contract_id: &'static str,
+    mount_key: &'static str,
+    level: vocab::HttpConsistencyLevel,
+    effects: &'static [vocab::HttpEffectKind],
+) -> generated::http::HttpSpec {
+    generated::http::HttpSpec {
+        mount_key,
+        route: vocab::HttpRouteEvidence::from_static(
+            owner,
+            vocab::ContractBinding::from_static(
+                "_seed",
+                contract_id,
+                "v1",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "/seed",
+            "GET",
+            vocab::HttpSuccessStatus::new(200),
+            vocab::HttpIdempotency::Idempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            level,
+            vocab::HttpEffectProfile::new(effects),
+        ),
+        local_tx: None,
+        resource_sharing: generated::http::HttpResourceSharingSpec {
+            mode: generated::http::HttpResourceSharingMode::TenantScoped,
+            reason: None,
+        },
+        projection_fields: &[],
+        headers: &[],
+    }
+}
+
+#[cfg(test)]
+fn empty_proof_source() -> ProofSource {
+    ProofSource {
+        states: BTreeMap::new(),
+        structs: BTreeMap::new(),
+        ports: BTreeMap::new(),
+        type_aliases: BTreeMap::new(),
+        bindings: BTreeMap::new(),
+        trusted_port_macros: BTreeSet::new(),
+    }
+}
+
+#[cfg(test)]
+fn synthetic_report_fixture() -> ConsistencyReport {
+    let escaped = ReportFinding {
+        rule: "forbiddenStateEffect".to_string(),
+        subject: "crates/demo/src/lib.rs:7".to_string(),
+        detail: "escaped | cell\\path\nline [link](https://example.invalid) ![img](x) <em>raw</em> `tick` *strong* & amp".to_string(),
+    };
+    let missing = ReportFinding {
+        rule: "missingRouteBinding".to_string(),
+        subject: "z.remote".to_string(),
+        detail: "canonical production Domain::init mount is missing".to_string(),
+    };
+    let contracts = vec![
+        ContractPosture {
+            contract_id: "a.local".to_string(),
+            owner: "demo".to_string(),
+            method: "GET".to_string(),
+            path: "/v1/a".to_string(),
+            consistency_level: "LocalOnly".to_string(),
+            effects: canonical_effects(&[
+                vocab::HttpEffectKind::CrossTenantAudit,
+                vocab::HttpEffectKind::Read,
+            ]),
+            route: RoutePosture {
+                mount_status: MountStatus::Mounted,
+                mount_sources: vec!["crates/demo/src/lib.rs:7".to_string()],
+            },
+            effect_proof: EffectProof {
+                kind: ProofKind::LocalOnlyStatic,
+                status: ProofStatus::Failed,
+                state_kind: Some(StateKind::Classified),
+                effect_class: Some("ReadEffect".to_string()),
+                privilege_class: Some("LocalPrivilege".to_string()),
+            },
+            findings: vec![escaped.clone()],
+        },
+        ContractPosture {
+            contract_id: "z.remote".to_string(),
+            owner: "demo".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/z".to_string(),
+            consistency_level: "LocalTx".to_string(),
+            effects: canonical_effects(&[
+                vocab::HttpEffectKind::Transaction,
+                vocab::HttpEffectKind::Auth,
+            ]),
+            route: RoutePosture {
+                mount_status: MountStatus::Missing,
+                mount_sources: Vec::new(),
+            },
+            effect_proof: EffectProof {
+                kind: ProofKind::DeclarationOnly,
+                status: ProofStatus::NotApplicable,
+                state_kind: None,
+                effect_class: None,
+                privilege_class: None,
+            },
+            findings: vec![missing.clone()],
+        },
+    ];
+    ConsistencyReport {
+        schema_version: 1,
+        status: ReportStatus::Failed,
+        active_http_contract_count: contracts.len(),
+        findings: vec![escaped, missing],
+        contracts,
+    }
 }
 
 #[cfg(test)]
@@ -2031,6 +2826,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/consistency_effects")
             .join(name)
+    }
+
+    fn domain_scope() -> ServingScope {
+        ServingScope::Domain("seed".to_string())
     }
 
     struct WorkspaceFixture(PathBuf);
@@ -2106,6 +2905,98 @@ mod tests {
                 &self.ports(),
                 "classify_demo_ports!(DynReadRepo => diport::ReadEffect);",
                 "classify_demo_ports!(DynReadRepo => diport::ReadEffect); classify_demo_ports!(DynWriteRepo => diport::WriteEffect);",
+            )
+        }
+
+        fn make_framework(&self, stateless: bool, global_read_capability: bool) -> Result<()> {
+            let assembly = self.0.join("assemblies/runtime");
+            copy_tree(&self.0.join("crates/demo"), &assembly)?;
+            fs::remove_dir_all(self.0.join("crates/demo"))?;
+            self.replace(
+                &self.0.join("Cargo.toml"),
+                "\"crates/demo\"",
+                "\"assemblies/runtime\"",
+            )?;
+            self.replace(
+                &assembly.join("Cargo.toml"),
+                "name = \"demo\"",
+                "name = \"runtime\"",
+            )?;
+            for dependency in ["bootstrap", "diport", "httpserve", "vocab"] {
+                self.replace(
+                    &assembly.join("Cargo.toml"),
+                    &format!("path = \"../{dependency}\""),
+                    &format!("path = \"../../crates/{dependency}\""),
+                )?;
+            }
+            self.replace(
+                &assembly.join("src/lib.rs"),
+                "impl ::bootstrap::Domain for Demo",
+                "impl ::bootstrap::FrameworkRoutes for Demo",
+            )?;
+            self.replace(
+                &assembly.join("src/lib.rs"),
+                "fn init(&self",
+                "fn register(&self",
+            )?;
+            self.replace(
+                &self.0.join("crates/bootstrap/src/lib.rs"),
+                "pub trait Domain {",
+                "pub trait FrameworkRoutes { fn register(&self, registry: &mut Registry) -> Result<(), httpserve::Error>; }\npub trait Domain {",
+            )?;
+            if stateless {
+                self.replace(
+                    &assembly.join("src/lib.rs"),
+                    ".with_classified_state(state),",
+                    ",",
+                )?;
+            }
+            if global_read_capability {
+                self.replace(
+                    &self.0.join("crates/diport/src/lib.rs"),
+                    "pub trait SubscribeInitializer: Send + Sync {}",
+                    "pub trait SubscribeInitializer: Send + Sync {} pub trait ReadInitializer: Send + Sync {}",
+                )?;
+                self.replace(
+                    &self.0.join("crates/diport/src/lib.rs"),
+                    "sync SubscribeInitializer => WorkflowEffect;",
+                    "sync SubscribeInitializer => WorkflowEffect; sync ReadInitializer => ReadEffect;",
+                )?;
+                self.replace(
+                    &assembly.join("src/lib.rs"),
+                    "struct ReadState { repo: Arc<DynReadRepo> }",
+                    "struct ReadState { repo: Arc<dyn diport::ReadInitializer> }",
+                )?;
+            }
+            self.replace(
+                &self.0.join("contracts/http/demo/v1/safe/contract.toml"),
+                "owner = \"demo\"",
+                "owner = \"_framework\"",
+            )?;
+            fs::write(
+                assembly.join("assembly.toml"),
+                include_str!("../../assemblies/runtime/assembly.toml").replace(
+                    "frameworkContracts = []",
+                    "frameworkContracts = [\"demo.safe\"]",
+                ),
+            )?;
+            Ok(())
+        }
+
+        fn make_framework_stateless(&self) -> Result<()> {
+            self.make_framework(true, false)
+        }
+
+        fn make_framework_classified(&self, global_read_capability: bool) -> Result<()> {
+            self.make_framework(false, global_read_capability)
+        }
+
+        fn make_framework_ordinary(&self) -> Result<()> {
+            self.make_framework(false, false)?;
+            self.replace(
+                &self.0.join("assemblies/runtime/src/lib.rs"),
+                ".with_classified_state(state),",
+                ".with_state(state),",
             )
         }
     }
@@ -2352,6 +3243,616 @@ fn conforms() {
     }
 
     #[test]
+    fn synthetic_report_renderers_match_exact_golden() -> Result<()> {
+        let report = synthetic_report_fixture();
+        assert_eq!(
+            render_report(&report, ReportFormat::Json)?,
+            include_str!("../tests/golden/consistency-posture.json")
+        );
+        assert_eq!(
+            render_report(&report, ReportFormat::Markdown)?,
+            include_str!("../tests/golden/consistency-posture.md")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn report_canonicalizes_rows_findings_effects_and_markdown_cells() -> Result<()> {
+        let report = synthetic_report_fixture();
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(report.active_http_contract_count, 2);
+        assert_eq!(
+            report.contracts[0].effects,
+            vec!["read".to_string(), "cross-tenant-audit".to_string()]
+        );
+        let markdown = render_report(&report, ReportFormat::Markdown)?;
+        assert!(markdown.contains("<code>forbiddenStateEffect @ crates/demo/src/lib.rs:7: escaped &#124; cell&#92;path<br>line &#91;link&#93;&#40;https://example.invalid&#41; &#33;&#91;img&#93;&#40;x&#41; &lt;em&gt;raw&lt;/em&gt; &#96;tick&#96; &#42;strong&#42; &amp; amp</code>"));
+        assert!(markdown.ends_with('\n'));
+        assert!(!markdown.ends_with("\n\n"));
+        for forbidden in [
+            "timestamp",
+            "hostname",
+            "gitSha",
+            env!("CARGO_MANIFEST_DIR"),
+        ] {
+            assert!(!markdown.contains(forbidden), "leaked {forbidden}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn report_policy_failure_is_renderable_but_structural_failure_is_error() -> Result<()> {
+        let failed = synthetic_report_fixture();
+        assert_eq!(failed.status, ReportStatus::Failed);
+        assert!(render_report(&failed, ReportFormat::Json)?.contains("\"status\": \"failed\""));
+
+        let mut malformed = failed;
+        malformed.active_http_contract_count += 1;
+        assert!(render_report(&malformed, ReportFormat::Json).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn report_command_seam_preserves_stdout_and_result_contract() -> Result<()> {
+        let mut failed_output = Vec::new();
+        run_report_with(
+            ReportFormat::Json,
+            || Ok(synthetic_report_fixture()),
+            &mut failed_output,
+        )?;
+        let failed: serde_json::Value = serde_json::from_slice(&failed_output)?;
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["activeHttpContractCount"], 2);
+        assert_eq!(failed["contracts"].as_array().map(Vec::len), Some(2));
+
+        let mut structural_output = Vec::new();
+        let structural = run_report_with(
+            ReportFormat::Json,
+            || Err(anyhow!("synthetic structural collection failure")),
+            &mut structural_output,
+        );
+        assert!(structural.is_err());
+        assert!(structural_output.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn real_workspace_report_consumes_the_generated_active_registry() -> Result<()> {
+        let report = collect_report(&crate::workspace_root()?)?;
+        assert_eq!(
+            report.active_http_contract_count,
+            generated::http::SPECS.len()
+        );
+        assert!(
+            report
+                .contracts
+                .windows(2)
+                .all(|rows| rows[0].contract_id <= rows[1].contract_id)
+        );
+        for format in [ReportFormat::Json, ReportFormat::Markdown] {
+            let first = render_report(&report, format)?;
+            let second = render_report(&report, format)?;
+            assert_eq!(first, second);
+            assert!(first.ends_with('\n'));
+            assert!(!first.contains(env!("CARGO_MANIFEST_DIR")));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn framework_owner_is_not_inferred_from_contract_domain() -> Result<()> {
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let spec = test_http_spec_with_owner(
+            vocab::HttpContractOwner::framework(),
+            "framework.status",
+            "framework_v1::status",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        );
+        let posture = build_contract_posture(
+            &spec,
+            &ServingScope::Framework("runtime".to_string()),
+            None,
+            None,
+        )?;
+        assert_eq!(posture.owner, "_framework");
+        assert_eq!(posture.route.mount_status, MountStatus::Missing);
+        assert_eq!(posture.effect_proof.status, ProofStatus::Failed);
+        assert!(
+            build_contract_posture(&spec, &ServingScope::Domain("demo".to_string()), None, None)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn framework_localonly_stateless_closes_gate_and_report_collection() -> Result<()> {
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let workspace = WorkspaceFixture::new()?;
+        workspace.make_framework_stateless()?;
+        let output = workspace.cargo_check()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let specs = [test_http_spec_with_owner(
+            vocab::HttpContractOwner::framework(),
+            "demo.safe",
+            "demo_v1::safe",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        )];
+
+        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        assert_eq!(report.status, ReportStatus::Passed);
+        assert_eq!(report.contracts[0].owner, "_framework");
+        assert_eq!(
+            report.contracts[0].effect_proof.state_kind,
+            Some(StateKind::Stateless)
+        );
+        let (summary, findings) = check_root(&workspace.0)?;
+        assert_eq!(summary, "1 active LocalOnly HTTP contract(s) checked");
+        assert!(findings.is_empty(), "{findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn framework_localonly_classified_uses_only_global_sealed_capabilities() -> Result<()> {
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let workspace = WorkspaceFixture::new()?;
+        workspace.make_framework_classified(true)?;
+        let output = workspace.cargo_check()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let specs = [test_http_spec_with_owner(
+            vocab::HttpContractOwner::framework(),
+            "demo.safe",
+            "demo_v1::safe",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        )];
+
+        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        assert_eq!(report.status, ReportStatus::Passed);
+        assert_eq!(
+            report.contracts[0].effect_proof.state_kind,
+            Some(StateKind::Classified)
+        );
+        assert_eq!(
+            report.contracts[0].effect_proof.effect_class.as_deref(),
+            Some("ReadEffect")
+        );
+        assert!(check_root(&workspace.0)?.1.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn framework_localonly_cannot_claim_domain_private_capabilities() -> Result<()> {
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let workspace = WorkspaceFixture::new()?;
+        workspace.make_framework_classified(false)?;
+        let output = workspace.cargo_check()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let specs = [test_http_spec_with_owner(
+            vocab::HttpContractOwner::framework(),
+            "demo.safe",
+            "demo_v1::safe",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        )];
+
+        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert!(!report.contracts[0].findings.is_empty());
+        assert!(!check_root(&workspace.0)?.1.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn framework_localonly_ordinary_state_renders_a_complete_failed_posture() -> Result<()> {
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let workspace = WorkspaceFixture::new()?;
+        workspace.make_framework_ordinary()?;
+        let specs = [test_http_spec_with_owner(
+            vocab::HttpContractOwner::framework(),
+            "demo.safe",
+            "demo_v1::safe",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        )];
+
+        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(
+            report.contracts[0].effect_proof.state_kind,
+            Some(StateKind::Ordinary)
+        );
+        assert!(
+            report.contracts[0]
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "unclassifiedState")
+        );
+        assert!(!check_root(&workspace.0)?.1.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn framework_serving_assembly_is_unique_and_manifest_backed() -> Result<()> {
+        let root = crate::testutil::unique_tmp("framework-serving-assembly");
+        let runtime = root.join("assemblies/runtime");
+        std::fs::create_dir_all(&runtime)?;
+        std::fs::write(
+            runtime.join("assembly.toml"),
+            include_str!("../../assemblies/runtime/assembly.toml").replace(
+                "frameworkContracts = []",
+                "frameworkContracts = [\"framework.status\"]",
+            ),
+        )?;
+        assert_eq!(
+            framework_serving_assembly(&root, "framework.status")?,
+            "runtime"
+        );
+
+        let duplicate = root.join("assemblies/duplicate");
+        std::fs::create_dir_all(&duplicate)?;
+        std::fs::write(
+            duplicate.join("assembly.toml"),
+            std::fs::read_to_string(runtime.join("assembly.toml"))?
+                .replace("name = \"runtime\"", "name = \"duplicate\""),
+        )?;
+        assert!(framework_serving_assembly(&root, "framework.status").is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mount_posture_distinguishes_missing_mounted_and_ambiguous() {
+        use crate::localtx_coverage::{CanonicalMountedState, CanonicalRouteMount};
+        let one = BTreeSet::from([CanonicalRouteMount {
+            source: "crates/demo/src/lib.rs:1".to_string(),
+            state: CanonicalMountedState::Stateless,
+        }]);
+        let two = BTreeSet::from([
+            CanonicalRouteMount {
+                source: "crates/demo/src/lib.rs:1".to_string(),
+                state: CanonicalMountedState::Stateless,
+            },
+            CanonicalRouteMount {
+                source: "crates/demo/src/lib.rs:2".to_string(),
+                state: CanonicalMountedState::Opaque,
+            },
+        ]);
+        assert_eq!(mount_posture(None).0, MountStatus::Missing);
+        assert_eq!(mount_posture(Some(&one)).0, MountStatus::Mounted);
+        assert_eq!(mount_posture(Some(&two)).0, MountStatus::Ambiguous);
+    }
+
+    #[test]
+    fn generated_mount_identity_does_not_guess_from_contract_id_suffix() -> Result<()> {
+        use crate::localtx_coverage::{CanonicalMountedState, CanonicalRouteMount};
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let spec = test_http_spec(
+            "seed.semantic-name",
+            "_seed_v1::filesystem_slug",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        );
+        let mounts = BTreeMap::from([
+            (
+                "_seed_v1::filesystem_slug".to_string(),
+                BTreeSet::from([CanonicalRouteMount {
+                    source: "crates/_seed/src/lib.rs".to_string(),
+                    state: CanonicalMountedState::Stateless,
+                }]),
+            ),
+            (
+                "_seed_v1::semantic_name".to_string(),
+                BTreeSet::from([CanonicalRouteMount {
+                    source: "crates/_seed/src/other.rs".to_string(),
+                    state: CanonicalMountedState::Stateless,
+                }]),
+            ),
+        ]);
+        let row = build_contract_posture(
+            &spec,
+            &domain_scope(),
+            mounts.get(spec.mount_key),
+            Some(&empty_proof_source()),
+        )?;
+        assert_eq!(spec.mount_key, "_seed_v1::filesystem_slug");
+        assert_eq!(row.route.mount_status, MountStatus::Mounted);
+
+        let swapped = test_http_spec(
+            "seed.filesystem-slug",
+            "_seed_v1::semantic_name",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            EFFECTS,
+        );
+        let swapped_row = build_contract_posture(
+            &swapped,
+            &domain_scope(),
+            mounts.get(swapped.mount_key),
+            Some(&empty_proof_source()),
+        )?;
+        assert_eq!(
+            swapped_row.route.mount_sources,
+            ["crates/_seed/src/other.rs"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn report_row_red_matrix_preserves_status_classes_sources_and_sorted_findings() -> Result<()> {
+        use crate::localtx_coverage::{CanonicalMountedState, CanonicalRouteMount};
+        const READ: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        const READ_WRITE: &[vocab::HttpEffectKind] =
+            &[vocab::HttpEffectKind::Write, vocab::HttpEffectKind::Read];
+        let source_path = "crates/_seed/src/lib.rs";
+        let empty = empty_proof_source();
+
+        let missing_spec = test_http_spec(
+            "seed.missing",
+            "_seed_v1::missing",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            READ_WRITE,
+        );
+        let missing = build_contract_posture(&missing_spec, &domain_scope(), None, None)?;
+        assert_eq!(missing.route.mount_status, MountStatus::Missing);
+        assert_eq!(missing.effect_proof.status, ProofStatus::Failed);
+        assert_eq!(
+            missing
+                .findings
+                .iter()
+                .map(|finding| finding.rule.as_str())
+                .collect::<Vec<_>>(),
+            ["forbiddenStateEffect", "missingRouteBinding"]
+        );
+
+        let ambiguous_mounts = BTreeSet::from([
+            CanonicalRouteMount {
+                source: format!("{source_path}:2"),
+                state: CanonicalMountedState::Opaque,
+            },
+            CanonicalRouteMount {
+                source: format!("{source_path}:1"),
+                state: CanonicalMountedState::Ordinary,
+            },
+        ]);
+        let ambiguous_spec = test_http_spec(
+            "seed.ambiguous",
+            "_seed_v1::ambiguous",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            READ,
+        );
+        let ambiguous = build_contract_posture(
+            &ambiguous_spec,
+            &domain_scope(),
+            Some(&ambiguous_mounts),
+            Some(&empty),
+        )?;
+        assert_eq!(ambiguous.route.mount_status, MountStatus::Ambiguous);
+        assert_eq!(
+            ambiguous.route.mount_sources,
+            [format!("{source_path}:1"), format!("{source_path}:2")]
+        );
+
+        let report = finalize_report(vec![missing, ambiguous])?;
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(report.active_http_contract_count, 2);
+        assert!(report.findings.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(report.contracts[0].contract_id, "seed.ambiguous");
+        Ok(())
+    }
+
+    #[test]
+    fn report_row_state_red_matrix_preserves_proof_classes() -> Result<()> {
+        use crate::localtx_coverage::{CanonicalMountedState, CanonicalRouteMount};
+        const READ: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let source_path = "crates/_seed/src/lib.rs";
+        let empty = empty_proof_source();
+        let mut rows = Vec::new();
+
+        for (id, state, expected) in [
+            (
+                "seed.ordinary",
+                CanonicalMountedState::Ordinary,
+                StateKind::Ordinary,
+            ),
+            (
+                "seed.opaque",
+                CanonicalMountedState::Opaque,
+                StateKind::Opaque,
+            ),
+        ] {
+            let spec = test_http_spec(
+                id,
+                "_seed_v1::state",
+                vocab::HttpConsistencyLevel::LocalOnly,
+                READ,
+            );
+            let mounts = BTreeSet::from([CanonicalRouteMount {
+                source: source_path.to_string(),
+                state,
+            }]);
+            let row = build_contract_posture(&spec, &domain_scope(), Some(&mounts), Some(&empty))?;
+            assert_eq!(row.effect_proof.state_kind, Some(expected));
+            assert_eq!(row.effect_proof.status, ProofStatus::Failed);
+            rows.push(row);
+        }
+
+        let mut classified_source = empty_proof_source();
+        classified_source.states.insert(
+            "State".to_string(),
+            StateImpl {
+                effect: "WriteEffect".to_string(),
+                privilege: "CrossTenantPrivilege".to_string(),
+                subject: format!("{source_path}:1"),
+            },
+        );
+        classified_source.structs.insert(
+            "State".to_string(),
+            StructInfo {
+                fields: vec![StructField {
+                    ty: syn::parse_quote!(DynAdmin),
+                    subject: format!("{source_path}:2"),
+                }],
+                named_fields: BTreeMap::new(),
+                subject: format!("{source_path}:1"),
+            },
+        );
+        classified_source.ports.insert(
+            "DynAdmin".to_string(),
+            PortClass {
+                effect: "WriteEffect".to_string(),
+                privilege: "CrossTenantPrivilege".to_string(),
+                subject: format!("{source_path}:3"),
+                port: "DynAdmin".to_string(),
+                privilege_subject: format!("{source_path}:3"),
+                privilege_port: "DynAdmin".to_string(),
+            },
+        );
+        classified_source
+            .bindings
+            .insert(source_path.to_string(), BTreeMap::new());
+        let classified_spec = test_http_spec(
+            "seed.classified",
+            "_seed_v1::classified",
+            vocab::HttpConsistencyLevel::LocalOnly,
+            READ,
+        );
+        let classified_mounts = BTreeSet::from([CanonicalRouteMount {
+            source: source_path.to_string(),
+            state: CanonicalMountedState::Classified(
+                "State { admin: unimplemented!() }".to_string(),
+            ),
+        }]);
+        let classified = build_contract_posture(
+            &classified_spec,
+            &domain_scope(),
+            Some(&classified_mounts),
+            Some(&classified_source),
+        )?;
+        assert_eq!(
+            classified.effect_proof.state_kind,
+            Some(StateKind::Classified)
+        );
+        assert_eq!(
+            classified.effect_proof.effect_class.as_deref(),
+            Some("WriteEffect")
+        );
+        assert_eq!(
+            classified.effect_proof.privilege_class.as_deref(),
+            Some("CrossTenantPrivilege")
+        );
+        assert_eq!(classified.findings.len(), 2);
+
+        rows.push(classified);
+        let report = finalize_report(rows)?;
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(report.active_http_contract_count, 3);
+        assert!(report.findings.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(report.contracts[0].contract_id, "seed.classified");
+        Ok(())
+    }
+
+    #[test]
+    fn report_closed_vocabularies_are_exhaustively_wired() {
+        use vocab::HttpConsistencyLevel as Level;
+        use vocab::HttpEffectKind as Effect;
+        let effects = [
+            Effect::Read,
+            Effect::Auth,
+            Effect::Projection,
+            Effect::Write,
+            Effect::Transaction,
+            Effect::Outbox,
+            Effect::Publish,
+            Effect::Workflow,
+            Effect::Saga,
+            Effect::Reconcile,
+            Effect::Worker,
+            Effect::CrossTenantAudit,
+        ];
+        assert_eq!(canonical_effects(&effects).len(), effects.len());
+        assert_eq!(
+            effects
+                .iter()
+                .copied()
+                .filter_map(forbidden_generated_effect_wire)
+                .count(),
+            9
+        );
+        assert_eq!(
+            [
+                Level::LocalOnly,
+                Level::LocalTx,
+                Level::OutboxFact,
+                Level::WorkflowEventual,
+                Level::DeviceLatent,
+            ]
+            .map(consistency_wire),
+            [
+                "LocalOnly",
+                "LocalTx",
+                "OutboxFact",
+                "WorkflowEventual",
+                "DeviceLatent"
+            ]
+        );
+        assert_eq!(
+            [
+                ProofStatus::Passed,
+                ProofStatus::Failed,
+                ProofStatus::NotApplicable
+            ]
+            .map(proof_status_wire),
+            ["passed", "failed", "notApplicable"]
+        );
+        assert_eq!(
+            [
+                MountStatus::Mounted,
+                MountStatus::Missing,
+                MountStatus::Ambiguous
+            ]
+            .map(mount_status_wire),
+            ["mounted", "missing", "ambiguous"]
+        );
+        assert_eq!(
+            [
+                Some(StateKind::Stateless),
+                Some(StateKind::Ordinary),
+                Some(StateKind::Classified),
+                Some(StateKind::Opaque),
+                None,
+            ]
+            .map(option_state_wire),
+            ["stateless", "ordinary", "classified", "opaque", "null"]
+        );
+        for rule in [
+            Rule::MissingRouteBinding,
+            Rule::UnclassifiedState,
+            Rule::ForbiddenStateEffect,
+            Rule::CrossTenantPrivilege,
+            Rule::OpaqueSourceScope,
+        ] {
+            assert!(
+                !report_finding(&finding(rule, "subject", "detail"))
+                    .rule
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn incomplete_metadata_is_a_hard_error() {
         for fixture_name in [
             "missing_profile",
@@ -2391,7 +3892,7 @@ fn conforms() {
 
     #[test]
     fn state_classification_rejects_strongest_effect_lies() {
-        let source = OwnerSource {
+        let source = ProofSource {
             states: BTreeMap::from([(
                 "ReadState".to_string(),
                 StateImpl {
@@ -2431,7 +3932,7 @@ fn conforms() {
 
     #[test]
     fn composite_state_aggregates_strongest_effect_and_cross_tenant_privilege() -> Result<()> {
-        let source = OwnerSource {
+        let source = ProofSource {
             states: BTreeMap::from([(
                 "State".to_string(),
                 StateImpl {

@@ -39,6 +39,7 @@
 pub mod domain;
 pub mod domaintransport;
 pub mod eventtransport;
+pub mod framework;
 pub mod module;
 pub mod refreshstoredeps;
 pub mod registry;
@@ -52,6 +53,9 @@ pub use domaintransport::{
     DomainTransportConfig, DomainTransportResolveError, DomainTransportUrl, ResolvedDomainTransport,
 };
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
+pub use framework::{
+    FrameworkHttpRoute, FrameworkRoutes, FrameworkServingError, validate_framework_serving,
+};
 pub use module::{
     DomainBinding, DomainModuleResult, LifecycleChannel, ProviderOutputBinding, WorkerSpec,
     compose_bindings,

@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::manifest::{
-    CommandJournalPolicy, ConsistencyLevel, ContractKind, EffectKind, HttpAuthMode, HttpHeaderMode,
-    HttpIdempotency, HttpResourceSharingMode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
-    LocalTxModel, LocalTxRetry, SubscriptionEffect, SubscriptionExecution, WorkflowMode,
+    CommandJournalPolicy, ConsistencyLevel, ContractKind, ContractOwner, EffectKind, HttpAuthMode,
+    HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode, Lifecycle, LocalTxBoundary,
+    LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, SubscriptionEffect, SubscriptionExecution,
+    WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -526,6 +527,12 @@ pub const SPEC: {sup}SagaSpec = {sup}SagaSpec::from_parts(CONTRACT, POLICY, STEP
 
 fn render_http_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
     let domain = &c.manifest.domain;
+    let owner = match &c.manifest.owner {
+        ContractOwner::Domain(owner) => {
+            format!("::vocab::HttpContractOwner::domain(\"{owner}\")")
+        }
+        ContractOwner::Framework => "::vocab::HttpContractOwner::framework()".to_string(),
+    };
     let contract_id = &c.manifest.id;
     let version = &c.manifest.version;
     let schema_hash = schema_hash(c)?;
@@ -610,6 +617,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ServiceOwned => "::vocab::HttpRouteAuth::ServiceOwned".to_string(),
     };
     let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
+    let mount_key = render_http_mount_key(c)?;
     let success_status = http.success_status;
     let idempotency = match http.idempotency {
         HttpIdempotency::Idempotent => "Idempotent",
@@ -734,6 +742,7 @@ pub enum RouteMarker {{}}
 
 /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
 pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consistency_level}> = ::vocab::HttpRouteBinding::from_static(
+    {owner},
     CONTRACT,
     PATH,
     "{method}",
@@ -747,6 +756,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
+    mount_key: "{mount_key}",
     route: ROUTE.evidence(),
     local_tx: {local_tx},
     resource_sharing: {sup}HttpResourceSharingSpec {{
@@ -770,6 +780,22 @@ fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
         ConsistencyLevel::WorkflowEventual => "WorkflowEventual",
         ConsistencyLevel::DeviceLatent => "DeviceLatent",
     }
+}
+
+fn render_http_mount_key(c: &DiscoveredContract) -> Result<String> {
+    let module = module_name(&c.manifest.domain, &c.manifest.version);
+    c.slug.as_deref().map_or(Ok(module.clone()), |slug| {
+        Ok(format!("{module}::{}", slug_module_ident(slug)?))
+    })
+}
+
+pub(crate) fn rendered_http_route_evidence_path(c: &DiscoveredContract) -> Result<String> {
+    let module = module_name(&c.manifest.domain, &c.manifest.version);
+    let path = match c.slug.as_deref() {
+        Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
+        None => module,
+    };
+    Ok(format!("::generated::http::{path}::ROUTE.evidence()"))
 }
 
 fn render_http_effect_profile_consts(c: &DiscoveredContract) -> Result<String> {
@@ -1602,6 +1628,8 @@ const HTTP_SPEC_DEF: &str = r#"
 /// HTTP serving metadata generated from `contract.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpSpec {
+    /// Canonical `Domain::init` mount identity derived from generated module + discovered slug.
+    pub mount_key: &'static str,
     pub route: ::vocab::HttpRouteEvidence,
     pub local_tx: Option<LocalTxSpec>,
     pub resource_sharing: HttpResourceSharingSpec,
@@ -3081,6 +3109,11 @@ mod tests {
             "pub route: ::vocab::HttpRouteEvidence",
             "HttpSpec should expose one atomic route proof",
         );
+        assert_generated_contains(
+            &root_mod,
+            "pub mount_key: &'static str",
+            "HttpSpec should expose the canonical generated mount identity",
+        );
         for removed in [
             "pub contract_id:",
             "pub contract:",
@@ -3109,6 +3142,16 @@ mod tests {
         );
         assert_generated_contains(
             &rendered,
+            "::vocab::HttpContractOwner::framework()",
+            "framework owner must be carried by generated route evidence",
+        );
+        assert_generated_contains(
+            &rendered,
+            "mount_key: \"_seed_v1\"",
+            "flat HTTP SPEC should carry its canonical generated mount identity",
+        );
+        assert_generated_contains(
+            &rendered,
             "::vocab::http::HttpSuccessStatus::new(200)",
             "success status should be sealed inside route evidence",
         );
@@ -3123,6 +3166,24 @@ mod tests {
                 "wire semantics must not create a parallel HttpSpec field: {removed}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn http_mount_key_uses_discovered_slug_not_contract_id_suffix() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-mount-key");
+        seed_http(&root)?;
+        let mut contract = crate::contract::discover(&root.join("contracts"))?
+            .pop()
+            .context("seed contract missing")?;
+        contract.slug = Some("filesystem-slug".to_string());
+        contract.manifest.id = "seed.semantic-name".to_string();
+
+        assert_eq!(
+            render_http_mount_key(&contract)?,
+            "_seed_v1::filesystem_slug"
+        );
+        let _ = std::fs::remove_dir_all(root);
         Ok(())
     }
 

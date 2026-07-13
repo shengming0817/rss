@@ -1021,7 +1021,9 @@ mod tests {
 
     fn synthetic_global_spec() -> HttpSpec {
         HttpSpec {
+            mount_key: "identity_v1::global_resource",
             route: vocab::HttpRouteEvidence::from_static(
+                vocab::HttpContractOwner::domain("identity"),
                 vocab::ContractBinding::from_static(
                     "identity",
                     "identity.global-resource",

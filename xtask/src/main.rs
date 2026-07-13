@@ -21,6 +21,8 @@
 //!   `cargo xtask consistency-fixtures`  consistency crash matrix fixture/DSL 治理门（#1616，CI 门）
 //!   `cargo xtask consistency local-only-effects`
 //!                                      active LocalOnly HTTP effect profile 治理门（#1689，CI 门）
+//!   `cargo xtask consistency report --format json|md`
+//!                                      active HTTP consistency/effect posture 确定性报告（只读）
 //!   `cargo xtask localtx-coverage`       active LocalTx manifest/generated/route/test closure 门（CI 门）
 //!   `cargo xtask runtime-baseline list|verify`
 //!                                      runtime assembly baseline 清单 / 漂移门（#1656，CI 门）
@@ -144,6 +146,9 @@ enum Command {
     DocContracts,
     ConsistencyFixtures,
     ConsistencyLocalOnlyEffects,
+    ConsistencyReport {
+        format: ReportFormat,
+    },
     LocalTxCoverage,
     Verify {
         fast: bool,
@@ -203,6 +208,13 @@ enum Command {
     TenancyCloseout,
     DeferGate,
     Migrations,
+}
+
+/// Consistency posture report wire format. Closed on purpose: no aliases or implicit default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportFormat {
+    Json,
+    Markdown,
 }
 
 /// 从参数列表解析命令，不执行任何 IO。
@@ -330,12 +342,18 @@ fn validate_decimal_cli(value: &str, flag: &str) -> Result<()> {
     Ok(())
 }
 
-/// 解析 `consistency <sub>`（fail-closed：只接受 `local-only-effects`，无 alias/尾参）。
+/// 解析 `consistency <sub>`（fail-closed：无 alias、默认值或尾参）。
 fn parse_consistency(args: &[&str]) -> Result<Command> {
     match args {
         ["local-only-effects"] => Ok(Command::ConsistencyLocalOnlyEffects),
+        ["report", "--format", "json"] => Ok(Command::ConsistencyReport {
+            format: ReportFormat::Json,
+        }),
+        ["report", "--format", "md"] => Ok(Command::ConsistencyReport {
+            format: ReportFormat::Markdown,
+        }),
         other => bail!(
-            "未知 consistency 子命令: {other:?}；用法: cargo xtask consistency local-only-effects"
+            "未知 consistency 子命令: {other:?}；用法: cargo xtask consistency local-only-effects | cargo xtask consistency report --format <json|md>"
         ),
     }
 }
@@ -623,6 +641,7 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::ConsistencyLocalOnlyEffects => {
             diagnostic::run_check(&consistency_effects::LocalOnlyEffects)
         }
+        Command::ConsistencyReport { format } => consistency_effects::run_report(format),
         Command::LocalTxCoverage => diagnostic::run_check(&localtx_coverage::LocalTxCoverage),
         Command::Verify {
             fast,
@@ -1020,6 +1039,43 @@ mod tests {
             s(&["consistency", "effects"]),
             s(&["consistency", "local-only-effects", "extra"]),
             s(&["consistency", "local-only-effects", "--bogus"]),
+        ] {
+            assert!(
+                parse_command(&bad).is_err(),
+                "unexpectedly accepted {bad:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_consistency_report_requires_exact_format() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["consistency", "report", "--format", "json"]))?,
+            Command::ConsistencyReport {
+                format: ReportFormat::Json,
+            }
+        );
+        assert_eq!(
+            parse_command(&s(&["consistency", "report", "--format", "md"]))?,
+            Command::ConsistencyReport {
+                format: ReportFormat::Markdown,
+            }
+        );
+        for bad in [
+            s(&["consistency", "report"]),
+            s(&["consistency", "report", "--format"]),
+            s(&["consistency", "report", "--format", "markdown"]),
+            s(&["consistency", "report", "--format", "json", "extra"]),
+            s(&[
+                "consistency",
+                "report",
+                "--format",
+                "json",
+                "--format",
+                "md",
+            ]),
+            s(&["consistency", "report", "--output", "report.json"]),
         ] {
             assert!(
                 parse_command(&bad).is_err(),

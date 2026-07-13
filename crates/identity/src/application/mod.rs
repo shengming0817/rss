@@ -3652,7 +3652,9 @@ mod tests {
 
     fn synthetic_global_spec() -> HttpSpec {
         HttpSpec {
+            mount_key: "other_v1::contract",
             route: vocab::HttpRouteEvidence::from_static(
+                vocab::HttpContractOwner::domain("other"),
                 vocab::ContractBinding::from_static(
                     "other",
                     "other.contract",

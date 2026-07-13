@@ -214,6 +214,7 @@ pub mod login {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -227,6 +228,7 @@ pub mod login {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::login",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -394,6 +396,7 @@ pub mod logout {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -407,6 +410,7 @@ pub mod logout {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::logout",
         route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: ::vocab::LocalTxBoundary::SingleDomain,
@@ -583,6 +587,7 @@ pub mod password_change {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -596,6 +601,7 @@ pub mod password_change {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::password_change",
         route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: ::vocab::LocalTxBoundary::SingleDomain,
@@ -2467,6 +2473,7 @@ pub mod policies_create {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -2480,6 +2487,7 @@ pub mod policies_create {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::policies_create",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -2660,6 +2668,7 @@ pub mod policies_deactivate {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -2675,6 +2684,7 @@ pub mod policies_deactivate {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::policies_deactivate",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -3580,6 +3590,7 @@ pub mod policies_get {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "GET",
@@ -3593,6 +3604,7 @@ pub mod policies_get {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::policies_get",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -4553,6 +4565,7 @@ pub mod policies_list {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "GET",
@@ -4566,6 +4579,7 @@ pub mod policies_list {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::policies_list",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -6434,6 +6448,7 @@ pub mod policies_update {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "PUT",
@@ -6447,6 +6462,7 @@ pub mod policies_update {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::policies_update",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -6747,6 +6763,7 @@ pub mod profile {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "GET",
@@ -6760,6 +6777,7 @@ pub mod profile {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::profile",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -6952,6 +6970,7 @@ pub mod refresh {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -6965,6 +6984,7 @@ pub mod refresh {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::refresh",
         route: ROUTE.evidence(),
         local_tx: Some(super::super::LocalTxSpec {
             boundary: ::vocab::LocalTxBoundary::SingleDomain,
@@ -7137,6 +7157,7 @@ pub mod roles_assign {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "POST",
@@ -7150,6 +7171,7 @@ pub mod roles_assign {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::roles_assign",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -7385,6 +7407,7 @@ pub mod roles_list {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "GET",
@@ -7398,6 +7421,7 @@ pub mod roles_list {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::roles_list",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {
@@ -7556,6 +7580,7 @@ pub mod roles_revoke {
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
         ::vocab::HttpRouteBinding::from_static(
+            ::vocab::HttpContractOwner::domain("identity"),
             CONTRACT,
             PATH,
             "DELETE",
@@ -7569,6 +7594,7 @@ pub mod roles_revoke {
 
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
+        mount_key: "identity_v1::roles_revoke",
         route: ROUTE.evidence(),
         local_tx: None,
         resource_sharing: super::super::HttpResourceSharingSpec {

@@ -194,6 +194,7 @@ integration_shard_catalog! {
             ("testkit", "testkit", Lib, Serial),
             ("testkit", "crash_matrix", Test, Parallel),
             ("testkit", "harness", Test, Parallel),
+            ("testkit", "local_only", Test, Parallel),
             ("redis-adapter", "redis", Lib, Parallel),
             ("redis-adapter", "integration_claimer", Test, Serial),
             ("journeys", "device_command_ack_timeout_journey", Test, Parallel),

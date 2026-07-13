@@ -817,28 +817,44 @@ pub(crate) struct CanonicalRouteMount {
     pub(crate) state: CanonicalMountedState,
 }
 
-pub(crate) struct CanonicalOwnerEvidence {
+pub(crate) struct CanonicalServingEvidence {
     pub(crate) mounts: BTreeMap<String, BTreeSet<CanonicalRouteMount>>,
     pub(crate) reachable_production_sources: BTreeSet<String>,
 }
 
-/// Canonical production routes mounted by one `crates/*` owner.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ServingEvidenceSource<'a> {
+    Domain(&'a str),
+    Framework(&'a str),
+}
+
+/// Canonical production routes mounted by one domain crate or framework assembly.
 ///
 /// This is deliberately the same evidence used by the LocalTx closure gate: Cargo targets,
-/// reachable modules, cfg state, aliases, handler markers, `Domain::init`, `route_group`, and
-/// `mount` are resolved once instead of being reimplemented by sibling consistency checks.
-pub(crate) fn canonical_owner_evidence(root: &Path, owner: &str) -> Result<CanonicalOwnerEvidence> {
+/// reachable modules, cfg state, aliases, handler markers, `Domain::init` /
+/// `FrameworkRoutes::register`, `route_group`, and `mount` are resolved once instead of being
+/// reimplemented by sibling consistency checks.
+pub(crate) fn canonical_serving_evidence(
+    root: &Path,
+    source: ServingEvidenceSource<'_>,
+) -> Result<CanonicalServingEvidence> {
     let workspace_crates = load_workspace_crates(root)?;
     let expected_packages: BTreeMap<_, _> = workspace_crates
         .iter()
         .map(|member| (member.name.clone(), member.root.clone()))
         .collect();
+    let (package, relative) = match source {
+        ServingEvidenceSource::Domain(owner) => (owner, Path::new("crates").join(owner)),
+        ServingEvidenceSource::Framework(assembly) => {
+            (assembly, Path::new("assemblies").join(assembly))
+        }
+    };
     let member = workspace_crates
         .iter()
-        .find(|member| member.name == owner && member.relative == Path::new("crates").join(owner))
-        .ok_or_else(|| anyhow!("owner `{owner}` is not a canonical crates/* workspace member"))?;
+        .find(|member| member.name == package && member.relative == relative)
+        .ok_or_else(|| anyhow!("serving source `{package}` is not a canonical workspace member"))?;
     let evidence = scan_owner(root, member, &expected_packages)?;
-    Ok(CanonicalOwnerEvidence {
+    Ok(CanonicalServingEvidence {
         mounts: evidence.canonical_mounts,
         reachable_production_sources: evidence.reachable_production_sources,
     })
@@ -1371,7 +1387,7 @@ fn scan_units(owner: &str, units: &[FileUnit], evidence: &mut OwnerEvidence) -> 
             marker_ordinal: 0,
             attribute_safe: true,
             test_macro: None,
-            canonical_domain_impl: false,
+            canonical_domain_impl: None,
             domain_init_router: None,
             domain_init_body_pending: false,
         };
@@ -1980,7 +1996,7 @@ struct SourceScanner<'a> {
     marker_ordinal: usize,
     attribute_safe: bool,
     test_macro: Option<&'static str>,
-    canonical_domain_impl: bool,
+    canonical_domain_impl: Option<CanonicalServingImpl>,
     domain_init_router: Option<String>,
     domain_init_body_pending: bool,
 }
@@ -2012,7 +2028,7 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
         self.canonical_domain_impl = self
             .resolver_stack
             .last()
-            .is_some_and(|resolver| is_canonical_domain_impl(node, resolver));
+            .and_then(|resolver| canonical_serving_impl(node, resolver));
         visit::visit_item_impl(self, node);
         self.canonical_domain_impl = old_domain_impl;
         self.domain_init_router = old_domain_router;
@@ -2029,10 +2045,10 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
         let old = self.enter_attrs(&node.attrs);
         let old_domain_router = self.domain_init_router.take();
         let old_domain_body_pending = self.domain_init_body_pending;
-        self.domain_init_router = self.canonical_domain_impl.then_some(()).and_then(|()| {
+        self.domain_init_router = self.canonical_domain_impl.and_then(|kind| {
             self.resolver_stack
                 .last()
-                .and_then(|resolver| canonical_domain_init_router(&node.sig, resolver))
+                .and_then(|resolver| canonical_serving_router(&node.sig, resolver, kind))
         });
         self.domain_init_body_pending = self.domain_init_router.is_some();
         visit::visit_impl_item_fn(self, node);
@@ -2164,7 +2180,7 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             && let Some(registry) = self.domain_init_router.as_deref()
         {
             self.domain_init_body_pending = false;
-            let mounts = direct_domain_init_route_mounts(
+            let mounts = direct_serving_route_mounts(
                 node,
                 registry,
                 &resolver,
@@ -2241,15 +2257,39 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
     }
 }
 
-fn is_canonical_domain_impl(node: &syn::ItemImpl, resolver: &Resolver) -> bool {
-    node.trait_.as_ref().is_some_and(|(_, path, _)| {
-        path.leading_colon.is_some()
-            && matches!(canonical_segments(path, resolver).as_deref(), Some([root, item]) if root == "bootstrap" && item == "Domain")
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalServingImpl {
+    Domain,
+    Framework,
 }
 
-fn canonical_domain_init_router(signature: &syn::Signature, resolver: &Resolver) -> Option<String> {
-    if signature.ident != "init" || signature.inputs.len() != 2 {
+fn canonical_serving_impl(
+    node: &syn::ItemImpl,
+    resolver: &Resolver,
+) -> Option<CanonicalServingImpl> {
+    let (_, path, _) = node.trait_.as_ref()?;
+    path.leading_colon.as_ref()?;
+    match canonical_segments(path, resolver).as_deref() {
+        Some([root, item]) if root == "bootstrap" && item == "Domain" => {
+            Some(CanonicalServingImpl::Domain)
+        }
+        Some([root, item]) if root == "bootstrap" && item == "FrameworkRoutes" => {
+            Some(CanonicalServingImpl::Framework)
+        }
+        _ => None,
+    }
+}
+
+fn canonical_serving_router(
+    signature: &syn::Signature,
+    resolver: &Resolver,
+    kind: CanonicalServingImpl,
+) -> Option<String> {
+    let expected = match kind {
+        CanonicalServingImpl::Domain => "init",
+        CanonicalServingImpl::Framework => "register",
+    };
+    if signature.ident != expected || signature.inputs.len() != 2 {
         return None;
     }
     let mut inputs = signature.inputs.iter();
@@ -2279,7 +2319,7 @@ fn canonical_domain_init_router(signature: &syn::Signature, resolver: &Resolver)
     .then(|| binding.ident.to_string())
 }
 
-fn direct_domain_init_route_mounts(
+fn direct_serving_route_mounts(
     block: &syn::Block,
     registry: &str,
     resolver: &Resolver,
@@ -3282,6 +3322,81 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/localtx_coverage")
             .join(name)
+    }
+
+    #[test]
+    fn framework_routes_trait_is_a_canonical_serving_root() -> anyhow::Result<()> {
+        let item: syn::ItemImpl = syn::parse_str(
+            r#"impl ::bootstrap::FrameworkRoutes for Routes {
+                fn register(&self, registry: &mut ::bootstrap::Registry) -> Result<(), ::bootstrap::KernelError> {
+                    Ok(())
+                }
+            }"#,
+        )?;
+        let resolver = Resolver::default();
+        assert_eq!(
+            canonical_serving_impl(&item, &resolver),
+            Some(CanonicalServingImpl::Framework)
+        );
+        let method = item.items.iter().find_map(|item| match item {
+            syn::ImplItem::Fn(method) => Some(method),
+            _ => None,
+        });
+        assert_eq!(
+            method.and_then(|method| canonical_serving_router(
+                &method.sig,
+                &resolver,
+                CanonicalServingImpl::Framework,
+            )),
+            Some("registry".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn framework_assembly_uses_the_same_canonical_mount_scanner() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("framework-serving-evidence")?;
+        let assembly = temp.path.join("assemblies/runtime");
+        copy_tree(&temp.path.join("crates/demo"), &assembly)?;
+        fs::remove_dir_all(temp.path.join("crates/demo"))?;
+        fs::write(
+            temp.path.join("Cargo.toml"),
+            fs::read_to_string(temp.path.join("Cargo.toml"))?
+                .replace("\"crates/demo\"", "\"assemblies/runtime\""),
+        )?;
+        fs::write(
+            assembly.join("Cargo.toml"),
+            fs::read_to_string(assembly.join("Cargo.toml"))?
+                .replace("name = \"demo\"", "name = \"runtime\"")
+                .replace(
+                    "path = \"../bootstrap\"",
+                    "path = \"../../crates/bootstrap\"",
+                )
+                .replace(
+                    "path = \"../httpserve\"",
+                    "path = \"../../crates/httpserve\"",
+                )
+                .replace("path = \"../vocab\"", "path = \"../../crates/vocab\""),
+        )?;
+        fs::write(
+            assembly.join("src/lib.rs"),
+            fs::read_to_string(assembly.join("src/lib.rs"))?
+                .replace(
+                    "impl ::bootstrap::Domain for Demo",
+                    "impl ::bootstrap::FrameworkRoutes for Demo",
+                )
+                .replace("fn init(&self", "fn register(&self"),
+        )?;
+
+        let evidence =
+            canonical_serving_evidence(&temp.path, ServingEvidenceSource::Framework("runtime"))?;
+        assert!(evidence.mounts.contains_key("demo_v1::write"));
+        assert!(
+            evidence
+                .reachable_production_sources
+                .contains("assemblies/runtime/src/lib.rs")
+        );
+        Ok(())
     }
 
     #[test]

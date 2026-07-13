@@ -39,6 +39,8 @@ pub(crate) enum Rule {
     EmptyListeners,
     /// assembly manifest 中 `listeners` 不得重复。
     DuplicateListener,
+    /// Framework contract declarations must exactly cover active framework-owned contracts.
+    FrameworkContractServing,
     /// assembly manifest 不能空转：至少声明一个 DI provider。
     EmptyDiportProviders,
     /// assembly manifest 中 `diportProviders` 不得重复。
@@ -105,6 +107,7 @@ struct DiscoveredAssembly {
 
 pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let (assemblies, mut findings) = discover(root)?;
+    findings.extend(validate_framework_contracts(root, &assemblies)?);
     let metadata = load_workspace_metadata(root)?;
     for assembly in &assemblies {
         findings.extend(validate_assembly(assembly));
@@ -113,6 +116,72 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
         }
     }
     Ok((assemblies.len(), findings))
+}
+
+fn validate_framework_contracts(
+    root: &Path,
+    assemblies: &[DiscoveredAssembly],
+) -> Result<Vec<Finding>> {
+    use crate::contract::manifest::{ContractOwner, Lifecycle};
+
+    let contracts = crate::contract::discover(&root.join("contracts"))?;
+    let by_id = contracts
+        .iter()
+        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .collect::<BTreeMap<_, _>>();
+    let mut declarations: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut findings = Vec::new();
+    for assembly in assemblies {
+        for contract_id in &assembly.manifest.framework_contracts {
+            declarations
+                .entry(contract_id)
+                .or_default()
+                .push(&assembly.manifest_label);
+            match by_id.get(contract_id.as_str()) {
+                Some(contract)
+                    if contract.manifest.lifecycle == Lifecycle::Active
+                        && contract.manifest.owner == ContractOwner::Framework => {}
+                Some(_) => findings.push(finding(
+                    Rule::FrameworkContractServing,
+                    &assembly.manifest_label,
+                    format!(
+                        "frameworkContracts entry `{contract_id}` must reference an active framework-owned contract"
+                    ),
+                )),
+                None => findings.push(finding(
+                    Rule::FrameworkContractServing,
+                    &assembly.manifest_label,
+                    format!("frameworkContracts entry `{contract_id}` is unknown"),
+                )),
+            }
+        }
+    }
+    for contract in contracts.iter().filter(|contract| {
+        contract.manifest.lifecycle == Lifecycle::Active
+            && contract.manifest.owner == ContractOwner::Framework
+    }) {
+        match declarations.get(contract.manifest.id.as_str()).map(Vec::as_slice) {
+            None | Some([]) => findings.push(finding(
+                Rule::FrameworkContractServing,
+                rel_label(root, &contract.dir.join("contract.toml")),
+                format!(
+                    "active framework contract `{}` must be declared by exactly one assembly",
+                    contract.manifest.id
+                ),
+            )),
+            Some([_]) => {}
+            Some(many) => findings.push(finding(
+                Rule::FrameworkContractServing,
+                many.join(", "),
+                format!(
+                    "active framework contract `{}` is declared by {} assemblies; expected exactly one",
+                    contract.manifest.id,
+                    many.len()
+                ),
+            )),
+        }
+    }
+    Ok(findings)
 }
 
 /// 对单个目标执行与 aggregate gate 相同的完整验证，不读取其它 assembly。
@@ -413,6 +482,20 @@ fn push_manifest_validation_finding(
                 "field=listeners listener 重复声明",
             ));
         }
+        ManifestValidationError::Empty {
+            field: "frameworkContracts",
+        } => findings.push(finding(
+            Rule::FrameworkContractServing,
+            &a.manifest_label,
+            "field=frameworkContracts entries must not be empty",
+        )),
+        ManifestValidationError::Duplicate {
+            field: "frameworkContracts",
+        } => findings.push(finding(
+            Rule::FrameworkContractServing,
+            &a.manifest_label,
+            "field=frameworkContracts contains a duplicate contract id",
+        )),
         ManifestValidationError::Empty {
             field: "diportProviders",
         } => {
@@ -1770,6 +1853,7 @@ name = "runtime"
 profile = "{profile}"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -1809,6 +1893,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -1973,6 +2058,7 @@ name = "runtime"
 profile = "{profile}"
 domains = ["identity", "settings", "audit"]
 topology = "{topology}"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -2133,6 +2219,7 @@ name = "runtime"
 profile = "{profile}"
 domains = [{rendered_domains}]
 topology = "{topology}"
+frameworkContracts = []
 {empty_providers}
 
 [[listeners]]
@@ -2890,6 +2977,47 @@ durability = "ephemeral-memory""#
     }
 
     #[test]
+    fn active_framework_contract_requires_one_exact_assembly_declaration() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-framework-contract");
+        let contract_dir = root.join("contracts/http/_seed/v1");
+        fs::create_dir_all(&contract_dir)?;
+        write(
+            &contract_dir.join("contract.toml"),
+            &include_str!("../../contracts/http/_seed/v1/contract.toml")
+                .replace("lifecycle = \"draft\"", "lifecycle = \"active\""),
+        )?;
+        write(&contract_dir.join("request.schema.json"), "{}")?;
+        write(&contract_dir.join("response.schema.json"), "{}")?;
+        write_assembly(
+            &root,
+            &manifest_with_intent(),
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
+        )?;
+
+        let (assemblies, _) = discover(&root)?;
+        let missing = validate_framework_contracts(&root, &assemblies)?;
+        assert!(
+            missing
+                .iter()
+                .any(|finding| finding.rule == Rule::FrameworkContractServing)
+        );
+
+        let declared = manifest_with_intent().replace(
+            "frameworkContracts = []",
+            "frameworkContracts = [\"seed.echo\"]",
+        );
+        write_assembly(
+            &root,
+            &declared,
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
+        )?;
+        let (assemblies, _) = discover(&root)?;
+        assert!(validate_framework_contracts(&root, &assemblies)?.is_empty());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn assembly_manifest_accepts_all_registered_domains() -> anyhow::Result<()> {
         let manifest =
             AssemblyManifest::from_toml_str(&manifest_with_domains(crate::layers::DOMAIN_CRATES))?;
@@ -3365,6 +3493,7 @@ name = "runtime"
 profile = "production"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 diportProviders = []
 
 [[listeners]]
@@ -3859,6 +3988,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -3925,6 +4055,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4007,6 +4138,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4087,6 +4219,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4144,6 +4277,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4201,6 +4335,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4277,6 +4412,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4370,6 +4506,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4422,6 +4559,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4473,6 +4611,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4525,6 +4664,7 @@ name = "runtime"
 profile = "demo"
 domains = ["contractreg"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"

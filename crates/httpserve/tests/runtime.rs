@@ -92,6 +92,7 @@ fn permission_binding(
     self_scoped: bool,
 ) -> vocab::HttpRouteBinding<PermissionRouteMarker, vocab::http::LocalOnly> {
     vocab::HttpRouteBinding::from_static(
+        vocab::HttpContractOwner::domain("test"),
         TEST_BINDING,
         path,
         "GET",
@@ -685,6 +686,7 @@ async fn route_meta_in_request_extension() {
     enum MetaRouteMarker {}
     const META_BINDING: vocab::HttpRouteBinding<MetaRouteMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
+            vocab::HttpContractOwner::domain("test"),
             vocab::ContractBinding::from_static(
                 "test",
                 META_CONTRACT,
@@ -736,6 +738,7 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
     enum NonIdempotentMarker {}
     const IDEMPOTENT_BINDING: vocab::HttpRouteBinding<IdempotentMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
+            vocab::HttpContractOwner::domain("test"),
             TEST_BINDING,
             "/api/v1/wire-idempotent",
             "GET",
@@ -750,6 +753,7 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
         NonIdempotentMarker,
         vocab::http::LocalOnly,
     > = vocab::HttpRouteBinding::from_static(
+        vocab::HttpContractOwner::domain("test"),
         TEST_BINDING,
         "/api/v1/wire-non-idempotent",
         "POST",
@@ -811,6 +815,7 @@ async fn declared_success_status_drift_fails_closed() {
     enum DriftMarker {}
     const DRIFT_BINDING: vocab::HttpRouteBinding<DriftMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
+            vocab::HttpContractOwner::domain("test"),
             TEST_BINDING,
             "/api/v1/wire-status-drift",
             "POST",
@@ -854,6 +859,7 @@ async fn undeclared_redirect_status_fails_closed() {
     enum RedirectMarker {}
     const REDIRECT_BINDING: vocab::HttpRouteBinding<RedirectMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
+            vocab::HttpContractOwner::domain("test"),
             TEST_BINDING,
             "/api/v1/wire-status-redirect",
             "POST",

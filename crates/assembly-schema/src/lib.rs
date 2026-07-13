@@ -24,6 +24,8 @@ pub struct AssemblyManifest {
     pub profile: AssemblyProfile,
     pub domains: Vec<AssemblyDomain>,
     pub topology: AssemblyTopology,
+    #[serde(rename = "frameworkContracts")]
+    pub framework_contracts: Vec<String>,
     pub listeners: Vec<AssemblyListener>,
     #[serde(rename = "diportProviders")]
     pub diport_providers: Vec<DiportProvider>,
@@ -51,6 +53,14 @@ impl AssemblyManifest {
         ensure_non_empty_slice(&self.diport_providers, "diportProviders", &mut errors);
 
         ensure_unique(self.domains.iter().copied(), "domains", &mut errors);
+        ensure_unique(
+            self.framework_contracts.iter().map(String::as_str),
+            "frameworkContracts",
+            &mut errors,
+        );
+        for contract in &self.framework_contracts {
+            ensure_non_empty_string(contract, "frameworkContracts", &mut errors);
+        }
         ensure_unique(
             self.listeners.iter().map(|listener| listener.kind),
             "listeners",
@@ -468,6 +478,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -498,6 +509,7 @@ outputs = ["resources", "workers"]
             ["identity", "settings", "audit"]
         );
         assert!(manifest.diport_providers[0].required_features.is_empty());
+        assert!(manifest.framework_contracts.is_empty());
         assert_eq!(
             manifest.listeners[0].domains.as_slice(),
             [
@@ -511,6 +523,27 @@ outputs = ["resources", "workers"]
             [LifecycleChannel::Resources, LifecycleChannel::Workers]
         );
         manifest.validate_basic().expect("valid manifest");
+    }
+
+    #[test]
+    fn framework_contracts_are_required_non_empty_and_unique() {
+        assert!(
+            AssemblyManifest::from_toml_str(&MINIMAL.replace("frameworkContracts = []\n", ""))
+                .is_err()
+        );
+
+        let invalid = AssemblyManifest::from_toml_str(&MINIMAL.replace(
+            "frameworkContracts = []",
+            "frameworkContracts = [\"\", \"seed.echo\", \"seed.echo\"]",
+        ))
+        .expect("closed framework contract declarations parse before semantic validation");
+        let errors = invalid.basic_validation_errors();
+        assert!(errors.contains(&ManifestValidationError::Empty {
+            field: "frameworkContracts"
+        }));
+        assert!(errors.contains(&ManifestValidationError::Duplicate {
+            field: "frameworkContracts"
+        }));
     }
 
     #[test]

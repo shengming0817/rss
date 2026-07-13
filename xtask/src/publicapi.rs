@@ -215,6 +215,7 @@ mod tests {
     use super::*;
 
     const HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS: &[&str] = &[
+        "owner",
         "contract",
         "path",
         "method",
@@ -503,6 +504,9 @@ mod tests {
             "pub vocab::http::HttpIdempotency::Idempotent",
             "pub vocab::http::HttpIdempotency::NonIdempotent",
             "pub enum vocab::http::HttpRouteAuth",
+            "pub struct vocab::http::HttpContractOwner",
+            "pub const fn vocab::http::HttpContractOwner::framework",
+            "pub const fn vocab::http::HttpContractOwner::domain_name",
             "pub struct vocab::http::HttpRouteBinding<M, C>",
             "pub const fn vocab::http::HttpRouteBinding<M, C>::from_static",
             "pub const fn vocab::http::HttpRouteBinding<M, C>::evidence",
@@ -572,6 +576,7 @@ mod tests {
     #[test]
     fn http_route_evidence_private_field_guard_covers_all_fields() {
         let synthetic = r#"
+pub vocab::http::HttpRouteEvidence::owner: vocab::http::HttpContractOwner
 pub vocab::http::HttpRouteEvidence::contract: vocab::contract::binding::ContractBinding
 pub vocab::http::HttpRouteEvidence::path: &'static str
 pub vocab::http::HttpRouteEvidence::method: &'static str
@@ -586,6 +591,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         assert_eq!(
             exposed_http_route_evidence_fields(synthetic),
             vec![
+                "owner",
                 "contract",
                 "path",
                 "method",

@@ -410,6 +410,7 @@ fn test_route_evidence(
     };
     const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
     Ok(HttpRouteEvidence::from_static(
+        vocab::HttpContractOwner::domain("test"),
         vocab::ContractBinding::from_static(
             "test",
             contract_id,
@@ -483,6 +484,7 @@ impl NonPrimaryListener for Admin {}
 pub struct ListenerRouter<L: Listener> {
     inner: axum::Router,
     prefix: &'static str,
+    evidence: Vec<HttpRouteEvidence>,
     _l: PhantomData<fn() -> L>,
 }
 
@@ -497,13 +499,13 @@ impl<L: Listener> ListenerRouter<L> {
         Self {
             inner: router,
             prefix,
+            evidence: Vec::new(),
             _l: PhantomData,
         }
     }
 
-    /// 交还累积的裸 `axum::Router`（仅 httpserve 内 erase 边界用，`pub(crate)`）。
-    pub(crate) fn into_inner(self) -> axum::Router {
-        self.inner
+    pub(crate) fn into_parts(self) -> (axum::Router, Vec<HttpRouteEvidence>) {
+        (self.inner, self.evidence)
     }
 
     /// Test-only raw framework router mount. Production builds do not contain this API.
@@ -534,6 +536,11 @@ impl<L: Listener> ListenerRouter<L> {
                 .inner
                 .route(path, handler.layer(enforce_layer(authz, method, evidence))),
             prefix: self.prefix,
+            evidence: {
+                let mut mounted = self.evidence;
+                mounted.push(evidence);
+                mounted
+            },
             _l: PhantomData,
         })
     }
@@ -556,6 +563,11 @@ impl ListenerRouter<Primary> {
                 handler.layer(enforce_layer(Some(route.authz), method, route.evidence)),
             ),
             prefix: self.prefix,
+            evidence: {
+                let mut mounted = self.evidence;
+                mounted.push(route.evidence);
+                mounted
+            },
             _l: PhantomData,
         })
     }
@@ -580,6 +592,11 @@ impl<L: NonPrimaryListener> ListenerRouter<L> {
                 .inner
                 .route(path, handler.layer(enforce_layer(authz, method, evidence))),
             prefix: self.prefix,
+            evidence: {
+                let mut mounted = self.evidence;
+                mounted.push(evidence);
+                mounted
+            },
             _l: PhantomData,
         })
     }
@@ -604,6 +621,11 @@ impl ListenerRouter<Primary> {
                 handler.layer(enforce_layer(Some(authz), method, evidence)),
             ),
             prefix: self.prefix,
+            evidence: {
+                let mut mounted = self.evidence;
+                mounted.push(evidence);
+                mounted
+            },
             _l: PhantomData,
         })
     }
@@ -618,6 +640,7 @@ impl ListenerRouter<Health> {
         Self {
             inner: self.inner.route(path, handler),
             prefix: self.prefix,
+            evidence: self.evidence,
             _l: PhantomData,
         }
     }
@@ -735,6 +758,7 @@ fn permission_authz(
 #[must_use = "UnfinalizedRoutes 须经 finalize_auth 换 AuthenticatedRoutes 才能 bind"]
 pub struct UnfinalizedRoutes {
     router: axum::Router,
+    evidence: Vec<HttpRouteEvidence>,
     listener: Option<ListenerKind>,
     conflicting_listener: Option<ListenerKind>,
 }
@@ -744,6 +768,7 @@ impl UnfinalizedRoutes {
     pub fn empty() -> Self {
         Self {
             router: axum::Router::new(),
+            evidence: Vec::new(),
             listener: None,
             conflicting_listener: None,
         }
@@ -762,7 +787,8 @@ impl UnfinalizedRoutes {
     where
         L: Listener,
     {
-        let group = register(ListenerRouter::<L>::new(axum::Router::new(), prefix))?.into_inner();
+        let (group, mut group_evidence) =
+            register(ListenerRouter::<L>::new(axum::Router::new(), prefix))?.into_parts();
         let listener = self.listener.or(Some(L::KIND));
         let conflicting_listener = self.conflicting_listener.or_else(|| {
             self.listener
@@ -771,9 +797,20 @@ impl UnfinalizedRoutes {
         });
         Ok(Self {
             router: self.router.nest(prefix, group),
+            evidence: {
+                let mut evidence = self.evidence;
+                evidence.append(&mut group_evidence);
+                evidence
+            },
             listener,
             conflicting_listener,
         })
+    }
+
+    /// Exact generated route evidence mounted into this listener before auth finalization.
+    #[must_use]
+    pub fn route_evidence(&self) -> &[HttpRouteEvidence] {
+        &self.evidence
     }
 
     /// 测试专用：取回裸 Router 做 `tower::ServiceExt::oneshot` listener 隔离断言。
@@ -1073,8 +1110,10 @@ fn listener_mismatch(routes: &UnfinalizedRoutes, finalized: ListenerKind) -> Rou
 pub fn unfinalized_for_test<L: Listener>(
     build: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, RouteGroupError>,
 ) -> Result<UnfinalizedRoutes, RouteGroupError> {
+    let (router, evidence) = build(ListenerRouter::<L>::new(axum::Router::new(), ""))?.into_parts();
     Ok(UnfinalizedRoutes {
-        router: build(ListenerRouter::<L>::new(axum::Router::new(), ""))?.into_inner(),
+        router,
+        evidence,
         listener: Some(L::KIND),
         conflicting_listener: None,
     })
@@ -1125,6 +1164,7 @@ mod tests {
         auth: vocab::HttpRouteAuth,
     ) -> vocab::HttpRouteBinding<TestRouteMarker, vocab::http::LocalOnly> {
         vocab::HttpRouteBinding::from_static(
+            vocab::HttpContractOwner::domain("test"),
             vocab::ContractBinding::from_static(
                 "test",
                 contract_id,
@@ -1155,6 +1195,26 @@ mod tests {
         build: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, RouteGroupError>,
     ) -> UnfinalizedRoutes {
         unfinalized_for_test(build).expect("test route mount")
+    }
+
+    #[test]
+    fn generated_mount_preserves_exact_route_evidence() -> Result<(), RouteGroupError> {
+        let binding = test_binding(
+            "/api/v1/evidence",
+            "test.evidence",
+            vocab::HttpRouteAuth::Public,
+        );
+        let expected = binding.evidence();
+        let routes =
+            UnfinalizedRoutes::empty().nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                let endpoint = GeneratedPrimaryEndpoint::new(
+                    binding,
+                    |_: ContractMarker<TestRouteMarker>| async { "ok" },
+                )?;
+                rb.mount(endpoint)
+            })?;
+        assert_eq!(routes.route_evidence(), &[expected]);
+        Ok(())
     }
 
     #[derive(Clone)]

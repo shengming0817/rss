@@ -11,6 +11,7 @@ assembly-schema = { path = "../crates/assembly-schema" }
 # `consistency::Topic::parse`，消除 contract 声明面与运行期构造面的镜像漂移。xtask 是组合根
 # （Layer::Root），依赖 Engine 层 consistency 合法（layers::allows(Root, Engine)）。
 consistency = { path = "../crates/consistency" }
+generated = { path = "../generated" }
 vocab = { path = "../crates/vocab" }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -27,7 +28,6 @@ time = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-generated = { path = "../generated" }
 rstest = { workspace = true }
 
 [lints]

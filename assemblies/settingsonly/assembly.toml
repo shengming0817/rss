@@ -2,6 +2,7 @@ name = "settingsonly"
 profile = "demo"
 domains = ["settings"]
 topology = "demo"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"

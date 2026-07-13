@@ -73,6 +73,26 @@ effect 后把跨租户读取当作普通本地 read。
 该 marker 证明的是 canonical port 注入面，不声称覆盖 handler 直接使用文件系统、网络 client 或全局状态的
 副作用；非 port 副作用与实际调用次数由 #1694 conformance testkit 继续闭合。
 
+## Posture report
+
+`cargo xtask consistency report --format json|md` 从 `generated::http::SPECS` 这一 active HTTP Hard 单源
+枚举全部 route declaration，并复用 `canonical_serving_evidence` 与本页 LocalOnly state/port 分类器输出
+production mount 和 effect proof。route owner 直接来自 generated `HttpRouteEvidence::owner()`，不得从
+`ContractBinding::domain()` 反推。Domain source 扫描 canonical `crates/<owner>`；Framework source 由唯一
+assembly `frameworkContracts` 声明定位，并扫描同一个 `bootstrap::FrameworkRoutes::register` funnel。
+两种 owner 经闭合 `ServingScope::Domain | Framework` 进入同一个 LocalOnly proof evaluator；assembly 名不得
+作为 domain owner 或 owner-sealed macro namespace 使用。无状态 route 不要求无关的 port proof；classified
+Framework state 只允许 `diport` 全局 sealed capability，不能借用任意 domain-private 分类。JSON v1
+面向 CI/PR artifact，Markdown 面向人工 review；两者由同一 typed
+model 渲染、稳定排序，且不包含时间、主机、Git SHA、绝对路径或运行态 tenant/device 数据。
+
+报告与 gate 的职责不同：posture finding 会令报告内 `status = "failed"`，但命令仍成功并输出完整 artifact；
+采集、结构或序列化失败在 stdout 写入前非零退出；stdout 写入失败本身可能留下截断文件，消费方必须检查退出码
+并完整解析 JSON。`consistency local-only-effects` 仍是阻断式 Medium gate，
+继续消费相同 LocalOnly proof。非 LocalOnly route 只报告 declaration 与 mount，effect proof 明示
+`declarationOnly/notApplicable`，不得解释为实际副作用证明或完整零信任 attest。非 port 副作用、实际调用及
+runtime conformance 仍由 #1694 闭合，auth/scope posture 不属于本报告。
+
 ## LocalOnly route state funnel
 
 `HttpRouteBinding<M, C>` 的 `C` 由 contract codegen 单源派生。`LocalOnly` endpoint 在类型层不提供普通
@@ -83,8 +103,9 @@ effect 后把跨租户读取当作普通本地 read。
 
 跨域 state 对最强 port effect / privilege 的声明仍需关联其私有字段与 owner-sealed port 分类；Rust orphan
 与 crate 依赖方向无法让 `httpserve` 的私有 sealed trait 同时开放给各域实现又禁止域内谎报。因此
-`cargo xtask consistency local-only-effects` 对 production `Domain::init → route_group → mount` 做 type-aware
-源码闭环，拒绝普通 `with_state`、未分类/不透明 state、marker 谎报及不可证明挂载（Medium CI 门；synthetic
+`cargo xtask consistency local-only-effects` 对 production serving funnel（`Domain::init` /
+`FrameworkRoutes::register`）到 `route_group → mount` 做 type-aware 源码闭环，拒绝普通 `with_state`、
+未分类/不透明 state、marker 谎报及不可证明挂载（Medium CI 门；synthetic
 red + compiling green anti-vacuity）。该门不从方法名猜能力，混合 port 始终按最强能力判定。
 
 ## LocalOnly runtime conformance

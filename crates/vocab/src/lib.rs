@@ -35,9 +35,9 @@ pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use http::{
-    HttpConsistencyLevel, HttpEffectKind, HttpEffectProfile, HttpIdempotency, HttpRouteAuth,
-    HttpRouteBinding, HttpRouteEvidence, HttpSuccessStatus, LocalTxBoundary, LocalTxCommitUnknown,
-    LocalTxModel, LocalTxRetry,
+    HttpConsistencyLevel, HttpContractOwner, HttpEffectKind, HttpEffectProfile, HttpIdempotency,
+    HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence, HttpSuccessStatus, LocalTxBoundary,
+    LocalTxCommitUnknown, LocalTxModel, LocalTxRetry,
 };
 pub use principal::PrincipalKind;
 pub use projection::{

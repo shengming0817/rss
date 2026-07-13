@@ -293,6 +293,7 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyListener
 pub struct assembly_schema::AssemblyManifest
 pub assembly_schema::AssemblyManifest::diport_providers: alloc::vec::Vec<assembly_schema::DiportProvider>
 pub assembly_schema::AssemblyManifest::domains: alloc::vec::Vec<assembly_schema::AssemblyDomain>
+pub assembly_schema::AssemblyManifest::framework_contracts: alloc::vec::Vec<alloc::string::String>
 pub assembly_schema::AssemblyManifest::listeners: alloc::vec::Vec<assembly_schema::AssemblyListener>
 pub assembly_schema::AssemblyManifest::name: alloc::string::String
 pub assembly_schema::AssemblyManifest::profile: assembly_schema::AssemblyProfile

@@ -3854,6 +3854,7 @@ name = "runtime"
 profile = "demo"
 domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4025,6 +4026,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 
 [[listeners]]
 kind = "primary"
@@ -4145,6 +4147,7 @@ name = "runtime"
 profile = "demo"
 domains = ["identity", "settings", "audit"]
 topology = "durable-shared"
+frameworkContracts = []
 diportProviders = []
 
 [[listeners]]

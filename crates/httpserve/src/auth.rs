@@ -1174,6 +1174,7 @@ mod tests {
     );
     const TEST_EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
     const TEST_EVIDENCE: vocab::HttpRouteEvidence = vocab::HttpRouteEvidence::from_static(
+        vocab::HttpContractOwner::domain("test"),
         TEST_BINDING,
         "/test",
         "GET",

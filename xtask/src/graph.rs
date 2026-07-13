@@ -1210,6 +1210,7 @@ mod tests {
 profile = "demo"
 domains = ["{domain}"]
 topology = "demo"
+frameworkContracts = []
 [[listeners]]
 kind = "{listener}"
 domains = ["{domain}"]
