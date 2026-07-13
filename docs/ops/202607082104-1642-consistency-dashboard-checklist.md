@@ -38,6 +38,9 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | Consumer release failed | `sum by (domain) (increase(consumer_release_failed_total[5m]))` | `domain` | `ConsumerReleaseFailed`; claim release failed after DLX failure |
 | Consumer lease lost | `sum by (domain) (rate(consumer_lease_lost_total[5m]))` | `domain` | `ConsumerLeaseLostHigh`; check handler duration and lease TTL |
 | Saga DLX | `sum by (domain, contract_id, outcome) (increase(saga_dead_letters_total[10m]))` | `domain`, `contract_id`, `outcome` | `SagaDeadLetterGrowth` / `SagaDeadLetterWriteError` |
+| LocalTx failed attempt rate | `sum by (domain, contract_id, boundary, retry_class) (rate(localtx_retry_attempts_total[5m]))` | `domain`, `contract_id`, `boundary`, `retry_class` | Diagnostic only; correlate sustained transient failures with DB health and request error rate |
+| LocalTx final settlement rate | `sum by (domain, contract_id, boundary, final_status) (rate(localtx_final_total[5m]))` | `domain`, `contract_id`, `boundary`, `final_status` | `LocalTxCommitUnknown` / `LocalTxRollbackFailed`; do not infer settlement from retry status |
+| LocalTx attempts P95 | `histogram_quantile(0.95, sum by (domain, contract_id, boundary, final_status, le) (rate(localtx_attempts_bucket[5m])))` | `domain`, `contract_id`, `boundary`, `final_status` | Retry-pressure diagnosis; exhaustion alone does not page |
 
 ## Explicit Gaps
 
@@ -64,6 +67,8 @@ before #1683 / #1684, treat the panel as deployment-local and keep it out of the
 - Projection replay / swap: `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md`
 - Outbox / consumer / saga alert rules: `docs/ops/outbox-relay-alerts.rules.yaml`
 - Cross-domain transport alert rules: `docs/ops/transport-dispatch-alerts.rules.yaml`
+- LocalTx unsafe settlement rules: `docs/ops/localtx-alerts.rules.yaml`
+- LocalTx unsafe settlement response: `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md`
 
 ## AI-HARD Check
 

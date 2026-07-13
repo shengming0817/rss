@@ -20031,6 +20031,8 @@ async fn credential_repo_bump_version_concurrent_writers_one_wins() -> TestResul
 async fn credential_repo_retry_boundary_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics_handle = recorder.handle();
     let repo = PgCredentialRepo::new(&store);
     let tenant = cred_tenant(CRED_TENANT_A)?;
     let retry_uid = cred_uid(CRED_USER_RETRY)?;
@@ -20045,92 +20047,122 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
     )
     .await?;
 
-    testkit::repo_conformance::assert_retry_boundary_policy(
-        testkit::repo_conformance::RetryBoundaryCase::new(
-            testkit::repo_conformance::TransientSuccessPath::new(
-                || {
-                    let repo = &repo;
-                    let transient_next = transient_next.clone();
-                    arm_credential_retry_failpoint("retry-alice", 1);
-                    async move {
-                        repo.bump_version(identity_scope(tenant), 1, transient_next)
-                            .await
-                    }
-                },
-                credential_retry_attempts,
-                2,
-                || async {
-                    let Some(got) = repo
-                        .find_by_user_id(identity_scope(tenant), retry_uid)
-                        .await?
-                    else {
-                        return Ok::<usize, IdentityError>(0);
-                    };
-                    Ok::<usize, IdentityError>(usize::from(got.version() == 2))
-                },
-            ),
-            testkit::repo_conformance::ConflictPath::new(
-                || {
-                    arm_credential_retry_failpoint("retry-alice", 0);
-                    async {
-                        repo.bump_version(identity_scope(tenant), 99, conflict_next.clone())
-                            .await
-                    }
-                },
-                credential_retry_attempts,
-                || async {
-                    let Some(got) = repo
-                        .find_by_user_id(identity_scope(tenant), retry_uid)
-                        .await?
-                    else {
-                        return Ok::<usize, IdentityError>(0);
-                    };
-                    Ok::<usize, IdentityError>(usize::from(got.version() == 3))
-                },
-            ),
-            testkit::repo_conformance::PermanentPath::new(
-                || {
-                    arm_credential_retry_failpoint("ghost", 0);
-                    async {
-                        repo.bump_version(identity_scope(tenant), 1, ghost_next.clone())
-                            .await
-                    }
-                },
-                credential_retry_attempts,
-                || async {
-                    Ok::<usize, IdentityError>(usize::from(
-                        repo.find_by_user_id(identity_scope(tenant), bob_uid)
-                            .await?
-                            .is_some(),
-                    ))
-                },
-            ),
-            testkit::repo_conformance::TransientExhaustionPath::new(
-                || {
-                    let repo = &repo;
-                    let exhaustion_next = exhaustion_next.clone();
-                    arm_credential_retry_failpoint("retry-alice", 3);
-                    async move {
-                        repo.bump_version(identity_scope(tenant), 2, exhaustion_next)
-                            .await
-                    }
-                },
-                credential_retry_attempts,
-                3,
-                || async {
-                    let Some(got) = repo
-                        .find_by_user_id(identity_scope(tenant), retry_uid)
-                        .await?
-                    else {
-                        return Ok::<usize, IdentityError>(0);
-                    };
-                    Ok::<usize, IdentityError>(usize::from(got.version() != 2))
-                },
-            ),
-        ),
-        |error| conformance_retry_category(classify_identity_error(error)),
-    )
-    .await?;
+    metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                testkit::repo_conformance::assert_retry_boundary_policy(
+                    testkit::repo_conformance::RetryBoundaryCase::new(
+                        testkit::repo_conformance::TransientSuccessPath::new(
+                            || {
+                                let repo = &repo;
+                                let transient_next = transient_next.clone();
+                                arm_credential_retry_failpoint("retry-alice", 1);
+                                async move {
+                                    repo.bump_version(identity_scope(tenant), 1, transient_next)
+                                        .await
+                                }
+                            },
+                            credential_retry_attempts,
+                            2,
+                            || async {
+                                let Some(got) = repo
+                                    .find_by_user_id(identity_scope(tenant), retry_uid)
+                                    .await?
+                                else {
+                                    return Ok::<usize, IdentityError>(0);
+                                };
+                                Ok::<usize, IdentityError>(usize::from(got.version() == 2))
+                            },
+                        ),
+                        testkit::repo_conformance::ConflictPath::new(
+                            || {
+                                arm_credential_retry_failpoint("retry-alice", 0);
+                                async {
+                                    repo.bump_version(
+                                        identity_scope(tenant),
+                                        99,
+                                        conflict_next.clone(),
+                                    )
+                                    .await
+                                }
+                            },
+                            credential_retry_attempts,
+                            || async {
+                                let Some(got) = repo
+                                    .find_by_user_id(identity_scope(tenant), retry_uid)
+                                    .await?
+                                else {
+                                    return Ok::<usize, IdentityError>(0);
+                                };
+                                Ok::<usize, IdentityError>(usize::from(got.version() == 3))
+                            },
+                        ),
+                        testkit::repo_conformance::PermanentPath::new(
+                            || {
+                                arm_credential_retry_failpoint("ghost", 0);
+                                async {
+                                    repo.bump_version(identity_scope(tenant), 1, ghost_next.clone())
+                                        .await
+                                }
+                            },
+                            credential_retry_attempts,
+                            || async {
+                                Ok::<usize, IdentityError>(usize::from(
+                                    repo.find_by_user_id(identity_scope(tenant), bob_uid)
+                                        .await?
+                                        .is_some(),
+                                ))
+                            },
+                        ),
+                        testkit::repo_conformance::TransientExhaustionPath::new(
+                            || {
+                                let repo = &repo;
+                                let exhaustion_next = exhaustion_next.clone();
+                                arm_credential_retry_failpoint("retry-alice", 3);
+                                async move {
+                                    repo.bump_version(identity_scope(tenant), 2, exhaustion_next)
+                                        .await
+                                }
+                            },
+                            credential_retry_attempts,
+                            3,
+                            || async {
+                                let Some(got) = repo
+                                    .find_by_user_id(identity_scope(tenant), retry_uid)
+                                    .await?
+                                else {
+                                    return Ok::<usize, IdentityError>(0);
+                                };
+                                Ok::<usize, IdentityError>(usize::from(got.version() != 2))
+                            },
+                        ),
+                    ),
+                    |error| conformance_retry_category(classify_identity_error(error)),
+                ),
+            )
+        })
+    })?;
+
+    let rendered = metrics_handle.render();
+    for expected in [
+        "localtx_retry_attempts_total",
+        "localtx_final_total",
+        "localtx_attempts",
+        "domain=\"identity\"",
+        "contract_id=\"identity.password-change\"",
+        "boundary=\"single_domain\"",
+        "retry_class=\"transient\"",
+        "retry_class=\"conflict\"",
+        "retry_class=\"permanent\"",
+        "final_status=\"committed\"",
+        "final_status=\"rolled_back\"",
+        "status=\"exhausted\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "production credential retry boundary omitted {expected}: {rendered}"
+        );
+    }
 
     store.shutdown().await?;
     Ok(())

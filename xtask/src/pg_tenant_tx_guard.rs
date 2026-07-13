@@ -386,15 +386,15 @@ fn retry_placement_findings(
         }
     };
     let aliases = retry_aliases(&syntax);
-    let mut scan = RetryAstScan::new(&aliases);
+    let mut scan = RetryAstScan::new(aliases);
     syn::visit::Visit::visit_file(&mut scan, &syntax);
 
     for call in &scan.direct_calls {
-        if rel != "tx_retry.rs" || call.function.as_deref() != Some("run_pg_tx_retry") {
+        if rel != "tx_retry.rs" || call.function.as_deref() != Some("run_pg_tx_retry_core") {
             findings.push(finding(
                 Rule::RetryPlacement,
                 site_subject(rel, call.line),
-                "consistency::run_tx_retry may only be called by tx_retry.rs::run_pg_tx_retry",
+                "consistency::run_tx_retry may only be called by tx_retry.rs::run_pg_tx_retry_core",
             ));
         }
     }
@@ -403,26 +403,16 @@ fn retry_placement_findings(
     }
 
     let allowed = match rel {
-        "config_repo.rs" => Some((
-            "commit",
-            "SETTINGS_CONFIG_BOUNDARY",
-            "retry_co_tx_with_outbox",
-            "settings-config-commit",
-        )),
-        "credential_repo.rs" => Some((
-            "bump_version",
-            "IDENTITY_CREDENTIAL_BOUNDARY",
-            "retry_write",
-            "identity-credential-bump-version",
-        )),
+        "config_repo.rs" => Some(("commit", "settings-config-commit")),
+        "credential_repo.rs" => Some(("bump_version", "identity-credential-bump-version")),
         _ => None,
     };
-    let Some((fn_marker, boundary, primitive, site)) = allowed else {
+    let Some((fn_marker, site)) = allowed else {
         for call in scan.wrapper_calls {
             findings.push(finding(
                 Rule::RetryPlacement,
                 site_subject(rel, call.line),
-                "run_pg_tx_retry is restricted to settings commit and identity credential bump_version",
+                "Postgres retry wrappers are restricted to settings commit and identity credential bump_version",
             ));
         }
         return findings;
@@ -433,77 +423,118 @@ fn retry_placement_findings(
             findings.push(finding(
                 Rule::RetryPlacement,
                 site_subject(rel, call.line),
-                format!("run_pg_tx_retry call must remain inside {fn_marker}"),
+                format!("Postgres retry wrapper call must remain inside {fn_marker}"),
             ));
         }
     }
-    let facts = scan.functions.get(fn_marker);
-    if facts.is_some_and(|facts| {
-        facts.wrapper_calls == 1
-            && facts.paths.contains(boundary)
-            && facts.methods.contains(primitive)
-    }) {
+    let calls: Vec<_> = scan
+        .wrapper_calls
+        .iter()
+        .filter(|call| call.function.as_deref() == Some(fn_marker))
+        .collect();
+    let valid = calls.len() == 1
+        && match rel {
+            "config_repo.rs" => valid_settings_retry(calls[0]),
+            "credential_repo.rs" => valid_identity_retry(calls[0]),
+            _ => false,
+        };
+    if valid {
         sites.insert(site);
     } else {
         findings.push(finding(
             Rule::RetryPlacement,
             rel,
             format!(
-                "{fn_marker} must contain exactly one run_pg_tx_retry call with {boundary} and {primitive}"
+                "{fn_marker} must contain exactly one correctly typed retry wrapper call with its closed boundary and transaction primitive"
             ),
         ));
     }
     findings
 }
 
-#[derive(Default)]
-struct RetryAliases {
-    direct: BTreeSet<String>,
-    wrapper: BTreeSet<String>,
+type RetryScope = BTreeMap<String, Option<RetrySymbol>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetrySymbol {
+    Direct,
+    Generic,
+    Local,
 }
 
-fn retry_aliases(file: &syn::File) -> RetryAliases {
-    let mut aliases = RetryAliases {
-        direct: BTreeSet::from(["run_tx_retry".to_string()]),
-        wrapper: BTreeSet::from(["run_pg_tx_retry".to_string()]),
-    };
+fn retry_aliases(file: &syn::File) -> RetryScope {
+    let mut aliases = RetryScope::from([
+        ("run_tx_retry".to_string(), Some(RetrySymbol::Direct)),
+        ("run_pg_tx_retry".to_string(), Some(RetrySymbol::Generic)),
+        ("run_pg_localtx_retry".to_string(), Some(RetrySymbol::Local)),
+    ]);
     for item in &file.items {
         if let syn::Item::Use(item_use) = item {
-            collect_retry_use_aliases(&item_use.tree, &mut aliases);
+            collect_retry_use_aliases(&item_use.tree, &[], &mut aliases);
+        }
+    }
+    for item in &file.items {
+        if let syn::Item::Fn(item_fn) = item {
+            aliases.insert(item_fn.sig.ident.to_string(), None);
         }
     }
     aliases
 }
 
-fn collect_retry_use_aliases(tree: &syn::UseTree, aliases: &mut RetryAliases) {
+fn collect_retry_use_aliases(tree: &syn::UseTree, prefix: &[String], aliases: &mut RetryScope) {
     match tree {
-        syn::UseTree::Path(path) => collect_retry_use_aliases(&path.tree, aliases),
+        syn::UseTree::Path(path) => {
+            let mut nested = prefix.to_vec();
+            nested.push(path.ident.to_string());
+            collect_retry_use_aliases(&path.tree, &nested, aliases);
+        }
         syn::UseTree::Group(group) => {
             for item in &group.items {
-                collect_retry_use_aliases(item, aliases);
+                collect_retry_use_aliases(item, prefix, aliases);
             }
         }
-        syn::UseTree::Name(name) => {
-            note_retry_alias(&name.ident.to_string(), &name.ident.to_string(), aliases)
-        }
+        syn::UseTree::Name(name) => note_retry_alias(
+            prefix,
+            &name.ident.to_string(),
+            &name.ident.to_string(),
+            aliases,
+        ),
         syn::UseTree::Rename(rename) => note_retry_alias(
+            prefix,
             &rename.ident.to_string(),
             &rename.rename.to_string(),
             aliases,
         ),
-        syn::UseTree::Glob(_) => {}
+        syn::UseTree::Glob(_) => note_retry_glob(prefix, aliases),
     }
 }
 
-fn note_retry_alias(original: &str, local: &str, aliases: &mut RetryAliases) {
-    match original {
-        "run_tx_retry" => {
-            aliases.direct.insert(local.to_string());
+fn note_retry_alias(prefix: &[String], original: &str, local: &str, aliases: &mut RetryScope) {
+    let symbol = retry_symbol_for_import(prefix, original);
+    if symbol.is_some() {
+        aliases.insert(local.to_string(), symbol);
+    }
+}
+
+fn note_retry_glob(prefix: &[String], aliases: &mut RetryScope) {
+    for name in ["run_tx_retry", "run_pg_tx_retry", "run_pg_localtx_retry"] {
+        note_retry_alias(prefix, name, name, aliases);
+    }
+}
+
+fn retry_symbol_for_import(prefix: &[String], name: &str) -> Option<RetrySymbol> {
+    match (prefix, name) {
+        ([root], "run_tx_retry") if root == "consistency" => Some(RetrySymbol::Direct),
+        ([root, module], "run_pg_tx_retry")
+            if matches!(root.as_str(), "crate" | "super" | "self") && module == "tx_retry" =>
+        {
+            Some(RetrySymbol::Generic)
         }
-        "run_pg_tx_retry" => {
-            aliases.wrapper.insert(local.to_string());
+        ([root, module], "run_pg_localtx_retry")
+            if matches!(root.as_str(), "crate" | "super" | "self") && module == "tx_retry" =>
+        {
+            Some(RetrySymbol::Local)
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -511,107 +542,345 @@ fn note_retry_alias(original: &str, local: &str, aliases: &mut RetryAliases) {
 struct RetryCall {
     line: usize,
     function: Option<String>,
+    wrapper: Option<RetryWrapper>,
+    arguments: Vec<RetryExprFacts>,
 }
 
-#[derive(Default)]
-struct RetryFunctionFacts {
-    wrapper_calls: usize,
-    paths: BTreeSet<String>,
-    methods: BTreeSet<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryWrapper {
+    Generic,
+    Local,
 }
 
-struct RetryAstScan<'a> {
-    aliases: &'a RetryAliases,
+#[derive(Debug, Default)]
+struct RetryExprFacts {
+    exact_path: Option<String>,
+    observation_factory: bool,
+    operation_method: Option<String>,
+}
+
+struct RetryAstScan {
+    scopes: Vec<RetryScope>,
     current_function: Option<String>,
     direct_calls: Vec<RetryCall>,
     wrapper_calls: Vec<RetryCall>,
-    functions: BTreeMap<String, RetryFunctionFacts>,
 }
 
-impl<'a> RetryAstScan<'a> {
-    fn new(aliases: &'a RetryAliases) -> Self {
+impl RetryAstScan {
+    fn new(aliases: RetryScope) -> Self {
         Self {
-            aliases,
+            scopes: vec![aliases],
             current_function: None,
             direct_calls: Vec::new(),
             wrapper_calls: Vec::new(),
-            functions: BTreeMap::new(),
         }
     }
 
-    fn visit_function(&mut self, name: String, block: &syn::Block) {
+    fn visit_function(&mut self, name: String, signature: &syn::Signature, block: &syn::Block) {
         let previous = self.current_function.replace(name.clone());
-        self.functions.entry(name).or_default();
-        syn::visit::visit_block(self, block);
+        self.scopes.push(RetryScope::new());
+        for input in &signature.inputs {
+            if let syn::FnArg::Typed(typed) = input {
+                self.shadow_pattern(&typed.pat);
+            }
+        }
+        <Self as syn::visit::Visit>::visit_block(self, block);
+        self.scopes.pop();
         self.current_function = previous;
+    }
+
+    fn resolve(&self, path: &syn::Path) -> Option<RetrySymbol> {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if segments.len() == 1 {
+            return self
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&segments[0]).copied())
+                .flatten();
+        }
+        retry_symbol_for_import(
+            &segments[..segments.len() - 1],
+            &segments[segments.len() - 1],
+        )
+    }
+
+    fn shadow_pattern(&mut self, pattern: &syn::Pat) {
+        let mut names = Vec::new();
+        collect_pattern_names(pattern, &mut names);
+        if let Some(scope) = self.scopes.last_mut() {
+            for name in names {
+                scope.insert(name, None);
+            }
+        }
     }
 }
 
-impl syn::visit::Visit<'_> for RetryAstScan<'_> {
+impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
     fn visit_item_fn(&mut self, node: &syn::ItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.block);
+        self.visit_function(node.sig.ident.to_string(), &node.sig, &node.block);
     }
 
     fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.block);
+        self.visit_function(node.sig.ident.to_string(), &node.sig, &node.block);
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let mut scope = RetryScope::new();
+        for statement in &node.stmts {
+            if let syn::Stmt::Item(syn::Item::Use(item_use)) = statement {
+                collect_retry_use_aliases(&item_use.tree, &[], &mut scope);
+            } else if let syn::Stmt::Item(syn::Item::Fn(item_fn)) = statement {
+                scope.insert(item_fn.sig.ident.to_string(), None);
+            }
+        }
+        self.scopes.push(scope);
+        for statement in &node.stmts {
+            syn::visit::visit_stmt(self, statement);
+            if let syn::Stmt::Local(local) = statement {
+                self.shadow_pattern(&local.pat);
+            }
+        }
+        self.scopes.pop();
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.scopes.push(RetryScope::new());
+        for input in &node.inputs {
+            self.shadow_pattern(input);
+        }
+        syn::visit::visit_expr(self, &node.body);
+        self.scopes.pop();
     }
 
     fn visit_expr_call(&mut self, node: &syn::ExprCall) {
         use syn::spanned::Spanned as _;
         if let syn::Expr::Path(path) = &*node.func
-            && let Some(name) = path
-                .path
-                .segments
-                .last()
-                .map(|segment| segment.ident.to_string())
+            && let Some(symbol) = self.resolve(&path.path)
         {
-            let call = || RetryCall {
+            let call = |wrapper| RetryCall {
                 line: node.func.span().start().line,
                 function: self.current_function.clone(),
+                wrapper,
+                arguments: node.args.iter().map(retry_expr_facts).collect(),
             };
-            if self.aliases.direct.contains(&name) {
-                self.direct_calls.push(call());
-            }
-            if self.aliases.wrapper.contains(&name) {
-                self.wrapper_calls.push(call());
-                if let Some(function) = &self.current_function {
-                    self.functions
-                        .entry(function.clone())
-                        .or_default()
-                        .wrapper_calls += 1;
-                }
+            match symbol {
+                RetrySymbol::Direct => self.direct_calls.push(call(None)),
+                RetrySymbol::Generic => self.wrapper_calls.push(call(Some(RetryWrapper::Generic))),
+                RetrySymbol::Local => self.wrapper_calls.push(call(Some(RetryWrapper::Local))),
             }
         }
         syn::visit::visit_expr_call(self, node);
     }
+}
 
-    fn visit_expr_path(&mut self, node: &syn::ExprPath) {
-        if let (Some(function), Some(name)) = (
-            &self.current_function,
-            node.path
-                .segments
-                .last()
-                .map(|segment| segment.ident.to_string()),
-        ) {
-            self.functions
-                .entry(function.clone())
-                .or_default()
-                .paths
-                .insert(name);
-        }
-        syn::visit::visit_expr_path(self, node);
+fn retry_expr_facts(expr: &syn::Expr) -> RetryExprFacts {
+    RetryExprFacts {
+        exact_path: exact_expr_path(expr),
+        observation_factory: is_observation_factory_expr(expr),
+        operation_method: canonical_retry_operation(expr),
     }
+}
 
-    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
-        if let Some(function) = &self.current_function {
-            self.functions
-                .entry(function.clone())
-                .or_default()
-                .methods
-                .insert(node.method.to_string());
+fn valid_settings_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Generic)
+        && call.arguments.len() == 3
+        && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_CONFIG_BOUNDARY")
+        && call.arguments[1].operation_method.as_deref() == Some("retry_co_tx_with_outbox")
+}
+
+fn valid_identity_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Local)
+        && call.arguments.len() == 4
+        && call.arguments[0].exact_path.as_deref() == Some("IDENTITY_CREDENTIAL_BOUNDARY")
+        && call.arguments[1].observation_factory
+        && call.arguments[2].operation_method.as_deref() == Some("retry_write")
+}
+
+fn collect_pattern_names(pattern: &syn::Pat, names: &mut Vec<String>) {
+    match pattern {
+        syn::Pat::Ident(ident) => names.push(ident.ident.to_string()),
+        syn::Pat::Reference(reference) => collect_pattern_names(&reference.pat, names),
+        syn::Pat::Tuple(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_names(element, names);
+            }
         }
-        syn::visit::visit_expr_method_call(self, node);
+        syn::Pat::TupleStruct(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_names(element, names);
+            }
+        }
+        syn::Pat::Struct(structure) => {
+            for field in &structure.fields {
+                collect_pattern_names(&field.pat, names);
+            }
+        }
+        syn::Pat::Slice(slice) => {
+            for element in &slice.elems {
+                collect_pattern_names(element, names);
+            }
+        }
+        syn::Pat::Type(typed) => collect_pattern_names(&typed.pat, names),
+        syn::Pat::Or(or) => {
+            for case in &or.cases {
+                collect_pattern_names(case, names);
+            }
+        }
+        _ => {}
     }
+}
+
+fn transparent_expr(expr: &syn::Expr) -> &syn::Expr {
+    match expr {
+        syn::Expr::Group(group) => transparent_expr(&group.expr),
+        syn::Expr::Paren(paren) => transparent_expr(&paren.expr),
+        _ => expr,
+    }
+}
+
+fn exact_expr_path(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = transparent_expr(expr) else {
+        return None;
+    };
+    Some(
+        path.path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+    )
+}
+
+fn is_observation_factory_expr(expr: &syn::Expr) -> bool {
+    match transparent_expr(expr) {
+        syn::Expr::Call(call) => {
+            exact_expr_path(&call.func).as_deref()
+                == Some("identity::password_change_localtx_observation")
+                && call.args.is_empty()
+        }
+        syn::Expr::MethodCall(method) if method.method == "ok_or_else" => {
+            is_observation_factory_expr(&method.receiver)
+        }
+        syn::Expr::Try(try_expr) => is_observation_factory_expr(&try_expr.expr),
+        syn::Expr::Match(match_expr) => is_canonical_observation_match(match_expr),
+        _ => false,
+    }
+}
+
+fn is_canonical_observation_match(match_expr: &syn::ExprMatch) -> bool {
+    if !is_observation_factory_expr(&match_expr.expr) || match_expr.arms.len() != 2 {
+        return false;
+    }
+    let some = &match_expr.arms[0];
+    let none = &match_expr.arms[1];
+    let Some(binding) = some_observation_binding(&some.pat) else {
+        return false;
+    };
+    some.guard.is_none()
+        && exact_expr_path(&some.body).as_deref() == Some(binding.as_str())
+        && none.guard.is_none()
+        && is_none_pattern(&none.pat)
+        && is_return_err(&none.body)
+}
+
+fn some_observation_binding(pattern: &syn::Pat) -> Option<String> {
+    let syn::Pat::TupleStruct(tuple) = pattern else {
+        return None;
+    };
+    if tuple.path.segments.len() != 1 || tuple.path.segments[0].ident != "Some" {
+        return None;
+    }
+    if tuple.elems.len() != 1 {
+        return None;
+    }
+    let syn::Pat::Ident(binding) = &tuple.elems[0] else {
+        return None;
+    };
+    Some(binding.ident.to_string())
+}
+
+fn is_none_pattern(pattern: &syn::Pat) -> bool {
+    match pattern {
+        syn::Pat::Path(path) => {
+            path.path.segments.len() == 1 && path.path.segments[0].ident == "None"
+        }
+        syn::Pat::Ident(ident) => {
+            ident.ident == "None"
+                && ident.by_ref.is_none()
+                && ident.mutability.is_none()
+                && ident.subpat.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn is_return_err(expr: &syn::Expr) -> bool {
+    let expr = match transparent_expr(expr) {
+        syn::Expr::Block(block) if block.block.stmts.len() == 1 => match &block.block.stmts[0] {
+            syn::Stmt::Expr(expr, _) => transparent_expr(expr),
+            _ => return false,
+        },
+        expr => expr,
+    };
+    let syn::Expr::Return(return_expr) = expr else {
+        return false;
+    };
+    let Some(value) = &return_expr.expr else {
+        return false;
+    };
+    let syn::Expr::Call(call) = transparent_expr(value) else {
+        return false;
+    };
+    exact_expr_path(&call.func).as_deref() == Some("Err") && call.args.len() == 1
+}
+
+fn canonical_retry_operation(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Closure(closure) = transparent_expr(expr) else {
+        return None;
+    };
+    canonical_retry_tail(&closure.body)
+}
+
+fn canonical_retry_tail(expr: &syn::Expr) -> Option<String> {
+    match transparent_expr(expr) {
+        syn::Expr::Async(async_expr) => {
+            block_tail(&async_expr.block).and_then(canonical_retry_tail)
+        }
+        syn::Expr::Block(block) => block_tail(&block.block).and_then(canonical_retry_tail),
+        syn::Expr::Await(await_expr) => canonical_retry_tail(&await_expr.base),
+        syn::Expr::MethodCall(method)
+            if matches!(
+                method.method.to_string().as_str(),
+                "retry_write" | "retry_co_tx_with_outbox"
+            ) && is_self_pool(&method.receiver) =>
+        {
+            Some(method.method.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn block_tail(block: &syn::Block) -> Option<&syn::Expr> {
+    match block.stmts.last()? {
+        syn::Stmt::Expr(expr, None) => Some(expr),
+        _ => None,
+    }
+}
+
+fn is_self_pool(expr: &syn::Expr) -> bool {
+    let syn::Expr::Field(pool) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Member::Named(member) = &pool.member else {
+        return false;
+    };
+    member == "pool" && exact_expr_path(&pool.base).as_deref() == Some("self")
 }
 
 fn tenant_tables_from_migrations(files: &[(String, String)]) -> BTreeSet<String> {
@@ -2262,6 +2531,21 @@ pub mod fault_matrix;
     }
 
     #[test]
+    fn retry_guard_allows_engine_retry_only_in_private_core_including_alias() {
+        let mut sites = BTreeSet::new();
+        for source in [
+            "async fn run_pg_tx_retry_core(){ run_tx_retry(policy, op, classify, sleep).await; }",
+            "use consistency::run_tx_retry as engine_retry; async fn run_pg_tx_retry_core(){ engine_retry(policy, op, classify, sleep).await; }",
+        ] {
+            let findings = retry_placement_findings("tx_retry.rs", source, &mut sites);
+            assert!(
+                findings.is_empty(),
+                "core engine call rejected: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
     fn retry_guard_resolves_grouped_multiline_direct_alias_and_glob() {
         let mut sites = BTreeSet::new();
         for source in [
@@ -2274,6 +2558,33 @@ pub mod fault_matrix;
                 "alias/glob must not bypass retry placement: {findings:?}"
             );
         }
+    }
+
+    #[test]
+    fn retry_guard_resolves_block_local_aliases_and_respects_shadowing() {
+        let mut sites = BTreeSet::new();
+        for source in [
+            "async fn save(){ use consistency::run_tx_retry as retry; retry(policy, op, classify, sleep).await; }",
+            "async fn save(){ use crate::tx_retry::run_pg_tx_retry as retry; retry(B, op, c).await; }",
+        ] {
+            let findings = retry_placement_findings("role_repo.rs", source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "block-local alias must not bypass retry placement: {findings:?}"
+            );
+        }
+
+        let findings = retry_placement_findings(
+            "role_repo.rs",
+            "use crate::tx_retry::run_pg_tx_retry as retry; async fn save(){ let retry = helper; retry(B, op, c).await; }",
+            &mut sites,
+        );
+        assert!(
+            findings.is_empty(),
+            "a lexical value binding must shadow the imported wrapper: {findings:?}"
+        );
     }
 
     #[test]
@@ -2291,7 +2602,7 @@ pub mod fault_matrix;
     }
 
     #[test]
-    fn retry_guard_accepts_grouped_wrapper_alias_inside_exact_boundary() {
+    fn retry_guard_accepts_grouped_generic_wrapper_alias_inside_exact_boundary() {
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "config_repo.rs",
@@ -2300,6 +2611,75 @@ pub mod fault_matrix;
         );
         assert!(findings.is_empty(), "{findings:?}");
         assert!(sites.contains("settings-config-commit"));
+    }
+
+    #[test]
+    fn retry_guard_accepts_local_wrapper_alias_with_identity_factory() {
+        let mut sites = BTreeSet::new();
+        let findings = retry_placement_findings(
+            "credential_repo.rs",
+            "use crate::tx_retry::{run_pg_localtx_retry as retry}; impl Repo { async fn bump_version(&self){ retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
+            &mut sites,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(sites.contains("identity-credential-bump-version"));
+    }
+
+    #[test]
+    fn retry_guard_rejects_wrong_wrapper_or_unbound_identity_evidence() {
+        let mut sites = BTreeSet::new();
+        for source in [
+            "impl Repo { async fn bump_version(&self){ run_pg_tx_retry(IDENTITY_CREDENTIAL_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, observation, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Uow { async fn commit(&self){ run_pg_localtx_retry(SETTINGS_CONFIG_BOUNDARY, observation, || async { self.pool.retry_co_tx_with_outbox() }, classify).await; } }",
+        ] {
+            let rel = if source.contains("impl Repo") {
+                "credential_repo.rs"
+            } else {
+                "config_repo.rs"
+            };
+            let findings = retry_placement_findings(rel, source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "wrong wrapper/evidence must fail closed: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_guard_rejects_block_tuple_and_dead_branch_argument_bait() {
+        let mut sites = BTreeSet::new();
+        for source in [
+            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry({ let _ = IDENTITY_CREDENTIAL_BOUNDARY; WRONG_BOUNDARY }, identity::password_change_localtx_observation().ok_or_else(missing)?, |_attempt| async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, (identity::password_change_localtx_observation(), observation).1, |_attempt| async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, match identity::password_change_localtx_observation() { Some(observation) => fake_observation, None => return Err(missing) }, |_attempt| async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, |_attempt| async { if false { self.pool.retry_write() } else { raw_write() } }, classify).await; } }",
+        ] {
+            let findings = retry_placement_findings("credential_repo.rs", source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "argument bait must not satisfy the canonical retry shape: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_guard_accepts_production_observation_match_shape() -> Result<()> {
+        let expression: syn::Expr = syn::parse_str(
+            r#"match identity::password_change_localtx_observation() {
+                Some(observation) => observation,
+                None => return Err(IdentityError::Storage(Box::new(missing))),
+            }"#,
+        )?;
+        assert!(
+            is_observation_factory_expr(&expression),
+            "generated observation match must preserve the Some binding and diverge on None"
+        );
+        Ok(())
     }
 
     #[test]
@@ -2312,12 +2692,34 @@ pub mod fault_matrix;
         );
         let identity = retry_placement_findings(
             "credential_repo.rs",
-            "impl Repo { async fn bump_version(&self){ run_pg_tx_retry(IDENTITY_CREDENTIAL_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
             &mut sites,
         );
         assert!(config.is_empty(), "{config:?}");
         assert!(identity.is_empty(), "{identity:?}");
         assert!(sites.contains("settings-config-commit"));
         assert!(sites.contains("identity-credential-bump-version"));
+    }
+
+    #[test]
+    fn retry_guard_real_workspace_contains_both_exact_boundaries() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let files = load_prod_rs(&root.join("adapters/postgres/src"))?;
+        let mut sites = BTreeSet::new();
+        let mut findings = Vec::new();
+        for (rel, source) in files.iter().filter(|(rel, _)| {
+            matches!(
+                rel.as_str(),
+                "tx_retry.rs" | "config_repo.rs" | "credential_repo.rs"
+            )
+        }) {
+            findings.extend(retry_placement_findings(rel, source, &mut sites));
+        }
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            sites,
+            BTreeSet::from(["identity-credential-bump-version", "settings-config-commit"])
+        );
+        Ok(())
     }
 }

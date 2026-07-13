@@ -138,12 +138,23 @@ funnel 可铸造；兄弟模块与 `tx_retry` 只能消费。`PgTenantPool` 仍�
 capability 的唯一入口；`cotx` 在每次 attempt 内重新 begin、注入 `SET LOCAL`，并经单一 settlement
 funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` 收口为独立 Storage settlement
 错误（保留 primary+rollback 因果链），不再把可重试领域冲突（如 `VersionConflict`）冒泡到 HTTP。
-`run_pg_tx_retry` 的 operation 签名只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为
-transient 时有界重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。该 runner 既服务
-`tenant-scoped-uow` 准入路径，也可被 `repo-atomic-cas` adapter 用于单次 CAS 的底层 settlement；
+Postgres retry operation 只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为 transient 时有界
+重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。通用 `run_pg_tx_retry` 保留 adapter operation
+boundary 的 retry-loop 指标；LocalTx contract 必须改用 `run_pg_localtx_retry`，并传 opaque
+`LocalTxObservation`。该 observation 只能由 typed `HttpRouteBinding<Marker, LocalTx>` 构造；identity 域从
+同一 generated password-change `ROUTE` + `SPEC.local_tx.boundary` 提供 fail-closed factory，Postgres adapter
+不建立被分层禁止的 production generated 依赖。两个 runner 复用同一个私有 retry core，不以 `Option` context
+或 bool 在运行期区分语义。该 core 既服务 `tenant-scoped-uow` 准入路径，也可被
+`repo-atomic-cas` adapter 用于单次 CAS 的底层 settlement；
 业务层 CAS 冲突仍按 `repo-atomic-cas` 规则上抛，不经 handler 自动重试。retry engine 与两个准入 UoW
-的放置继续由 `pg-tenant-tx-guard`（Medium）守住。#1705 在该 closed carrier 上补 metrics/trace，不改变
-settlement 语义。
+的放置继续由 `pg-tenant-tx-guard`（Medium）守住。
+
+`observ::LocalTxObservation` 从 typed generated route 私有提取 domain / contract id，并以
+`LocalTxBoundary` / `TxRetryClass` / `LocalTxFinalStatus` 的闭标签发射 metrics 与 trace。每个 failed attempt
+记录 settlement-safe retry class；invocation 结束只在本轮曾存在真实 settlement 时发 final 指标，并保留最后
+一个 `Some(LocalTxFinalStatus)`，后续 begin 前 `Unsettled` 不得擦除已观测 settlement。全程只有 `Unsettled`
+则没有 transaction outcome，不得映射为 rolled-back 或 commit-unknown。`commit_unknown` / `rollback_failed` /
+retry exhausted 在 metrics 与 warn trace 中显式可见，且不改变 #1699 已闭合的 no-retry settlement 语义。
 
 ## Static coverage gate
 

@@ -42,7 +42,9 @@ use sqlx::{PgConnection, Row};
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{epoch_secs_to_time, unix_secs};
-use crate::tx_retry::{IDENTITY_CREDENTIAL_BOUNDARY, classify_identity_error, run_pg_tx_retry};
+use crate::tx_retry::{
+    IDENTITY_CREDENTIAL_BOUNDARY, classify_identity_error, run_pg_localtx_retry,
+};
 
 #[cfg(all(test, feature = "integration"))]
 static CREDENTIAL_RETRY_FAIL_REMAINING: AtomicUsize = AtomicUsize::new(0);
@@ -357,8 +359,16 @@ impl CredentialRepo for PgCredentialRepo {
         let login_str = next.login().as_str().to_owned();
         #[cfg(all(test, feature = "integration"))]
         let post_update_gate = self.bump_post_update_gate.clone();
-        run_pg_tx_retry(
+        run_pg_localtx_retry(
             IDENTITY_CREDENTIAL_BOUNDARY,
+            match identity::password_change_localtx_observation() {
+                Some(observation) => observation,
+                None => {
+                    return Err(IdentityError::Storage(Box::new(std::io::Error::other(
+                        "generated identity.password-change contract is missing LocalTx metadata",
+                    ))));
+                }
+            },
             |_attempt| {
                 let tenant_uuid = tenant_uuid.clone();
                 let login_str = login_str.clone();

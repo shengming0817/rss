@@ -158,6 +158,39 @@ label 闭值集纪律：
 - `boundary` 只允许 adapter 内常量（当前 `settings.config` / `identity.credential`），不得从租户、key、
   SQL、handler 或请求输入派生。
 
+### LocalTx Settlement Metrics（#1705）
+
+LocalTx-aware Postgres retry 除上述通用 retry-loop 指标外，还经 `observ::LocalTxObservation` 发射契约归属与
+真实 transaction settlement。两组指标正交：`tx_retry_*` 描述 retry engine，`localtx_*` 描述已观测到的
+LocalTx 结算；禁止从 `TxRetryFinalStatus` 反推 commit / rollback 结果。
+
+| metric | 类型 | label | 语义 |
+|--------|------|-------|------|
+| `localtx_retry_attempts_total` | Counter | `domain`,`contract_id`,`boundary`,`retry_class` | LocalTx 失败 attempt 的 settlement-safe retry 分类 |
+| `localtx_final_total` | Counter | `domain`,`contract_id`,`boundary`,`final_status` | 一次 LocalTx retry invocation 最后真实可观测的结算状态 |
+| `localtx_attempts` | Histogram | `domain`,`contract_id`,`boundary`,`final_status` | 有真实终态的 invocation 实际 attempt 数 |
+
+label 与 trace 字段纪律：
+
+- `domain` / `contract_id` 只能从 generated `HttpRouteBinding<Marker, LocalTx>` 内的静态
+  `ContractBinding` 取得；`observ` 独占 metric 名与 label key，adapter 不暴露或手写第二条 label 路径。
+- `boundary`、`retry_class`、`final_status` 分别闭合于 `LocalTxBoundary::as_label()`、
+  `TxRetryClass::as_label()`、`LocalTxFinalStatus::as_label()`；当前终态为 `committed` / `rolled_back` /
+  `rollback_failed` / `commit_unknown`。
+- `Unsettled` 表示当前 attempt 在 begin 前失败、没有 transaction settlement：可以按 retry class 有界重试，
+  但不得伪造 `final_status`。invocation 全程只有 `Unsettled` 时不发 final；若早先 attempt 已有真实 settlement，
+  后续 `Unsettled` 不擦除该最后已观测状态，histogram 的 attempts 仍记录 invocation 总次数。
+- `commit_unknown` / `rollback_failed` 强制不可重试，retry exhausted 也在契约级 LocalTx span 下发 warn；普通
+  attempt/completion 只发 debug。trace invocation/attempt/completion 只携 contract、closed label、attempt count；
+  tenant、业务 key、SQL、payload 与错误文本不得进入 metric label。
+- `LOCALTX-OBS-LABELS-01` 由 typed LocalTx route + 私有 façade + 闭枚举在编译期 Hard 化；generated route
+  provenance 仍由 codegen golden 与 `CONTRACT-BINDING-FUNNEL-01`（Medium）守卫，不虚称跨 crate 来源 Hard。
+- 运维消费闭环由 `docs/ops/202607082104-1642-consistency-dashboard-checklist.md`、
+  `docs/ops/localtx-alerts.rules.yaml` 与
+  `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md` 承载。
+  仅 `commit_unknown` / `rollback_failed` 是需要人工核实真实数据库状态的 actionable page；retry exhausted
+  保持 dashboard/trace 诊断信号，禁止从通用 `tx_retry_*` 反推或重复告警 LocalTx settlement。
+
 ### Outbox Relay Metrics（#1209）
 
 outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` 注入式 `OutboxMetrics` 端口，

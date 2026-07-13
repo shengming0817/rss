@@ -3651,10 +3651,15 @@ version = "0.0.0"
 dependencies = [
  "consistency",
  "ids",
+ "metrics",
+ "metrics-exporter-prometheus",
  "primitives",
  "runctx",
  "secure",
  "support",
+ "tracing",
+ "trybuild",
+ "vocab",
 ]
 
 [[package]]
@@ -4055,6 +4060,7 @@ dependencies = [
  "ids",
  "metrics",
  "metrics-exporter-prometheus",
+ "observ",
  "primitives",
  "runctx",
  "secure",

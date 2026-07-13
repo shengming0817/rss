@@ -13,6 +13,10 @@
 //! 不新增动态 `LabelValue` 或 outbox label enum。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
 
+mod localtx;
+
+pub use localtx::LocalTxObservation;
+
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────
 
 /// HTTP method 闭值集。

@@ -1,0 +1,33 @@
+# LocalTx transaction settlement alerts (#1705).
+#
+# Metric and closed-label contract: docs/rules/observability.md §LocalTx Settlement Metrics.
+# Operator procedure: docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md.
+#
+# Validation: promtool check rules docs/ops/localtx-alerts.rules.yaml
+#
+# Prometheus alerting guidance favors few, actionable symptoms. Only settlements whose database
+# outcome requires human verification page here. Retry exhaustion is deliberately excluded: it is
+# a retry-engine condition, may have a known rolled_back settlement, and remains dashboard/trace
+# evidence instead of an independent page.
+groups:
+  - name: localtx-settlement
+    rules:
+      - alert: LocalTxCommitUnknown
+        expr: sum by (domain, contract_id, boundary) (increase(localtx_final_total{final_status="commit_unknown"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LocalTx commit outcome unknown (domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }})"
+          description: "A commit acknowledgement was lost at {{ $labels.boundary }}; do not retry the mutation. Freeze automated replay and verify the authoritative record using the contract-scoped WARN trace before reconciliation."
+          runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#commit-unknown"
+
+      - alert: LocalTxRollbackFailed
+        expr: sum by (domain, contract_id, boundary) (increase(localtx_final_total{final_status="rollback_failed"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LocalTx rollback failed (domain={{ $labels.domain }}, contract_id={{ $labels.contract_id }})"
+          description: "Rollback failed at {{ $labels.boundary }}; do not retry on the same transaction or connection. Check database health, isolate the affected connection, and verify authoritative state before reconciliation."
+          runbook: "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md#rollback-failed"

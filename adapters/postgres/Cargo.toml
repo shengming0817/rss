@@ -19,6 +19,7 @@ runctx = { path = "../../crates/runctx" }
 diagctx = { path = "../../crates/diagctx" }
 consistency = { path = "../../crates/consistency" }
 primitives = { path = "../../crates/primitives" }
+observ = { path = "../../crates/observ", optional = true }
 # emit 侧从当前 tracing span 捕获 W3C traceparent 写 outbox metadata 保留键 `trace`（#1224，fail-open）；
 # 只依赖此 helper、不直接 import otel（otel 收口在 tracewire/adapters-otel）。
 tracewire = { path = "../../crates/tracewire" }
@@ -70,7 +71,7 @@ anyhow = { workspace = true, optional = true }
 [features]
 default = []
 domain-settings = ["dep:settings"]
-domain-identity = ["dep:identity"]
+domain-identity = ["dep:identity", "dep:observ"]
 domain-audit = ["dep:audit"]
 # 需真实 postgres 的集成测试门控（azure 无 CI；feature 关闭时 src/integration_tests.rs 不编译，verify 永远绿）。
 # testkit/containers 经此传递激活 testcontainers（self-provision pg，无需手工预置）。

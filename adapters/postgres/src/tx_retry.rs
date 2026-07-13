@@ -2,11 +2,17 @@
 
 use std::error::Error;
 use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use consistency::{TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryReport, run_tx_retry};
+use consistency::{
+    LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryReport,
+    run_tx_retry,
+};
 #[cfg(feature = "domain-identity")]
 use identity::ports::IdentityError;
+#[cfg(feature = "domain-identity")]
+use observ::LocalTxObservation;
 #[cfg(feature = "domain-settings")]
 use settings::ports::ConfigRepoError;
 
@@ -83,9 +89,10 @@ pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
 }
 
 /// Run a Postgres UoW under the default retry policy and emit closed-label metrics.
+#[cfg(feature = "domain-settings")]
 pub(crate) async fn run_pg_tx_retry<T, E, Op, OpFut, Classify>(
     boundary: &'static str,
-    mut op: Op,
+    op: Op,
     classify: Classify,
 ) -> Result<T, E>
 where
@@ -93,11 +100,71 @@ where
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
 {
+    let (result, _, _) = run_pg_tx_retry_core(boundary, op, classify, |_, _, _| {}).await;
+    result
+}
+
+/// Run a typed LocalTx Postgres UoW and emit retry and settlement observability.
+#[cfg(feature = "domain-identity")]
+pub(crate) async fn run_pg_localtx_retry<T, E, Op, OpFut, Classify>(
+    operation_boundary: &'static str,
+    observation: LocalTxObservation,
+    op: Op,
+    classify: Classify,
+) -> Result<T, E>
+where
+    Op: FnMut(u32) -> OpFut,
+    OpFut: Future<Output = LocalTxAttempt<T, E>>,
+    Classify: Fn(&E) -> TxRetryClass,
+{
+    let (result, report, settlement) = run_pg_tx_retry_core(
+        operation_boundary,
+        op,
+        classify,
+        |attempt, retry_class, settlement| {
+            observation.record_failed_attempt(attempt, retry_class, settlement);
+        },
+    )
+    .await;
+    observation.finish(report.attempts(), report.final_status(), settlement);
+    result
+}
+
+async fn run_pg_tx_retry_core<T, E, Op, OpFut, Classify, OnFailed>(
+    boundary: &'static str,
+    mut op: Op,
+    classify: Classify,
+    on_failed: OnFailed,
+) -> (Result<T, E>, TxRetryReport, Option<LocalTxFinalStatus>)
+where
+    Op: FnMut(u32) -> OpFut,
+    OpFut: Future<Output = LocalTxAttempt<T, E>>,
+    Classify: Fn(&E) -> TxRetryClass,
+    OnFailed: Fn(u32, TxRetryClass, Option<LocalTxFinalStatus>),
+{
+    let last_settlement = Mutex::new(None);
     let (result, report) = run_tx_retry(
         TxRetryPolicy::default(),
         |attempt| {
             let future = op(attempt);
-            async { future.await.into_retry_result(&classify) }
+            let last_settlement = &last_settlement;
+            let on_failed = &on_failed;
+            let classify = &classify;
+            async move {
+                let attempt_result = future.await;
+                let settlement = attempt_result.settlement();
+                if let Some(status) = settlement {
+                    match last_settlement.lock() {
+                        Ok(mut last) => *last = Some(status),
+                        Err(poisoned) => *poisoned.into_inner() = Some(status),
+                    }
+                }
+                let result = attempt_result.into_retry_result(classify);
+                if let Err(error) = &result {
+                    on_failed(attempt, error.class(), settlement);
+                }
+                result
+            }
         },
         |error| {
             let class = error.class();
@@ -108,7 +175,15 @@ where
     )
     .await;
     record_final(boundary, report);
-    result.map_err(LocalTxRetryError::into_error)
+    let settlement = match last_settlement.into_inner() {
+        Ok(settlement) => settlement,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    (
+        result.map_err(LocalTxRetryError::into_error),
+        report,
+        settlement,
+    )
 }
 
 async fn sleep_delay(delay: Duration) {

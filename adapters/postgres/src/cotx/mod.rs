@@ -1012,13 +1012,17 @@ mod tx_capability_tests {
     }
 }
 
-#[cfg(all(test, feature = "domain-settings"))]
+#[cfg(all(test, any(feature = "domain-settings", feature = "domain-identity")))]
 mod retry_settlement_tests {
+    #[cfg(feature = "domain-settings")]
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use consistency::TxRetryClass;
 
     use super::LocalTxAttempt;
+    #[cfg(feature = "domain-identity")]
+    use crate::tx_retry::{IDENTITY_CREDENTIAL_BOUNDARY, run_pg_localtx_retry};
+    #[cfg(feature = "domain-settings")]
     use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, run_pg_tx_retry};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -1027,9 +1031,11 @@ mod retry_settlement_tests {
         Transient,
         #[error("conflict")]
         Conflict,
+        #[cfg(feature = "domain-settings")]
         #[error("permanent")]
         Permanent,
         #[error("ownership lost")]
+        #[cfg(feature = "domain-settings")]
         OwnershipLost,
     }
 
@@ -1037,12 +1043,15 @@ mod retry_settlement_tests {
         match error {
             FakeError::Transient => TxRetryClass::Transient,
             FakeError::Conflict => TxRetryClass::Conflict,
+            #[cfg(feature = "domain-settings")]
             FakeError::Permanent => TxRetryClass::Permanent,
+            #[cfg(feature = "domain-settings")]
             FakeError::OwnershipLost => TxRetryClass::OwnershipLost,
         }
     }
 
     #[test]
+    #[cfg(feature = "domain-settings")]
     fn retry_metrics_emit_closed_labels() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -1099,10 +1108,193 @@ mod retry_settlement_tests {
         assert!(rendered.contains("status=\"success\""), "{rendered}");
         assert!(rendered.contains("status=\"conflict\""), "{rendered}");
         assert!(rendered.contains("status=\"exhausted\""), "{rendered}");
+        assert!(
+            !rendered.contains("localtx_"),
+            "generic retry must not emit LocalTx telemetry: {rendered}"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "domain-identity")]
+    fn password_change_observation() -> Result<observ::LocalTxObservation, std::io::Error> {
+        identity::password_change_localtx_observation().ok_or_else(|| {
+            std::io::Error::other("generated password-change contract must carry LocalTx evidence")
+        })
+    }
+
+    #[test]
+    #[cfg(feature = "domain-identity")]
+    fn localtx_retry_metrics_preserve_retry_and_settlement_axes()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        let committed_observation = password_change_observation()?;
+        let terminal_observations = [
+            password_change_observation()?,
+            password_change_observation()?,
+            password_change_observation()?,
+        ];
+        let exhausted_observation = password_change_observation()?;
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let committed = run_pg_localtx_retry(
+                    IDENTITY_CREDENTIAL_BOUNDARY,
+                    committed_observation,
+                    |attempt| async move {
+                        if attempt == 1 {
+                            LocalTxAttempt::rolled_back(FakeError::Transient)
+                        } else {
+                            LocalTxAttempt::committed(())
+                        }
+                    },
+                    classify_fake,
+                )
+                .await;
+                assert_eq!(committed, Ok(()));
+
+                for (attempt, observation) in [
+                    LocalTxAttempt::<(), _>::rolled_back(FakeError::Conflict),
+                    LocalTxAttempt::commit_unknown(FakeError::Transient),
+                    LocalTxAttempt::rollback_failed(FakeError::Transient),
+                ]
+                .into_iter()
+                .zip(terminal_observations)
+                {
+                    let mut attempt = Some(attempt);
+                    let result = run_pg_localtx_retry(
+                        IDENTITY_CREDENTIAL_BOUNDARY,
+                        observation,
+                        |_attempt| {
+                            core::future::ready(match attempt.take() {
+                                Some(attempt) => attempt,
+                                None => LocalTxAttempt::committed(()),
+                            })
+                        },
+                        classify_fake,
+                    )
+                    .await;
+                    assert!(result.is_err());
+                    assert!(attempt.is_none(), "terminal settlement must not retry");
+                }
+
+                let exhausted = run_pg_localtx_retry(
+                    IDENTITY_CREDENTIAL_BOUNDARY,
+                    exhausted_observation,
+                    |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient) },
+                    classify_fake,
+                )
+                .await;
+                assert_eq!(exhausted, Err(FakeError::Transient));
+            });
+        });
+
+        let rendered = handle.render();
+        for expected in [
+            "localtx_retry_attempts_total",
+            "localtx_final_total",
+            "localtx_attempts",
+            "domain=\"identity\"",
+            "contract_id=\"identity.password-change\"",
+            "boundary=\"single_domain\"",
+            "retry_class=\"transient\"",
+            "retry_class=\"conflict\"",
+            "retry_class=\"permanent\"",
+            "final_status=\"committed\"",
+            "final_status=\"rolled_back\"",
+            "final_status=\"commit_unknown\"",
+            "final_status=\"rollback_failed\"",
+            "status=\"exhausted\"",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}: {rendered}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "domain-identity")]
+    fn last_real_settlement_survives_later_unsettled_attempts()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        let observation = password_change_observation()?;
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let result = run_pg_localtx_retry(
+                    IDENTITY_CREDENTIAL_BOUNDARY,
+                    observation,
+                    |attempt| async move {
+                        if attempt == 1 {
+                            LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient)
+                        } else {
+                            LocalTxAttempt::unsettled(FakeError::Transient)
+                        }
+                    },
+                    classify_fake,
+                )
+                .await;
+                assert_eq!(result, Err(FakeError::Transient));
+            });
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("localtx_retry_attempts_total"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("localtx_final_total"), "{rendered}");
+        assert!(
+            rendered.contains("final_status=\"rolled_back\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("localtx_attempts_sum{domain=\"identity\",contract_id=\"identity.password-change\",boundary=\"single_domain\",final_status=\"rolled_back\"} 3"),
+            "histogram must record all retry attempts: {rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "domain-identity")]
+    fn entirely_unsettled_retry_does_not_forge_localtx_final()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        let observation = password_change_observation()?;
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let result = run_pg_localtx_retry(
+                    IDENTITY_CREDENTIAL_BOUNDARY,
+                    observation,
+                    |_attempt| async { LocalTxAttempt::<(), _>::unsettled(FakeError::Transient) },
+                    classify_fake,
+                )
+                .await;
+                assert_eq!(result, Err(FakeError::Transient));
+            });
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("localtx_retry_attempts_total"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("localtx_final_total"), "{rendered}");
+        assert!(!rendered.contains("localtx_attempts{"), "{rendered}");
         Ok(())
     }
 
     #[tokio::test]
+    #[cfg(feature = "domain-settings")]
     async fn settlement_safety_controls_retry() {
         let attempts = AtomicU32::new(0);
         let unsettled = run_pg_tx_retry(

@@ -39,7 +39,7 @@ pub mod ports;
 pub use application::{
     ChangePasswordError, IdentityDomain, IdentityDomainDeps, LoginError, LoginService,
     PolicyManageError, PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle,
-    RefreshError, RefreshPrincipal, RefreshService,
+    RefreshError, RefreshPrincipal, RefreshService, password_change_localtx_observation,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
@@ -107,6 +107,11 @@ mod smoke {
         ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, Session, SessionId,
         authorize_rbac, evaluate_abac,
     };
+
+    #[test]
+    fn password_change_observation_comes_from_generated_localtx_evidence() {
+        assert!(crate::password_change_localtx_observation().is_some());
+    }
 
     // 证明主要类型是 Send（跨 await 点传播）。
     fn _assert_send<T: Send>() {}

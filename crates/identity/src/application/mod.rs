@@ -127,6 +127,16 @@ use crate::ports::{
     RoleReadRepo, SessionLifecycle, TenantRepoScope,
 };
 
+/// Build password-change LocalTx observability from generated contract evidence.
+///
+/// `None` is fail-closed evidence that generated L1 metadata is incomplete; adapters must map it
+/// to their boundary error instead of inventing a route or boundary label.
+pub fn password_change_localtx_observation() -> Option<observ::LocalTxObservation> {
+    PASSWORD_CHANGE_HTTP_SPEC
+        .local_tx
+        .map(|spec| observ::LocalTxObservation::new(PASSWORD_CHANGE_HTTP_ROUTE, spec.boundary))
+}
+
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
 pub use rbac_admin::{RbacAdminError, RbacAdminService};

@@ -18,3 +18,10 @@ support = { path = "../support" }
 runctx = { path = "../runctx" }
 consistency = { path = "../consistency" }
 primitives = { path = "../primitives" }
+vocab = { path = "../vocab" }
+metrics = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+metrics-exporter-prometheus = { workspace = true }
+trybuild = { workspace = true }
