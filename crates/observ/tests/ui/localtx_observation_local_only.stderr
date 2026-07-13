@@ -11,5 +11,5 @@ error[E0308]: mismatched types
 note: associated function defined here
   --> src/localtx.rs
    |
-   |     pub fn new<M>(route: HttpRouteBinding<M, LocalTx>, boundary: LocalTxBoundary) -> Self {
+   |     pub fn new(route: HttpRouteBinding<M, LocalTx>, boundary: LocalTxBoundary) -> Self {
    |            ^^^

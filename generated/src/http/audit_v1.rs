@@ -699,16 +699,19 @@ pub mod list_tenant_entries {
             EFFECT_PROFILE,
         );
 
+    /// Required LocalTx capability evidence derived from `[capabilities.localTx]`.
+    pub const LOCAL_TX: super::super::LocalTxSpec = super::super::LocalTxSpec {
+        boundary: ::vocab::LocalTxBoundary::SingleDomain,
+        tx_model: ::vocab::LocalTxModel::TenantScopedUow,
+        retry: ::vocab::LocalTxRetry::BoundedTransient,
+        commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
+    };
+
     /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const SPEC: super::super::HttpSpec = super::super::HttpSpec {
         mount_key: "audit_v1::list_tenant_entries",
         route: ROUTE.evidence(),
-        local_tx: Some(super::super::LocalTxSpec {
-            boundary: ::vocab::LocalTxBoundary::SingleDomain,
-            tx_model: ::vocab::LocalTxModel::TenantScopedUow,
-            retry: ::vocab::LocalTxRetry::BoundedTransient,
-            commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
-        }),
+        local_tx: Some(LOCAL_TX),
         resource_sharing: super::super::HttpResourceSharingSpec {
             mode: super::super::HttpResourceSharingMode::TenantScoped,
             reason: None,

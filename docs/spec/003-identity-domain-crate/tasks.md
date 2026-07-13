@@ -68,7 +68,7 @@ description: "Task list — identity 域 crate body 兑现"
 **Independent Test**: in-mem `CredentialRepo` 替身 + 表驱动覆盖校验/锁定/状态迁移/脱敏。覆盖率命令：`cargo llvm-cov --lib -p identity`。
 
 - [ ] T012 [PR3][US3] 先写测试（`domain/account.rs` + `internal/mem.rs`）：密码校验正确/错误/版本不匹配（constant-time）、`AccountStatus` 合法迁移、`AccountLockout` 计数/阈值5/窗口15min/锁定TTL15min/lazy-unlock、密码 Debug 脱敏；fake Clock 推进时间验证窗口/TTL；窗口恰好到期 + 锁定 TTL 恰好到期临界值边界测试；跨租红用例（`principal.tenant ≠ credential.tenant` → Deny）。运行确认 FAIL。
-- [ ] T013 [PR3][US3] 定义 `CredentialRepo`（`ports.rs`，域形 DI port + dynosaur Send 变体 + `DynCredentialRepo`，ADR-005 范式）：`find`/`verify_password`/`bump_version`(CAS)/`save`/`save_lockout`（AccountLockout 持久化）。
+- [ ] T013 [PR3][US3] 定义 `CredentialRepo`（`ports.rs`，域形 DI port + dynosaur Send 变体 + `DynCredentialRepo`，ADR-005 范式）：`find_by_user_id`/`authenticate`/`apply_password_change`(CAS)/`save`/`lockout_status`（AccountLockout 持久化）。
 - [ ] T014 [PR3][US3] 实现 `Credential`/`AccountStatus`/`AccountLockout` 域类型（`domain/account.rs`）+ argon2/bcrypt 哈希（复用 `secure` 或最小封装，注 ref）；`AccountLockout` 窗口/TTL 判定经注入 `Clock` 计算，禁止 `SystemTime::now()`。
 - [ ] T015 [PR3][US3] `internal/mem.rs` 补 in-mem `CredentialRepo` 替身（`#[cfg(test)]`/`seed-login`）；清理 G1 tracer `UserRepo` + `InMemUserRepo` 明文比对（由 CredentialRepo 替代后删除）。
 - [ ] T015b [PR3][US3] 核查 `deny.toml` `wrappers` 集合与 xtask `EXTERNAL_CONFINEMENT_WRAPPERS` 相等（DIPORT-MACRO-CONFINE-01′，identity 已在白名单，作显式核查）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity`。

@@ -1,6 +1,6 @@
 //! `PgCredentialRepo` —— identity 凭据仓储的 postgres adapter（#1316）。
 //!
-//! impl `identity::ports::CredentialRepo`（find_by_user_id / authenticate / save / bump_version / lockout_status），
+//! impl `identity::ports::CredentialRepo`（find_by_user_id / authenticate / save / apply_password_change / lockout_status），
 //! 作 durable login 密码校验真依赖，替换 in-mem `InMemCredentialRepo`（test/seed 门控）。adapter→域 DIP 内向边
 //! （postgres 依赖 identity、native AFIT impl 其域形 port，经 deny.toml identity wrapper + `allows(Adapter,Domain)`
 //! 放行；adapter 仍不被域依赖）。
@@ -10,7 +10,7 @@
 //! （#1277 F2「未知主体不可预置锁定、不撑大 lockout 表」**结构层**天然成立，无独立锁定表）。明文密码**永不落库**，
 //! 仅 `password_hash`（argon2 PHC，经 `secure::PasswordHash`）。
 //!
-//! 原子性：authenticate / lockout_status / bump_version 经 `SELECT ... FOR UPDATE` 单行事务做原子 read-modify-write
+//! 原子性：authenticate / lockout_status / apply_password_change 经 `SELECT ... FOR UPDATE` 单行事务做原子 read-modify-write
 //! （跨实例行级锁，避免负载均衡下各实例独立计数 / 并发丢更新）。策略阈值（5 次 / 15min 滑窗 / 15min 锁定 TTL）
 //! 域内单源（`identity::ports::AccountLockout`），adapter 仅 I/O：`from_parts` 重建 → `record_failure` /
 //! `try_lazy_unlock` 推进 → 访问器回写三列。
@@ -28,32 +28,21 @@
 //! ref: adapters/postgres/src/session_lifecycle.rs（#1278 epoch↔SystemTime 编码对称）
 
 #[cfg(all(test, feature = "integration"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
 #[cfg(all(test, feature = "integration"))]
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use identity::ports::{
     AccountLockout, AuthOutcome, Credential, CredentialRepo, IdentityError, LoginIdentifier,
-    TenantId, TenantRepoScope,
+    PasswordChangeMutation, TenantId, TenantRepoScope,
 };
 use sqlx::{PgConnection, Row};
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{epoch_secs_to_time, unix_secs};
-use crate::tx_retry::{
-    IDENTITY_CREDENTIAL_BOUNDARY, classify_identity_error, run_pg_localtx_retry,
-};
-
-#[cfg(all(test, feature = "integration"))]
-static CREDENTIAL_RETRY_FAIL_REMAINING: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(test, feature = "integration"))]
-static CREDENTIAL_RETRY_FAIL_HITS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(test, feature = "integration"))]
-static CREDENTIAL_RETRY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(test, feature = "integration"))]
-static CREDENTIAL_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
+use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 /// identity 凭据仓储的 PostgreSQL adapter。
 ///
@@ -63,18 +52,43 @@ static CREDENTIAL_RETRY_FAIL_TARGET: Mutex<Option<&'static str>> = Mutex::new(No
 pub struct PgCredentialRepo {
     pool: PgTenantPool,
     #[cfg(all(test, feature = "integration"))]
-    bump_post_update_gate: Option<Arc<CredentialCasPauseGate>>,
+    password_change_post_update_gate: Option<Arc<PasswordChangeCasPauseGate>>,
+    #[cfg(all(test, feature = "integration"))]
+    password_change_faults: Arc<Mutex<CredentialFaultState>>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+pub(crate) enum CredentialMutationFault {
+    Permanent,
+    Transient,
+    TransientBeforeWrite,
+    CommitUnknown,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+struct CredentialFaultPlan {
+    fault: CredentialMutationFault,
+    remaining: usize,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Default)]
+struct CredentialFaultState {
+    plans: HashMap<String, CredentialFaultPlan>,
+    attempts: HashMap<String, usize>,
 }
 
 /// 实例级 CAS 编排门：第一写者完成 UPDATE 后通知测试，并等待显式放行后才返回事务闭包。
 #[cfg(all(test, feature = "integration"))]
-pub(crate) struct CredentialCasPauseGate {
+pub(crate) struct PasswordChangeCasPauseGate {
     updated: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
 
 #[cfg(all(test, feature = "integration"))]
-impl CredentialCasPauseGate {
+impl PasswordChangeCasPauseGate {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             updated: tokio::sync::Notify::new(),
@@ -104,14 +118,46 @@ impl PgCredentialRepo {
         Self {
             pool: PgTenantPool::new(store),
             #[cfg(all(test, feature = "integration"))]
-            bump_post_update_gate: None,
+            password_change_post_update_gate: None,
+            #[cfg(all(test, feature = "integration"))]
+            password_change_faults: Arc::new(Mutex::new(CredentialFaultState::default())),
         }
     }
 
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn with_bump_post_update_pause(mut self, gate: Arc<CredentialCasPauseGate>) -> Self {
-        self.bump_post_update_gate = Some(gate);
+    pub(crate) fn with_password_change_post_update_pause(
+        mut self,
+        gate: Arc<PasswordChangeCasPauseGate>,
+    ) -> Self {
+        self.password_change_post_update_gate = Some(gate);
         self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_password_change_fault(
+        self,
+        login: &str,
+        fault: CredentialMutationFault,
+        remaining: usize,
+    ) -> Self {
+        assert!(remaining > 0, "fault plan must affect at least one attempt");
+        self.password_change_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .plans
+            .insert(login.to_owned(), CredentialFaultPlan { fault, remaining });
+        self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn password_change_attempts(&self, login: &str) -> usize {
+        self.password_change_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .attempts
+            .get(login)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -121,51 +167,32 @@ fn storage(e: sqlx::Error) -> IdentityError {
 }
 
 #[cfg(all(test, feature = "integration"))]
-pub(crate) fn arm_credential_retry_failpoint(target_login: &'static str, failures: usize) {
-    if let Ok(mut target) = CREDENTIAL_RETRY_FAIL_TARGET.lock() {
-        *target = Some(target_login);
-    }
-    CREDENTIAL_RETRY_FAIL_HITS.store(0, Ordering::Release);
-    CREDENTIAL_RETRY_ATTEMPTS.store(0, Ordering::Release);
-    CREDENTIAL_RETRY_FAIL_REMAINING.store(failures, Ordering::Release);
-}
-
-#[cfg(all(test, feature = "integration"))]
-pub(crate) fn credential_retry_attempts() -> usize {
-    CREDENTIAL_RETRY_ATTEMPTS.load(Ordering::Acquire)
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn record_credential_retry_attempt(login: &str) {
-    let target_matches = CREDENTIAL_RETRY_FAIL_TARGET
+fn record_password_change_attempt(state: &Mutex<CredentialFaultState>, login: &str) {
+    let mut state = state
         .lock()
-        .map(|target| target.is_some_and(|target| target == login))
-        .unwrap_or(false);
-    if target_matches {
-        CREDENTIAL_RETRY_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
-    }
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state.attempts.entry(login.to_owned()).or_default() += 1;
 }
 
 #[cfg(all(test, feature = "integration"))]
-fn maybe_fail_credential_retry(login: &str) -> Result<(), IdentityError> {
-    let target_matches = CREDENTIAL_RETRY_FAIL_TARGET
+fn take_credential_fault_if(
+    state: &Mutex<CredentialFaultState>,
+    login: &str,
+    predicate: impl FnOnce(CredentialMutationFault) -> bool,
+) -> Option<CredentialMutationFault> {
+    let mut state = state
         .lock()
-        .map(|target| target.is_some_and(|target| target == login))
-        .unwrap_or(false);
-    if !target_matches {
-        return Ok(());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let plan = state.plans.get_mut(login)?;
+    let fault = plan.fault;
+    if !predicate(fault) {
+        return None;
     }
-    CREDENTIAL_RETRY_FAIL_HITS.fetch_add(1, Ordering::AcqRel);
-    if CREDENTIAL_RETRY_FAIL_REMAINING
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-            remaining.checked_sub(1)
-        })
-        .is_ok()
-    {
-        Err(storage(sqlx::Error::PoolTimedOut))
-    } else {
-        Ok(())
+    plan.remaining -= 1;
+    if plan.remaining == 0 {
+        state.plans.remove(login);
     }
+    Some(fault)
 }
 
 /// `TenantId` → SQL bind 参数（stringify UUID 绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature）。
@@ -343,12 +370,12 @@ impl CredentialRepo for PgCredentialRepo {
             .await
     }
 
-    async fn bump_version(
+    async fn apply_password_change(
         &self,
         scope: TenantRepoScope,
-        expected: u32,
-        next: Credential,
+        mutation: PasswordChangeMutation,
     ) -> Result<(), IdentityError> {
+        let (expected, next, observation) = mutation.into_parts();
         let tenant = scope.tenant();
         if next.tenant() != tenant {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
@@ -358,33 +385,44 @@ impl CredentialRepo for PgCredentialRepo {
         let tenant_uuid = tenant_param(tenant);
         let login_str = next.login().as_str().to_owned();
         #[cfg(all(test, feature = "integration"))]
-        let post_update_gate = self.bump_post_update_gate.clone();
+        let post_update_gate = self.password_change_post_update_gate.clone();
+        #[cfg(all(test, feature = "integration"))]
+        let password_change_faults = Arc::clone(&self.password_change_faults);
         run_pg_localtx_retry(
-            IDENTITY_CREDENTIAL_BOUNDARY,
-            match identity::password_change_localtx_observation() {
-                Some(observation) => observation,
-                None => {
-                    return Err(IdentityError::Storage(Box::new(std::io::Error::other(
-                        "generated identity.password-change contract is missing LocalTx metadata",
-                    ))));
-                }
-            },
+            observation,
             |_attempt| {
                 let tenant_uuid = tenant_uuid.clone();
                 let login_str = login_str.clone();
                 let next = next.clone();
                 #[cfg(all(test, feature = "integration"))]
-                record_credential_retry_attempt(&login_str);
-                #[cfg(all(test, feature = "integration"))]
                 let post_update_gate = post_update_gate.clone();
+                #[cfg(all(test, feature = "integration"))]
+                let password_change_faults = Arc::clone(&password_change_faults);
+                #[cfg(all(test, feature = "integration"))]
+                record_password_change_attempt(&password_change_faults, &login_str);
                 async move {
                     self.pool
                         .retry_write(
                             scope,
-                            move |conn| {
+                            move |tx| {
                                 Box::pin(async move {
-                                    bump_version_in_tx(
-                                        conn.conn(),
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if take_credential_fault_if(
+                                        &password_change_faults,
+                                        &login_str,
+                                        |fault| {
+                                            matches!(
+                                                fault,
+                                                CredentialMutationFault::TransientBeforeWrite
+                                            )
+                                        },
+                                    )
+                                    .is_some()
+                                    {
+                                        return Err(storage(sqlx::Error::PoolTimedOut));
+                                    }
+                                    apply_password_change_in_tx(
+                                        tx.conn(),
                                         &tenant_uuid,
                                         &login_str,
                                         expected,
@@ -394,6 +432,40 @@ impl CredentialRepo for PgCredentialRepo {
                                     #[cfg(all(test, feature = "integration"))]
                                     if let Some(gate) = post_update_gate {
                                         gate.pause_after_update().await;
+                                    }
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if let Some(fault) = take_credential_fault_if(
+                                        &password_change_faults,
+                                        &login_str,
+                                        |fault| {
+                                            !matches!(
+                                                fault,
+                                                CredentialMutationFault::TransientBeforeWrite
+                                            )
+                                        },
+                                    ) {
+                                        match fault {
+                                            CredentialMutationFault::Permanent => {
+                                                return Err(IdentityError::Storage(Box::new(
+                                                    std::io::Error::other(
+                                                        "injected credential post-update failure",
+                                                    ),
+                                                )));
+                                            }
+                                            CredentialMutationFault::Transient => {
+                                                return Err(storage(sqlx::Error::PoolTimedOut));
+                                            }
+                                            CredentialMutationFault::TransientBeforeWrite => {
+                                                unreachable!(
+                                                    "before-write fault is consumed before SQL"
+                                                )
+                                            }
+                                            CredentialMutationFault::CommitUnknown => {
+                                                tx.inject_commit_unknown_after_commit()
+                                                    .await
+                                                    .map_err(storage)?;
+                                            }
+                                        }
                                     }
                                     Ok(())
                                 })
@@ -544,9 +616,9 @@ async fn save_in_tx(
     Ok(())
 }
 
-/// bump_version 事务体：单行 FOR UPDATE 读版本 → CAS 分支（None=CredentialNotFound / 不匹配=VersionConflict /
+/// password-change 事务体：单行 FOR UPDATE 读版本 → CAS 分支（None=CredentialNotFound / 不匹配=VersionConflict /
 /// 命中→替换 hash+version，保留锁定列，同 in-mem bump 不动 lockout）。key 派生自 `next`（F2）。
-async fn bump_version_in_tx(
+async fn apply_password_change_in_tx(
     tx: &mut PgConnection,
     tenant_uuid: &str,
     login: &str,
@@ -580,8 +652,6 @@ async fn bump_version_in_tx(
     .execute(&mut *tx)
     .await
     .map_err(storage)?;
-    #[cfg(all(test, feature = "integration"))]
-    maybe_fail_credential_retry(login)?;
     Ok(())
 }
 

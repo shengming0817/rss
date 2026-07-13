@@ -43,7 +43,9 @@ use diport::{
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
-use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantRepoScope};
+use identity::ports::{
+    IdentityError, Session, SessionId, SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
+};
 use tokio_util::sync::CancellationToken;
 
 // 锁中毒（仅当持锁线程 panic 时发生）恢复 guard 而非 panic：in-mem 替身不在持锁时 panic，
@@ -321,7 +323,7 @@ impl OutboxEmitter for MemEmitter {
 
 /// in-mem 会话生命周期 provider（impl [`identity::ports::SessionLifecycle`]，合并原 `MemSessionUnitOfWork`，
 /// #1278）：`persist_session_and_emit` 把 session 存入进程内 store 并把 [`Entry`] fan-out 到 [`MemBus`]，
-/// `find` / `revoke` 在同一 store 操作——demo / 单进程 / 测试用；生产走 postgres `PgSessionLifecycle`
+/// `find` / `logout` 在同一 store 操作——demo / 单进程 / 测试用；生产走 postgres `PgSessionLifecycle`
 /// （单事务 session + outbox co-tx）。
 ///
 /// # WARNING / DEMO-ONLY
@@ -417,11 +419,12 @@ impl SessionLifecycle for MemSessionLifecycle {
             .map(|(s, _)| s.clone()))
     }
 
-    async fn revoke(
+    async fn logout(
         &self,
         scope: TenantRepoScope,
-        session_id: SessionId,
+        mutation: SessionLogoutMutation,
     ) -> Result<(), IdentityError> {
+        let (session_id, _observation) = mutation.into_parts();
         let tenant = scope.tenant();
         let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = guard.get_mut(&session_id)

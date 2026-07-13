@@ -33,9 +33,17 @@ use crate::projection_events::ProjectionWriteRegistry;
 mod settlement;
 
 use settlement::rollback_failed;
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 pub(crate) use settlement::{LocalTxAttempt, LocalTxRetryError, commit_unknown};
-#[cfg(not(any(feature = "domain-settings", feature = "domain-identity")))]
+#[cfg(not(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+)))]
 pub(crate) use settlement::{LocalTxAttempt, commit_unknown};
 
 const TX_RETRY_LOCK_TIMEOUT: &str = "5s";
@@ -139,6 +147,19 @@ impl<'tx> TxCapability<'tx> {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
+    /// Integration-only seam that performs a real rollback and then simulates losing its
+    /// acknowledgement. The settlement funnel consumes the transaction-local marker and reports
+    /// `RollbackFailed`, which must never be replayed.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn inject_rollback_failed_after_rollback(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_rollback_failed_after_rollback', '1', true)")
             .execute(&mut *self.conn)
             .await
             .map(|_| ())
@@ -258,7 +279,11 @@ impl PgTenantPool {
     }
 
     /// Run a tenant-scoped write transaction with a per-attempt lock wait bound.
-    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    #[cfg(any(
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    ))]
     pub(crate) async fn retry_write<S, T, F, E>(
         &self,
         scope: S,
@@ -599,13 +624,21 @@ where
             };
             finish_local_tx_commit_result(commit_result, value, map_storage, operation, tenant)
         }
-        Err(error) => finish_local_tx_rollback_result(
-            tx.rollback().await,
-            error,
-            map_storage,
-            operation,
-            tenant,
-        ),
+        Err(error) => {
+            #[allow(unused_mut)]
+            let mut tx = tx;
+            #[cfg(all(test, feature = "integration"))]
+            let inject_rollback_failed =
+                test_rollback_failed_after_rollback_requested(&mut tx).await;
+            let rollback_result = tx.rollback().await;
+            #[cfg(all(test, feature = "integration"))]
+            let rollback_result = if inject_rollback_failed && rollback_result.is_ok() {
+                Err(sqlx::Error::PoolTimedOut)
+            } else {
+                rollback_result
+            };
+            finish_local_tx_rollback_result(rollback_result, error, map_storage, operation, tenant)
+        }
     }
 }
 
@@ -613,6 +646,18 @@ where
 async fn test_commit_unknown_after_commit_requested(tx: &mut Transaction<'_, Postgres>) -> bool {
     sqlx::query_scalar::<_, Option<String>>(
         "SELECT current_setting('rss.test_commit_unknown_after_commit', true)",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|value| value == "1")
+}
+
+#[cfg(all(test, feature = "integration"))]
+async fn test_rollback_failed_after_rollback_requested(tx: &mut Transaction<'_, Postgres>) -> bool {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT current_setting('rss.test_rollback_failed_after_rollback', true)",
     )
     .fetch_one(&mut **tx)
     .await
@@ -1092,8 +1137,6 @@ mod retry_settlement_tests {
     use tracing::{Event, Id, Metadata, Subscriber, field::Visit};
 
     use super::LocalTxAttempt;
-    #[cfg(feature = "domain-identity")]
-    use crate::tx_retry::IDENTITY_CREDENTIAL_BOUNDARY;
     use crate::tx_retry::run_pg_localtx_retry;
     #[cfg(feature = "domain-settings")]
     use crate::tx_retry::{SETTINGS_CONFIG_BOUNDARY, SETTINGS_SECRET_BOUNDARY, run_pg_tx_retry};
@@ -1311,19 +1354,10 @@ mod retry_settlement_tests {
 
     #[cfg(feature = "domain-settings")]
     fn settings_secret_observation()
-    -> Result<observ::LocalTxObservation, Box<dyn std::error::Error + Send + Sync>> {
-        use settings::ports::{SecretEntry, SecretKey, SecretPublishCommand, StoreId};
+    -> observ::LocalTxObservation<generated::http::settings_v2::RouteMarker> {
+        use generated::http::settings_v2::{LOCAL_TX, ROUTE};
 
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?;
-        let entry = SecretEntry::hydrate(
-            SecretKey::parse("test.secret")?,
-            StoreId::parse("vault")?,
-            "test/secret",
-            None,
-            tenant,
-            1,
-        );
-        Ok(SecretPublishCommand::for_test(entry)?.into_parts().1)
+        observ::LocalTxObservation::new(ROUTE, LOCAL_TX.boundary)
     }
 
     #[tokio::test]
@@ -1331,8 +1365,7 @@ mod retry_settlement_tests {
     async fn settings_localtx_retry_accepts_generated_observation()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let result = run_pg_localtx_retry(
-            SETTINGS_SECRET_BOUNDARY,
-            settings_secret_observation()?,
+            settings_secret_observation(),
             |_attempt| async { LocalTxAttempt::<(), FakeError>::committed(()) },
             classify_fake,
         )
@@ -1353,13 +1386,12 @@ mod retry_settlement_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
-        let observation = settings_secret_observation()?;
+        let observation = settings_secret_observation();
 
         let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
                 let result = run_pg_localtx_retry(
-                    SETTINGS_SECRET_BOUNDARY,
                     observation,
                     |_attempt| async {
                         LocalTxAttempt::<(), _>::commit_unknown(FakeError::Transient)
@@ -1429,10 +1461,11 @@ mod retry_settlement_tests {
     }
 
     #[cfg(feature = "domain-identity")]
-    fn password_change_observation() -> Result<observ::LocalTxObservation, std::io::Error> {
-        identity::password_change_localtx_observation().ok_or_else(|| {
-            std::io::Error::other("generated password-change contract must carry LocalTx evidence")
-        })
+    fn password_change_observation()
+    -> observ::LocalTxObservation<generated::http::identity_v1::password_change::RouteMarker> {
+        use generated::http::identity_v1::password_change::{LOCAL_TX, ROUTE};
+
+        observ::LocalTxObservation::new(ROUTE, LOCAL_TX.boundary)
     }
 
     #[test]
@@ -1444,17 +1477,16 @@ mod retry_settlement_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
-        let committed_observation = password_change_observation()?;
+        let committed_observation = password_change_observation();
         let terminal_observations = [
-            password_change_observation()?,
-            password_change_observation()?,
-            password_change_observation()?,
+            password_change_observation(),
+            password_change_observation(),
+            password_change_observation(),
         ];
-        let exhausted_observation = password_change_observation()?;
+        let exhausted_observation = password_change_observation();
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
                 let committed = run_pg_localtx_retry(
-                    IDENTITY_CREDENTIAL_BOUNDARY,
                     committed_observation,
                     |attempt| async move {
                         if attempt == 1 {
@@ -1478,7 +1510,6 @@ mod retry_settlement_tests {
                 {
                     let mut attempt = Some(attempt);
                     let result = run_pg_localtx_retry(
-                        IDENTITY_CREDENTIAL_BOUNDARY,
                         observation,
                         |_attempt| {
                             core::future::ready(match attempt.take() {
@@ -1494,7 +1525,6 @@ mod retry_settlement_tests {
                 }
 
                 let exhausted = run_pg_localtx_retry(
-                    IDENTITY_CREDENTIAL_BOUNDARY,
                     exhausted_observation,
                     |_attempt| async { LocalTxAttempt::<(), _>::rolled_back(FakeError::Transient) },
                     classify_fake,
@@ -1538,11 +1568,10 @@ mod retry_settlement_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
-        let observation = password_change_observation()?;
+        let observation = password_change_observation();
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
                 let result = run_pg_localtx_retry(
-                    IDENTITY_CREDENTIAL_BOUNDARY,
                     observation,
                     |attempt| async move {
                         if attempt == 1 {
@@ -1583,11 +1612,10 @@ mod retry_settlement_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
-        let observation = password_change_observation()?;
+        let observation = password_change_observation();
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
                 let result = run_pg_localtx_retry(
-                    IDENTITY_CREDENTIAL_BOUNDARY,
                     observation,
                     |_attempt| async { LocalTxAttempt::<(), _>::unsettled(FakeError::Transient) },
                     classify_fake,

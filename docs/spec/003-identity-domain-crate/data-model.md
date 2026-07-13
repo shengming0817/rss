@@ -39,7 +39,7 @@
 | `AccountLockout` | `failure_count + window_start + locked_until` | 阈值 5 / 窗口 15min / 锁定 TTL 15min；`record_failure` / `try_lazy_unlock`；窗口/TTL 判定经注入 `Clock` 计算（禁 `SystemTime::now()`）；状态经 `CredentialRepo` port 持久化（多实例安全） | 新增（P1-12） |
 | `IdentityError` | enum（pub，non_exhaustive） | 3 值错误 | 签名冻结 |
 
-**port `CredentialRepo`**（`identity::ports`，域形 DI port，dynosaur Send 变体）：`find(subject, tenant) -> Option<Credential>` / `verify_password(...) -> bool`（constant-time）/ `bump_version(...)`（CAS）/ `save(...)`。
+**port `CredentialRepo`**（`identity::ports`，域形 DI port，dynosaur Send 变体）：`find_by_user_id(scope, user_id) -> Option<Credential>` / `authenticate(...)`（constant-time）/ `apply_password_change(scope, PasswordChangeMutation)`（CAS）/ `save(...)`。
 
 ## 会话子域（`domain/session.rs` + `ports.rs` SessionRepo）
 

@@ -7,7 +7,7 @@
 //! `ports::SessionLifecycle::persist_session_and_emit`）→ 返回 `IdentityLoginResponse`。
 //! mint-first 语义：mint 失败 ⇒ clean failure（无 session/outbox）；co-tx 失败 ⇒ orphan refresh token
 //! （无 session/outbox，随 TTL 自然过期）——全面消除 co-tx 先/mint 失败的半成功窗口（F4 reorder）。
-//! logout 经同一 `ports::SessionLifecycle::revoke` 软撤销（create / find / revoke 同源，#1278）。
+//! logout 经同一 `ports::SessionLifecycle::logout` 软撤销（create / find / logout 同源，#1278）。
 //!
 //! 下游 audit 订阅消费该事件。co-tx 接缝由 postgres adapter `PgSessionLifecycle`
 //! （INVARIANT OUTBOX-COTX-SESSION-01）落地。
@@ -122,20 +122,11 @@ use crate::domain::{
 use crate::ports::RoleWriteRepo;
 use crate::ports::{
     CredentialRepo, DynCredentialRepo, DynPolicyRepo, DynResourceAttributeRepo,
-    DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle, Operator, PolicyPage,
-    PolicyRepo, RefreshTokenStore, ResourceAttributeRepo, RoleBindingLifecycle, RolePage,
-    RoleReadRepo, SessionLifecycle, TenantRepoScope,
+    DynRoleBindingLifecycle, DynRoleReadRepo, DynSessionLifecycle, Operator,
+    PasswordChangeMutation, PolicyPage, PolicyRepo, RefreshRotationMutation, RefreshTokenStore,
+    ResourceAttributeRepo, RoleBindingLifecycle, RolePage, RoleReadRepo, SessionLifecycle,
+    SessionLogoutMutation, TenantRepoScope,
 };
-
-/// Build password-change LocalTx observability from generated contract evidence.
-///
-/// `None` is fail-closed evidence that generated L1 metadata is incomplete; adapters must map it
-/// to their boundary error instead of inventing a route or boundary label.
-pub fn password_change_localtx_observation() -> Option<observ::LocalTxObservation> {
-    PASSWORD_CHANGE_HTTP_SPEC
-        .local_tx
-        .map(|spec| observ::LocalTxObservation::new(PASSWORD_CHANGE_HTTP_ROUTE, spec.boundary))
-}
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
@@ -218,7 +209,7 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 /// 登录应用服务。必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）。
 ///
 /// 会话生命周期由**单一** [`DynSessionLifecycle`] provider 承载（合并原 `sessions` + `session_uow`，#1278）：
-/// login 经 `persist_session_and_emit` co-tx 创建、logout 经 `revoke` 软撤销、查询经 `find`——**同源**，
+/// login 经 `persist_session_and_emit` co-tx 创建、logout 经 `logout` 软撤销、查询经 `find`——**同源**，
 /// 「创建写 与 撤销/查询落不同 store」从类型层不可表达（PR #255 F3 接缝闭合）。
 ///
 /// 注入形态为 `Arc<DynCredentialRepo>` + `Arc<DynSessionLifecycle>`：域形端口基 trait 为 `Send + Sync`，
@@ -237,7 +228,7 @@ pub struct LoginService<S> {
 
 impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     /// 组合根构造：4 必填依赖位置参（缺失即编译错误）+ 会话 ttl。`lifecycle` 是单一会话生命周期 provider
-    /// （create/find/revoke 同源，#1278）；`refresh` 承载首发 token 签发（#1252）。
+    /// （create/find/logout 同源，#1278）；`refresh` 承载首发 token 签发（#1252）。
     pub fn new(
         credentials: Arc<DynCredentialRepo<'static>>,
         lifecycle: Arc<DynSessionLifecycle<'static>>,
@@ -275,7 +266,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         )?;
         // 会话生命周期 provider 由组合根注入（journeys 注 MemSessionLifecycle / PgSessionLifecycle；单测注
         // CapturingSessionLifecycle）——不再自建独立空 session store（原 InMemSessionRepo 与注入 UoW 异 store
-        // 即 #1278 F3 接缝根因）；单一 lifecycle ⇒ create/find/revoke 同源。
+        // 即 #1278 F3 接缝根因）；单一 lifecycle ⇒ create/find/logout 同源。
         Ok(Self::new(
             Arc::from(crate::ports::DynCredentialRepo::new_box(creds)),
             lifecycle,
@@ -449,7 +440,10 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             secure::hash_password(&new_password).map_err(|_| ChangePasswordError::Hash)?;
         let next = credential.rotate(new_hash);
         self.credentials
-            .bump_version(tenant_scope, credential.version(), next)
+            .apply_password_change(
+                tenant_scope,
+                PasswordChangeMutation::new(credential.version(), next),
+            )
             .await
             .map_err(|e| match e {
                 IdentityError::VersionConflict => ChangePasswordError::VersionConflict,
@@ -488,7 +482,9 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         if session.subject() != actor_subject {
             return Err(IdentityError::PermissionDenied);
         }
-        self.lifecycle.revoke(tenant_scope, session_id).await
+        self.lifecycle
+            .logout(tenant_scope, SessionLogoutMutation::new(session_id))
+            .await
     }
 }
 
@@ -822,7 +818,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
         // 6. 原子 CAS：旧 token 一次性失效（mint 成功后才提交不可回滚的消费）
         let applied = self
             .store
-            .rotate(tenant_scope, rotation)
+            .rotate(tenant_scope, RefreshRotationMutation::new(rotation))
             .await
             .map_err(RefreshError::Store)?;
         if !applied {
@@ -872,7 +868,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
                 .await
                 .map_err(RefreshError::Store)?;
         }
-        // reason: 查无 token 时幂等 Ok（logout 不泄露 token 存在性，同 SessionLifecycle::revoke）。
+        // reason: 查无 token 时幂等 Ok（logout 不泄露 token 存在性，同 SessionLifecycle::logout）。
         Ok(())
     }
 }
@@ -2518,6 +2514,30 @@ async fn logout_handler<S: diport::Signer + Send + Sync + 'static>(
     }
 }
 
+/// Test-support mount for driving the production logout handler with an injected lifecycle.
+///
+/// This is deliberately feature-gated: adapter integration tests need the real decode/auth/service
+/// path, while production composition continues to mount the handler only through `IdentityDomain`.
+#[cfg(feature = "test-support")]
+pub(crate) fn logout_router_for_test<S: diport::Signer + Send + Sync + 'static>(
+    service: Arc<LoginService<S>>,
+    tenant: TenantId,
+    actor: &str,
+) -> axum::Router {
+    axum::Router::new()
+        .route(
+            LOGOUT_HTTP_SPEC.route.path(),
+            axum::routing::post(logout_handler::<S>)
+                .with_state(SelfServiceHandlerState { service }),
+        )
+        .layer(axum::Extension(AuthorizedSubject::for_test(
+            tenant,
+            vocab::PrincipalKind::User,
+            actor,
+            None,
+        )))
+}
+
 fn rbac_error_response(
     err: &RbacAdminError,
     tenant: TenantId,
@@ -2920,17 +2940,16 @@ mod tests {
             self.inner.save(scope, credential).await
         }
 
-        async fn bump_version(
+        async fn apply_password_change(
             &self,
             scope: TenantRepoScope,
-            expected: u32,
-            next: Credential,
+            mutation: PasswordChangeMutation,
         ) -> Result<(), IdentityError> {
             self.calls.bump_attempts.fetch_add(1, Ordering::SeqCst);
             if self.conflict_on_bump {
                 return Err(IdentityError::VersionConflict);
             }
-            let result = self.inner.bump_version(scope, expected, next).await;
+            let result = self.inner.apply_password_change(scope, mutation).await;
             if result.is_ok() {
                 self.calls.bump_commits.fetch_add(1, Ordering::SeqCst);
             }
@@ -2949,7 +2968,7 @@ mod tests {
     }
 
     // CapturingSessionLifecycle 双职能：① 捕获 co-tx 写入（Session + Entry + envelope）供 outbox 断言（test 1-5）；
-    // ② 复用 `InMemSessionLifecycle` 承载 session store（create 即写 → find/revoke 同源，不重写 HashMap/租户/
+    // ② 复用 `InMemSessionLifecycle` 承载 session store（create 即写 → find/logout 同源，不重写 HashMap/租户/
     // 幂等逻辑）——证明 login→logout 经**同一 store** 闭合（#1278）。`Arc` 共享：clone 与 service 持有方共享
     // `writes` + `inner` 两 store。
     #[derive(Clone, Default)]
@@ -2967,7 +2986,7 @@ mod tests {
             entry: EventEntry,
             envelope: OutboxEnvelopeParts,
         ) -> Result<(), OutboxEmitError> {
-            // 委托 inner 承载 store（创建即写 → 同源 find/revoke）；同时捕获写入供 outbox 断言。
+            // 委托 inner 承载 store（创建即写 → 同源 find/logout）；同时捕获写入供 outbox 断言。
             self.inner
                 .persist_session_and_emit(scope, session.clone(), entry.clone(), envelope.clone())
                 .await?;
@@ -2985,13 +3004,13 @@ mod tests {
             self.find_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.find(scope, session_id).await
         }
-        async fn revoke(
+        async fn logout(
             &self,
             scope: TenantRepoScope,
-            session_id: SessionId,
+            mutation: SessionLogoutMutation,
         ) -> Result<(), IdentityError> {
             self.revoke_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.revoke(scope, session_id).await
+            self.inner.logout(scope, mutation).await
         }
     }
 
@@ -4189,7 +4208,7 @@ mod tests {
     // ── 测试 10：login → logout 全链回归（#1278 接缝闭合）─────────────────────────
     // 经**单一** lifecycle：login 写入会话 → 同一 store find=Some → svc.logout 软撤销 → find=None。
     // anti-vacuity：login 写入的会话**真实可读**（非两独立 store；合并前 login 写 UoW、logout 查 SessionRepo
-    // 异 store ⇒ find 永远 None，回归不可表达该 bug）——证明合并后 create / revoke / find 同源。
+    // 异 store ⇒ find 永远 None，回归不可表达该 bug）——证明合并后 create / logout / find 同源。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn login_then_logout_revokes_via_shared_lifecycle() {
@@ -6794,7 +6813,7 @@ mod tests {
                 async fn rotate(
                     &self,
                     scope: TenantRepoScope,
-                    rotation: crate::ports::RefreshRotation,
+                    mutation: crate::ports::RefreshRotationMutation,
                 ) -> Result<bool, IdentityError>;
                 async fn revoke_lineage(
                     &self,
@@ -7094,7 +7113,7 @@ mod tests {
                 async fn rotate(
                     &self,
                     scope: TenantRepoScope,
-                    rotation: crate::ports::RefreshRotation,
+                    mutation: crate::ports::RefreshRotationMutation,
                 ) -> Result<bool, IdentityError>;
                 async fn revoke_lineage(
                     &self,
@@ -7170,7 +7189,7 @@ mod tests {
                 async fn rotate(
                     &self,
                     scope: TenantRepoScope,
-                    rotation: crate::ports::RefreshRotation,
+                    mutation: crate::ports::RefreshRotationMutation,
                 ) -> Result<bool, IdentityError>;
                 async fn revoke_lineage(
                     &self,

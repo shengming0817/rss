@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::domain::{AccountLockout, AuthOutcome, Credential, IdentityError, LoginIdentifier};
-use crate::ports::{CredentialRepo, TenantRepoScope};
+use crate::ports::{CredentialRepo, PasswordChangeMutation, TenantRepoScope};
 use vocab::TenantId;
 
 // 会话生命周期 in-mem 替身（[`InMemSessionLifecycle`]）仅 test 构建编译：with_seed_credential 改注入 lifecycle
@@ -18,7 +18,7 @@ use vocab::TenantId;
 #[cfg(test)]
 use crate::domain::{Session, SessionId};
 #[cfg(test)]
-use crate::ports::SessionLifecycle;
+use crate::ports::{SessionLifecycle, SessionLogoutMutation};
 #[cfg(test)]
 use consistency::EventEntry;
 #[cfg(test)]
@@ -174,12 +174,12 @@ impl CredentialRepo for InMemCredentialRepo {
         Ok(())
     }
 
-    async fn bump_version(
+    async fn apply_password_change(
         &self,
         scope: TenantRepoScope,
-        expected: u32,
-        next: Credential,
+        mutation: PasswordChangeMutation,
     ) -> Result<(), IdentityError> {
+        let (expected, next, _observation) = mutation.into_parts();
         if scope.tenant() != next.tenant() {
             return Err(IdentityError::Storage(Box::new(std::io::Error::other(
                 "credential bump tenant scope mismatch",
@@ -229,8 +229,8 @@ impl CredentialRepo for InMemCredentialRepo {
 ///   事务，`entry`/`envelope` 不落库（同 `adapters/memory` 的 `MemSessionLifecycle`：demo/test 无 outbox 持久化
 ///   载体，消费侧从 payload 解码；真实 co-tx both-or-neither 由 postgres `PgSessionLifecycle` 的
 ///   OUTBOX-COTX-SESSION-01 守）。
-/// - `revoke`（软撤销，logout）：设 `revoked = true`，不删除记录（幂等：重复 / 未知 revoke 仍 Ok）。
-/// - 跨租隔离：`find` 过滤 `s.tenant() == tenant`（跨租 → None）；`revoke` 跨租 no-op（不报错、不撤销）。
+/// - `logout`（软撤销）：设 `revoked = true`，不删除记录（幂等：重复 / 未知 logout 仍 Ok）。
+/// - 跨租隔离：`find` 过滤 `s.tenant() == tenant`（跨租 → None）；`logout` 跨租 no-op（不报错、不撤销）。
 ///
 /// 内部 `Arc<Mutex<..>>`（`&self` + 内部可变；锁仅同步持有、**不跨 `.await`** ⇒ future 仍 `Send`）；
 /// `Arc` ⇒ clone 共享同一存储——测试侧持一克隆、`LoginService` 持另一克隆，可观测经 service login 写入 →
@@ -284,11 +284,12 @@ impl SessionLifecycle for InMemSessionLifecycle {
             .map(|(s, _)| s.clone()))
     }
 
-    async fn revoke(
+    async fn logout(
         &self,
         scope: TenantRepoScope,
-        session_id: SessionId,
+        mutation: SessionLogoutMutation,
     ) -> Result<(), IdentityError> {
+        let (session_id, _observation) = mutation.into_parts();
         let tenant = scope.tenant();
         if let Some(entry) = recover(&self.sessions).get_mut(&session_id)
             && entry.0.tenant() == tenant
@@ -1056,8 +1057,9 @@ impl RefreshTokenStore for InMemRefreshTokenStore {
     async fn rotate(
         &self,
         scope: TenantRepoScope,
-        rotation: crate::ports::RefreshRotation,
+        mutation: crate::ports::RefreshRotationMutation,
     ) -> Result<bool, crate::domain::IdentityError> {
+        let (rotation, _observation) = mutation.into_parts();
         // sealed 命令：tenant 从 new record 派生（= 源 record tenant），无独立 tenant 入参可错位（#284 F2）。
         let old_id = rotation.old_id().clone();
         let new = rotation.new_record().clone();
@@ -1117,8 +1119,8 @@ mod tests {
         RoleBinding, RoleId, Session, SessionId,
     };
     use crate::ports::{
-        CredentialRepo, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo, RoleBindingLifecycle,
-        SessionLifecycle, TenantRepoScope,
+        CredentialRepo, PasswordChangeMutation, PolicyLifecycle, PolicyRepo, ResourceAttributeRepo,
+        RoleBindingLifecycle, SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
     };
     use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEnvelopeParts};
@@ -1388,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_tenant_bump_version_isolated() {
+    async fn cross_tenant_password_change_isolated() {
         let a = tid(TENANT_A);
         let other = tid(TENANT_B);
         let repo = InMemCredentialRepo::new();
@@ -1397,7 +1399,10 @@ mod tests {
             .expect("save");
         // 跨租 bump：next 在 TENANT_B（key 派生自 next）→ 查无 → CredentialNotFound，不动 TENANT_A。
         let res = repo
-            .bump_version(scope(other), 1, cred("alice", USER_ALICE, "pw2", 2, other))
+            .apply_password_change(
+                scope(other),
+                PasswordChangeMutation::for_test(1, cred("alice", USER_ALICE, "pw2", 2, other)),
+            )
             .await;
         assert!(matches!(res, Err(IdentityError::CredentialNotFound)));
         let still = repo
@@ -1410,7 +1415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bump_version_cas_hit_miss_and_unknown() {
+    async fn password_change_cas_hit_miss_and_unknown() {
         let repo = InMemCredentialRepo::new();
         let t = tid(TENANT_A);
         repo.save(scope(t), cred("alice", USER_ALICE, "pw", 1, t))
@@ -1418,13 +1423,19 @@ mod tests {
             .expect("save");
         // 期望版本不匹配 → VersionConflict（key 派生自 next）。
         let conflict = repo
-            .bump_version(scope(t), 99, cred("alice", USER_ALICE, "pw2", 2, t))
+            .apply_password_change(
+                scope(t),
+                PasswordChangeMutation::for_test(99, cred("alice", USER_ALICE, "pw2", 2, t)),
+            )
             .await;
         assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
         // 期望版本命中 → 替换。
-        repo.bump_version(scope(t), 1, cred("alice", USER_ALICE, "pw2", 2, t))
-            .await
-            .expect("cas hit");
+        repo.apply_password_change(
+            scope(t),
+            PasswordChangeMutation::for_test(1, cred("alice", USER_ALICE, "pw2", 2, t)),
+        )
+        .await
+        .expect("cas hit");
         let found = repo
             .find_by_user_id(scope(t), uid(USER_ALICE))
             .await
@@ -1434,7 +1445,10 @@ mod tests {
         assert!(found.verify_password("pw2"));
         // 查无凭据 → CredentialNotFound。
         let missing = repo
-            .bump_version(scope(t), 1, cred("ghost", USER_ALICE, "x", 1, t))
+            .apply_password_change(
+                scope(t),
+                PasswordChangeMutation::for_test(1, cred("ghost", USER_ALICE, "x", 1, t)),
+            )
             .await;
         assert!(matches!(missing, Err(IdentityError::CredentialNotFound)));
     }
@@ -1797,9 +1811,12 @@ mod tests {
         )
         .await
         .expect("persist ok");
-        repo.revoke(scope(ta), SessionId::new("sid-002"))
-            .await
-            .expect("revoke ok");
+        repo.logout(
+            scope(ta),
+            SessionLogoutMutation::for_test(SessionId::new("sid-002")),
+        )
+        .await
+        .expect("revoke ok");
         let found = repo
             .find(scope(ta), SessionId::new("sid-002"))
             .await
@@ -1820,17 +1837,26 @@ mod tests {
         .await
         .expect("persist ok");
         // 第一次 revoke
-        repo.revoke(scope(ta), SessionId::new("sid-003"))
-            .await
-            .expect("revoke 1");
+        repo.logout(
+            scope(ta),
+            SessionLogoutMutation::for_test(SessionId::new("sid-003")),
+        )
+        .await
+        .expect("revoke 1");
         // 第二次 revoke（幂等，应仍 Ok）
-        repo.revoke(scope(ta), SessionId::new("sid-003"))
-            .await
-            .expect("revoke 2 idempotent");
+        repo.logout(
+            scope(ta),
+            SessionLogoutMutation::for_test(SessionId::new("sid-003")),
+        )
+        .await
+        .expect("revoke 2 idempotent");
         // 未知 session id（幂等，no-op）
-        repo.revoke(scope(ta), SessionId::new("no-such-sid"))
-            .await
-            .expect("revoke unknown idempotent");
+        repo.logout(
+            scope(ta),
+            SessionLogoutMutation::for_test(SessionId::new("no-such-sid")),
+        )
+        .await
+        .expect("revoke unknown idempotent");
     }
 
     #[tokio::test]
@@ -1869,9 +1895,12 @@ mod tests {
         .await
         .expect("persist ok");
         // 跨租 revoke：no-op，不影响 TENANT_A 的记录。
-        repo.revoke(scope(tb), SessionId::new("sid-005"))
-            .await
-            .expect("cross-tenant revoke");
+        repo.logout(
+            scope(tb),
+            SessionLogoutMutation::for_test(SessionId::new("sid-005")),
+        )
+        .await
+        .expect("cross-tenant revoke");
         let found = repo
             .find(scope(ta), SessionId::new("sid-005"))
             .await
@@ -1981,7 +2010,13 @@ mod tests {
                 issued,
                 issued + Duration::from_secs(3_600),
             );
-        let result = store.rotate(scope(ta), rotation).await.expect("rotate ok");
+        let result = store
+            .rotate(
+                scope(ta),
+                crate::ports::RefreshRotationMutation::for_test(rotation),
+            )
+            .await
+            .expect("rotate ok");
         assert!(!result, "Consumed 状态 CAS miss 应返回 false");
 
         // new 不应写入
@@ -2033,7 +2068,13 @@ mod tests {
             issued + Duration::from_secs(3_600),
         );
         assert!(
-            store.rotate(scope(ta), rotation1).await.expect("rotate ok"),
+            store
+                .rotate(
+                    scope(ta),
+                    crate::ports::RefreshRotationMutation::for_test(rotation1),
+                )
+                .await
+                .expect("rotate ok"),
             "首次 rotate 应命中 CAS"
         );
 
@@ -2045,7 +2086,13 @@ mod tests {
             issued + Duration::from_secs(3_600),
         );
         assert!(
-            !store.rotate(scope(ta), rotation2).await.expect("rotate ok"),
+            !store
+                .rotate(
+                    scope(ta),
+                    crate::ports::RefreshRotationMutation::for_test(rotation2),
+                )
+                .await
+                .expect("rotate ok"),
             "二次 rotate 同一 old 应 miss（一次性）"
         );
 

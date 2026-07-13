@@ -39,7 +39,7 @@ pub mod ports;
 pub use application::{
     ChangePasswordError, IdentityDomain, IdentityDomainDeps, LoginError, LoginService,
     PolicyManageError, PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle,
-    RefreshError, RefreshPrincipal, RefreshService, password_change_localtx_observation,
+    RefreshError, RefreshPrincipal, RefreshService,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
@@ -54,11 +54,21 @@ pub use application::{SeedSigner, seed_refresh_service};
 /// `authn::test_support` 同信任模型（生产构建不编译 ⇒ funnel seal 不变）。
 #[cfg(feature = "test-support")]
 pub mod test_support {
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     use vocab::TenantId;
 
     use crate::domain::{LoginIdentifier, Session, SessionId};
+
+    /// Mount the production logout handler for downstream adapter integration tests.
+    pub fn logout_router<S: diport::Signer + Send + Sync + 'static>(
+        service: Arc<crate::LoginService<S>>,
+        tenant: TenantId,
+        actor: &str,
+    ) -> axum::Router {
+        crate::application::logout_router_for_test(service, tenant, actor)
+    }
 
     /// 构造测试用 [`Session`]（经域 funnel；仅 test/dev 构建）。
     pub fn session(
@@ -107,11 +117,6 @@ mod smoke {
         ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, Session, SessionId,
         authorize_rbac, evaluate_abac,
     };
-
-    #[test]
-    fn password_change_observation_comes_from_generated_localtx_evidence() {
-        assert!(crate::password_change_localtx_observation().is_some());
-    }
 
     // 证明主要类型是 Send（跨 await 点传播）。
     fn _assert_send<T: Send>() {}

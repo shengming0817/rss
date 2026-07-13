@@ -42,6 +42,7 @@ const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 
 use crate::test_pg::{
     connect_pg, connect_pg_audit_admin_role, connect_pg_nobypass_role, connect_pg_rss_app_role,
+    connect_pg_rss_app_role_with_limits,
 };
 
 #[allow(clippy::unwrap_used)]
@@ -995,53 +996,6 @@ async fn transaction_commit_persists_and_rollback_discards() -> TestResult {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LocalTxProfileProbeError {
-    Storage,
-    Transient,
-    Conflict,
-    Permanent,
-    Validation,
-    Authorization,
-    CommitUnknown,
-    RollbackFailed,
-}
-
-impl std::fmt::Display for LocalTxProfileProbeError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("localtx postgres profile probe failed")
-    }
-}
-
-impl std::error::Error for LocalTxProfileProbeError {}
-
-impl From<sqlx::Error> for LocalTxProfileProbeError {
-    fn from(_: sqlx::Error) -> Self {
-        Self::Storage
-    }
-}
-
-fn localtx_profile_category(error: LocalTxProfileProbeError) -> testkit::ConformanceErrorCategory {
-    match error {
-        LocalTxProfileProbeError::Storage => testkit::ConformanceErrorCategory::Storage,
-        LocalTxProfileProbeError::Transient => testkit::ConformanceErrorCategory::Transient,
-        LocalTxProfileProbeError::Conflict => testkit::ConformanceErrorCategory::Conflict,
-        LocalTxProfileProbeError::Permanent => testkit::ConformanceErrorCategory::Permanent,
-        LocalTxProfileProbeError::Validation => testkit::ConformanceErrorCategory::Validation,
-        LocalTxProfileProbeError::Authorization => testkit::ConformanceErrorCategory::Authorization,
-        LocalTxProfileProbeError::CommitUnknown => testkit::ConformanceErrorCategory::CommitUnknown,
-        LocalTxProfileProbeError::RollbackFailed => {
-            testkit::ConformanceErrorCategory::RollbackFailed
-        }
-    }
-}
-
-fn localtx_profile_classified(
-    error: LocalTxProfileProbeError,
-) -> testkit::localtx::ClassifiedError<LocalTxProfileProbeError> {
-    testkit::localtx::ClassifiedError::new(localtx_profile_category(error), error)
-}
-
 fn secret_repo_conformance_category(error: &SecretRepoError) -> testkit::ConformanceErrorCategory {
     match error {
         SecretRepoError::VersionConflict => testkit::ConformanceErrorCategory::Conflict,
@@ -1057,328 +1011,919 @@ fn secret_repo_classified(
     testkit::localtx::ClassifiedError::new(category, error)
 }
 
-async fn setup_localtx_profile_probe(store: &PgStore) -> Result<(), LocalTxProfileProbeError> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS localtx_profile_probe (\
-         run_id text NOT NULL, tenant_id uuid NOT NULL, marker text NOT NULL, \
-         PRIMARY KEY (run_id, tenant_id, marker))",
-    )
-    .execute(&store.pool)
-    .await
-    .map_err(|_| LocalTxProfileProbeError::Storage)?;
-    Ok(())
+#[derive(Debug)]
+enum AuditLocalTxProfileError {
+    Provider(audit::ports::AuditError),
+    Conflict,
 }
 
-async fn localtx_profile_commit_insert(
-    store: &PgStore,
-    run_id: &str,
-    tenant: vocab::TenantId,
-    marker: &str,
-) -> Result<(), LocalTxProfileProbeError> {
-    let run_id = run_id.to_string();
-    let tenant = tenant.to_string();
-    let marker = marker.to_string();
-    store
-        .run_global_transaction::<_, _, LocalTxProfileProbeError>(move |cap| {
-            Box::pin(async move {
-                sqlx::query(
-                    "INSERT INTO localtx_profile_probe (run_id, tenant_id, marker) \
-                     VALUES ($1, $2::uuid, $3)",
-                )
-                .bind(run_id)
-                .bind(tenant)
-                .bind(marker)
-                .execute(cap.conn())
+impl std::fmt::Display for AuditLocalTxProfileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("audit LocalTx provider profile failed")
+    }
+}
+
+impl std::error::Error for AuditLocalTxProfileError {}
+
+impl From<audit::ports::AuditError> for AuditLocalTxProfileError {
+    fn from(error: audit::ports::AuditError) -> Self {
+        Self::Provider(error)
+    }
+}
+
+fn audit_profile_category(error: &AuditLocalTxProfileError) -> testkit::ConformanceErrorCategory {
+    match error {
+        AuditLocalTxProfileError::Provider(error) => {
+            conformance_retry_category(crate::tx_retry::classify_audit_error(error))
+        }
+        AuditLocalTxProfileError::Conflict => testkit::ConformanceErrorCategory::Conflict,
+    }
+}
+
+struct AuditLocalTxProfile<'a> {
+    owner: &'a PgStore,
+    app: &'a PgStore,
+    admin: &'a PgStore,
+}
+
+impl<'a> AuditLocalTxProfile<'a> {
+    fn new(owner: &'a PgStore, app: &'a PgStore, admin: &'a PgStore) -> Self {
+        Self { owner, app, admin }
+    }
+
+    fn repo(&self) -> crate::PgAuditRepo<crate::audit_repo::test_support::TestVerifier> {
+        make_audit_repo(self.app)
+    }
+
+    async fn append(
+        &self,
+        repo: &crate::PgAuditRepo<crate::audit_repo::test_support::TestVerifier>,
+        tenant: vocab::TenantId,
+    ) -> Result<(), AuditLocalTxProfileError> {
+        repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn snapshot(&self, tenant: vocab::TenantId) -> Result<usize, AuditLocalTxProfileError> {
+        let admin = make_audit_admin_repo(self.admin);
+        let report = admin
+            .verify_tenant(
+                tenant,
+                vocab::Limit::new(32).map_err(audit::ports::AuditError::storage)?,
+            )
+            .await?;
+        let (physical,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM audit_entries WHERE tenant_id = $1::uuid")
+                .bind(tenant.as_uuid().to_string())
+                .fetch_one(&self.owner.pool)
                 .await
-                .map_err(|_| LocalTxProfileProbeError::Storage)?;
-                Ok(())
-            })
-        })
-        .await
+                .map_err(audit::ports::AuditError::storage)?;
+        let physical = usize::try_from(physical).map_err(audit::ports::AuditError::storage)?;
+        if report.checked_entries != physical as u64 {
+            return Err(audit::ports::AuditError::ChainBroken.into());
+        }
+        Ok(physical)
+    }
 }
 
-async fn localtx_profile_rollback_insert(
-    store: &PgStore,
-    run_id: &str,
-    tenant: vocab::TenantId,
-    marker: &str,
-    error: LocalTxProfileProbeError,
-) -> Result<(), LocalTxProfileProbeError> {
-    let run_id = run_id.to_string();
-    let tenant = tenant.to_string();
-    let marker = marker.to_string();
-    store
-        .run_global_transaction::<_, (), LocalTxProfileProbeError>(move |cap| {
-            Box::pin(async move {
-                sqlx::query(
-                    "INSERT INTO localtx_profile_probe (run_id, tenant_id, marker) \
-                     VALUES ($1, $2::uuid, $3)",
-                )
-                .bind(run_id)
-                .bind(tenant)
-                .bind(marker)
-                .execute(cap.conn())
-                .await
-                .map_err(|_| LocalTxProfileProbeError::Storage)?;
-                Err(error)
-            })
-        })
-        .await
-}
-
-async fn localtx_profile_count(
-    store: &PgStore,
-    run_id: &str,
-    tenant: vocab::TenantId,
-    marker: &str,
-) -> Result<usize, LocalTxProfileProbeError> {
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM localtx_profile_probe \
-         WHERE run_id = $1 AND tenant_id = $2::uuid AND marker = $3",
-    )
-    .bind(run_id)
-    .bind(tenant.to_string())
-    .bind(marker)
-    .fetch_one(&store.pool)
-    .await
-    .map_err(|_| LocalTxProfileProbeError::Storage)?;
-    usize::try_from(count).map_err(|_| LocalTxProfileProbeError::Storage)
-}
-
-/// Shared real Postgres enrollment for active LocalTx contracts other than settings secret publish.
-///
-/// These four typed markers plus the settings marker in the dedicated `PgSecretRepo` matrix form
-/// the manifest-keyed registry. `localtx-coverage` derives each contract's canonical `txModel` and
-/// requires the corresponding exact helper set; deleting a marker or probe fails the verify gate.
+/// Real Postgres enrollment for the audit LocalTx contract. Writes use the rss_app-backed
+/// `PgAuditRepo`; every durable snapshot is cross-checked by the dedicated audit-admin provider
+/// and the owner connection.
 #[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::too_many_lines)]
-async fn localtx_postgres_backend_profiles_conformance() -> TestResult {
+async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
         ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
         ::vocab::http::LocalTx,
     > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::logout::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::logout::ROUTE;
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::refresh::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::refresh::ROUTE;
-    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
-        ::generated::http::identity_v1::password_change::RouteMarker,
-        ::vocab::http::LocalTx,
-    > = ::generated::http::identity_v1::password_change::ROUTE;
-    let _typed_enrollment = (
-        LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES,
-        LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT,
-        LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH,
-        LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE,
-    );
+    const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        AuditLocalTxProfile<'static>,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES;
 
-    let (_pg, store) = connect_pg().await?;
-    setup_localtx_profile_probe(&store).await?;
-    let run_id = uuid::Uuid::new_v4().to_string();
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &owner).await?;
+    let profile = AuditLocalTxProfile::new(&owner, &app, &audit_admin);
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
     let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
 
+    let commit_repo = profile.repo();
     let commit_writes = AtomicUsize::new(0);
     ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
         || async {
-            localtx_profile_commit_insert(&store, &run_id, tenant_a, "commit")
+            profile
+                .append(&commit_repo, tenant_a)
                 .await
-                .map_err(localtx_profile_classified)?;
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(audit_profile_category(&error), error)
+                })?;
             commit_writes.fetch_add(1, Ordering::Relaxed);
             Ok(())
         },
         || async {
-            localtx_profile_count(&store, &run_id, tenant_a, "commit")
-                .await
-                .map_err(localtx_profile_classified)
+            profile.snapshot(tenant_a).await.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(audit_profile_category(&error), error)
+            })
         },
         1,
         || commit_writes.load(Ordering::Relaxed),
     ))
     .await?;
 
+    let rollback_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let rollback_repo = profile.repo().with_append_fault(
+        rollback_tenant,
+        crate::audit_repo::AuditAppendFault::Permanent,
+        1,
+    );
     ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
         || async {
-            localtx_profile_rollback_insert(
-                &store,
-                &run_id,
-                tenant_a,
-                "rollback",
-                LocalTxProfileProbeError::Transient,
-            )
-            .await
-            .map_err(localtx_profile_classified)
-        },
-        testkit::ConformanceErrorCategory::Transient,
-        || async {
-            localtx_profile_count(&store, &run_id, tenant_a, "rollback")
+            profile
+                .append(&rollback_repo, rollback_tenant)
                 .await
-                .map_err(localtx_profile_classified)
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(audit_profile_category(&error), error)
+                })
+        },
+        testkit::ConformanceErrorCategory::Permanent,
+        || async {
+            profile.snapshot(rollback_tenant).await.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(audit_profile_category(&error), error)
+            })
         },
         0,
     ))
     .await?;
 
-    let rejected_mutations = AtomicUsize::new(0);
+    audit_admin.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_audit_backend_profile_rejected_paths() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        AuditLocalTxProfile<'static>,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &owner).await?;
+    let profile = AuditLocalTxProfile::new(&owner, &app, &audit_admin);
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let rejected_repo = profile.repo();
+    let rejected_probe = rejected_repo.append_attempt_probe();
     ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
         || async {
-            Err::<(), _>(localtx_profile_classified(
-                LocalTxProfileProbeError::Validation,
-            ))
+            rejected_repo
+                .append(audit_scope(tenant_a), make_audit_record(tenant_b, 0))
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Validation,
+                        error,
+                    )
+                })
         },
         testkit::ConformanceErrorCategory::Validation,
         || async {
-            localtx_profile_count(&store, &run_id, tenant_a, "validation")
-                .await
-                .map_err(localtx_profile_classified)
+            profile.snapshot(tenant_a).await.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(audit_profile_category(&error), error)
+            })
         },
         0,
-        || rejected_mutations.load(Ordering::Relaxed),
+        || rejected_probe.attempts(tenant_a),
     ))
     .await?;
 
+    let authorization_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let authorization_repo = profile.repo();
+    let authorization_probe = authorization_repo.append_attempt_probe();
     ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
         || async {
-            Err::<(), _>(localtx_profile_classified(
-                LocalTxProfileProbeError::Authorization,
-            ))
+            authorization_repo
+                .append(
+                    audit_scope(authorization_tenant),
+                    make_audit_record(tenant_a, 0),
+                )
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Authorization,
+                        error,
+                    )
+                })
         },
         testkit::ConformanceErrorCategory::Authorization,
         || async {
-            localtx_profile_count(&store, &run_id, tenant_a, "authorization")
+            profile
+                .snapshot(authorization_tenant)
                 .await
-                .map_err(localtx_profile_classified)
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(audit_profile_category(&error), error)
+                })
         },
         0,
-        || rejected_mutations.load(Ordering::Relaxed),
+        || authorization_probe.attempts(authorization_tenant),
     ))
     .await?;
 
+    audit_admin.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_audit_backend_profile_tenant_isolation() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        AuditLocalTxProfile<'static>,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &owner).await?;
+    let profile = AuditLocalTxProfile::new(&owner, &app, &audit_admin);
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let tenant_repo = profile.repo();
     ::testkit::tenant_conformance::assert_tenant_isolation(
         tenant_a,
         tenant_b,
-        |tenant| localtx_profile_commit_insert(&store, &run_id, tenant, "tenant-isolation"),
+        |tenant| profile.append(&tenant_repo, tenant),
         |tenant| {
-            let store = &store;
-            let run_id = &run_id;
-            async move {
-                localtx_profile_count(store, run_id, tenant, "tenant-isolation")
-                    .await
-                    .map(|count| count == 1)
-            }
+            let profile = &profile;
+            async move { profile.snapshot(tenant).await.map(|count| count > 0) }
         },
-        |error| localtx_profile_category(*error),
+        audit_profile_category,
     )
     .await?;
 
-    let success_attempts = AtomicUsize::new(0);
+    audit_admin.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        AuditLocalTxProfile<'static>,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &owner).await?;
+    let profile = AuditLocalTxProfile::new(&owner, &app, &audit_admin);
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
+
+    let success_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let conflict_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let permanent_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let exhaustion_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let success_repo = profile.repo().with_append_fault(
+        success_tenant,
+        crate::audit_repo::AuditAppendFault::Transient,
+        1,
+    );
+    let permanent_repo = profile.repo().with_append_fault(
+        permanent_tenant,
+        crate::audit_repo::AuditAppendFault::Permanent,
+        1,
+    );
+    let exhaustion_repo = profile.repo().with_append_fault(
+        exhaustion_tenant,
+        crate::audit_repo::AuditAppendFault::TransientBeforeWrite,
+        3,
+    );
+    let success_probe = success_repo.append_attempt_probe();
+    let permanent_probe = permanent_repo.append_attempt_probe();
+    let exhaustion_probe = exhaustion_repo.append_attempt_probe();
     let conflict_attempts = AtomicUsize::new(0);
-    let permanent_attempts = AtomicUsize::new(0);
-    let exhaustion_attempts = AtomicUsize::new(0);
     ::testkit::repo_conformance::assert_retry_boundary_policy(
         ::testkit::repo_conformance::RetryBoundaryCase::new(
             ::testkit::repo_conformance::TransientSuccessPath::new(
-                || async {
-                    success_attempts.fetch_add(1, Ordering::Relaxed);
-                    let _ = localtx_profile_rollback_insert(
-                        &store,
-                        &run_id,
-                        tenant_a,
-                        "retry-success",
-                        LocalTxProfileProbeError::Transient,
-                    )
-                    .await;
-                    success_attempts.fetch_add(1, Ordering::Relaxed);
-                    localtx_profile_commit_insert(&store, &run_id, tenant_a, "retry-success").await
-                },
-                || success_attempts.load(Ordering::Relaxed),
+                || profile.append(&success_repo, success_tenant),
+                || success_probe.attempts(success_tenant),
                 2,
-                || async {
-                    localtx_profile_count(&store, &run_id, tenant_a, "retry-success").await
-                },
+                || profile.snapshot(success_tenant),
             ),
             ::testkit::repo_conformance::ConflictPath::new(
                 || async {
                     conflict_attempts.fetch_add(1, Ordering::Relaxed);
-                    Err::<(), _>(LocalTxProfileProbeError::Conflict)
+                    Err::<(), _>(AuditLocalTxProfileError::Conflict)
                 },
                 || conflict_attempts.load(Ordering::Relaxed),
-                || async { Ok::<usize, LocalTxProfileProbeError>(0) },
+                || profile.snapshot(conflict_tenant),
             ),
             ::testkit::repo_conformance::PermanentPath::new(
-                || async {
-                    permanent_attempts.fetch_add(1, Ordering::Relaxed);
-                    Err::<(), _>(LocalTxProfileProbeError::Permanent)
-                },
-                || permanent_attempts.load(Ordering::Relaxed),
-                || async { Ok::<usize, LocalTxProfileProbeError>(0) },
+                || profile.append(&permanent_repo, permanent_tenant),
+                || permanent_probe.attempts(permanent_tenant),
+                || profile.snapshot(permanent_tenant),
             ),
             ::testkit::repo_conformance::TransientExhaustionPath::new(
-                || async {
-                    for _ in 0..3 {
-                        exhaustion_attempts.fetch_add(1, Ordering::Relaxed);
-                        let _ = localtx_profile_rollback_insert(
-                            &store,
-                            &run_id,
-                            tenant_a,
-                            "retry-exhaustion",
-                            LocalTxProfileProbeError::Transient,
-                        )
-                        .await;
-                    }
-                    Err::<(), _>(LocalTxProfileProbeError::Transient)
-                },
-                || exhaustion_attempts.load(Ordering::Relaxed),
+                || profile.append(&exhaustion_repo, exhaustion_tenant),
+                || exhaustion_probe.attempts(exhaustion_tenant),
                 3,
-                || async {
-                    localtx_profile_count(&store, &run_id, tenant_a, "retry-exhaustion").await
-                },
+                || profile.snapshot(exhaustion_tenant),
             ),
         ),
-        |error| localtx_profile_category(*error),
+        audit_profile_category,
     )
     .await?;
 
-    let unknown_attempts = AtomicUsize::new(0);
+    audit_admin.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES: ::vocab::HttpRouteBinding<
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::audit_v1::list_tenant_entries::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES: ::std::marker::PhantomData<(
+        ::generated::http::audit_v1::list_tenant_entries::RouteMarker,
+        AuditLocalTxProfile<'static>,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_AUDIT_LIST_TENANT_ENTRIES;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let audit_admin = connect_pg_audit_admin_role(&pg, &owner).await?;
+    let profile = AuditLocalTxProfile::new(&owner, &app, &audit_admin);
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
+
+    let unknown_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let unknown_repo = profile.repo().with_append_fault(
+        unknown_tenant,
+        crate::audit_repo::AuditAppendFault::CommitUnknown,
+        1,
+    );
+    let unknown_probe = unknown_repo.append_attempt_probe();
     ::testkit::localtx::assert_commit_unknown_no_replay(
         ::testkit::localtx::CommitUnknownCase::new(
             || async {
-                unknown_attempts.fetch_add(1, Ordering::Relaxed);
-                Err::<(), _>(localtx_profile_classified(
-                    LocalTxProfileProbeError::CommitUnknown,
-                ))
+                profile
+                    .append(&unknown_repo, unknown_tenant)
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::CommitUnknown,
+                            error,
+                        )
+                    })
             },
             testkit::ConformanceErrorCategory::CommitUnknown,
-            || unknown_attempts.load(Ordering::Relaxed),
+            || unknown_probe.attempts(unknown_tenant),
         ),
     )
     .await?;
-    let rollback_failed_attempts = AtomicUsize::new(0);
+    let rollback_failed_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let rollback_failed_repo = profile.repo().with_append_fault(
+        rollback_failed_tenant,
+        crate::audit_repo::AuditAppendFault::RollbackFailed,
+        1,
+    );
+    let rollback_failed_probe = rollback_failed_repo.append_attempt_probe();
     ::testkit::localtx::assert_rollback_failed_no_replay(
         ::testkit::localtx::RollbackFailedCase::new(
             || async {
-                rollback_failed_attempts.fetch_add(1, Ordering::Relaxed);
-                Err::<(), _>(localtx_profile_classified(
-                    LocalTxProfileProbeError::RollbackFailed,
-                ))
+                profile
+                    .append(&rollback_failed_repo, rollback_failed_tenant)
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::RollbackFailed,
+                            error,
+                        )
+                    })
             },
             testkit::ConformanceErrorCategory::RollbackFailed,
-            || rollback_failed_attempts.load(Ordering::Relaxed),
+            || rollback_failed_probe.attempts(rollback_failed_tenant),
         ),
     )
     .await?;
 
-    sqlx::query("DELETE FROM localtx_profile_probe WHERE run_id = $1")
-        .bind(&run_id)
-        .execute(&store.pool)
-        .await?;
-    store.shutdown().await?;
+    audit_admin.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct RefreshLocalTxCase {
+    tenant: vocab::TenantId,
+    old: identity::ports::RefreshTokenRecord,
+    next: identity::ports::RefreshTokenRecord,
+}
+
+impl RefreshLocalTxCase {
+    #[allow(clippy::unwrap_used)]
+    fn new(tenant: vocab::TenantId) -> Self {
+        let old_id = uuid::Uuid::new_v4().to_string();
+        let issued =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut hash = [0_u8; 32];
+        hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let old = identity::ports::RefreshTokenRecord::hydrate(
+            old_id.clone(),
+            tenant,
+            "localtx-refresh",
+            vocab::PrincipalKind::User,
+            hash,
+            None,
+            old_id,
+            identity::ports::RefreshStatus::Active,
+            issued,
+            issued + std::time::Duration::from_secs(3_600),
+        );
+        let mut next_hash = [0_u8; 32];
+        next_hash[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        next_hash[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let next = identity::ports::RefreshTokenRecord::hydrate(
+            uuid::Uuid::new_v4().to_string(),
+            tenant,
+            "localtx-refresh",
+            vocab::PrincipalKind::User,
+            next_hash,
+            Some(old.id().as_str().to_owned()),
+            old.lineage_id().as_str().to_owned(),
+            identity::ports::RefreshStatus::Active,
+            issued + std::time::Duration::from_secs(1),
+            issued + std::time::Duration::from_secs(3_601),
+        );
+        Self { tenant, old, next }
+    }
+
+    fn old_id(&self) -> &str {
+        self.old.id().as_str()
+    }
+
+    fn mutation(&self) -> identity::ports::RefreshRotationMutation {
+        identity::ports::RefreshRotationMutation::for_test(self.old.clone().begin_rotation(
+            self.next.id().clone(),
+            self.next.token_hash().clone(),
+            self.next.issued_at(),
+            self.next.expires_at(),
+        ))
+    }
+
+    async fn seed(&self, app: &PgStore) -> Result<(), identity::ports::IdentityError> {
+        crate::PgRefreshTokenStore::new(app)
+            .insert(identity_scope(self.tenant), self.old.clone())
+            .await
+    }
+
+    async fn rotate(
+        &self,
+        repo: &crate::PgRefreshTokenStore,
+    ) -> Result<(), identity::ports::IdentityError> {
+        match repo
+            .rotate(identity_scope(self.tenant), self.mutation())
+            .await?
+        {
+            true => Ok(()),
+            false => Err(identity::ports::IdentityError::VersionConflict),
+        }
+    }
+
+    async fn snapshot(&self, owner: &PgStore) -> Result<(Option<String>, i64), sqlx::Error> {
+        sqlx::query_as(
+            "SELECT (SELECT status FROM refresh_tokens WHERE id = $1::uuid), \
+             (SELECT count(*) FROM refresh_tokens WHERE id = $2::uuid)",
+        )
+        .bind(self.old.id().as_str())
+        .bind(self.next.id().as_str())
+        .fetch_one(&owner.pool)
+        .await
+    }
+
+    async fn durable_writes(
+        &self,
+        owner: &PgStore,
+    ) -> Result<usize, identity::ports::IdentityError> {
+        let (_, count) = self
+            .snapshot(owner)
+            .await
+            .map_err(|error| identity::ports::IdentityError::Storage(Box::new(error)))?;
+        usize::try_from(count)
+            .map_err(|error| identity::ports::IdentityError::Storage(Box::new(error)))
+    }
+}
+
+fn classified_pg_snapshot_error(
+    error: sqlx::Error,
+) -> testkit::localtx::ClassifiedError<sqlx::Error> {
+    testkit::localtx::ClassifiedError::new(testkit::ConformanceErrorCategory::Storage, error)
+}
+
+/// Refresh keeps a separate enrollment so backend probes cannot be inherited from another
+/// contract in the same Rust test function. Every mutating path calls the real rss_app-backed
+/// `PgRefreshTokenStore`; durable snapshots use only the owner connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_identity_refresh_backend_profile_commit_and_rollback() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::refresh::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        crate::PgRefreshTokenStore,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let commit = RefreshLocalTxCase::new(tenant_a);
+    commit.seed(&app).await?;
+    let commit_repo = crate::PgRefreshTokenStore::new(&app);
+    let commit_writes = AtomicUsize::new(0);
+    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+        || async {
+            commit
+                .rotate(&commit_repo)
+                .await
+                .map_err(classified_identity_error)?;
+            commit_writes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        },
+        || async {
+            commit
+                .snapshot(&owner)
+                .await
+                .map_err(classified_pg_snapshot_error)
+        },
+        (Some("consumed".to_owned()), 1),
+        || commit_writes.load(Ordering::Relaxed),
+    ))
+    .await?;
+
+    let rollback = RefreshLocalTxCase::new(tenant_a);
+    rollback.seed(&app).await?;
+    let rollback_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        rollback.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::Permanent,
+        1,
+    );
+    ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
+        || async {
+            rollback
+                .rotate(&rollback_repo)
+                .await
+                .map_err(classified_identity_error)
+        },
+        testkit::ConformanceErrorCategory::Permanent,
+        || async {
+            rollback
+                .snapshot(&owner)
+                .await
+                .map_err(classified_pg_snapshot_error)
+        },
+        (Some("active".to_owned()), 0),
+    ))
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_identity_refresh_backend_profile_rejected_paths() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::refresh::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        crate::PgRefreshTokenStore,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let rejected = RefreshLocalTxCase::new(tenant_a);
+    let rejected_repo = crate::PgRefreshTokenStore::new(&app);
+    let rejected_probe = rejected_repo.rotation_attempt_probe();
+    let rejected_mutations = AtomicUsize::new(0);
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let _ = rejected_repo
+                .find_by_hash(identity_scope(tenant_a), rejected.old.token_hash().clone())
+                .await
+                .map_err(classified_identity_error)?;
+            Err::<(), _>(testkit::localtx::ClassifiedError::new(
+                testkit::ConformanceErrorCategory::Validation,
+                identity::ports::IdentityError::Storage(Box::new(std::io::Error::other(
+                    "refresh request rejected before rotate",
+                ))),
+            ))
+        },
+        testkit::ConformanceErrorCategory::Validation,
+        || async {
+            rejected
+                .snapshot(&owner)
+                .await
+                .map_err(classified_pg_snapshot_error)
+        },
+        (None, 0),
+        || rejected_probe.attempts(rejected.old_id()),
+    ))
+    .await?;
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let _ = rejected_repo
+                .find_by_hash(identity_scope(tenant_b), rejected.old.token_hash().clone())
+                .await
+                .map_err(classified_identity_error)?;
+            Err::<(), _>(testkit::localtx::ClassifiedError::new(
+                testkit::ConformanceErrorCategory::Authorization,
+                identity::ports::IdentityError::Storage(Box::new(std::io::Error::other(
+                    "cross-tenant refresh rejected before rotate",
+                ))),
+            ))
+        },
+        testkit::ConformanceErrorCategory::Authorization,
+        || async {
+            rejected
+                .snapshot(&owner)
+                .await
+                .map_err(classified_pg_snapshot_error)
+        },
+        (None, 0),
+        || rejected_mutations.load(Ordering::Relaxed),
+    ))
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_identity_refresh_backend_profile_tenant_isolation() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::refresh::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        crate::PgRefreshTokenStore,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let tenant_case_a = RefreshLocalTxCase::new(tenant_a);
+    let tenant_case_b = RefreshLocalTxCase::new(tenant_b);
+    tenant_case_a.seed(&app).await?;
+    tenant_case_b.seed(&app).await?;
+    let tenant_repo = crate::PgRefreshTokenStore::new(&app);
+    ::testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let repo = &tenant_repo;
+            let case = if tenant == tenant_a {
+                &tenant_case_a
+            } else {
+                &tenant_case_b
+            };
+            async move { case.rotate(repo).await }
+        },
+        |tenant| {
+            let repo = &tenant_repo;
+            let hash = tenant_case_a.old.token_hash().clone();
+            async move {
+                repo.find_by_hash(identity_scope(tenant), hash)
+                    .await
+                    .map(|record| record.is_some())
+            }
+        },
+        |error| conformance_retry_category(classify_identity_error(error)),
+    )
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_identity_refresh_backend_profile_retry_policy() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::refresh::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        crate::PgRefreshTokenStore,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let retry_success = RefreshLocalTxCase::new(tenant_a);
+    let retry_conflict = RefreshLocalTxCase::new(tenant_a);
+    let retry_permanent = RefreshLocalTxCase::new(tenant_a);
+    let retry_exhaustion = RefreshLocalTxCase::new(tenant_a);
+    for case in [
+        &retry_success,
+        &retry_conflict,
+        &retry_permanent,
+        &retry_exhaustion,
+    ] {
+        case.seed(&app).await?;
+    }
+    let success_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        retry_success.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::Transient,
+        1,
+    );
+    let conflict_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        retry_conflict.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::Conflict,
+        1,
+    );
+    let permanent_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        retry_permanent.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::Permanent,
+        1,
+    );
+    let exhaustion_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        retry_exhaustion.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::TransientBeforeWrite,
+        3,
+    );
+    let success_probe = success_repo.rotation_attempt_probe();
+    let conflict_probe = conflict_repo.rotation_attempt_probe();
+    let permanent_probe = permanent_repo.rotation_attempt_probe();
+    let exhaustion_probe = exhaustion_repo.rotation_attempt_probe();
+    ::testkit::repo_conformance::assert_retry_boundary_policy(
+        ::testkit::repo_conformance::RetryBoundaryCase::new(
+            ::testkit::repo_conformance::TransientSuccessPath::new(
+                || retry_success.rotate(&success_repo),
+                || success_probe.attempts(retry_success.old_id()),
+                2,
+                || retry_success.durable_writes(&owner),
+            ),
+            ::testkit::repo_conformance::ConflictPath::new(
+                || retry_conflict.rotate(&conflict_repo),
+                || conflict_probe.attempts(retry_conflict.old_id()),
+                || retry_conflict.durable_writes(&owner),
+            ),
+            ::testkit::repo_conformance::PermanentPath::new(
+                || retry_permanent.rotate(&permanent_repo),
+                || permanent_probe.attempts(retry_permanent.old_id()),
+                || retry_permanent.durable_writes(&owner),
+            ),
+            ::testkit::repo_conformance::TransientExhaustionPath::new(
+                || retry_exhaustion.rotate(&exhaustion_repo),
+                || exhaustion_probe.attempts(retry_exhaustion.old_id()),
+                3,
+                || retry_exhaustion.durable_writes(&owner),
+            ),
+        ),
+        |error| conformance_retry_category(classify_identity_error(error)),
+    )
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn localtx_identity_refresh_backend_profile_unsafe_settlements() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::refresh::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::refresh::RouteMarker,
+        crate::PgRefreshTokenStore,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_REFRESH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_REFRESH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+
+    let unknown = RefreshLocalTxCase::new(tenant_a);
+    unknown.seed(&app).await?;
+    let unknown_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        unknown.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::CommitUnknown,
+        1,
+    );
+    let unknown_probe = unknown_repo.rotation_attempt_probe();
+    ::testkit::localtx::assert_commit_unknown_no_replay(
+        ::testkit::localtx::CommitUnknownCase::new(
+            || async {
+                unknown.rotate(&unknown_repo).await.map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::CommitUnknown,
+                        error,
+                    )
+                })
+            },
+            testkit::ConformanceErrorCategory::CommitUnknown,
+            || unknown_probe.attempts(unknown.old_id()),
+        ),
+    )
+    .await?;
+    let rollback_failed = RefreshLocalTxCase::new(tenant_a);
+    rollback_failed.seed(&app).await?;
+    let rollback_failed_repo = crate::PgRefreshTokenStore::new(&app).with_rotation_fault(
+        rollback_failed.old_id(),
+        crate::refresh_token_store::RefreshRotationFault::RollbackFailed,
+        1,
+    );
+    let rollback_failed_probe = rollback_failed_repo.rotation_attempt_probe();
+    ::testkit::localtx::assert_rollback_failed_no_replay(
+        ::testkit::localtx::RollbackFailedCase::new(
+            || async {
+                rollback_failed
+                    .rotate(&rollback_failed_repo)
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::RollbackFailed,
+                            error,
+                        )
+                    })
+            },
+            testkit::ConformanceErrorCategory::RollbackFailed,
+            || rollback_failed_probe.attempts(rollback_failed.old_id()),
+        ),
+    )
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -11256,7 +11801,9 @@ async fn t10_pg_emitter_persists_nonempty_causation_id() -> TestResult {
 use std::time::{Duration, SystemTime};
 
 use diport::{OutboxEmitError, OutboxEnvelopeParts};
-use identity::ports::{SessionLifecycle, TenantId};
+use identity::ports::{
+    DynCredentialRepo, DynSessionLifecycle, SessionLifecycle, SessionLogoutMutation, TenantId,
+};
 
 /// co-tx 测试用 canonical 租户 UUID。
 const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -14846,6 +15393,90 @@ async fn outbox_row_exists(store: &PgStore, event_id: &str) -> Result<bool, sqlx
 // 第二租户（跨租隔离 t22）——与 config/secret 测试 TENANT_B 同值。
 const COTX_TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
 
+async fn seed_active_session(
+    owner: &PgStore,
+    tenant: TenantId,
+    session_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at, revoked) \
+         VALUES ($1, $2, $3::uuid, to_timestamp(2000000000), to_timestamp(1700000000), false)",
+    )
+    .bind(session_id)
+    .bind(format!("subject-{session_id}"))
+    .bind(tenant.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await
+    .map(|_| ())
+}
+
+async fn seed_active_session_for_subject(
+    owner: &PgStore,
+    tenant: TenantId,
+    session_id: &str,
+    subject: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO sessions (session_id, subject, tenant_id, expires_at, created_at, revoked) \
+         VALUES ($1, $2, $3::uuid, to_timestamp(2000000000), to_timestamp(1700000000), false)",
+    )
+    .bind(session_id)
+    .bind(subject)
+    .bind(tenant.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await
+    .map(|_| ())
+}
+
+async fn owner_session_revoked(
+    owner: &PgStore,
+    session_id: &str,
+) -> Result<Option<bool>, sqlx::Error> {
+    sqlx::query_scalar("SELECT revoked FROM sessions WHERE session_id = $1")
+        .bind(session_id)
+        .fetch_optional(&owner.pool)
+        .await
+}
+
+#[allow(clippy::unwrap_used)]
+fn test_session_id(raw: &str) -> identity::ports::SessionId {
+    let tenant = TenantId::parse(COTX_TENANT_A).unwrap();
+    identity::test_support::session(
+        raw,
+        "localtx-fixture",
+        tenant,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+    )
+    .id()
+    .clone()
+}
+
+fn classified_identity_error(
+    error: IdentityError,
+) -> testkit::localtx::ClassifiedError<IdentityError> {
+    testkit::localtx::ClassifiedError::new(
+        conformance_retry_category(classify_identity_error(&error)),
+        error,
+    )
+}
+
+fn logout_handler_service(
+    app: &PgStore,
+    lifecycle: crate::PgSessionLifecycle,
+) -> std::sync::Arc<identity::LoginService<identity::SeedSigner>> {
+    let credentials = std::sync::Arc::from(DynCredentialRepo::new_box(PgCredentialRepo::new(app)));
+    let lifecycle = std::sync::Arc::from(DynSessionLifecycle::new_box(lifecycle));
+    let refresh = identity::seed_refresh_service(fixed_clock, Duration::from_secs(3_600));
+    std::sync::Arc::new(identity::LoginService::new(
+        credentials,
+        lifecycle,
+        refresh,
+        fixed_clock(),
+        Duration::from_secs(3_600),
+    ))
+}
+
 /// t20：persist → `find` 命中，重建 session 字段（subject/tenant/时刻）与持久化一致。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -14924,7 +15555,10 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
 
     // 软撤销 → find None（行仍在、revoked=true）。
     lifecycle
-        .revoke(identity_scope(tenant), sid.clone())
+        .logout(
+            identity_scope(tenant),
+            SessionLogoutMutation::for_test(sid.clone()),
+        )
         .await?;
     assert!(
         lifecycle
@@ -14940,7 +15574,9 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
     assert_eq!(row_cnt.0, 1, "软撤销不删行（行仍在、revoked=true）");
 
     // 幂等：重复 revoke + 未知 sid revoke 均 Ok。
-    lifecycle.revoke(identity_scope(tenant), sid).await?;
+    lifecycle
+        .logout(identity_scope(tenant), SessionLogoutMutation::for_test(sid))
+        .await?;
     let ghost = identity::test_support::session(
         &unique_event_id("t16-ghost"),
         "x",
@@ -14949,7 +15585,10 @@ async fn t21_revoke_soft_deletes_and_is_idempotent() -> TestResult {
         created,
     );
     lifecycle
-        .revoke(identity_scope(tenant), ghost.id().clone())
+        .logout(
+            identity_scope(tenant),
+            SessionLogoutMutation::for_test(ghost.id().clone()),
+        )
         .await?;
 
     store.shutdown().await?;
@@ -14977,8 +15616,11 @@ async fn session_revoke_rollback_on_storage_error() -> TestResult {
         created,
     );
     let sid = session.id().clone();
-    let lifecycle =
-        crate::PgSessionLifecycle::new(&store, fixed_clock()).with_revoke_post_update_error();
+    let lifecycle = crate::PgSessionLifecycle::new(&store, fixed_clock()).with_logout_fault(
+        &session_id,
+        crate::session_lifecycle::SessionLogoutFault::Permanent,
+        1,
+    );
     lifecycle
         .persist_session_and_emit(
             identity_scope(tenant),
@@ -14988,7 +15630,12 @@ async fn session_revoke_rollback_on_storage_error() -> TestResult {
         )
         .await?;
 
-    let revoke_result = lifecycle.revoke(identity_scope(tenant), sid.clone()).await;
+    let revoke_result = lifecycle
+        .logout(
+            identity_scope(tenant),
+            SessionLogoutMutation::for_test(sid.clone()),
+        )
+        .await;
 
     assert!(
         matches!(revoke_result, Err(IdentityError::Storage(_))),
@@ -15046,7 +15693,10 @@ async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
     );
     // 跨租 revoke（tenant B）→ no-op：tenant A 会话仍 find 到。
     lifecycle
-        .revoke(identity_scope(tenant_b), sid.clone())
+        .logout(
+            identity_scope(tenant_b),
+            SessionLogoutMutation::for_test(sid.clone()),
+        )
         .await?;
     assert!(
         lifecycle
@@ -15057,7 +15707,10 @@ async fn t22_cross_tenant_revoke_and_find_isolated() -> TestResult {
     );
     // 同租 revoke → find None（隔离正确、撤销生效）。
     lifecycle
-        .revoke(identity_scope(tenant_a), sid.clone())
+        .logout(
+            identity_scope(tenant_a),
+            SessionLogoutMutation::for_test(sid.clone()),
+        )
         .await?;
     assert!(
         lifecycle
@@ -15119,7 +15772,10 @@ async fn t22b_session_lifecycle_tenant_noop_conformance() -> TestResult {
         },
         || async {
             lifecycle
-                .revoke(identity_scope(tenant_b), sid.clone())
+                .logout(
+                    identity_scope(tenant_b),
+                    SessionLogoutMutation::for_test(sid.clone()),
+                )
                 .await?;
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         },
@@ -15169,6 +15825,721 @@ async fn t22c_session_lifecycle_storage_error_conformance() -> TestResult {
     )
     .await?;
 
+    Ok(())
+}
+
+/// #1704：真实 `rss_app` + `PgSessionLifecycle` logout LocalTx 后端矩阵。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_localtx_matrix() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let commit_sid = format!("logout-commit-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &commit_sid).await?;
+    let commit_lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock());
+    let commit_writes = AtomicUsize::new(0);
+    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+        || async {
+            commit_lifecycle
+                .logout(
+                    identity_scope(tenant_a),
+                    SessionLogoutMutation::for_test(test_session_id(&commit_sid)),
+                )
+                .await
+                .map_err(classified_identity_error)?;
+            commit_writes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        },
+        || async {
+            owner_session_revoked(&owner, &commit_sid)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(true),
+        || commit_writes.load(Ordering::Relaxed),
+    ))
+    .await?;
+    commit_lifecycle
+        .logout(
+            identity_scope(tenant_a),
+            SessionLogoutMutation::for_test(test_session_id(&commit_sid)),
+        )
+        .await?;
+    assert_eq!(
+        owner_session_revoked(&owner, &commit_sid).await?,
+        Some(true),
+        "repeated logout must remain idempotent"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_rollback_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let rollback_sid = format!("logout-rollback-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &rollback_sid).await?;
+    let rollback_lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &rollback_sid,
+        crate::session_lifecycle::SessionLogoutFault::Permanent,
+        1,
+    );
+    ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
+        || async {
+            rollback_lifecycle
+                .logout(
+                    identity_scope(tenant_a),
+                    SessionLogoutMutation::for_test(test_session_id(&rollback_sid)),
+                )
+                .await
+                .map_err(classified_identity_error)
+        },
+        testkit::ConformanceErrorCategory::Permanent,
+        || async {
+            owner_session_revoked(&owner, &rollback_sid)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(false),
+    ))
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_validation_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let validation_sid = format!("logout-validation-{}", uuid::Uuid::new_v4());
+    let validation_actor = uuid::Uuid::new_v4().to_string();
+    seed_active_session_for_subject(&owner, tenant_a, &validation_sid, &validation_actor).await?;
+    let validation_lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock());
+    let validation_attempts = validation_lifecycle.logout_attempt_probe();
+    let validation_router = identity::test_support::logout_router(
+        logout_handler_service(&app, validation_lifecycle),
+        tenant_a,
+        &validation_actor,
+    );
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let response = testkit::call(
+                validation_router,
+                testkit::ContractRequest::post(
+                    generated::http::identity_v1::logout::SPEC.route.path(),
+                )
+                .raw_json(br#"{"sessionId":"malformed""#.to_vec()),
+            )
+            .await
+            .expect("production logout handler accepts the test request");
+            assert_eq!(
+                response.status().as_u16(),
+                400,
+                "malformed logout request is rejected by production decoding"
+            );
+            Err::<(), _>(testkit::localtx::ClassifiedError::new(
+                testkit::ConformanceErrorCategory::Validation,
+                std::io::Error::other("production logout handler rejected malformed request"),
+            ))
+        },
+        testkit::ConformanceErrorCategory::Validation,
+        || async {
+            owner_session_revoked(&owner, &validation_sid)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(false),
+        || validation_attempts.attempts(&validation_sid),
+    ))
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_authorization_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let authorization_sid = format!("logout-authorization-{}", uuid::Uuid::new_v4());
+    let authorization_owner = uuid::Uuid::new_v4().to_string();
+    let unauthorized_actor = uuid::Uuid::new_v4().to_string();
+    seed_active_session_for_subject(&owner, tenant_a, &authorization_sid, &authorization_owner)
+        .await?;
+    let authorization_lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock());
+    let authorization_attempts = authorization_lifecycle.logout_attempt_probe();
+    let authorization_router = identity::test_support::logout_router(
+        logout_handler_service(&app, authorization_lifecycle),
+        tenant_a,
+        &unauthorized_actor,
+    );
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let response = testkit::call(
+                authorization_router,
+                testkit::ContractRequest::post(
+                    generated::http::identity_v1::logout::SPEC.route.path(),
+                )
+                .json(
+                    &generated::http::identity_v1::logout::IdentityLogoutRequest {
+                        session_id: authorization_sid.clone(),
+                    },
+                ),
+            )
+            .await
+            .expect("production logout handler accepts the test request");
+            assert_eq!(
+                response.status().as_u16(),
+                403,
+                "wrong actor is rejected by the production logout service"
+            );
+            Err(testkit::localtx::ClassifiedError::new(
+                testkit::ConformanceErrorCategory::Authorization,
+                std::io::Error::other("production logout service rejected wrong actor"),
+            ))
+        },
+        testkit::ConformanceErrorCategory::Authorization,
+        || async {
+            owner_session_revoked(&owner, &authorization_sid)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(false),
+        || authorization_attempts.attempts(&authorization_sid),
+    ))
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_tenant_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let tenant_a_sid = format!("logout-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b_sid = format!("logout-tenant-b-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &tenant_a_sid).await?;
+    seed_active_session(&owner, tenant_b, &tenant_b_sid).await?;
+    let tenant_lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock());
+    ::testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let session_id = if tenant == tenant_a {
+                &tenant_a_sid
+            } else {
+                &tenant_b_sid
+            };
+            tenant_lifecycle.logout(
+                identity_scope(tenant),
+                SessionLogoutMutation::for_test(test_session_id(session_id)),
+            )
+        },
+        |tenant| {
+            let session_id = if tenant == tenant_a {
+                &tenant_a_sid
+            } else {
+                &tenant_b_sid
+            };
+            async {
+                owner_session_revoked(&owner, session_id)
+                    .await
+                    .map(|revoked| revoked == Some(true))
+                    .map_err(|error| IdentityError::Storage(Box::new(error)))
+            }
+        },
+        |error| conformance_retry_category(classify_identity_error(error)),
+    )
+    .await?;
+    let cross_sid = format!("logout-cross-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &cross_sid).await?;
+    tenant_lifecycle
+        .logout(
+            identity_scope(tenant_b),
+            SessionLogoutMutation::for_test(test_session_id(&cross_sid)),
+        )
+        .await?;
+    assert_eq!(
+        owner_session_revoked(&owner, &cross_sid).await?,
+        Some(false)
+    );
+    let missing_sid = format!("logout-missing-{}", uuid::Uuid::new_v4());
+    let missing_lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock());
+    missing_lifecycle
+        .logout(
+            identity_scope(tenant_a),
+            SessionLogoutMutation::for_test(test_session_id(&missing_sid)),
+        )
+        .await?;
+    assert_eq!(missing_lifecycle.logout_attempts(&missing_sid), 1);
+    assert_eq!(owner_session_revoked(&owner, &missing_sid).await?, None);
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_transient_stage_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let before_begin_sid = format!("logout-before-begin-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &before_begin_sid).await?;
+    let begin_app =
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, std::time::Duration::from_millis(100))
+            .await?;
+    let held_connection = begin_app.pool.acquire().await?;
+    let before_begin =
+        std::sync::Arc::new(crate::PgSessionLifecycle::new(&begin_app, fixed_clock()));
+    let before_begin_task = {
+        let before_begin = std::sync::Arc::clone(&before_begin);
+        let session_id = before_begin_sid.clone();
+        tokio::spawn(async move {
+            before_begin
+                .logout(
+                    identity_scope(tenant_a),
+                    SessionLogoutMutation::for_test(test_session_id(&session_id)),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while before_begin.logout_attempts(&before_begin_sid) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "logout before-begin transient was not retried")?;
+    drop(held_connection);
+    before_begin_task.await??;
+    assert_eq!(before_begin.logout_attempts(&before_begin_sid), 2);
+    assert_eq!(
+        owner_session_revoked(&owner, &before_begin_sid).await?,
+        Some(true)
+    );
+    begin_app.shutdown().await?;
+
+    let before_write_sid = format!("logout-before-write-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &before_write_sid).await?;
+    let before_write = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &before_write_sid,
+        crate::session_lifecycle::SessionLogoutFault::TransientBeforeWrite,
+        1,
+    );
+    before_write
+        .logout(
+            identity_scope(tenant_a),
+            SessionLogoutMutation::for_test(test_session_id(&before_write_sid)),
+        )
+        .await?;
+    assert_eq!(before_write.logout_attempts(&before_write_sid), 2);
+    assert_eq!(
+        owner_session_revoked(&owner, &before_write_sid).await?,
+        Some(true)
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_retry_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let retry_success_sid = format!("logout-retry-success-{}", uuid::Uuid::new_v4());
+    let retry_conflict_sid = format!("logout-retry-conflict-{}", uuid::Uuid::new_v4());
+    let retry_permanent_sid = format!("logout-retry-permanent-{}", uuid::Uuid::new_v4());
+    let retry_exhaustion_sid = format!("logout-retry-exhaustion-{}", uuid::Uuid::new_v4());
+    for session_id in [
+        &retry_success_sid,
+        &retry_conflict_sid,
+        &retry_permanent_sid,
+        &retry_exhaustion_sid,
+    ] {
+        seed_active_session(&owner, tenant_a, session_id).await?;
+    }
+    let retry_success = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &retry_success_sid,
+        crate::session_lifecycle::SessionLogoutFault::Transient,
+        1,
+    );
+    let retry_conflict = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &retry_conflict_sid,
+        crate::session_lifecycle::SessionLogoutFault::Conflict,
+        1,
+    );
+    let retry_permanent = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &retry_permanent_sid,
+        crate::session_lifecycle::SessionLogoutFault::Permanent,
+        1,
+    );
+    let retry_exhaustion = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &retry_exhaustion_sid,
+        crate::session_lifecycle::SessionLogoutFault::Transient,
+        3,
+    );
+    ::testkit::repo_conformance::assert_retry_boundary_policy(
+        ::testkit::repo_conformance::RetryBoundaryCase::new(
+            ::testkit::repo_conformance::TransientSuccessPath::new(
+                || async {
+                    retry_success
+                        .logout(
+                            identity_scope(tenant_a),
+                            SessionLogoutMutation::for_test(test_session_id(&retry_success_sid)),
+                        )
+                        .await
+                },
+                || retry_success.logout_attempts(&retry_success_sid),
+                2,
+                || async {
+                    owner_session_revoked(&owner, &retry_success_sid)
+                        .await
+                        .map(|value| usize::from(value == Some(true)))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+            ::testkit::repo_conformance::ConflictPath::new(
+                || async {
+                    retry_conflict
+                        .logout(
+                            identity_scope(tenant_a),
+                            SessionLogoutMutation::for_test(test_session_id(&retry_conflict_sid)),
+                        )
+                        .await
+                },
+                || retry_conflict.logout_attempts(&retry_conflict_sid),
+                || async {
+                    owner_session_revoked(&owner, &retry_conflict_sid)
+                        .await
+                        .map(|value| usize::from(value == Some(true)))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+            ::testkit::repo_conformance::PermanentPath::new(
+                || async {
+                    retry_permanent
+                        .logout(
+                            identity_scope(tenant_a),
+                            SessionLogoutMutation::for_test(test_session_id(&retry_permanent_sid)),
+                        )
+                        .await
+                },
+                || retry_permanent.logout_attempts(&retry_permanent_sid),
+                || async {
+                    owner_session_revoked(&owner, &retry_permanent_sid)
+                        .await
+                        .map(|value| usize::from(value == Some(true)))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+            ::testkit::repo_conformance::TransientExhaustionPath::new(
+                || async {
+                    retry_exhaustion
+                        .logout(
+                            identity_scope(tenant_a),
+                            SessionLogoutMutation::for_test(test_session_id(&retry_exhaustion_sid)),
+                        )
+                        .await
+                },
+                || retry_exhaustion.logout_attempts(&retry_exhaustion_sid),
+                3,
+                || async {
+                    owner_session_revoked(&owner, &retry_exhaustion_sid)
+                        .await
+                        .map(|value| usize::from(value == Some(true)))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+        ),
+        |error| conformance_retry_category(classify_identity_error(error)),
+    )
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_logout_real_rss_app_unsafe_settlement_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::logout::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::logout::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::logout::RouteMarker,
+        crate::PgSessionLifecycle,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+    let commit_unknown_sid = format!("logout-commit-unknown-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &commit_unknown_sid).await?;
+    let commit_unknown = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &commit_unknown_sid,
+        crate::session_lifecycle::SessionLogoutFault::CommitUnknown,
+        1,
+    );
+    ::testkit::localtx::assert_commit_unknown_no_replay(
+        ::testkit::localtx::CommitUnknownCase::new(
+            || async {
+                commit_unknown
+                    .logout(
+                        identity_scope(tenant_a),
+                        SessionLogoutMutation::for_test(test_session_id(&commit_unknown_sid)),
+                    )
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::CommitUnknown,
+                            error,
+                        )
+                    })
+            },
+            testkit::ConformanceErrorCategory::CommitUnknown,
+            || commit_unknown.logout_attempts(&commit_unknown_sid),
+        ),
+    )
+    .await?;
+    assert_eq!(
+        owner_session_revoked(&owner, &commit_unknown_sid).await?,
+        Some(true),
+        "commit-unknown must expose the committed physical state without replay"
+    );
+
+    let rollback_failed_sid = format!("logout-rollback-failed-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant_a, &rollback_failed_sid).await?;
+    let rollback_failed = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &rollback_failed_sid,
+        crate::session_lifecycle::SessionLogoutFault::RollbackFailed,
+        1,
+    );
+    ::testkit::localtx::assert_rollback_failed_no_replay(
+        ::testkit::localtx::RollbackFailedCase::new(
+            || async {
+                rollback_failed
+                    .logout(
+                        identity_scope(tenant_a),
+                        SessionLogoutMutation::for_test(test_session_id(&rollback_failed_sid)),
+                    )
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::RollbackFailed,
+                            error,
+                        )
+                    })
+            },
+            testkit::ConformanceErrorCategory::RollbackFailed,
+            || rollback_failed.logout_attempts(&rollback_failed_sid),
+        ),
+    )
+    .await?;
+    assert_eq!(
+        owner_session_revoked(&owner, &rollback_failed_sid).await?,
+        Some(false),
+        "rollback-failed acknowledgement loss must not commit the mutation"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// The generated logout route and sealed Postgres operation mapping must retain both metric
+/// identities: HTTP contract ownership and the adapter retry boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_logout_retry_metrics_bind_contract_to_session_boundary() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let session_id = format!("logout-metrics-{}", uuid::Uuid::new_v4());
+    seed_active_session(&owner, tenant, &session_id).await?;
+    let lifecycle = crate::PgSessionLifecycle::new(&app, fixed_clock()).with_logout_fault(
+        &session_id,
+        crate::session_lifecycle::SessionLogoutFault::Transient,
+        1,
+    );
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+
+    metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(lifecycle.logout(
+                identity_scope(tenant),
+                SessionLogoutMutation::for_test(test_session_id(&session_id)),
+            ))
+        })
+    })?;
+
+    assert_eq!(lifecycle.logout_attempts(&session_id), 2);
+    assert_eq!(
+        owner_session_revoked(&owner, &session_id).await?,
+        Some(true)
+    );
+    let rendered = handle.render();
+    for expected in [
+        "tx_retry_attempts_total",
+        "tx_retry_final_total",
+        "boundary=\"identity.session\"",
+        "localtx_retry_attempts_total",
+        "localtx_final_total",
+        "contract_id=\"identity.logout\"",
+        "boundary=\"single_domain\"",
+        "retry_class=\"transient\"",
+        "final_status=\"committed\"",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "logout retry metrics omitted {expected}: {rendered}"
+        );
+    }
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -17661,7 +19032,7 @@ fn internal_secret_publish(entry: SecretEntry) -> SecretInternalPublishCommand {
     SecretInternalPublishCommand::for_test(entry)
 }
 
-fn http_secret_publish(entry: SecretEntry) -> Result<SecretPublishCommand, SecretRepoError> {
+fn http_secret_publish(entry: SecretEntry) -> SecretPublishCommand {
     SecretPublishCommand::for_test(entry)
 }
 
@@ -17866,13 +19237,17 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
         ::generated::http::settings_v2::RouteMarker,
         ::vocab::http::LocalTx,
     > = ::generated::http::settings_v2::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH: ::std::marker::PhantomData<(
+        ::generated::http::settings_v2::RouteMarker,
+        crate::PgSecretUnitOfWork,
+    )> = ::std::marker::PhantomData;
     let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH;
 
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
 
     // Commit proof: the typed conformance helper drives the real repository, then the owner
     // independently confirms the physical row.
@@ -17893,8 +19268,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                         Some("rev-1"),
                         1,
                         tenant_a,
-                    ))
-                    .map_err(secret_repo_classified)?,
+                    )),
                 )
                 .await
                 .map_err(secret_repo_classified)?;
@@ -17939,7 +19313,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                 None,
                 1,
                 tenant_a,
-            ))?,
+            )),
         )
         .await;
     assert!(
@@ -17954,6 +19328,33 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(rolled_back_rows.0, 0, "post-insert error must rollback");
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn ts9_secret_repo_real_rss_app_tenant_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH: ::std::marker::PhantomData<(
+        ::generated::http::settings_v2::RouteMarker,
+        crate::PgSecretUnitOfWork,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = PgSecretRepo::new(&app);
+    let writer = PgSecretUnitOfWork::new(&app);
 
     // Tenant isolation: the same key has independent version spaces and values. The typed helper
     // proves round-trip, cross-tenant invisibility before tenant B writes, and no interference.
@@ -18023,6 +19424,33 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     assert_eq!(hidden.0, 0, "missing tenant GUC must hide all rows");
     missing_read.rollback().await?;
 
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts9_secret_repo_real_rss_app_authorization_profile() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH: ::std::marker::PhantomData<(
+        ::generated::http::settings_v2::RouteMarker,
+        crate::PgSecretUnitOfWork,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let _provider = PgSecretUnitOfWork::new(&app);
+
     let missing_scope_mutations = AtomicUsize::new(0);
     let missing_key_raw = format!("missing.{}", uuid::Uuid::new_v4().simple());
     ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
@@ -18080,6 +19508,20 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
         || missing_scope_mutations.load(Ordering::Relaxed),
     ))
     .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
 
     // Probe anti-vacuity: a durable row under the wrong tenant must still break the global-key
     // no-write snapshot. This red case prevents the provider matrix from regressing to an
@@ -18166,6 +19608,32 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     .await?;
     assert_eq!(cross_tenant_rows.0, 0, "RLS rejection must write nothing");
 
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts9_secret_repo_real_rss_app_validation_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH: ::std::marker::PhantomData<(
+        ::generated::http::settings_v2::RouteMarker,
+        crate::PgSecretUnitOfWork,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let writer = PgSecretUnitOfWork::new(&app);
+
     let invalid_scope_key_raw = format!("scope-mismatch.{}", uuid::Uuid::new_v4().simple());
     let invalid_scope_key = SecretKey::parse(&invalid_scope_key_raw).unwrap();
     ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
@@ -18180,13 +19648,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                         None,
                         1,
                         tenant_b,
-                    ))
-                    .map_err(|error| {
-                        testkit::localtx::ClassifiedError::new(
-                            testkit::ConformanceErrorCategory::Validation,
-                            error,
-                        )
-                    })?,
+                    )),
                 )
                 .await
                 .map_err(|error| {
@@ -18214,6 +19676,53 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
         || crate::secret_repo::secret_save_attempts(&invalid_scope_key),
     ))
     .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let repo = PgSecretRepo::new(&app);
+    let writer = PgSecretUnitOfWork::new(&app);
+    let commit_key_raw = format!("lifecycle.{}", uuid::Uuid::new_v4().simple());
+    writer
+        .publish_internal(
+            settings_scope(tenant_a),
+            internal_secret_publish(make_secret_entry(
+                &commit_key_raw,
+                "vault",
+                "secret/v1",
+                None,
+                1,
+                tenant_a,
+            )),
+        )
+        .await?;
+    let shared_key_raw = format!("lifecycle-tenant.{}", uuid::Uuid::new_v4().simple());
+    let shared_key = SecretKey::parse(&shared_key_raw).unwrap();
+    for (tenant, store_id) in [(tenant_a, "vault-a"), (tenant_b, "vault-b")] {
+        writer
+            .publish_internal(
+                settings_scope(tenant),
+                internal_secret_publish(make_secret_entry(
+                    &shared_key_raw,
+                    store_id,
+                    "secret/shared",
+                    None,
+                    1,
+                    tenant,
+                )),
+            )
+            .await?;
+    }
 
     // Sequential stale CAS conflict is explicit and does not overwrite the head.
     let stale = writer
@@ -18486,6 +19995,31 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     );
     lock_holder.rollback().await?;
 
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts9_secret_repo_real_rss_app_retry_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH: ::std::marker::PhantomData<(
+        ::generated::http::settings_v2::RouteMarker,
+        crate::PgSecretUnitOfWork,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let writer = PgSecretUnitOfWork::new(&app);
+
     // The profile helpers below execute the real PgSecretRepo + retry_write + settlement funnel.
     let retry_success_key_raw = format!("retry-success.{}", uuid::Uuid::new_v4().simple());
     let retry_success_key = SecretKey::parse(&retry_success_key_raw).unwrap();
@@ -18512,7 +20046,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                                 None,
                                 1,
                                 tenant_a,
-                            ))?,
+                            )),
                         )
                         .await
                 },
@@ -18532,7 +20066,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                                 None,
                                 2,
                                 tenant_a,
-                            ))?,
+                            )),
                         )
                         .await
                 },
@@ -18551,7 +20085,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                                 None,
                                 1,
                                 tenant_a,
-                            ))?,
+                            )),
                         )
                         .await
                 },
@@ -18570,7 +20104,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                                 None,
                                 1,
                                 tenant_a,
-                            ))?,
+                            )),
                         )
                         .await
                 },
@@ -18582,6 +20116,31 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
         |error| conformance_retry_category(crate::tx_retry::classify_secret_repo_error(error)),
     )
     .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn ts9_secret_repo_real_rss_app_commit_unknown_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH: ::vocab::HttpRouteBinding<
+        ::generated::http::settings_v2::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::settings_v2::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH: ::std::marker::PhantomData<(
+        ::generated::http::settings_v2::RouteMarker,
+        crate::PgSecretUnitOfWork,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_SETTINGS_SECRET_PUBLISH;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_SETTINGS_SECRET_PUBLISH;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let writer = PgSecretUnitOfWork::new(&app);
 
     let unknown_key_raw = format!("commit-unknown.{}", uuid::Uuid::new_v4().simple());
     let unknown_key = SecretKey::parse(&unknown_key_raw).unwrap();
@@ -18599,13 +20158,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
                             None,
                             1,
                             tenant_a,
-                        ))
-                        .map_err(|error| {
-                            testkit::localtx::ClassifiedError::new(
-                                testkit::ConformanceErrorCategory::CommitUnknown,
-                                error,
-                            )
-                        })?,
+                        )),
                     )
                     .await
                     .map_err(|error| {
@@ -21550,7 +23103,12 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
         issued + Duration::from_secs(1),
         expires + Duration::from_secs(1),
     );
-    let result = rt_store.rotate(identity_scope(tenant), rotation1).await?;
+    let result = rt_store
+        .rotate(
+            identity_scope(tenant),
+            identity::ports::RefreshRotationMutation::for_test(rotation1),
+        )
+        .await?;
     assert!(result, "rt2: 首次 rotate 应返回 true（CAS 命中）");
 
     // 验证 old 变 consumed。
@@ -21595,7 +23153,12 @@ async fn rt2_rotate_cas_active_then_consumed() -> TestResult {
         issued + Duration::from_secs(2),
         expires + Duration::from_secs(2),
     );
-    let result2 = rt_store.rotate(identity_scope(tenant), rotation2).await?;
+    let result2 = rt_store
+        .rotate(
+            identity_scope(tenant),
+            identity::ports::RefreshRotationMutation::for_test(rotation2),
+        )
+        .await?;
     assert!(
         !result2,
         "rt2: 再次 rotate consumed old 应返回 false（CAS miss）"
@@ -21814,7 +23377,12 @@ async fn rt5_rotate_nonexistent_old_id_returns_false() -> TestResult {
         expires + Duration::from_secs(1),
     );
     let rt_store = PgRefreshTokenStore::new(&store);
-    let result = rt_store.rotate(identity_scope(tenant), rotation).await?;
+    let result = rt_store
+        .rotate(
+            identity_scope(tenant),
+            identity::ports::RefreshRotationMutation::for_test(rotation),
+        )
+        .await?;
     assert!(
         !result,
         "rt5: 未入库 old_id → CAS miss → rotate 应返回 false"
@@ -22053,8 +23621,14 @@ async fn rt7_concurrent_rotate_cas_fencing() -> TestResult {
     // 共享 pool 的两个独立 store 实例：并发 rotate 同一 old_id
     let rt_store2 = PgRefreshTokenStore::new(&store);
     let (r1, r2) = tokio::join!(
-        rt_store1.rotate(identity_scope(tenant), rotation1),
-        rt_store2.rotate(identity_scope(tenant), rotation2),
+        rt_store1.rotate(
+            identity_scope(tenant),
+            identity::ports::RefreshRotationMutation::for_test(rotation1),
+        ),
+        rt_store2.rotate(
+            identity_scope(tenant),
+            identity::ports::RefreshRotationMutation::for_test(rotation2),
+        ),
     );
 
     let r1 = r1?;
@@ -22154,7 +23728,12 @@ async fn rt8_refresh_token_rotate_rollback_conformance() -> TestResult {
     let rt_store = PgRefreshTokenStore::new(&store);
     rt_store.insert(identity_scope(tenant), old_record).await?;
 
-    let result = rt_store.rotate(identity_scope(tenant), rotation).await;
+    let result = rt_store
+        .rotate(
+            identity_scope(tenant),
+            identity::ports::RefreshRotationMutation::for_test(rotation),
+        )
+        .await;
     assert!(
         matches!(result, Err(identity::ports::IdentityError::Storage(_))),
         "rt8: new insert 失败应映射为 IdentityError::Storage"
@@ -22290,7 +23869,7 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
 
 // ───────────────────────────────────────────────────────────────────────────
 // PgCredentialRepo（identity 凭据仓储）集成测试（#1316）：find/save/upsert · authenticate 三态（含成功清锁）·
-// 折叠锁定态原子 RMW（累计→锁→lazy-unlock 持久化）· bump_version CAS · 跨租 fail-closed · F2 未知主体不建行 ·
+// 折叠锁定态原子 RMW（累计→锁→lazy-unlock 持久化）· password-change CAS · 跨租 fail-closed · F2 未知主体不建行 ·
 // information_schema 明文列断言（DoD）。
 //
 // 构造 `Credential` 经 `Credential::hydrate`（pub funnel + `secure::hash_password`）；`LoginIdentifier` 经
@@ -22300,10 +23879,12 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
 // `InMemCredentialRepo` 单测（crates/identity/src/internal/mem.rs），此处证 postgres provider 行为等价 + durable。
 // ───────────────────────────────────────────────────────────────────────────
 
-use identity::ports::{AuthOutcome, Credential, CredentialRepo, LoginIdentifier};
+use identity::ports::{
+    AuthOutcome, Credential, CredentialRepo, LoginIdentifier, PasswordChangeMutation,
+};
 
 use crate::PgCredentialRepo;
-use crate::credential_repo::{arm_credential_retry_failpoint, credential_retry_attempts};
+use crate::credential_repo::CredentialMutationFault;
 
 const CRED_TENANT_A: &str = "a1a2a3a4-b1b2-4c3c-8d4d-e1e2e3e4e5e6";
 const CRED_TENANT_B: &str = "b9b8b7b6-c5c4-4a3a-8f2f-d1d2d3d4d5d6";
@@ -22347,6 +23928,10 @@ fn make_cred(
     ))
 }
 
+fn password_change(expected: u32, next: Credential) -> PasswordChangeMutation {
+    PasswordChangeMutation::for_test(expected, next)
+}
+
 fn cred_epoch(secs: u64) -> std::time::SystemTime {
     std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
 }
@@ -22361,6 +23946,21 @@ async fn db_failure_count(store: &PgStore, tenant: &str, login: &str) -> CredHel
     .fetch_one(&store.pool)
     .await?;
     Ok(row.0)
+}
+
+async fn owner_credential_snapshot(
+    owner: &PgStore,
+    tenant: TenantId,
+    login: &str,
+) -> Result<Option<(i64, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT version, password_hash FROM credentials \
+         WHERE tenant_id = $1::uuid AND login = $2",
+    )
+    .bind(tenant.as_uuid().to_string())
+    .bind(login)
+    .fetch_optional(&owner.pool)
+    .await
 }
 
 // 直查持久化 locked_until epoch（NULL → None；断言 lazy-unlock 持久化解锁）。
@@ -22850,10 +24450,10 @@ async fn credential_repo_authenticate_success_clears_lockout() -> TestResult {
     Ok(())
 }
 
-// bump_version CAS：期望不匹配 → VersionConflict；命中 → 替换 hash+version（authenticate 新密码真）；
+// apply_password_change CAS：期望不匹配 → VersionConflict；命中 → 替换 hash+version（authenticate 新密码真）；
 // 查无 → CredentialNotFound；跨租（next 在 B）→ CredentialNotFound 且不动 A。
 #[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_bump_version_cas() -> TestResult {
+async fn credential_repo_apply_password_change_cas() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgCredentialRepo::new(&store);
@@ -22869,10 +24469,9 @@ async fn credential_repo_bump_version_cas() -> TestResult {
     // 期望版本不匹配 → VersionConflict。
     assert!(
         matches!(
-            repo.bump_version(
+            repo.apply_password_change(
                 identity_scope(a),
-                99,
-                make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?
+                password_change(99, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?)
             )
             .await,
             Err(IdentityError::VersionConflict)
@@ -22895,10 +24494,9 @@ async fn credential_repo_bump_version_cas() -> TestResult {
         "stale CAS 后候选密码不得生效"
     );
     // 命中 → 替换 hash + version。
-    repo.bump_version(
+    repo.apply_password_change(
         identity_scope(a),
-        1,
-        make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?,
+        password_change(1, make_cred("alice", CRED_USER_ALICE, "pw2", 2, a)?),
     )
     .await?;
     let Some(got) = repo
@@ -22917,10 +24515,9 @@ async fn credential_repo_bump_version_cas() -> TestResult {
     // 查无凭据 → CredentialNotFound。
     assert!(
         matches!(
-            repo.bump_version(
+            repo.apply_password_change(
                 identity_scope(a),
-                1,
-                make_cred("ghost", CRED_USER_BOB, "x", 1, a)?
+                password_change(1, make_cred("ghost", CRED_USER_BOB, "x", 1, a)?)
             )
             .await,
             Err(IdentityError::CredentialNotFound)
@@ -22930,10 +24527,9 @@ async fn credential_repo_bump_version_cas() -> TestResult {
     // 跨租 bump（next 在 B）→ CredentialNotFound（key 派生自 next，B 无行），不动 A。
     assert!(
         matches!(
-            repo.bump_version(
+            repo.apply_password_change(
                 identity_scope(b),
-                2,
-                make_cred("alice", CRED_USER_ALICE, "pw3", 3, b)?
+                password_change(2, make_cred("alice", CRED_USER_ALICE, "pw3", 3, b)?)
             )
             .await,
             Err(IdentityError::CredentialNotFound)
@@ -22954,12 +24550,12 @@ async fn credential_repo_bump_version_cas() -> TestResult {
 
 /// 两个持有同一 v1 快照的真实并发写者只能有一个 CAS 胜出；败者冲突且不覆盖胜者。
 #[tokio::test(flavor = "multi_thread")]
-async fn credential_repo_bump_version_concurrent_writers_one_wins() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let setup_repo = PgCredentialRepo::new(&store);
+async fn credential_repo_password_change_concurrent_writers_one_wins() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let setup_repo = PgCredentialRepo::new(&app);
     let tenant = cred_tenant(CRED_TENANT_A)?;
-    let user_id = cred_uid(CRED_USER_ALICE)?;
     setup_repo
         .save(
             identity_scope(tenant),
@@ -22969,66 +24565,30 @@ async fn credential_repo_bump_version_concurrent_writers_one_wins() -> TestResul
 
     let left = make_cred("alice", CRED_USER_ALICE, "pw-left", 2, tenant)?;
     let right = make_cred("alice", CRED_USER_ALICE, "pw-right", 2, tenant)?;
-    let gate = crate::credential_repo::CredentialCasPauseGate::new();
-    let left_repo = PgCredentialRepo::new(&store).with_bump_post_update_pause(gate.clone());
+    let gate = crate::credential_repo::PasswordChangeCasPauseGate::new();
+    let left_repo =
+        PgCredentialRepo::new(&app).with_password_change_post_update_pause(gate.clone());
     let left_task = tokio::spawn(async move {
         left_repo
-            .bump_version(identity_scope(tenant), 1, left)
+            .apply_password_change(identity_scope(tenant), password_change(1, left))
             .await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_until_updated())
         .await
         .map_err(|_| "first CAS writer did not reach the post-update pause gate")?;
 
-    let right_repo = PgCredentialRepo::new(&store);
-    let right_task = tokio::spawn(async move {
+    let right_repo = PgCredentialRepo::new(&app);
+    let mut right_task = tokio::spawn(async move {
         right_repo
-            .bump_version(identity_scope(tenant), 1, right)
+            .apply_password_change(identity_scope(tenant), password_change(1, right))
             .await
     });
-
-    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
-        loop {
-            poll.tick().await;
-            let (is_blocked,): (bool,) = sqlx::query_as(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM pg_stat_activity AS activity
-                    WHERE activity.datname = current_database()
-                      AND activity.pid <> pg_backend_pid()
-                      AND activity.state = 'active'
-                      AND activity.wait_event_type = 'Lock'
-                      AND position('SELECT version FROM credentials' IN activity.query) > 0
-                      AND position('FOR UPDATE' IN activity.query) > 0
-                      AND EXISTS (
-                          SELECT 1
-                          FROM pg_locks AS lock
-                          WHERE lock.pid = activity.pid AND NOT lock.granted
-                      )
-                )
-                "#,
-            )
-            .fetch_one(&store.pool)
-            .await?;
-            if is_blocked {
-                return Ok::<(), sqlx::Error>(());
-            }
-        }
-    })
-    .await;
-    match blocked {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            gate.release();
-            return Err(error.into());
-        }
-        Err(_) => {
-            gate.release();
-            return Err("second CAS writer did not block on the credential row lock".into());
-        }
-    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut right_task)
+            .await
+            .is_err(),
+        "second CAS writer must remain pending while the first writer owns the row lock"
+    );
 
     gate.release();
     let left_result = tokio::time::timeout(std::time::Duration::from_secs(5), left_task)
@@ -23048,34 +24608,35 @@ async fn credential_repo_bump_version_concurrent_writers_one_wins() -> TestResul
         "等待行锁的第二写者必须观察到 VersionConflict：{right_result:?}"
     );
 
-    let Some(final_credential) = setup_repo
-        .find_by_user_id(identity_scope(tenant), user_id)
-        .await?
+    let Some((final_version, final_hash)) =
+        owner_credential_snapshot(&owner, tenant, "alice").await?
     else {
         return Err("credential visible after concurrent CAS".into());
     };
-    assert_eq!(final_credential.version(), 2, "并发 CAS 最终只推进至 v2");
+    assert_eq!(final_version, 2, "并发 CAS 最终只推进至 v2");
+    let final_hash = secure::PasswordHash::parse(&final_hash)?;
     assert!(
-        secure::verify_password("pw-left", final_credential.password_hash()),
+        secure::verify_password("pw-left", &final_hash),
         "最终 hash 必须属于先持锁并提交的写者"
     );
     assert!(
-        !secure::verify_password("pw-right", final_credential.password_hash()),
+        !secure::verify_password("pw-right", &final_hash),
         "冲突写者不得覆盖胜出的 hash"
     );
     assert!(
-        !secure::verify_password("pw-v1", final_credential.password_hash()),
+        !secure::verify_password("pw-v1", &final_hash),
         "成功 CAS 后 v1 密码必须失效"
     );
 
-    store.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
 /// identity credential 的 Postgres retry 边界 conformance。
 ///
 /// transient 用真实 tenant-scoped 事务更新 credentials：第一轮更新后返回 transient storage error，事务回滚；
-/// 第二轮重建事务后提交。CAS conflict / permanent 走 production `bump_version`，证明不会盲目重试或提交副作用。
+/// 第二轮重建事务后提交。CAS conflict / permanent 走 production `apply_password_change`，证明不会盲目重试或提交副作用。
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_repo_retry_boundary_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -23095,6 +24656,18 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
         make_cred("retry-alice", CRED_USER_RETRY, "pw1", 1, tenant)?,
     )
     .await?;
+    let transient_repo = PgCredentialRepo::new(&store).with_password_change_fault(
+        "retry-alice",
+        CredentialMutationFault::Transient,
+        1,
+    );
+    let conflict_repo = PgCredentialRepo::new(&store);
+    let permanent_repo = PgCredentialRepo::new(&store);
+    let exhaustion_repo = PgCredentialRepo::new(&store).with_password_change_fault(
+        "retry-alice",
+        CredentialMutationFault::Transient,
+        3,
+    );
 
     metrics::with_local_recorder(&recorder, || {
         tokio::task::block_in_place(|| {
@@ -23103,15 +24676,18 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
                     testkit::repo_conformance::RetryBoundaryCase::new(
                         testkit::repo_conformance::TransientSuccessPath::new(
                             || {
-                                let repo = &repo;
+                                let transient_repo = &transient_repo;
                                 let transient_next = transient_next.clone();
-                                arm_credential_retry_failpoint("retry-alice", 1);
                                 async move {
-                                    repo.bump_version(identity_scope(tenant), 1, transient_next)
+                                    transient_repo
+                                        .apply_password_change(
+                                            identity_scope(tenant),
+                                            password_change(1, transient_next),
+                                        )
                                         .await
                                 }
                             },
-                            credential_retry_attempts,
+                            || transient_repo.password_change_attempts("retry-alice"),
                             2,
                             || async {
                                 let Some(got) = repo
@@ -23124,18 +24700,15 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
                             },
                         ),
                         testkit::repo_conformance::ConflictPath::new(
-                            || {
-                                arm_credential_retry_failpoint("retry-alice", 0);
-                                async {
-                                    repo.bump_version(
+                            || async {
+                                conflict_repo
+                                    .apply_password_change(
                                         identity_scope(tenant),
-                                        99,
-                                        conflict_next.clone(),
+                                        password_change(99, conflict_next.clone()),
                                     )
                                     .await
-                                }
                             },
-                            credential_retry_attempts,
+                            || conflict_repo.password_change_attempts("retry-alice"),
                             || async {
                                 let Some(got) = repo
                                     .find_by_user_id(identity_scope(tenant), retry_uid)
@@ -23147,14 +24720,15 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
                             },
                         ),
                         testkit::repo_conformance::PermanentPath::new(
-                            || {
-                                arm_credential_retry_failpoint("ghost", 0);
-                                async {
-                                    repo.bump_version(identity_scope(tenant), 1, ghost_next.clone())
-                                        .await
-                                }
+                            || async {
+                                permanent_repo
+                                    .apply_password_change(
+                                        identity_scope(tenant),
+                                        password_change(1, ghost_next.clone()),
+                                    )
+                                    .await
                             },
-                            credential_retry_attempts,
+                            || permanent_repo.password_change_attempts("ghost"),
                             || async {
                                 Ok::<usize, IdentityError>(usize::from(
                                     repo.find_by_user_id(identity_scope(tenant), bob_uid)
@@ -23165,15 +24739,18 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
                         ),
                         testkit::repo_conformance::TransientExhaustionPath::new(
                             || {
-                                let repo = &repo;
+                                let exhaustion_repo = &exhaustion_repo;
                                 let exhaustion_next = exhaustion_next.clone();
-                                arm_credential_retry_failpoint("retry-alice", 3);
                                 async move {
-                                    repo.bump_version(identity_scope(tenant), 2, exhaustion_next)
+                                    exhaustion_repo
+                                        .apply_password_change(
+                                            identity_scope(tenant),
+                                            password_change(2, exhaustion_next),
+                                        )
                                         .await
                                 }
                             },
-                            credential_retry_attempts,
+                            || exhaustion_repo.password_change_attempts("retry-alice"),
                             3,
                             || async {
                                 let Some(got) = repo
@@ -23214,6 +24791,773 @@ async fn credential_repo_retry_boundary_conformance() -> TestResult {
     }
 
     store.shutdown().await?;
+    Ok(())
+}
+
+/// #1704：真实 `rss_app` + `PgCredentialRepo` password-change LocalTx 后端矩阵。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_localtx_matrix() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let commit_login = format!("pc-commit-{}", uuid::Uuid::new_v4().simple());
+    let commit_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(&commit_login, &commit_user, "pw-v1", 1, tenant_a)?,
+        )
+        .await?;
+    let commit_repo = PgCredentialRepo::new(&app);
+    let commit_writes = AtomicUsize::new(0);
+    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+        || async {
+            commit_repo
+                .apply_password_change(
+                    identity_scope(tenant_a),
+                    password_change(
+                        1,
+                        make_cred(&commit_login, &commit_user, "pw-v2", 2, tenant_a).map_err(
+                            |error| {
+                                testkit::localtx::ClassifiedError::new(
+                                    testkit::ConformanceErrorCategory::Storage,
+                                    IdentityError::Storage(error),
+                                )
+                            },
+                        )?,
+                    ),
+                )
+                .await
+                .map_err(classified_identity_error)?;
+            commit_writes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        },
+        || async {
+            owner_credential_snapshot(&owner, tenant_a, &commit_login)
+                .await
+                .map(|snapshot| snapshot.map(|(version, _)| version))
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(2),
+        || commit_writes.load(Ordering::Relaxed),
+    ))
+    .await?;
+    let (_, committed_hash) = owner_credential_snapshot(&owner, tenant_a, &commit_login)
+        .await?
+        .ok_or("committed credential snapshot missing")?;
+    assert!(secure::verify_password(
+        "pw-v2",
+        &secure::PasswordHash::parse(&committed_hash)?
+    ));
+
+    let missing_login = format!("pc-missing-{}", uuid::Uuid::new_v4().simple());
+    let missing_user = uuid::Uuid::new_v4().to_string();
+    let missing_repo = PgCredentialRepo::new(&app);
+    assert!(matches!(
+        missing_repo
+            .apply_password_change(
+                identity_scope(tenant_a),
+                password_change(
+                    1,
+                    make_cred(&missing_login, &missing_user, "pw-missing", 2, tenant_a)?,
+                ),
+            )
+            .await,
+        Err(IdentityError::CredentialNotFound)
+    ));
+    assert_eq!(missing_repo.password_change_attempts(&missing_login), 1);
+    assert_eq!(
+        owner_credential_snapshot(&owner, tenant_a, &missing_login).await?,
+        None
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_validation_profile() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let validation_login = format!("pc-validation-{}", uuid::Uuid::new_v4().simple());
+    let validation_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(&validation_login, &validation_user, "pw-v1", 1, tenant_a)?,
+        )
+        .await?;
+    let validation_repo = PgCredentialRepo::new(&app);
+    let validation_baseline = owner_credential_snapshot(&owner, tenant_a, &validation_login)
+        .await?
+        .ok_or("validation credential baseline missing")?;
+    let validation_mutations = AtomicUsize::new(0);
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let result = validation_repo
+                .apply_password_change(
+                    identity_scope(tenant_a),
+                    password_change(
+                        1,
+                        make_cred(
+                            &validation_login,
+                            &validation_user,
+                            "pw-invalid",
+                            2,
+                            tenant_b,
+                        )
+                        .map_err(|error| {
+                            testkit::localtx::ClassifiedError::new(
+                                testkit::ConformanceErrorCategory::Validation,
+                                IdentityError::Storage(error),
+                            )
+                        })?,
+                    ),
+                )
+                .await;
+            let changed = owner_credential_snapshot(&owner, tenant_a, &validation_login)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        IdentityError::Storage(Box::new(error)),
+                    )
+                })?
+                .is_some_and(|snapshot| snapshot != validation_baseline);
+            validation_mutations.store(usize::from(changed), Ordering::Relaxed);
+            result.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(
+                    testkit::ConformanceErrorCategory::Validation,
+                    error,
+                )
+            })
+        },
+        testkit::ConformanceErrorCategory::Validation,
+        || async {
+            owner_credential_snapshot(&owner, tenant_a, &validation_login)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(validation_baseline.clone()),
+        || validation_mutations.load(Ordering::Relaxed),
+    ))
+    .await?;
+    let validation_hash = secure::PasswordHash::parse(&validation_baseline.1)?;
+    assert!(secure::verify_password("pw-v1", &validation_hash));
+    assert!(!secure::verify_password("pw-invalid", &validation_hash));
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_authorization_profile() -> TestResult {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let authorization_login = format!("pc-authorization-{}", uuid::Uuid::new_v4().simple());
+    let authorization_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(
+                &authorization_login,
+                &authorization_user,
+                "pw-v1",
+                1,
+                tenant_a,
+            )?,
+        )
+        .await?;
+    let authorization_repo = PgCredentialRepo::new(&app);
+    let authorization_baseline = owner_credential_snapshot(&owner, tenant_a, &authorization_login)
+        .await?
+        .ok_or("authorization credential baseline missing")?;
+    let authorization_mutations = AtomicUsize::new(0);
+    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        || async {
+            let result = authorization_repo
+                .apply_password_change(
+                    identity_scope(tenant_b),
+                    password_change(
+                        1,
+                        make_cred(
+                            &authorization_login,
+                            &authorization_user,
+                            "pw-cross",
+                            2,
+                            tenant_b,
+                        )
+                        .map_err(|error| {
+                            testkit::localtx::ClassifiedError::new(
+                                testkit::ConformanceErrorCategory::Authorization,
+                                IdentityError::Storage(error),
+                            )
+                        })?,
+                    ),
+                )
+                .await;
+            let changed = owner_credential_snapshot(&owner, tenant_a, &authorization_login)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        IdentityError::Storage(Box::new(error)),
+                    )
+                })?
+                .is_some_and(|snapshot| snapshot != authorization_baseline);
+            authorization_mutations.store(usize::from(changed), Ordering::Relaxed);
+            result.map_err(|error| {
+                testkit::localtx::ClassifiedError::new(
+                    testkit::ConformanceErrorCategory::Authorization,
+                    error,
+                )
+            })
+        },
+        testkit::ConformanceErrorCategory::Authorization,
+        || async {
+            owner_credential_snapshot(&owner, tenant_a, &authorization_login)
+                .await
+                .map_err(|error| {
+                    testkit::localtx::ClassifiedError::new(
+                        testkit::ConformanceErrorCategory::Storage,
+                        error,
+                    )
+                })
+        },
+        Some(authorization_baseline.clone()),
+        || authorization_mutations.load(Ordering::Relaxed),
+    ))
+    .await?;
+    let authorization_hash = secure::PasswordHash::parse(&authorization_baseline.1)?;
+    assert!(secure::verify_password("pw-v1", &authorization_hash));
+    assert!(!secure::verify_password("pw-cross", &authorization_hash));
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_tenant_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let tenant_login = format!("pc-tenant-{}", uuid::Uuid::new_v4().simple());
+    let tenant_a_user = uuid::Uuid::new_v4().to_string();
+    let tenant_b_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(&tenant_login, &tenant_a_user, "pw-a1", 1, tenant_a)?,
+        )
+        .await?;
+    fixture_repo
+        .save(
+            identity_scope(tenant_b),
+            make_cred(&tenant_login, &tenant_b_user, "pw-b1", 1, tenant_b)?,
+        )
+        .await?;
+    let tenant_repo = PgCredentialRepo::new(&app);
+    ::testkit::tenant_conformance::assert_tenant_isolation(
+        tenant_a,
+        tenant_b,
+        |tenant| {
+            let (user, password) = if tenant == tenant_a {
+                (&tenant_a_user, "pw-a2")
+            } else {
+                (&tenant_b_user, "pw-b2")
+            };
+            let next = make_cred(&tenant_login, user, password, 2, tenant);
+            let tenant_repo = &tenant_repo;
+            async move {
+                tenant_repo
+                    .apply_password_change(
+                        identity_scope(tenant),
+                        password_change(1, next.map_err(IdentityError::Storage)?),
+                    )
+                    .await
+            }
+        },
+        |tenant| {
+            let owner = &owner;
+            let tenant_login = &tenant_login;
+            async move {
+                owner_credential_snapshot(owner, tenant, tenant_login)
+                    .await
+                    .map(|snapshot| snapshot.is_some_and(|(version, _)| version == 2))
+                    .map_err(|error| IdentityError::Storage(Box::new(error)))
+            }
+        },
+        |error| conformance_retry_category(classify_identity_error(error)),
+    )
+    .await?;
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_transient_stage_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let before_begin_login = format!("pc-before-begin-{}", uuid::Uuid::new_v4().simple());
+    let before_begin_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(
+                &before_begin_login,
+                &before_begin_user,
+                "pw-begin-1",
+                1,
+                tenant_a,
+            )?,
+        )
+        .await?;
+    let begin_app =
+        connect_pg_rss_app_role_with_limits(&pg, &owner, 1, std::time::Duration::from_millis(100))
+            .await?;
+    let held_connection = begin_app.pool.acquire().await?;
+    let before_begin = std::sync::Arc::new(PgCredentialRepo::new(&begin_app));
+    let before_begin_task = {
+        let before_begin = std::sync::Arc::clone(&before_begin);
+        let login = before_begin_login.clone();
+        let next = make_cred(
+            &before_begin_login,
+            &before_begin_user,
+            "pw-begin-2",
+            2,
+            tenant_a,
+        )?;
+        tokio::spawn(async move {
+            before_begin
+                .apply_password_change(identity_scope(tenant_a), password_change(1, next))
+                .await
+                .map(|()| login)
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while before_begin.password_change_attempts(&before_begin_login) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "password-change before-begin transient was not retried")?;
+    drop(held_connection);
+    let completed_login = before_begin_task.await??;
+    assert_eq!(completed_login, before_begin_login);
+    assert_eq!(
+        before_begin.password_change_attempts(&before_begin_login),
+        2
+    );
+    let (before_begin_version, before_begin_hash) =
+        owner_credential_snapshot(&owner, tenant_a, &before_begin_login)
+            .await?
+            .ok_or("before-begin credential snapshot missing")?;
+    assert_eq!(before_begin_version, 2);
+    assert!(secure::verify_password(
+        "pw-begin-2",
+        &secure::PasswordHash::parse(&before_begin_hash)?
+    ));
+    begin_app.shutdown().await?;
+
+    let before_write_login = format!("pc-before-write-{}", uuid::Uuid::new_v4().simple());
+    let before_write_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(
+                &before_write_login,
+                &before_write_user,
+                "pw-write-1",
+                1,
+                tenant_a,
+            )?,
+        )
+        .await?;
+    let before_write = PgCredentialRepo::new(&app).with_password_change_fault(
+        &before_write_login,
+        CredentialMutationFault::TransientBeforeWrite,
+        1,
+    );
+    before_write
+        .apply_password_change(
+            identity_scope(tenant_a),
+            password_change(
+                1,
+                make_cred(
+                    &before_write_login,
+                    &before_write_user,
+                    "pw-write-2",
+                    2,
+                    tenant_a,
+                )?,
+            ),
+        )
+        .await?;
+    assert_eq!(
+        before_write.password_change_attempts(&before_write_login),
+        2
+    );
+    let (before_write_version, before_write_hash) =
+        owner_credential_snapshot(&owner, tenant_a, &before_write_login)
+            .await?
+            .ok_or("before-write credential snapshot missing")?;
+    assert_eq!(before_write_version, 2);
+    assert!(secure::verify_password(
+        "pw-write-2",
+        &secure::PasswordHash::parse(&before_write_hash)?
+    ));
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_retry_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let retry_login = format!("pc-retry-{}", uuid::Uuid::new_v4().simple());
+    let retry_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(&retry_login, &retry_user, "pw-r1", 1, tenant_a)?,
+        )
+        .await?;
+    let transient_repo = PgCredentialRepo::new(&app).with_password_change_fault(
+        &retry_login,
+        CredentialMutationFault::Transient,
+        1,
+    );
+    let conflict_repo = PgCredentialRepo::new(&app);
+    let permanent_repo = PgCredentialRepo::new(&app).with_password_change_fault(
+        &retry_login,
+        CredentialMutationFault::Permanent,
+        1,
+    );
+    let exhaustion_repo = PgCredentialRepo::new(&app).with_password_change_fault(
+        &retry_login,
+        CredentialMutationFault::Transient,
+        3,
+    );
+    let retry_baseline = std::sync::OnceLock::new();
+    ::testkit::repo_conformance::assert_retry_boundary_policy(
+        ::testkit::repo_conformance::RetryBoundaryCase::new(
+            ::testkit::repo_conformance::TransientSuccessPath::new(
+                || async {
+                    transient_repo
+                        .apply_password_change(
+                            identity_scope(tenant_a),
+                            password_change(
+                                1,
+                                make_cred(&retry_login, &retry_user, "pw-r2", 2, tenant_a)
+                                    .map_err(IdentityError::Storage)?,
+                            ),
+                        )
+                        .await
+                },
+                || transient_repo.password_change_attempts(&retry_login),
+                2,
+                || async {
+                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
+                        .await
+                        .map(|snapshot| {
+                            let Some(snapshot) = snapshot else {
+                                return 0;
+                            };
+                            let valid = snapshot.0 == 2;
+                            if valid {
+                                let _ = retry_baseline.set(snapshot);
+                            }
+                            usize::from(valid)
+                        })
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+            ::testkit::repo_conformance::ConflictPath::new(
+                || async {
+                    conflict_repo
+                        .apply_password_change(
+                            identity_scope(tenant_a),
+                            password_change(
+                                99,
+                                make_cred(&retry_login, &retry_user, "pw-conflict", 3, tenant_a)
+                                    .map_err(IdentityError::Storage)?,
+                            ),
+                        )
+                        .await
+                },
+                || conflict_repo.password_change_attempts(&retry_login),
+                || async {
+                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
+                        .await
+                        .map(|snapshot| usize::from(snapshot.as_ref() != retry_baseline.get()))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+            ::testkit::repo_conformance::PermanentPath::new(
+                || async {
+                    permanent_repo
+                        .apply_password_change(
+                            identity_scope(tenant_a),
+                            password_change(
+                                2,
+                                make_cred(&retry_login, &retry_user, "pw-permanent", 3, tenant_a)
+                                    .map_err(IdentityError::Storage)?,
+                            ),
+                        )
+                        .await
+                },
+                || permanent_repo.password_change_attempts(&retry_login),
+                || async {
+                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
+                        .await
+                        .map(|snapshot| usize::from(snapshot.as_ref() != retry_baseline.get()))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+            ::testkit::repo_conformance::TransientExhaustionPath::new(
+                || async {
+                    exhaustion_repo
+                        .apply_password_change(
+                            identity_scope(tenant_a),
+                            password_change(
+                                2,
+                                make_cred(&retry_login, &retry_user, "pw-exhausted", 3, tenant_a)
+                                    .map_err(IdentityError::Storage)?,
+                            ),
+                        )
+                        .await
+                },
+                || exhaustion_repo.password_change_attempts(&retry_login),
+                3,
+                || async {
+                    owner_credential_snapshot(&owner, tenant_a, &retry_login)
+                        .await
+                        .map(|snapshot| usize::from(snapshot.as_ref() != retry_baseline.get()))
+                        .map_err(|error| IdentityError::Storage(Box::new(error)))
+                },
+            ),
+        ),
+        |error| conformance_retry_category(classify_identity_error(error)),
+    )
+    .await?;
+    let (retry_version, retry_hash) = owner_credential_snapshot(&owner, tenant_a, &retry_login)
+        .await?
+        .ok_or("retry credential snapshot missing")?;
+    assert_eq!(retry_version, 2);
+    assert!(secure::verify_password(
+        "pw-r2",
+        &secure::PasswordHash::parse(&retry_hash)?
+    ));
+    for rejected_password in ["pw-conflict", "pw-permanent", "pw-exhausted"] {
+        assert!(
+            !secure::verify_password(
+                rejected_password,
+                &secure::PasswordHash::parse(&retry_hash)?
+            ),
+            "rejected retry path must not replace the durable password hash: {rejected_password}"
+        );
+    }
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+async fn identity_password_change_real_rss_app_commit_unknown_profile() -> TestResult {
+    const LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE: ::vocab::HttpRouteBinding<
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        ::vocab::http::LocalTx,
+    > = ::generated::http::identity_v1::password_change::ROUTE;
+    const LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE: ::std::marker::PhantomData<(
+        ::generated::http::identity_v1::password_change::RouteMarker,
+        crate::PgCredentialRepo,
+    )> = ::std::marker::PhantomData;
+    let _typed_enrollment = LOCALTX_BACKEND_PROFILE_IDENTITY_PASSWORD_CHANGE;
+    let _typed_provider = LOCALTX_BACKEND_PROVIDER_IDENTITY_PASSWORD_CHANGE;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant_a = TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let fixture_repo = PgCredentialRepo::new(&app);
+
+    let unknown_login = format!("pc-unknown-{}", uuid::Uuid::new_v4().simple());
+    let unknown_user = uuid::Uuid::new_v4().to_string();
+    fixture_repo
+        .save(
+            identity_scope(tenant_a),
+            make_cred(&unknown_login, &unknown_user, "pw-u1", 1, tenant_a)?,
+        )
+        .await?;
+    let unknown_repo = PgCredentialRepo::new(&app).with_password_change_fault(
+        &unknown_login,
+        CredentialMutationFault::CommitUnknown,
+        1,
+    );
+    ::testkit::localtx::assert_commit_unknown_no_replay(
+        ::testkit::localtx::CommitUnknownCase::new(
+            || async {
+                unknown_repo
+                    .apply_password_change(
+                        identity_scope(tenant_a),
+                        password_change(
+                            1,
+                            make_cred(&unknown_login, &unknown_user, "pw-u2", 2, tenant_a)
+                                .map_err(|error| {
+                                    testkit::localtx::ClassifiedError::new(
+                                        testkit::ConformanceErrorCategory::CommitUnknown,
+                                        IdentityError::Storage(error),
+                                    )
+                                })?,
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        testkit::localtx::ClassifiedError::new(
+                            testkit::ConformanceErrorCategory::CommitUnknown,
+                            error,
+                        )
+                    })
+            },
+            testkit::ConformanceErrorCategory::CommitUnknown,
+            || unknown_repo.password_change_attempts(&unknown_login),
+        ),
+    )
+    .await?;
+    let (unknown_version, unknown_hash) =
+        owner_credential_snapshot(&owner, tenant_a, &unknown_login)
+            .await?
+            .ok_or("commit-unknown credential snapshot missing")?;
+    assert_eq!(unknown_version, 2);
+    assert!(secure::verify_password(
+        "pw-u2",
+        &secure::PasswordHash::parse(&unknown_hash)?
+    ));
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 

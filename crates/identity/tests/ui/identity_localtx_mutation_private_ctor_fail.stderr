@@ -1,0 +1,21 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:6:82
+  |
+6 |     let _logout: fn(SessionId) -> SessionLogoutMutation = SessionLogoutMutation::new;
+  |                                                                                  ^^^ private associated function
+  |
+ ::: src/ports.rs
+  |
+  |     pub(crate) fn new(session_id: SessionId) -> Self {
+  |     ------------------------------------------------ private associated function defined here
+
+error[E0624]: associated function `new` is private
+ --> tests/ui/identity_localtx_mutation_private_ctor_fail.rs:7:45
+  |
+7 |     let _password = PasswordChangeMutation::new;
+  |                                             ^^^ private associated function
+  |
+ ::: src/ports.rs
+  |
+  |     pub(crate) fn new(expected: u32, next: Credential) -> Self {
+  |     ---------------------------------------------------------- private associated function defined here

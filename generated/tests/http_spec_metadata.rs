@@ -183,6 +183,38 @@ fn local_tx_registry_contains_exact_active_l1_contracts() {
 }
 
 #[test]
+fn local_tx_specs_reuse_required_module_evidence() {
+    let contracts = [
+        (
+            http::audit_v1::list_tenant_entries::SPEC,
+            http::audit_v1::list_tenant_entries::LOCAL_TX,
+        ),
+        (
+            http::identity_v1::logout::SPEC,
+            http::identity_v1::logout::LOCAL_TX,
+        ),
+        (
+            http::identity_v1::password_change::SPEC,
+            http::identity_v1::password_change::LOCAL_TX,
+        ),
+        (
+            http::identity_v1::refresh::SPEC,
+            http::identity_v1::refresh::LOCAL_TX,
+        ),
+        (http::settings_v2::SPEC, http::settings_v2::LOCAL_TX),
+    ];
+
+    for (spec, evidence) in contracts {
+        assert_eq!(
+            spec.local_tx,
+            Some(evidence),
+            "{} must reuse its non-optional module LocalTx evidence",
+            spec.route.contract_id()
+        );
+    }
+}
+
+#[test]
 fn active_http_specs_expose_manifest_consistency_levels() {
     for (contract_id, expected) in EXPECTED_ACTIVE_SPECS {
         let actual = http::SPECS

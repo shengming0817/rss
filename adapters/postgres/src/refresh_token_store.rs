@@ -23,14 +23,20 @@
 use std::time::{Duration, SystemTime};
 
 use identity::ports::{
-    IdentityError, RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId,
+    IdentityError, RefreshRotationMutation, RefreshStatus, RefreshTokenHash, RefreshTokenId,
     RefreshTokenRecord, RefreshTokenStore, TenantRepoScope, kind_from_db, kind_to_db,
 };
 use sqlx::Row;
 
+#[cfg(all(test, feature = "integration"))]
+use std::collections::HashMap;
+#[cfg(all(test, feature = "integration"))]
+use std::sync::{Arc, Mutex};
+
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::unix_secs;
+use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
 /// refresh token 持久化 PostgreSQL adapter（impl [`RefreshTokenStore`]，#1325）。
 ///
@@ -38,6 +44,51 @@ use crate::outbox::unix_secs;
 /// **Clock 不注入**：issued_at/expires_at 来自 record，由 `RefreshService` 的 Clock 派生，adapter 只透传落库。
 pub struct PgRefreshTokenStore {
     pool: PgTenantPool,
+    #[cfg(all(test, feature = "integration"))]
+    rotation_faults: Arc<Mutex<RefreshRotationFaultState>>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+pub(crate) enum RefreshRotationFault {
+    Permanent,
+    Transient,
+    TransientBeforeWrite,
+    Conflict,
+    CommitUnknown,
+    RollbackFailed,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+struct RefreshRotationFaultPlan {
+    fault: RefreshRotationFault,
+    remaining: usize,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Default)]
+struct RefreshRotationFaultState {
+    plans: HashMap<String, RefreshRotationFaultPlan>,
+    attempts: HashMap<String, usize>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) struct RefreshRotationAttemptProbe {
+    state: Arc<Mutex<RefreshRotationFaultState>>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl RefreshRotationAttemptProbe {
+    pub(crate) fn attempts(&self, old_id: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .attempts
+            .get(old_id)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 impl PgRefreshTokenStore {
@@ -47,8 +98,65 @@ impl PgRefreshTokenStore {
     pub(crate) fn new(store: &PgStore) -> Self {
         Self {
             pool: PgTenantPool::new(store),
+            #[cfg(all(test, feature = "integration"))]
+            rotation_faults: Arc::new(Mutex::new(RefreshRotationFaultState::default())),
         }
     }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_rotation_fault(
+        self,
+        old_id: &str,
+        fault: RefreshRotationFault,
+        remaining: usize,
+    ) -> Self {
+        assert!(remaining > 0, "fault plan must affect at least one attempt");
+        self.rotation_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .plans
+            .insert(
+                old_id.to_owned(),
+                RefreshRotationFaultPlan { fault, remaining },
+            );
+        self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn rotation_attempt_probe(&self) -> RefreshRotationAttemptProbe {
+        RefreshRotationAttemptProbe {
+            state: Arc::clone(&self.rotation_faults),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn record_rotation_attempt(state: &Mutex<RefreshRotationFaultState>, old_id: &str) {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state.attempts.entry(old_id.to_owned()).or_default() += 1;
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn take_rotation_fault_if(
+    state: &Mutex<RefreshRotationFaultState>,
+    old_id: &str,
+    predicate: impl FnOnce(RefreshRotationFault) -> bool,
+) -> Option<RefreshRotationFault> {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let plan = state.plans.get_mut(old_id)?;
+    let fault = plan.fault;
+    if !predicate(fault) {
+        return None;
+    }
+    plan.remaining -= 1;
+    if plan.remaining == 0 {
+        state.plans.remove(old_id);
+    }
+    Some(fault)
 }
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。
@@ -249,8 +357,9 @@ impl RefreshTokenStore for PgRefreshTokenStore {
     async fn rotate(
         &self,
         scope: TenantRepoScope,
-        rotation: RefreshRotation,
+        mutation: RefreshRotationMutation,
     ) -> Result<bool, IdentityError> {
+        let (rotation, observation) = mutation.into_parts();
         let old_id = rotation.old_id().clone();
         let new = rotation.new_record().clone();
         let tenant = scope.tenant();
@@ -260,19 +369,101 @@ impl RefreshTokenStore for PgRefreshTokenStore {
             ))));
         }
         let tenant_uuid = tenant.as_uuid().to_string();
-        self.pool
-            .write(
-                scope,
-                move |conn| {
-                    Box::pin(async move {
-                        do_rotate_tx(&tenant_uuid, conn.conn(), &old_id, &new)
-                            .await
-                            .map_err(storage)
-                    })
-                },
-                storage,
-            )
-            .await
+        #[cfg(all(test, feature = "integration"))]
+        let old_id_key = old_id.as_str().to_owned();
+        #[cfg(all(test, feature = "integration"))]
+        let rotation_faults = Arc::clone(&self.rotation_faults);
+        run_pg_localtx_retry(
+            observation,
+            |_attempt| {
+                let tenant_uuid = tenant_uuid.clone();
+                let old_id = old_id.clone();
+                #[cfg(all(test, feature = "integration"))]
+                let old_id_key = old_id_key.clone();
+                let new = new.clone();
+                #[cfg(all(test, feature = "integration"))]
+                let rotation_faults = Arc::clone(&rotation_faults);
+                #[cfg(all(test, feature = "integration"))]
+                record_rotation_attempt(&rotation_faults, &old_id_key);
+                async move {
+                    self.pool
+                        .retry_write(
+                            scope,
+                            move |tx| {
+                                Box::pin(async move {
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if take_rotation_fault_if(
+                                        &rotation_faults,
+                                        &old_id_key,
+                                        |fault| {
+                                            matches!(
+                                                fault,
+                                                RefreshRotationFault::TransientBeforeWrite
+                                            )
+                                        },
+                                    )
+                                    .is_some()
+                                    {
+                                        return Err(storage(sqlx::Error::PoolTimedOut));
+                                    }
+                                    let applied =
+                                        do_rotate_tx(&tenant_uuid, tx.conn(), &old_id, &new)
+                                            .await
+                                            .map_err(storage)?;
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if let Some(fault) = take_rotation_fault_if(
+                                        &rotation_faults,
+                                        &old_id_key,
+                                        |fault| {
+                                            !matches!(
+                                                fault,
+                                                RefreshRotationFault::TransientBeforeWrite
+                                            )
+                                        },
+                                    ) {
+                                        match fault {
+                                            RefreshRotationFault::Permanent => {
+                                                return Err(IdentityError::Storage(Box::new(
+                                                    std::io::Error::other(
+                                                        "injected refresh rotation failure",
+                                                    ),
+                                                )));
+                                            }
+                                            RefreshRotationFault::Transient => {
+                                                return Err(storage(sqlx::Error::PoolTimedOut));
+                                            }
+                                            RefreshRotationFault::TransientBeforeWrite => {
+                                                unreachable!(
+                                                    "before-write fault is consumed before SQL"
+                                                )
+                                            }
+                                            RefreshRotationFault::Conflict => {
+                                                return Err(IdentityError::VersionConflict);
+                                            }
+                                            RefreshRotationFault::CommitUnknown => {
+                                                tx.inject_commit_unknown_after_commit()
+                                                    .await
+                                                    .map_err(storage)?;
+                                            }
+                                            RefreshRotationFault::RollbackFailed => {
+                                                tx.inject_rollback_failed_after_rollback()
+                                                    .await
+                                                    .map_err(storage)?;
+                                                return Err(storage(sqlx::Error::PoolTimedOut));
+                                            }
+                                        }
+                                    }
+                                    Ok(applied)
+                                })
+                            },
+                            storage,
+                        )
+                        .await
+                }
+            },
+            classify_identity_error,
+        )
+        .await
     }
 
     /// **级联撤销整条谱系**（幂等；0 行也 Ok）：tenant-scoped 事务内批量 `UPDATE status='revoked'

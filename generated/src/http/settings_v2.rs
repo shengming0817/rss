@@ -210,16 +210,19 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> 
         EFFECT_PROFILE,
     );
 
+/// Required LocalTx capability evidence derived from `[capabilities.localTx]`.
+pub const LOCAL_TX: super::LocalTxSpec = super::LocalTxSpec {
+    boundary: ::vocab::LocalTxBoundary::SingleDomain,
+    tx_model: ::vocab::LocalTxModel::RepoAtomicCas,
+    retry: ::vocab::LocalTxRetry::BoundedTransient,
+    commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
+};
+
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: super::HttpSpec = super::HttpSpec {
     mount_key: "settings_v2",
     route: ROUTE.evidence(),
-    local_tx: Some(super::LocalTxSpec {
-        boundary: ::vocab::LocalTxBoundary::SingleDomain,
-        tx_model: ::vocab::LocalTxModel::RepoAtomicCas,
-        retry: ::vocab::LocalTxRetry::BoundedTransient,
-        commit_unknown: ::vocab::LocalTxCommitUnknown::NotRetryable,
-    }),
+    local_tx: Some(LOCAL_TX),
     resource_sharing: super::HttpResourceSharingSpec {
         mode: super::HttpResourceSharingMode::TenantScoped,
         reason: None,

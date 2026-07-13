@@ -1,7 +1,7 @@
 //! LocalTx static coverage closure gate.
 //!
 //! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
-//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set", anti_vacuity = "actual_workspace_has_non_empty_complete_localtx_closure" }.
+//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
 
 use crate::contract::manifest::{
     ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxModel,
@@ -33,7 +33,10 @@ pub(crate) enum Rule {
     DuplicateTestMarker,
     UnexpectedTestMarker,
     MissingBackendProfile,
+    MissingBackendProviderBinding,
+    ForbiddenBackendProfileEvidence,
     MissingBackendProbe,
+    MultipleBackendProfilesInTest,
     UnexpectedBackendProfile,
     OpaqueSourceScope,
 }
@@ -156,8 +159,37 @@ impl BackendProbe {
 struct BackendEnrollmentOccurrence {
     key: String,
     provider: String,
+    provider_fixture: String,
     path: String,
     probes: BTreeMap<BackendProbe, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackendProfileMarker {
+    name: String,
+    key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackendProviderBinding {
+    name: String,
+    key: String,
+    fixture: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackendProfileViolation {
+    rule: Rule,
+    provider: String,
+    path: String,
+    function: String,
+    detail: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BackendTestEvidence {
+    enrollments: Vec<BackendEnrollmentOccurrence>,
+    violation: Option<BackendProfileViolation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -193,6 +225,7 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
     let mut owner_evidence = BTreeMap::new();
     let mut all_markers = Vec::new();
     let mut all_backend_enrollments = Vec::new();
+    let mut all_backend_profile_violations = Vec::new();
     let adapter_providers: BTreeSet<_> = workspace_crates
         .iter()
         .filter(|member| member.relative == Path::new("adapters").join(&member.name))
@@ -202,6 +235,7 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
         let evidence = scan_owner(root, member, &expected_packages)?;
         all_markers.extend(evidence.markers.iter().cloned());
         all_backend_enrollments.extend(evidence.backend_enrollments.iter().cloned());
+        all_backend_profile_violations.extend(evidence.backend_profile_violations.iter().cloned());
         if member.relative == Path::new("crates").join(&member.name) {
             owner_evidence.insert(member.name.clone(), evidence);
         }
@@ -211,6 +245,16 @@ fn check_root_inner(root: &Path) -> Result<(String, Vec<Finding>)> {
     });
     all_markers.dedup();
     let mut findings = Vec::new();
+    findings.extend(all_backend_profile_violations.iter().map(|violation| {
+        finding(
+            violation.rule,
+            violation.path.clone(),
+            format!(
+                "test function `{}` in provider `{}`: {}",
+                violation.function, violation.provider, violation.detail
+            ),
+        )
+    }));
 
     for contract in &contracts {
         if !contract.valid_owner {
@@ -377,7 +421,8 @@ fn append_backend_profile_findings(
         ));
         return;
     }
-    let mut by_provider: BTreeMap<&str, Vec<&BackendEnrollmentOccurrence>> = BTreeMap::new();
+    let mut by_provider: BTreeMap<(&str, &str), Vec<&BackendEnrollmentOccurrence>> =
+        BTreeMap::new();
     for enrollment in matching {
         if !adapter_providers.contains(&enrollment.provider) {
             findings.push(finding(
@@ -391,14 +436,14 @@ fn append_backend_profile_findings(
             continue;
         }
         by_provider
-            .entry(&enrollment.provider)
+            .entry((&enrollment.provider, &enrollment.provider_fixture))
             .or_default()
             .push(enrollment);
     }
     if by_provider.is_empty() {
         return;
     }
-    for (provider, provider_enrollments) in by_provider {
+    for ((provider, provider_fixture), provider_enrollments) in by_provider {
         let mut probes = BTreeMap::new();
         for enrollment in &provider_enrollments {
             for (probe, count) in &enrollment.probes {
@@ -412,7 +457,7 @@ fn append_backend_profile_findings(
                     Rule::MissingBackendProbe,
                     provider_enrollments[0].path.clone(),
                     format!(
-                        "contract `{}` provider `{provider}` txModel `{}` requires probe `{}` at least {minimum} time(s), found {actual}",
+                        "contract `{}` provider `{provider}` fixture `{provider_fixture}` txModel `{}` requires probe `{}` at least {minimum} time(s), found {actual}",
                         contract.id,
                         localtx_model_label(contract.tx_model),
                         probe.label(),
@@ -798,6 +843,7 @@ struct OwnerEvidence {
     reachable_production_sources: BTreeSet<String>,
     markers: Vec<MarkerOccurrence>,
     backend_enrollments: Vec<BackendEnrollmentOccurrence>,
+    backend_profile_violations: Vec<BackendProfileViolation>,
     test_macros: BTreeSet<String>,
     production_macros: BTreeSet<String>,
     opaque_triggers: BTreeSet<OpaqueTrigger>,
@@ -1050,6 +1096,9 @@ fn scan_owner(
         evidence
             .backend_enrollments
             .extend(target_evidence.backend_enrollments);
+        evidence
+            .backend_profile_violations
+            .extend(target_evidence.backend_profile_violations);
         evidence.test_macros.extend(target_evidence.test_macros);
         evidence
             .production_macros
@@ -1076,7 +1125,7 @@ fn validate_evidence_dependencies(
             validate_dependency(member, key, true, expected_packages)?;
         }
     }
-    if !evidence.backend_enrollments.is_empty() {
+    if !evidence.backend_enrollments.is_empty() || !evidence.backend_profile_violations.is_empty() {
         for key in ["generated", "testkit", "vocab"] {
             validate_dependency(member, key, true, expected_packages)?;
         }
@@ -2136,9 +2185,14 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
             && self.attribute_safe
             && let Some(resolver) = resolver
         {
-            let enrollments =
-                backend_enrollments_in_test(&node.block, resolver, self.owner, self.source);
-            if !enrollments.is_empty() {
+            let backend_evidence = backend_enrollments_in_test(
+                &node.block,
+                resolver,
+                self.owner,
+                self.source,
+                &node.sig.ident.to_string(),
+            );
+            if !backend_evidence.enrollments.is_empty() || backend_evidence.violation.is_some() {
                 if let Some(test_macro) = self.test_macro {
                     self.evidence.test_macros.insert(test_macro.to_string());
                 }
@@ -2146,7 +2200,12 @@ impl<'ast> Visit<'ast> for SourceScanner<'_> {
                     .test_macros
                     .extend(resolver.trusted_macros.iter().cloned());
             }
-            self.evidence.backend_enrollments.extend(enrollments);
+            self.evidence
+                .backend_enrollments
+                .extend(backend_evidence.enrollments);
+            self.evidence
+                .backend_profile_violations
+                .extend(backend_evidence.violation);
         }
         visit::visit_item_fn(self, node);
         self.in_test_function = old_test_function;
@@ -2797,15 +2856,103 @@ fn backend_enrollments_in_test(
     resolver: &Resolver,
     provider: &str,
     source: &str,
-) -> Vec<BackendEnrollmentOccurrence> {
-    let keys: BTreeSet<_> = block
+    function: &str,
+) -> BackendTestEvidence {
+    let markers: Vec<_> = block
         .stmts
         .iter()
         .filter_map(|statement| match statement {
-            Stmt::Item(Item::Const(item)) => strict_backend_profile_key(item, resolver),
+            Stmt::Item(Item::Const(item)) => {
+                strict_backend_profile_key(item, resolver).map(|key| BackendProfileMarker {
+                    name: item.ident.to_string(),
+                    key,
+                })
+            }
             _ => None,
         })
         .collect();
+    if markers.len() > 1 {
+        let rendered = markers
+            .iter()
+            .map(|marker| format!("`{}` (`{}`)", marker.name, marker.key))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return BackendTestEvidence {
+            enrollments: Vec::new(),
+            violation: Some(BackendProfileViolation {
+                rule: Rule::MultipleBackendProfilesInTest,
+                provider: provider.to_string(),
+                path: source.to_string(),
+                function: function.to_string(),
+                detail: format!(
+                    "declares {} LOCALTX_BACKEND_PROFILE_* markers: {rendered}; expected at most one",
+                    markers.len()
+                ),
+            }),
+        };
+    }
+    let bindings: Vec<_> = block
+        .stmts
+        .iter()
+        .filter_map(|statement| match statement {
+            Stmt::Item(Item::Const(item)) => strict_backend_provider_binding(item, resolver),
+            _ => None,
+        })
+        .collect();
+    let Some(marker) = markers.first() else {
+        return BackendTestEvidence::default();
+    };
+    let expected_binding_name =
+        marker
+            .name
+            .replacen("LOCALTX_BACKEND_PROFILE_", "LOCALTX_BACKEND_PROVIDER_", 1);
+    let matching_bindings: Vec<_> = bindings
+        .iter()
+        .filter(|binding| binding.name == expected_binding_name && binding.key == marker.key)
+        .collect();
+    let [binding] = matching_bindings.as_slice() else {
+        return BackendTestEvidence {
+            enrollments: Vec::new(),
+            violation: Some(BackendProfileViolation {
+                rule: Rule::MissingBackendProviderBinding,
+                provider: provider.to_string(),
+                path: source.to_string(),
+                function: function.to_string(),
+                detail: format!(
+                    "profile `{}` requires exactly one `{expected_binding_name}` typed as `PhantomData<(RouteMarker, ProviderFixture)>`; found {} matching bindings",
+                    marker.name,
+                    matching_bindings.len()
+                ),
+            }),
+        };
+    };
+    if let Some(reason) = forbidden_backend_profile_evidence(block) {
+        return BackendTestEvidence {
+            enrollments: Vec::new(),
+            violation: Some(BackendProfileViolation {
+                rule: Rule::ForbiddenBackendProfileEvidence,
+                provider: provider.to_string(),
+                path: source.to_string(),
+                function: function.to_string(),
+                detail: reason,
+            }),
+        };
+    }
+    if !provider_fixture_constructed(block, &binding.fixture) {
+        return BackendTestEvidence {
+            enrollments: Vec::new(),
+            violation: Some(BackendProfileViolation {
+                rule: Rule::MissingBackendProviderBinding,
+                provider: provider.to_string(),
+                path: source.to_string(),
+                function: function.to_string(),
+                detail: format!(
+                    "typed provider fixture `{}` is not constructed through `{}::new(...)` in the enrolled test",
+                    binding.fixture, binding.fixture
+                ),
+            }),
+        };
+    }
     let mut probes = BTreeMap::new();
     for probe in block
         .stmts
@@ -2814,14 +2961,20 @@ fn backend_enrollments_in_test(
     {
         *probes.entry(probe).or_insert(0) += 1;
     }
-    keys.into_iter()
+    let enrollments = markers
+        .into_iter()
         .map(|key| BackendEnrollmentOccurrence {
-            key,
+            key: key.key,
             provider: provider.to_string(),
+            provider_fixture: binding.fixture.clone(),
             path: source.to_string(),
             probes: probes.clone(),
         })
-        .collect()
+        .collect();
+    BackendTestEvidence {
+        enrollments,
+        violation: None,
+    }
 }
 
 fn backend_probe_from_statement(statement: &Stmt, resolver: &Resolver) -> Option<BackendProbe> {
@@ -2908,6 +3061,117 @@ fn strict_backend_profile_key(item: &ItemConst, resolver: &Resolver) -> Option<S
         return None;
     }
     (key_from_segments(&route_segments, "ROUTE").as_deref() == Some(&key)).then_some(key)
+}
+
+fn strict_backend_provider_binding(
+    item: &ItemConst,
+    resolver: &Resolver,
+) -> Option<BackendProviderBinding> {
+    let name = item.ident.to_string();
+    if !name.starts_with("LOCALTX_BACKEND_PROVIDER_") {
+        return None;
+    }
+    let Type::Path(phantom) = item.ty.as_ref() else {
+        return None;
+    };
+    if phantom.qself.is_some()
+        || phantom.path.leading_colon.is_none()
+        || raw_segments(&phantom.path).as_slice() != ["std", "marker", "PhantomData"]
+    {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &phantom.path.segments.last()?.arguments else {
+        return None;
+    };
+    let GenericArgument::Type(Type::Tuple(binding)) = arguments.args.first()? else {
+        return None;
+    };
+    if binding.elems.len() != 2 {
+        return None;
+    }
+    let Type::Path(marker) = binding.elems.first()? else {
+        return None;
+    };
+    if marker.qself.is_some() || marker.path.leading_colon.is_none() {
+        return None;
+    }
+    let marker_segments = raw_segments(&marker.path);
+    if canonical_backend_segments(&marker.path, resolver).as_deref()
+        != Some(marker_segments.as_slice())
+    {
+        return None;
+    }
+    let key = key_from_segments(&marker_segments, "RouteMarker")?;
+    let Type::Path(provider) = binding.elems.iter().nth(1)? else {
+        return None;
+    };
+    let fixture = provider.path.segments.last()?.ident.to_string();
+    let Expr::Path(value) = peel_expr(&item.expr) else {
+        return None;
+    };
+    if value.qself.is_some()
+        || value.path.leading_colon.is_none()
+        || raw_segments(&value.path).as_slice() != ["std", "marker", "PhantomData"]
+    {
+        return None;
+    }
+    Some(BackendProviderBinding { name, key, fixture })
+}
+
+#[derive(Default)]
+struct BackendProfileBodyVisitor {
+    forbidden: Option<String>,
+    constructed: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for BackendProfileBodyVisitor {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if node.method == "run_global_transaction" && self.forbidden.is_none() {
+            self.forbidden = Some(
+                "calls `run_global_transaction`; backend profiles must exercise the bound provider fixture"
+                    .to_string(),
+            );
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let Expr::Path(path) = peel_expr(&node.func) {
+            let segments = raw_segments(&path.path);
+            if let [.., fixture, constructor] = segments.as_slice()
+                && constructor == "new"
+            {
+                self.constructed.insert(fixture.clone());
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if node.value().contains("localtx_profile_probe") && self.forbidden.is_none() {
+            self.forbidden = Some(
+                "references `localtx_profile_probe`; toy-table transactions cannot prove provider conformance"
+                    .to_string(),
+            );
+        }
+        visit::visit_lit_str(self, node);
+    }
+}
+
+fn inspect_backend_profile_body(block: &syn::Block) -> BackendProfileBodyVisitor {
+    let mut visitor = BackendProfileBodyVisitor::default();
+    visitor.visit_block(block);
+    visitor
+}
+
+fn forbidden_backend_profile_evidence(block: &syn::Block) -> Option<String> {
+    inspect_backend_profile_body(block).forbidden
+}
+
+fn provider_fixture_constructed(block: &syn::Block, fixture: &str) -> bool {
+    inspect_backend_profile_body(block)
+        .constructed
+        .contains(fixture)
 }
 
 fn backend_probe_from_call(call: &ExprCall, resolver: &Resolver) -> Option<BackendProbe> {
@@ -3408,6 +3672,41 @@ mod tests {
     }
 
     #[test]
+    fn multiple_backend_profiles_in_one_test_function_are_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-shared-backend-profile-probes")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source.replacen(
+                "        let _typed_enrollment = LOCALTX_BACKEND_PROFILE_DEMO_WRITE;",
+                r#"        const LOCALTX_BACKEND_PROFILE_DEMO_WRITE_ALIAS: ::vocab::HttpRouteBinding<
+            ::generated::http::demo_v1::write::RouteMarker,
+            ::vocab::http::LocalTx,
+        > = ::generated::http::demo_v1::write::ROUTE;
+        let _typed_enrollment = LOCALTX_BACKEND_PROFILE_DEMO_WRITE;"#,
+                1,
+            ),
+        )?;
+
+        let (_, findings) = check_root(&temp.path)?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::MultipleBackendProfilesInTest
+                    && finding.detail.contains("tenant_scoped_uow_profile")
+                    && finding
+                        .detail
+                        .contains("LOCALTX_BACKEND_PROFILE_DEMO_WRITE")
+                    && finding
+                        .detail
+                        .contains("LOCALTX_BACKEND_PROFILE_DEMO_WRITE_ALIAS")
+            }),
+            "one test function must not lend the same probes to multiple backend profile markers: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn active_contract_without_backend_profile_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-missing-backend-profile")?;
         fs::write(temp.path.join("adapters/pg/src/lib.rs"), "")?;
@@ -3530,7 +3829,7 @@ mod tests {
         fs::write(
             &owner,
             format!(
-                "{source}\n#[cfg(test)] mod invalid_backend {{\n    #[test] fn profile() {{\n        const LOCALTX_BACKEND_PROFILE_INVALID: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE;\n    }}\n}}\n"
+                "{source}\n#[cfg(test)] mod invalid_backend {{\n    #[test] fn profile() {{\n        const LOCALTX_BACKEND_PROFILE_INVALID: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE;\n        const LOCALTX_BACKEND_PROVIDER_INVALID: ::std::marker::PhantomData<(::generated::http::demo_v1::write::RouteMarker, InvalidProviderFixture)> = ::std::marker::PhantomData;\n        let _provider = InvalidProviderFixture::new();\n    }}\n}}\n"
             ),
         )?;
         let (_, findings) = check_root(&temp.path)?;
@@ -3579,7 +3878,91 @@ mod tests {
     }
 
     #[test]
-    fn backend_profile_parser_accepts_only_typed_absolute_evidence() -> anyhow::Result<()> {
+    fn backend_profile_shards_cannot_aggregate_across_provider_fixtures() {
+        let contract = Contract {
+            id: "demo.write".to_string(),
+            owner: "demo".to_string(),
+            key: "demo_v1::write".to_string(),
+            subject: "contracts/demo/v1/write/contract.toml".to_string(),
+            valid_owner: true,
+            tx_model: LocalTxModel::TenantScopedUow,
+        };
+        let enrollments = [
+            BackendEnrollmentOccurrence {
+                key: contract.key.clone(),
+                provider: "pg".to_string(),
+                provider_fixture: "FirstProvider".to_string(),
+                path: "adapters/pg/src/first.rs".to_string(),
+                probes: BTreeMap::from([
+                    (BackendProbe::Commit, 1),
+                    (BackendProbe::Rollback, 1),
+                    (BackendProbe::RejectedNoWrite, 1),
+                ]),
+            },
+            BackendEnrollmentOccurrence {
+                key: contract.key.clone(),
+                provider: "pg".to_string(),
+                provider_fixture: "SecondProvider".to_string(),
+                path: "adapters/pg/src/second.rs".to_string(),
+                probes: BTreeMap::from([
+                    (BackendProbe::RejectedNoWrite, 1),
+                    (BackendProbe::TenantIsolation, 1),
+                    (BackendProbe::RetryBoundary, 1),
+                    (BackendProbe::CommitUnknownNoReplay, 1),
+                    (BackendProbe::RollbackFailedNoReplay, 1),
+                ]),
+            },
+        ];
+        let mut findings = Vec::new();
+        append_backend_profile_findings(
+            &mut findings,
+            &contract,
+            &enrollments,
+            &BTreeSet::from(["pg".to_string()]),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MissingBackendProbe),
+            "different provider fixtures must not combine partial probe sets"
+        );
+    }
+
+    #[test]
+    fn single_backend_profile_in_test_function_is_accepted() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let _fixture = DemoProviderFixture::new();
+                ::testkit::localtx::assert_commit().await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        assert!(evidence.violation.is_none());
+        let enrollments = evidence.enrollments;
+        assert_eq!(enrollments.len(), 1);
+        assert_eq!(enrollments[0].key, "demo_v1::write");
+        assert_eq!(enrollments[0].probes.get(&BackendProbe::Commit), Some(&1));
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_without_typed_provider_binding_is_rejected() -> anyhow::Result<()> {
         let function: ItemFn = syn::parse_str(
             r#"#[tokio::test]
             async fn profile() -> Result<(), ()> {
@@ -3591,11 +3974,52 @@ mod tests {
                 Ok(())
             }"#,
         )?;
-        let enrollments =
-            backend_enrollments_in_test(&function.block, &Resolver::default(), "pg", "probe.rs");
-        assert_eq!(enrollments.len(), 1);
-        assert_eq!(enrollments[0].key, "demo_v1::write");
-        assert_eq!(enrollments[0].probes.get(&BackendProbe::Commit), Some(&1));
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        assert!(
+            evidence.enrollments.is_empty(),
+            "a route marker without a typed provider fixture binding must not enroll"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backend_profile_rejects_toy_transaction_evidence() -> anyhow::Result<()> {
+        let function: ItemFn = syn::parse_str(
+            r#"#[tokio::test]
+            async fn profile() -> Result<(), ()> {
+                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    ::vocab::http::LocalTx,
+                > = ::generated::http::demo_v1::write::ROUTE;
+                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
+                    ::generated::http::demo_v1::write::RouteMarker,
+                    DemoProviderFixture,
+                )> = ::std::marker::PhantomData;
+                let fixture = DemoProviderFixture::new();
+                fixture.store.run_global_transaction(|tx| async move {
+                    sqlx::query("INSERT INTO localtx_profile_probe VALUES (1)").execute(tx).await
+                }).await?;
+                ::testkit::localtx::assert_commit().await?;
+                Ok(())
+            }"#,
+        )?;
+        let evidence = backend_enrollments_in_test(
+            &function.block,
+            &Resolver::default(),
+            "pg",
+            "probe.rs",
+            "profile",
+        );
+        assert!(
+            evidence.enrollments.is_empty(),
+            "toy tables and raw global transactions must not count as provider evidence"
+        );
         Ok(())
     }
 

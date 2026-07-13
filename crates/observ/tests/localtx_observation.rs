@@ -31,6 +31,18 @@ fn route() -> HttpRouteBinding<TestRoute, LocalTx> {
 }
 
 #[test]
+fn observation_retains_the_route_marker_type() {
+    let observation: LocalTxObservation<TestRoute> =
+        LocalTxObservation::new(route(), LocalTxBoundary::SingleDomain);
+
+    observation.finish(
+        1,
+        TxRetryFinalStatus::Success,
+        Some(LocalTxFinalStatus::Committed),
+    );
+}
+
+#[test]
 fn emits_closed_retry_and_final_metrics() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();

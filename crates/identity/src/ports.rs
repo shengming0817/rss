@@ -19,6 +19,11 @@ use std::time::SystemTime;
 use consistency::EventEntry;
 use diport::{OutboxEmitError, OutboxEnvelopeParts};
 use dynosaur::dynosaur;
+use generated::http::identity_v1::{
+    logout::{LOCAL_TX as LOGOUT_LOCAL_TX, ROUTE as LOGOUT_ROUTE},
+    password_change::{LOCAL_TX as PASSWORD_CHANGE_LOCAL_TX, ROUTE as PASSWORD_CHANGE_ROUTE},
+    refresh::{LOCAL_TX as REFRESH_LOCAL_TX, ROUTE as REFRESH_ROUTE},
+};
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 // reason: AccountStatus 自 #1277 起不再是任一 port 方法的入/出参（lockout 推进折叠进 `authenticate`，
@@ -38,6 +43,118 @@ pub use crate::domain::{
     SessionId, kind_from_db, kind_to_db,
 };
 pub use vocab::TenantId;
+
+/// Generated route marker retained by the logout LocalTx command.
+pub type SessionLogoutRouteMarker = generated::http::identity_v1::logout::RouteMarker;
+/// Generated route marker retained by the password-change LocalTx command.
+pub type PasswordChangeRouteMarker = generated::http::identity_v1::password_change::RouteMarker;
+/// Generated route marker retained by the refresh rotation LocalTx command.
+pub type RefreshRotationRouteMarker = generated::http::identity_v1::refresh::RouteMarker;
+
+/// `identity.logout` 的不可伪造 LocalTx 写命令。
+///
+/// session id 与 generated route marker observation 同一构造 funnel 产生；外部 adapter 只能消费，
+/// 不能把其它 HTTP contract 的 observation 塞进 logout 写路径。
+pub struct SessionLogoutMutation {
+    session_id: SessionId,
+    observation: observ::LocalTxObservation<SessionLogoutRouteMarker>,
+}
+
+impl SessionLogoutMutation {
+    pub(crate) fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            observation: observ::LocalTxObservation::new(LOGOUT_ROUTE, LOGOUT_LOCAL_TX.boundary),
+        }
+    }
+
+    /// Adapter 消费命令并取得 session key 与精确 route marker evidence。
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionId,
+        observ::LocalTxObservation<SessionLogoutRouteMarker>,
+    ) {
+        (self.session_id, self.observation)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(session_id: SessionId) -> Self {
+        Self::new(session_id)
+    }
+}
+
+/// `identity.password-change` 的不可伪造 CAS 命令。
+///
+/// expected version、next credential 与 generated route marker observation 被绑定成一个 owned
+/// mutation；adapter 不再分别接收可错配的业务参数和观测证据。
+pub struct PasswordChangeMutation {
+    expected: u32,
+    next: Credential,
+    observation: observ::LocalTxObservation<PasswordChangeRouteMarker>,
+}
+
+impl PasswordChangeMutation {
+    pub(crate) fn new(expected: u32, next: Credential) -> Self {
+        Self {
+            expected,
+            next,
+            observation: observ::LocalTxObservation::new(
+                PASSWORD_CHANGE_ROUTE,
+                PASSWORD_CHANGE_LOCAL_TX.boundary,
+            ),
+        }
+    }
+
+    /// Adapter 消费命令并取得 CAS 参数与精确 route marker evidence。
+    pub fn into_parts(
+        self,
+    ) -> (
+        u32,
+        Credential,
+        observ::LocalTxObservation<PasswordChangeRouteMarker>,
+    ) {
+        (self.expected, self.next, self.observation)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(expected: u32, next: Credential) -> Self {
+        Self::new(expected, next)
+    }
+}
+
+/// `identity.refresh` 的不可伪造 CAS 轮换命令。
+///
+/// sealed rotation 与 generated route marker observation 同源封装；adapter 只能消费命令，不能把
+/// refresh 业务参数接到其它 LocalTx contract 或 retry boundary。
+pub struct RefreshRotationMutation {
+    rotation: RefreshRotation,
+    observation: observ::LocalTxObservation<RefreshRotationRouteMarker>,
+}
+
+impl RefreshRotationMutation {
+    pub(crate) fn new(rotation: RefreshRotation) -> Self {
+        Self {
+            rotation,
+            observation: observ::LocalTxObservation::new(REFRESH_ROUTE, REFRESH_LOCAL_TX.boundary),
+        }
+    }
+
+    /// Adapter 消费命令并取得 sealed rotation 与精确 route marker evidence。
+    pub fn into_parts(
+        self,
+    ) -> (
+        RefreshRotation,
+        observ::LocalTxObservation<RefreshRotationRouteMarker>,
+    ) {
+        (self.rotation, self.observation)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(rotation: RefreshRotation) -> Self {
+        Self::new(rotation)
+    }
+}
 
 /// Tenant-scoped repo capability for identity storage ports.
 ///
@@ -355,7 +472,7 @@ pub trait RoleBindingLifecycleLocal: Send + Sync {
 /// 的跨 crate 重建 + 只读 accessor 公开化与 `RoleReadRepo` 同步走 W（accessor 升 `pub` / `from_persisted` funnel，
 /// 见 #1258）——本 PR 编译证明阶段无独立 adapter，替身在同 crate 用 `pub(crate)`。
 ///
-/// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `bump_version`）**不收**
+/// **租户/主体一致性 = 类型层 Hard（F2）**：携带完整 `Credential` 的写方法（`save` / `apply_password_change`）**不收**
 /// 独立 `tenant`/`login` 参，store key 直接派生自 `credential.tenant()` / `.login()`——错位组合不可表达
 /// （零信任租户隔离不靠调用方约定 / debug_assert）。只持标识的方法：`authenticate` / `lockout_status` 收
 /// [`TenantRepoScope`] + [`LoginIdentifier`]（登录路径，攻击者可控查找键）；`find_by_user_id` 收 [`TenantRepoScope`] +
@@ -424,11 +541,10 @@ pub trait CredentialRepoLocal: Send + Sync {
     /// `Err(CredentialNotFound)`。单次 port 调用可按 provider 的既定策略重试 transient storage 错误；
     /// `VersionConflict` / CAS 冲突不自动重试。store key 派生自 `next`（F2）；消费方经
     /// `Credential::rotate`（保持 login/user_id/tenant、version + 1）构造 `next`。
-    async fn bump_version(
+    async fn apply_password_change(
         &self,
         scope: TenantRepoScope,
-        expected: u32,
-        next: Credential,
+        mutation: PasswordChangeMutation,
     ) -> Result<(), IdentityError>;
 
     /// **原子**锁定态查询（F1，验签前门控）：provider 内 RMW 完成「读 → `try_lazy_unlock(now)`（TTL 过则解锁
@@ -442,7 +558,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 }
 
 /// 会话**生命周期** DI port（域形；provider 可换：prod postgres / demo in-mem）——会话**创建（co-tx，L2）**、
-/// **查询（L1）**、**软撤销（L1）**收敛为**单一 provider**，create / find / revoke 同源。
+/// **查询（L1）**、**软撤销（L1）**收敛为**单一 provider**，create / find / logout 同源。
 ///
 /// 公开 [`SessionLifecycle`] 是 **Send 变体**（adapter `impl SessionLifecycle for ...`），
 /// [`DynSessionLifecycle`] 是其 dyn-compatible wrapper（组合根经 `Arc<DynSessionLifecycle>` 注入）。
@@ -450,9 +566,9 @@ pub trait CredentialRepoLocal: Send + Sync {
 /// `LoginService::login().await` future 必须为 `Send`（axum handler 要求）。
 ///
 /// **为何单一 provider（合并原 `SessionUnitOfWork` + `SessionRepo`，#1278）**：会话「创建写」与「查询/撤销」
-/// 分属**两个未绑定的存储端口**时，组合根可注入分属不同底座的实例（persist 写 store A、find/revoke 查 store B）
+/// 分属**两个未绑定的存储端口**时，组合根可注入分属不同底座的实例（persist 写 store A、find/logout 查 store B）
 /// ——login 写入的会话无法被同一 service 的 logout 撤销，且类型系统无法阻止该 bug（PR #255 F3）。收敛为单一
-/// `SessionLifecycle` 后，**「两个未绑定 store」从类型层不可表达**：单一必填注入端口 ⇒ create / find / revoke 必
+/// `SessionLifecycle` 后，**「两个未绑定 store」从类型层不可表达**：单一必填注入端口 ⇒ create / find / logout 必
 /// 同源（AI-robust **Hard**：构造器必填参数 + typed function choice）。工业 Rust 一致采用单一会话存储接口
 /// （tower-sessions `SessionStore`：create+save+load+delete 同 trait；omicron `DataStore` console_session：
 /// session_create / lookup / hard_delete 同 impl）。
@@ -461,7 +577,7 @@ pub trait CredentialRepoLocal: Send + Sync {
 ///
 /// **co-tx 原子性 INVARIANT OUTBOX-COTX-SESSION-01 不受合并影响**（L2 OutboxFact，FR-003）：原子性来自
 /// [`persist_session_and_emit`](SessionLifecycleLocal::persist_session_and_emit) 的**方法签名形状**
-/// （combined 单方法、域无半开事务句柄），**非** trait 边界——它与 `find` / `revoke` 并列于同一 trait 后仍是
+/// （combined 单方法、域无半开事务句柄），**非** trait 边界——它与 `find` / `logout` 并列于同一 trait 后仍是
 /// 唯一 session-写 API（无 `save` / `emit` 分调）。adapter 在其 impl body 内独占事务边界（begin → 写 session →
 /// append_outbox → 单 commit）；拆成 `SessionRepo::save` + `OutboxEmitter::emit` 两 provider-agnostic 调用，域
 /// 无法绑同一事务（端口签名不容 `&mut PgConnection`，否则 `ports`→adapter 反向耦合），closure-UoW 把事务句柄
@@ -469,14 +585,14 @@ pub trait CredentialRepoLocal: Send + Sync {
 /// Hard）。adapter same-tx 接线由 postgres `PgSessionLifecycle` 的 **INVARIANT: OUTBOX-COTX-SESSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }** +
 /// 集成测试 anti-vacuity（commit 两行皆在 ↔ rollback 两行皆无）守。
 ///
-/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `revoke` 接收 [`TenantRepoScope`]，跨租
-/// find→None（不泄露存在性）/ revoke→幂等 no-op。失败通道：`persist_session_and_emit` 经 [`OutboxEmitError`]
+/// 租户隔离由签名承载（fail-closed，同 `CredentialRepo`）：`find` / `logout` 接收 [`TenantRepoScope`]，跨租
+/// find→None（不泄露存在性）/ logout→幂等 no-op。失败通道：`persist_session_and_emit` 经 [`OutboxEmitError`]
 /// （diport infra 错误，source 已 PII-redacted）冒泡（co-tx 写失败任一步均不暴露原始错误明文，zero-trust；
-/// 复用 infra 错误因签名已桥接 [`Entry`] / [`OutboxEnvelopeParts`]、失败本质是持久化层错误）；`find` / `revoke`
+/// 复用 infra 错误因签名已桥接 [`Entry`] / [`OutboxEnvelopeParts`]、失败本质是持久化层错误）；`find` / `logout`
 /// 经 [`IdentityError`] 冒泡。
 ///
 /// 归属：域形 port（签名引用域内实体 [`Session`]）→ 本 crate `ports`，非 diport（ADR-005 category line，同
-/// [`RoleReadRepo`]）。durable `find` / `revoke` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE +
+/// [`RoleReadRepo`]）。durable `find` / `logout` 由 postgres `PgSessionLifecycle` 实写（tenant-scope SELECT/UPDATE +
 /// `sessions.revoked` 列，#1278——补齐原 #1116 session durable 闭合，provider 无 `todo!()` 半实现）。
 ///
 /// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
@@ -511,10 +627,10 @@ pub trait SessionLifecycleLocal: Send + Sync {
 
     /// **软撤销（L1，logout）**：域侧软撤销会话（幂等——重复 / 未知 / 跨租均 `Ok` 且 no-op）。已颁 JWT 在 TTL
     /// 内仍有效（硬吊销延 #1003）。
-    async fn revoke(
+    async fn logout(
         &self,
         scope: TenantRepoScope,
-        session_id: SessionId,
+        mutation: SessionLogoutMutation,
     ) -> Result<(), IdentityError>;
 }
 
@@ -578,7 +694,7 @@ pub trait RefreshTokenStoreLocal: Send + Sync {
     async fn rotate(
         &self,
         scope: TenantRepoScope,
-        rotation: RefreshRotation,
+        mutation: RefreshRotationMutation,
     ) -> Result<bool, IdentityError>;
 
     /// **级联撤销整条谱系**（reuse-detection + logout）：把 `lineage_id` 家族全部记录置 `Revoked`。幂等
@@ -682,7 +798,7 @@ mod smoke {
     use super::{
         DynRoleReadRepo, DynSessionLifecycle, EventEntry, IdentityError, OutboxEmitError,
         OutboxEnvelopeParts, Role, RoleId, RoleReadRepo, Session, SessionId, SessionLifecycle,
-        TenantRepoScope,
+        SessionLogoutMutation, TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -756,8 +872,8 @@ mod smoke {
 
     // ── SessionLifecycle（co-tx 创建 + 查询 + 软撤销，单一域形 port，#1278）PORT-SHAPE ────────────
     // 与 RoleReadRepo 不同：本 port 在 postgres adapter 有**真实 impl**（PgSessionLifecycle 的 co-tx 创建；
-    // find/revoke 冻结 #1116），但本 smoke 仍只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop
-    // `todo!()`）；co-tx 行为由 adapter 集成测试守。三方法（create/find/revoke）同一 trait，证明合并后仍
+    // find/logout 冻结 #1116），但本 smoke 仍只构造 Dyn wrapper + 断言 `Send`（不 `.await` → 不触 Noop
+    // `todo!()`）；co-tx 行为由 adapter 集成测试守。三方法（create/find/logout）同一 trait，证明合并后仍
     // 经单一 `Arc<DynSessionLifecycle>` 注入。
     struct NoopSessionLifecycle;
     impl SessionLifecycle for NoopSessionLifecycle {
@@ -777,10 +893,10 @@ mod smoke {
         ) -> Result<Option<Session>, IdentityError> {
             todo!()
         }
-        async fn revoke(
+        async fn logout(
             &self,
             _scope: TenantRepoScope,
-            _session_id: SessionId,
+            _mutation: SessionLogoutMutation,
         ) -> Result<(), IdentityError> {
             todo!()
         }
@@ -838,10 +954,10 @@ mod smoke {
                 scope: TenantRepoScope,
                 session_id: SessionId,
             ) -> Result<Option<Session>, IdentityError>;
-            async fn revoke(
+            async fn logout(
                 &self,
                 scope: TenantRepoScope,
-                session_id: SessionId,
+                mutation: SessionLogoutMutation,
             ) -> Result<(), IdentityError>;
         }
     }
@@ -855,7 +971,7 @@ mod smoke_credential {
     //! round-trip 测试覆盖）。
     use super::{
         AuthOutcome, Credential, CredentialRepo, DynCredentialRepo, IdentityError, LoginIdentifier,
-        SystemTime, TenantRepoScope,
+        PasswordChangeMutation, SystemTime, TenantRepoScope,
     };
     use std::sync::Arc;
 
@@ -884,11 +1000,10 @@ mod smoke_credential {
         ) -> Result<(), IdentityError> {
             todo!()
         }
-        async fn bump_version(
+        async fn apply_password_change(
             &self,
             _scope: TenantRepoScope,
-            _expected: u32,
-            _next: Credential,
+            _mutation: PasswordChangeMutation,
         ) -> Result<(), IdentityError> {
             todo!()
         }
@@ -943,7 +1058,7 @@ mod smoke_credential {
             async fn find_by_user_id(&self, scope: TenantRepoScope, user_id: ids::UserId) -> Result<Option<Credential>, IdentityError>;
             async fn authenticate(&self, scope: TenantRepoScope, login: LoginIdentifier, candidate: String, now: SystemTime) -> Result<AuthOutcome, IdentityError>;
             async fn save(&self, scope: TenantRepoScope, credential: Credential) -> Result<(), IdentityError>;
-            async fn bump_version(&self, scope: TenantRepoScope, expected: u32, next: Credential) -> Result<(), IdentityError>;
+            async fn apply_password_change(&self, scope: TenantRepoScope, mutation: PasswordChangeMutation) -> Result<(), IdentityError>;
             async fn lockout_status(&self, scope: TenantRepoScope, login: LoginIdentifier, now: SystemTime) -> Result<bool, IdentityError>;
         }
     }
@@ -958,8 +1073,8 @@ mod smoke_refresh {
     //! 故只构造 Dyn wrapper + 断言 `Send + Sync`，**不 `.await`**（真实行为由 `internal::mem::InMemRefreshTokenStore`
     //! + `application::RefreshService` 集成测试覆盖）。
     use super::{
-        DynRefreshTokenStore, IdentityError, RefreshRotation, RefreshTokenHash, RefreshTokenId,
-        RefreshTokenRecord, RefreshTokenStore, TenantRepoScope,
+        DynRefreshTokenStore, IdentityError, RefreshRotationMutation, RefreshTokenHash,
+        RefreshTokenId, RefreshTokenRecord, RefreshTokenStore, TenantRepoScope,
     };
 
     struct NoopRefreshTokenStore;
@@ -981,7 +1096,7 @@ mod smoke_refresh {
         async fn rotate(
             &self,
             _scope: TenantRepoScope,
-            _rotation: RefreshRotation,
+            _mutation: RefreshRotationMutation,
         ) -> Result<bool, IdentityError> {
             todo!()
         }
@@ -1033,7 +1148,7 @@ mod smoke_refresh {
         impl RefreshTokenStore for TestRefreshTokenStore {
             async fn insert(&self, scope: TenantRepoScope, record: RefreshTokenRecord) -> Result<(), IdentityError>;
             async fn find_by_hash(&self, scope: TenantRepoScope, hash: RefreshTokenHash) -> Result<Option<RefreshTokenRecord>, IdentityError>;
-            async fn rotate(&self, scope: TenantRepoScope, rotation: RefreshRotation) -> Result<bool, IdentityError>;
+            async fn rotate(&self, scope: TenantRepoScope, mutation: RefreshRotationMutation) -> Result<bool, IdentityError>;
             async fn revoke_lineage(&self, scope: TenantRepoScope, lineage_id: RefreshTokenId) -> Result<(), IdentityError>;
         }
     }

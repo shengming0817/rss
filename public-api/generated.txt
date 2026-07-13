@@ -1127,6 +1127,7 @@ pub const generated::http::audit_v1::list_tenant_entries::CONTRACT: vocab::contr
 pub const generated::http::audit_v1::list_tenant_entries::CONTRACT_ID: &str
 pub const generated::http::audit_v1::list_tenant_entries::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::audit_v1::list_tenant_entries::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::audit_v1::list_tenant_entries::PATH: &str
 pub const generated::http::audit_v1::list_tenant_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::audit_v1::list_tenant_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_tenant_entries::RouteMarker, vocab::http::LocalTx>
@@ -1378,6 +1379,7 @@ pub const generated::http::identity_v1::logout::CONTRACT: vocab::contract::bindi
 pub const generated::http::identity_v1::logout::CONTRACT_ID: &str
 pub const generated::http::identity_v1::logout::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::logout::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::logout::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::identity_v1::logout::PATH: &str
 pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker, vocab::http::LocalTx>
@@ -1471,6 +1473,7 @@ pub const generated::http::identity_v1::password_change::CONTRACT: vocab::contra
 pub const generated::http::identity_v1::password_change::CONTRACT_ID: &str
 pub const generated::http::identity_v1::password_change::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::password_change::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::identity_v1::password_change::PATH: &str
 pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker, vocab::http::LocalTx>
@@ -3441,6 +3444,7 @@ pub const generated::http::identity_v1::refresh::CONTRACT: vocab::contract::bind
 pub const generated::http::identity_v1::refresh::CONTRACT_ID: &str
 pub const generated::http::identity_v1::refresh::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::identity_v1::refresh::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::identity_v1::refresh::PATH: &str
 pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker, vocab::http::LocalTx>
@@ -3979,6 +3983,7 @@ pub const generated::http::settings_v2::CONTRACT: vocab::contract::binding::Cont
 pub const generated::http::settings_v2::CONTRACT_ID: &str
 pub const generated::http::settings_v2::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v2::EFFECT_PROFILE: vocab::http::HttpEffectProfile
+pub const generated::http::settings_v2::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::settings_v2::PATH: &str
 pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::settings_v2::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v2::RouteMarker, vocab::http::LocalTx>
@@ -4408,6 +4413,7 @@ impl core::panic::unwind_safe::UnwindSafe for generated::http::HttpResourceShari
 pub struct generated::http::HttpSpec
 pub generated::http::HttpSpec::headers: &'static [generated::http::HttpHeaderSpec]
 pub generated::http::HttpSpec::local_tx: core::option::Option<generated::http::LocalTxSpec>
+pub generated::http::HttpSpec::mount_key: &'static str
 pub generated::http::HttpSpec::projection_fields: &'static [generated::http::HttpProjectionFieldSpec]
 pub generated::http::HttpSpec::resource_sharing: generated::http::HttpResourceSharingSpec
 pub generated::http::HttpSpec::route: vocab::http::HttpRouteEvidence

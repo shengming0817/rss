@@ -322,7 +322,7 @@ pub(crate) async fn publish_secret_to_ports(
     secret_ref: SecretRef,
 ) -> Result<u64, SecretServiceError> {
     let (entry, version) = next_secret_entry(secrets, scope, key, secret_ref).await?;
-    let command = SecretPublishCommand::from_entry(entry)?;
+    let command = SecretPublishCommand::from_entry(entry);
     secret_uow.publish(scope, command).await?;
     Ok(version)
 }

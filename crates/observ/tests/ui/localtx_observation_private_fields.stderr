@@ -1,28 +1,15 @@
-error: cannot construct `LocalTxObservation` with struct literal syntax due to private fields
- --> tests/ui/localtx_observation_private_fields.rs:4:13
-  |
-4 |     let _ = LocalTxObservation {
-  |             ^^^^^^^^^^^^^^^^^^
-5 |         domain: "runtime-domain",
-  |         ------------------------ private field
-6 |         contract_id: "runtime-contract",
-  |         ------------------------------- private field
-7 |         boundary: "runtime-boundary",
-  |         ---------------------------- private field
-  |
-  = note: ...and other private field `span` that was not provided
-help: you might have meant to use the `new` associated function
-  |
-4 -     let _ = LocalTxObservation {
-5 -         domain: "runtime-domain",
-6 -         contract_id: "runtime-contract",
-7 -         boundary: "runtime-boundary",
-8 -     };
-4 +     let _ = LocalTxObservation::new(_, _);
-  |
-
-error[E0308]: mismatched types
- --> tests/ui/localtx_observation_private_fields.rs:7:19
-  |
-7 |         boundary: "runtime-boundary",
-  |                   ^^^^^^^^^^^^^^^^^^ expected `LocalTxBoundary`, found `&str`
+error[E0451]: fields `domain`, `contract_id`, `boundary`, `span` and `marker` of struct `LocalTxObservation` are private
+  --> tests/ui/localtx_observation_private_fields.rs:10:9
+   |
+ 9 |     let _ = LocalTxObservation::<Route> {
+   |             --------------------------- in this type
+10 |         domain: "runtime-domain",
+   |         ^^^^^^ private field
+11 |         contract_id: "runtime-contract",
+   |         ^^^^^^^^^^^ private field
+12 |         boundary: LocalTxBoundary::SingleDomain,
+   |         ^^^^^^^^ private field
+13 |         span: Span::none(),
+   |         ^^^^ private field
+14 |         marker: PhantomData,
+   |         ^^^^^^ private field

@@ -5,12 +5,13 @@
 //!
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@285dc925f98403ff426acc70968f104dc820d4f2
 //!
-//! INVARIANT: LOCALTX-OBS-LABELS-01 { level = "Hard", exec = "native-compile", source = "code", native = "LocalTxObservation construction requires HttpRouteBinding<M, LocalTx>; private state owns metric names and label keys; LocalTxBoundary, TxRetryClass, and LocalTxFinalStatus provide closed values" }
+//! INVARIANT: LOCALTX-OBS-LABELS-01 { level = "Hard", exec = "native-compile", source = "code", native = "`LocalTxObservation<M>` construction requires `HttpRouteBinding<M, LocalTx>` and retains M; private state owns metric names and label keys; LocalTxBoundary, TxRetryClass, and LocalTxFinalStatus provide closed values" }
 //! Generated route provenance is separately enforced at Medium by
 //! `CONTRACT-BINDING-FUNNEL-01`; this façade does not claim to Hard-seal the public
 //! `HttpRouteBinding::from_static` source.
 
 use consistency::{LocalTxBoundary, LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus};
+use std::marker::PhantomData;
 use tracing::{Level, Span, field};
 use vocab::{HttpRouteBinding, http::LocalTx};
 
@@ -18,17 +19,18 @@ use vocab::{HttpRouteBinding, http::LocalTx};
 ///
 /// Construction requires typed LocalTx route evidence. Metric names, label keys, and extracted
 /// label values stay private so adapter code cannot assemble a parallel dynamic-label path.
-pub struct LocalTxObservation {
+pub struct LocalTxObservation<M> {
     domain: &'static str,
     contract_id: &'static str,
     boundary: LocalTxBoundary,
     span: Span,
+    marker: PhantomData<fn() -> M>,
 }
 
-impl LocalTxObservation {
+impl<M> LocalTxObservation<M> {
     /// Start observing one LocalTx retry invocation under the current trace span.
     #[must_use]
-    pub fn new<M>(route: HttpRouteBinding<M, LocalTx>, boundary: LocalTxBoundary) -> Self {
+    pub fn new(route: HttpRouteBinding<M, LocalTx>, boundary: LocalTxBoundary) -> Self {
         let contract = route.evidence().contract();
         let domain = contract.domain();
         let contract_id = contract.contract_id();
@@ -48,6 +50,7 @@ impl LocalTxObservation {
             contract_id,
             boundary,
             span,
+            marker: PhantomData,
         }
     }
 

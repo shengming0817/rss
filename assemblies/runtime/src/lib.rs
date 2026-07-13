@@ -4915,11 +4915,10 @@ mod tests {
             ))
         }
 
-        async fn bump_version(
+        async fn apply_password_change(
             &self,
             _scope: IdentityTenantRepoScope,
-            _expected: u32,
-            _next: identity::ports::Credential,
+            _mutation: identity::ports::PasswordChangeMutation,
         ) -> Result<(), identity::ports::IdentityError> {
             Err(identity_storage_error(
                 "runtime test credential repo is read-only",
@@ -4959,10 +4958,10 @@ mod tests {
             Ok(None)
         }
 
-        async fn revoke(
+        async fn logout(
             &self,
             _scope: IdentityTenantRepoScope,
-            _session_id: identity::ports::SessionId,
+            _mutation: identity::ports::SessionLogoutMutation,
         ) -> Result<(), identity::ports::IdentityError> {
             Ok(())
         }
@@ -4993,7 +4992,7 @@ mod tests {
         async fn rotate(
             &self,
             _scope: IdentityTenantRepoScope,
-            _rotation: identity::ports::RefreshRotation,
+            _mutation: identity::ports::RefreshRotationMutation,
         ) -> Result<bool, identity::ports::IdentityError> {
             Err(identity_storage_error(
                 "runtime test refresh store must not be called",

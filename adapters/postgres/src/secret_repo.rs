@@ -559,7 +559,6 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         Self::validate_entry_scope(scope, &entry)?;
         let tenant = scope.tenant();
         run_pg_localtx_retry(
-            SETTINGS_SECRET_BOUNDARY,
             observation,
             |_attempt| {
                 let entry = entry.clone();

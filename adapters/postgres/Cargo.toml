@@ -87,8 +87,8 @@ test-support = []
 fault-matrix-test-support = ["dep:anyhow"]
 
 [dev-dependencies]
-toml = { workspace = true }
 generated = { path = "../../generated" }
+toml = { workspace = true }
 authn = { path = "../../crates/authn", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 # #1224 trace 接线单测：复用 tracewire 的 `test-util` 脚手架（with_test_subscriber）装 otel subscriber，
@@ -102,7 +102,7 @@ metrics-exporter-prometheus = { workspace = true }
 # 会话生命周期集成测试（co-tx t11-t14 + durable find/revoke t20-t22）构造 `ports::Session` 经 `identity::test_support::session`
 # （funnel `Session::new` 为 pub(crate)；test-support feature 仅 dev/test 生效，生产 seal 不变）。同范式见
 # identity 自身 dev-dep `authn = { features = ["test-support"] }`。
-identity = { path = "../../crates/identity", features = ["test-support"] }
+identity = { path = "../../crates/identity", features = ["seed-login", "test-support"] }
 settings = { path = "../../crates/settings", features = ["test-support"] }
 audit = { path = "../../crates/audit", features = ["test-support"] }
 # 集成测试容器 fixture（#1137）：testcontainers self-provision postgres（经 testkit/containers，

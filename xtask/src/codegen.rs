@@ -624,7 +624,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpIdempotency::NonIdempotent => "NonIdempotent",
     };
     let effect_profile = render_http_effect_profile_consts(c)?;
-    let local_tx = render_http_local_tx(c, sup)?;
+    let (local_tx_evidence, local_tx) = render_http_local_tx(c, sup)?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
     let resource_present = http
@@ -753,6 +753,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
     {self_scoped},
     EFFECT_PROFILE,
 );
+{local_tx_evidence}
 
 /// HTTP serving metadata（path/method/auth/header 单源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
@@ -849,12 +850,12 @@ fn render_http_effect_kind(effect: EffectKind) -> &'static str {
     }
 }
 
-fn render_http_local_tx(c: &DiscoveredContract, sup: &str) -> Result<String> {
+fn render_http_local_tx(c: &DiscoveredContract, sup: &str) -> Result<(String, &'static str)> {
     if c.manifest.consistency_level != ConsistencyLevel::LocalTx {
         if c.manifest.capabilities.local_tx.is_some() {
             bail!("非 LocalTx http 契约不得声明 [capabilities.localTx]（codegen fail-closed）");
         }
-        return Ok("None".to_string());
+        return Ok((String::new(), "None"));
     }
 
     let local_tx = c
@@ -863,14 +864,22 @@ fn render_http_local_tx(c: &DiscoveredContract, sup: &str) -> Result<String> {
         .local_tx
         .as_ref()
         .context("LocalTx http 契约缺 [capabilities.localTx]（codegen fail-closed）")?;
-    let spec = format!(
-        "{sup}LocalTxSpec {{ boundary: ::vocab::LocalTxBoundary::{}, tx_model: ::vocab::LocalTxModel::{}, retry: ::vocab::LocalTxRetry::{}, commit_unknown: ::vocab::LocalTxCommitUnknown::{} }}",
+    let evidence = format!(
+        r#"
+/// Required LocalTx capability evidence derived from `[capabilities.localTx]`.
+pub const LOCAL_TX: {sup}LocalTxSpec = {sup}LocalTxSpec {{
+    boundary: ::vocab::LocalTxBoundary::{},
+    tx_model: ::vocab::LocalTxModel::{},
+    retry: ::vocab::LocalTxRetry::{},
+    commit_unknown: ::vocab::LocalTxCommitUnknown::{},
+}};
+"#,
         render_local_tx_boundary(local_tx.boundary),
         render_local_tx_model(local_tx.tx_model),
         render_local_tx_retry(local_tx.retry),
         render_local_tx_commit_unknown(local_tx.commit_unknown),
     );
-    Ok(format!("Some({spec})"))
+    Ok((evidence, "Some(LOCAL_TX)"))
 }
 
 fn render_local_tx_boundary(boundary: LocalTxBoundary) -> &'static str {
@@ -3243,6 +3252,10 @@ mod tests {
             "local_tx: None",
             "non-LocalTx endpoint SPEC should explicitly carry no LocalTx evidence",
         );
+        assert!(
+            !rendered.contains("pub const LOCAL_TX:"),
+            "non-LocalTx endpoint modules must not expose LocalTx contract evidence"
+        );
         Ok(())
     }
 
@@ -3364,8 +3377,13 @@ mod tests {
         );
         assert_generated_contains(
             &rendered,
-            "local_tx: Some(super::LocalTxSpec",
-            "LocalTx endpoint SPEC should carry LocalTx evidence",
+            "pub const LOCAL_TX: super::LocalTxSpec",
+            "LocalTx endpoint modules should expose non-optional typed contract evidence",
+        );
+        assert_generated_contains(
+            &rendered,
+            "local_tx: Some(LOCAL_TX)",
+            "LocalTx endpoint SPEC should reuse its module-local evidence constant",
         );
         for needle in [
             "boundary: ::vocab::LocalTxBoundary::SingleDomain",

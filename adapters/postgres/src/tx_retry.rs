@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "domain-audit")]
+use audit::ports::AuditError;
 use consistency::{
     LocalTxFinalStatus, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryReport,
     run_tx_retry,
@@ -29,6 +31,12 @@ pub(crate) enum PgTxRetryBoundary {
     SettingsSecret,
     #[cfg(feature = "domain-identity")]
     IdentityCredential,
+    #[cfg(feature = "domain-identity")]
+    IdentitySession,
+    #[cfg(feature = "domain-identity")]
+    IdentityRefresh,
+    #[cfg(feature = "domain-audit")]
+    AuditAppend,
 }
 
 impl PgTxRetryBoundary {
@@ -40,6 +48,12 @@ impl PgTxRetryBoundary {
             Self::SettingsSecret => "settings.secret",
             #[cfg(feature = "domain-identity")]
             Self::IdentityCredential => "identity.credential",
+            #[cfg(feature = "domain-identity")]
+            Self::IdentitySession => "identity.session",
+            #[cfg(feature = "domain-identity")]
+            Self::IdentityRefresh => "identity.refresh",
+            #[cfg(feature = "domain-audit")]
+            Self::AuditAppend => "audit.append",
         }
     }
 }
@@ -54,6 +68,44 @@ pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary
 #[cfg(feature = "domain-identity")]
 pub(crate) const IDENTITY_CREDENTIAL_BOUNDARY: PgTxRetryBoundary =
     PgTxRetryBoundary::IdentityCredential;
+/// Retry boundary for identity session logout writes.
+#[cfg(feature = "domain-identity")]
+pub(crate) const IDENTITY_SESSION_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentitySession;
+/// Retry boundary for identity refresh-token rotation writes.
+#[cfg(feature = "domain-identity")]
+pub(crate) const IDENTITY_REFRESH_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::IdentityRefresh;
+/// Retry boundary for the durable audit append transaction.
+#[cfg(feature = "domain-audit")]
+pub(crate) const AUDIT_APPEND_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::AuditAppend;
+
+/// Closed route-marker to Postgres retry-boundary mapping.
+///
+/// The trait is crate-private, so downstream adapters cannot add arbitrary generated routes.
+/// Callers provide only `LocalTxObservation<M>`; the retry boundary is derived from `M` and cannot
+/// be independently paired.
+pub(crate) trait PgLocalTxOperation {
+    const BOUNDARY: PgTxRetryBoundary;
+}
+
+#[cfg(feature = "domain-settings")]
+impl PgLocalTxOperation for settings::ports::SecretPublishRouteMarker {
+    const BOUNDARY: PgTxRetryBoundary = SETTINGS_SECRET_BOUNDARY;
+}
+
+#[cfg(feature = "domain-identity")]
+impl PgLocalTxOperation for identity::ports::PasswordChangeRouteMarker {
+    const BOUNDARY: PgTxRetryBoundary = IDENTITY_CREDENTIAL_BOUNDARY;
+}
+
+#[cfg(feature = "domain-identity")]
+impl PgLocalTxOperation for identity::ports::SessionLogoutRouteMarker {
+    const BOUNDARY: PgTxRetryBoundary = IDENTITY_SESSION_BOUNDARY;
+}
+
+#[cfg(feature = "domain-identity")]
+impl PgLocalTxOperation for identity::ports::RefreshRotationRouteMarker {
+    const BOUNDARY: PgTxRetryBoundary = IDENTITY_REFRESH_BOUNDARY;
+}
 
 /// Classify a SQLSTATE code.
 pub(crate) fn classify_sqlstate(code: Option<&str>) -> TxRetryClass {
@@ -128,8 +180,17 @@ pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
     }
 }
 
+/// Classify audit repository errors at the Postgres boundary.
+#[cfg(feature = "domain-audit")]
+pub(crate) fn classify_audit_error(error: &AuditError) -> TxRetryClass {
+    match error {
+        AuditError::Storage(source) => classify_source(source.as_ref()),
+        _ => TxRetryClass::Permanent,
+    }
+}
+
 /// Run a Postgres UoW under the default retry policy and emit closed-label metrics.
-#[cfg(feature = "domain-settings")]
+#[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) async fn run_pg_tx_retry<T, E, Op, OpFut, Classify>(
     boundary: PgTxRetryBoundary,
     op: Op,
@@ -148,20 +209,20 @@ where
 
 /// Run a typed LocalTx Postgres UoW and emit retry and settlement observability.
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
-pub(crate) async fn run_pg_localtx_retry<T, E, Op, OpFut, Classify>(
-    operation_boundary: PgTxRetryBoundary,
-    observation: LocalTxObservation,
+pub(crate) async fn run_pg_localtx_retry<M, T, E, Op, OpFut, Classify>(
+    observation: LocalTxObservation<M>,
     op: Op,
     classify: Classify,
 ) -> Result<T, E>
 where
+    M: PgLocalTxOperation,
     Op: FnMut(u32) -> OpFut,
     OpFut: Future<Output = LocalTxAttempt<T, E>>,
     Classify: Fn(&E) -> TxRetryClass,
     E: Error + Send + Sync + 'static,
 {
     let (result, report, settlement) = run_pg_tx_retry_core(
-        operation_boundary,
+        M::BOUNDARY,
         op,
         classify,
         |attempt, retry_class, settlement| {

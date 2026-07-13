@@ -2,10 +2,10 @@
 //! `PgSessionUnitOfWork`，#1278）。
 //!
 //! **完整生命周期均 durable 交付**（#1278，原 #1116 session 闭合）：创建（co-tx）+ 查询 `find`（tenant-scope
-//! SELECT + `revoked = false` 过滤 + `Session::hydrate` 重建）+ 软撤销 `revoke`（tenant-scoped tx
+//! SELECT + `revoked = false` 过滤 + `Session::hydrate` 重建）+ 软撤销 `logout`（tenant-scoped tx
 //! `UPDATE ... SET revoked = true`，幂等）。`revoked` 列由 `0011_add_sessions_revoked.sql` 迁移引入。
 //! 合并为单一 `SessionLifecycle` 后 postgres provider **不留 `todo!()` 半实现**——`LoginService::logout` 经
-//! `revoke` 落到真实软撤销路径（消除「trait 看似完整、生产 read/revoke panic」的接缝，PR #273 codex F1）。
+//! `logout` 落到真实软撤销路径（消除「trait 看似完整、生产 read/logout panic」的接缝，PR #273 codex F1）。
 //!
 //! L2 OutboxFact 完整语义（FR-003）：把一次登录的 [`Session`] 业务写与 outbox(`identity.session-created`)
 //! append **同一本地事务**原子落库（both-or-neither）。取代「emit-only `PgEmitter` + 无 session 持久化」的
@@ -33,15 +33,23 @@
 
 use consistency::EventEntry;
 use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
-use identity::ports::{IdentityError, Session, SessionId, SessionLifecycle, TenantRepoScope};
+use identity::ports::{
+    IdentityError, Session, SessionId, SessionLifecycle, SessionLogoutMutation, TenantRepoScope,
+};
 use sqlx::Row;
+
+#[cfg(all(test, feature = "integration"))]
+use std::collections::HashMap;
+#[cfg(all(test, feature = "integration"))]
+use std::sync::{Arc, Mutex};
 
 use crate::PgStore;
 use crate::cotx::PgTenantPool;
 use crate::outbox::{OutboxEnvelope, epoch_secs_to_time, metadata_with_ambient, unix_secs};
 use crate::projection_events::ProjectionWriteRegistry;
+use crate::tx_retry::{classify_identity_error, run_pg_localtx_retry};
 
-/// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/revoke 均已交付，#1278）。
+/// PostgreSQL 会话生命周期 adapter（impl [`SessionLifecycle`]：创建 co-tx + durable find/logout 均已交付，#1278）。
 ///
 /// 经 [`PgStore`] 的 `pool`（`pub(crate)`，share-pool 注入，与 [`crate::PgEmitter`] 同形）clone 构造；
 /// 不持 `PgStore`（避免 ManagedResource 所有权耦合）。
@@ -52,7 +60,51 @@ pub struct PgSessionLifecycle {
     pool: PgTenantPool,
     clock: Box<dyn Clock>,
     #[cfg(all(test, feature = "integration"))]
-    revoke_post_update_hook: Option<fn() -> Result<(), IdentityError>>,
+    logout_faults: Arc<Mutex<SessionLogoutFaultState>>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+pub(crate) enum SessionLogoutFault {
+    Permanent,
+    Transient,
+    TransientBeforeWrite,
+    Conflict,
+    CommitUnknown,
+    RollbackFailed,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+struct SessionLogoutFaultPlan {
+    fault: SessionLogoutFault,
+    remaining: usize,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Default)]
+struct SessionLogoutFaultState {
+    plans: HashMap<String, SessionLogoutFaultPlan>,
+    attempts: HashMap<String, usize>,
+}
+
+/// Instance-scoped attempt probe retained after the concrete lifecycle is erased behind its port.
+#[cfg(all(test, feature = "integration"))]
+pub(crate) struct SessionLogoutAttemptProbe {
+    state: Arc<Mutex<SessionLogoutFaultState>>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+impl SessionLogoutAttemptProbe {
+    pub(crate) fn attempts(&self, session_id: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .attempts
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 impl PgSessionLifecycle {
@@ -73,16 +125,75 @@ impl PgSessionLifecycle {
             pool: PgTenantPool::with_projection_registry(store, projection_registry),
             clock,
             #[cfg(all(test, feature = "integration"))]
-            revoke_post_update_hook: None,
+            logout_faults: Arc::new(Mutex::new(SessionLogoutFaultState::default())),
         }
     }
 
-    /// 测试专用：让 `revoke` 在真实 UPDATE 后、事务提交前返回 storage error。
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn with_revoke_post_update_error(mut self) -> Self {
-        self.revoke_post_update_hook = Some(revoke_post_update_error);
+    pub(crate) fn with_logout_fault(
+        self,
+        session_id: &str,
+        fault: SessionLogoutFault,
+        remaining: usize,
+    ) -> Self {
+        assert!(remaining > 0, "fault plan must affect at least one attempt");
+        self.logout_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .plans
+            .insert(
+                session_id.to_owned(),
+                SessionLogoutFaultPlan { fault, remaining },
+            );
         self
     }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn logout_attempts(&self, session_id: &str) -> usize {
+        self.logout_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .attempts
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn logout_attempt_probe(&self) -> SessionLogoutAttemptProbe {
+        SessionLogoutAttemptProbe {
+            state: Arc::clone(&self.logout_faults),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn record_logout_attempt(state: &Mutex<SessionLogoutFaultState>, session_id: &str) {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state.attempts.entry(session_id.to_owned()).or_default() += 1;
+}
+
+#[cfg(all(test, feature = "integration"))]
+fn take_logout_fault_if(
+    state: &Mutex<SessionLogoutFaultState>,
+    session_id: &str,
+    predicate: impl FnOnce(SessionLogoutFault) -> bool,
+) -> Option<SessionLogoutFault> {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let plan = state.plans.get_mut(session_id)?;
+    let fault = plan.fault;
+    if !predicate(fault) {
+        return None;
+    }
+    plan.remaining -= 1;
+    if plan.remaining == 0 {
+        state.plans.remove(session_id);
+    }
+    Some(fault)
 }
 
 impl SessionLifecycle for PgSessionLifecycle {
@@ -194,49 +305,106 @@ impl SessionLifecycle for PgSessionLifecycle {
         }
     }
 
-    async fn revoke(
+    async fn logout(
         &self,
         scope: TenantRepoScope,
-        session_id: SessionId,
+        mutation: SessionLogoutMutation,
     ) -> Result<(), IdentityError> {
+        let (session_id, observation) = mutation.into_parts();
         let tenant = scope.tenant();
         // 软撤销 = tenant-scoped 事务（SET LOCAL 锚点，与 co-tx 写 / `PgRoleRepo::save` 统一收口）内
         // `UPDATE ... SET revoked = true`。幂等：未知 / 跨租（`WHERE tenant_id` 不匹配）/ 已撤销均 0 行影响、仍
         // `Ok(())`（与 in-mem / demo provider 的幂等 no-op 语义对齐）。软撤销不删行（保留审计 + 幂等）。
         let tenant_uuid = tenant.as_uuid().to_string();
+        let session_id = session_id.as_str().to_owned();
         #[cfg(all(test, feature = "integration"))]
-        let post_update_hook = self.revoke_post_update_hook;
-        self.pool
-            .write(
-                scope,
-                move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            "UPDATE sessions SET revoked = true WHERE tenant_id = $1::uuid AND session_id = $2",
+        let logout_faults = Arc::clone(&self.logout_faults);
+        run_pg_localtx_retry(
+            observation,
+            |_attempt| {
+                let tenant_uuid = tenant_uuid.clone();
+                let session_id = session_id.clone();
+                #[cfg(all(test, feature = "integration"))]
+                let logout_faults = Arc::clone(&logout_faults);
+                #[cfg(all(test, feature = "integration"))]
+                record_logout_attempt(&logout_faults, &session_id);
+                async move {
+                    self.pool
+                        .retry_write(
+                            scope,
+                            move |tx| {
+                                Box::pin(async move {
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if take_logout_fault_if(&logout_faults, &session_id, |fault| {
+                                        matches!(fault, SessionLogoutFault::TransientBeforeWrite)
+                                    })
+                                    .is_some()
+                                    {
+                                        return Err(storage(sqlx::Error::PoolTimedOut));
+                                    }
+                                    sqlx::query(
+                                        "UPDATE sessions SET revoked = true \
+                                         WHERE tenant_id = $1::uuid AND session_id = $2 \
+                                           AND revoked = false",
+                                    )
+                                    .bind(&tenant_uuid)
+                                    .bind(&session_id)
+                                    .execute(tx.conn())
+                                    .await
+                                    .map_err(storage)?;
+                                    #[cfg(all(test, feature = "integration"))]
+                                    if let Some(fault) =
+                                        take_logout_fault_if(&logout_faults, &session_id, |fault| {
+                                            !matches!(
+                                                fault,
+                                                SessionLogoutFault::TransientBeforeWrite
+                                            )
+                                        })
+                                    {
+                                        match fault {
+                                            SessionLogoutFault::Permanent => {
+                                                return Err(IdentityError::Storage(Box::new(
+                                                    std::io::Error::other(
+                                                        "injected session logout failure",
+                                                    ),
+                                                )));
+                                            }
+                                            SessionLogoutFault::Transient => {
+                                                return Err(storage(sqlx::Error::PoolTimedOut));
+                                            }
+                                            SessionLogoutFault::TransientBeforeWrite => {
+                                                unreachable!(
+                                                    "before-write fault is consumed before SQL"
+                                                )
+                                            }
+                                            SessionLogoutFault::Conflict => {
+                                                return Err(IdentityError::VersionConflict);
+                                            }
+                                            SessionLogoutFault::CommitUnknown => {
+                                                tx.inject_commit_unknown_after_commit()
+                                                    .await
+                                                    .map_err(storage)?;
+                                            }
+                                            SessionLogoutFault::RollbackFailed => {
+                                                tx.inject_rollback_failed_after_rollback()
+                                                    .await
+                                                    .map_err(storage)?;
+                                                return Err(storage(sqlx::Error::PoolTimedOut));
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                })
+                            },
+                            storage,
                         )
-                        .bind(&tenant_uuid)
-                        .bind(session_id.as_str())
-                        .execute(conn.conn())
                         .await
-                        .map_err(storage)?;
-                        #[cfg(all(test, feature = "integration"))]
-                        if let Some(hook) = post_update_hook {
-                            hook()?;
-                        }
-                        Ok(())
-                    })
-                },
-                storage,
-            )
-            .await
+                }
+            },
+            classify_identity_error,
+        )
+        .await
     }
-}
-
-#[cfg(all(test, feature = "integration"))]
-fn revoke_post_update_error() -> Result<(), IdentityError> {
-    Err(IdentityError::Storage(Box::new(std::io::Error::other(
-        "forced post-update revoke failure",
-    ))))
 }
 
 /// sqlx 错误 → 域 storage 错误（装箱保留 source；域 crate 不依赖 sqlx，adapter 边界收口；同 `PgRoleRepo`）。

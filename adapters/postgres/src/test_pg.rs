@@ -78,6 +78,16 @@ pub(crate) async fn connect_pg_rss_app_role(
     fixture: &PgFixture,
     store: &PgStore,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
+    connect_pg_rss_app_role_with_limits(fixture, store, 10, Duration::from_secs(5)).await
+}
+
+/// Build a real `rss_app` pool with deterministic limits for transaction-begin fault tests.
+pub(crate) async fn connect_pg_rss_app_role_with_limits(
+    fixture: &PgFixture,
+    store: &PgStore,
+    max_connections: u32,
+    acquire_timeout: Duration,
+) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
     sqlx::query(&format!(
         "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}' NOBYPASSRLS"
     ))
@@ -92,7 +102,8 @@ pub(crate) async fn connect_pg_rss_app_role(
         PgPassword::new(RSS_APP_PASSWORD.to_string()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5));
+    .with_max_connections(max_connections)
+    .with_acquire_timeout(acquire_timeout);
     Ok(PgStore::connect(&config).await?)
 }
 

@@ -370,38 +370,38 @@ impl<T> tracing::instrument::Instrument for observ::StatusClass
 impl<T> tracing::instrument::WithSubscriber for observ::StatusClass
 impl<T> typenum::type_operators::Same for observ::StatusClass
 pub type observ::StatusClass::Output = T
-pub struct observ::LocalTxObservation
-impl observ::LocalTxObservation
-pub fn observ::LocalTxObservation::finish(self, u32, consistency::tx_retry::TxRetryFinalStatus, core::option::Option<consistency::localtx::LocalTxFinalStatus>)
-pub fn observ::LocalTxObservation::new<M>(vocab::http::HttpRouteBinding<M, vocab::http::LocalTx>, vocab::http::LocalTxBoundary) -> Self
-pub fn observ::LocalTxObservation::record_failed_attempt(&self, u32, consistency::tx_retry::TxRetryClass, core::option::Option<consistency::localtx::LocalTxFinalStatus>)
-impl core::marker::Freeze for observ::LocalTxObservation
-impl core::marker::Send for observ::LocalTxObservation
-impl core::marker::Sync for observ::LocalTxObservation
-impl core::marker::Unpin for observ::LocalTxObservation
-impl core::marker::UnsafeUnpin for observ::LocalTxObservation
-impl !core::panic::unwind_safe::RefUnwindSafe for observ::LocalTxObservation
-impl !core::panic::unwind_safe::UnwindSafe for observ::LocalTxObservation
-impl<T, U> core::convert::Into<U> for observ::LocalTxObservation where U: core::convert::From<T>
-pub fn observ::LocalTxObservation::into(self) -> U
-impl<T, U> core::convert::TryFrom<U> for observ::LocalTxObservation where U: core::convert::Into<T>
-pub type observ::LocalTxObservation::Error = core::convert::Infallible
-pub fn observ::LocalTxObservation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
-impl<T, U> core::convert::TryInto<U> for observ::LocalTxObservation where U: core::convert::TryFrom<T>
-pub type observ::LocalTxObservation::Error = <U as core::convert::TryFrom<T>>::Error
-pub fn observ::LocalTxObservation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
-impl<T> core::any::Any for observ::LocalTxObservation where T: 'static + ?core::marker::Sized
-pub fn observ::LocalTxObservation::type_id(&self) -> core::any::TypeId
-impl<T> core::borrow::Borrow<T> for observ::LocalTxObservation where T: ?core::marker::Sized
-pub fn observ::LocalTxObservation::borrow(&self) -> &T
-impl<T> core::borrow::BorrowMut<T> for observ::LocalTxObservation where T: ?core::marker::Sized
-pub fn observ::LocalTxObservation::borrow_mut(&mut self) -> &mut T
-impl<T> core::convert::From<T> for observ::LocalTxObservation
-pub fn observ::LocalTxObservation::from(T) -> T
-impl<T> tracing::instrument::Instrument for observ::LocalTxObservation
-impl<T> tracing::instrument::WithSubscriber for observ::LocalTxObservation
-impl<T> typenum::type_operators::Same for observ::LocalTxObservation
-pub type observ::LocalTxObservation::Output = T
+pub struct observ::LocalTxObservation<M>
+impl<M> observ::LocalTxObservation<M>
+pub fn observ::LocalTxObservation<M>::finish(self, u32, consistency::tx_retry::TxRetryFinalStatus, core::option::Option<consistency::localtx::LocalTxFinalStatus>)
+pub fn observ::LocalTxObservation<M>::new(vocab::http::HttpRouteBinding<M, vocab::http::LocalTx>, vocab::http::LocalTxBoundary) -> Self
+pub fn observ::LocalTxObservation<M>::record_failed_attempt(&self, u32, consistency::tx_retry::TxRetryClass, core::option::Option<consistency::localtx::LocalTxFinalStatus>)
+impl<M> core::marker::Freeze for observ::LocalTxObservation<M>
+impl<M> core::marker::Send for observ::LocalTxObservation<M>
+impl<M> core::marker::Sync for observ::LocalTxObservation<M>
+impl<M> core::marker::Unpin for observ::LocalTxObservation<M>
+impl<M> core::marker::UnsafeUnpin for observ::LocalTxObservation<M>
+impl<M> !core::panic::unwind_safe::RefUnwindSafe for observ::LocalTxObservation<M>
+impl<M> !core::panic::unwind_safe::UnwindSafe for observ::LocalTxObservation<M>
+impl<T, U> core::convert::Into<U> for observ::LocalTxObservation<M> where U: core::convert::From<T>
+pub fn observ::LocalTxObservation<M>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for observ::LocalTxObservation<M> where U: core::convert::Into<T>
+pub type observ::LocalTxObservation<M>::Error = core::convert::Infallible
+pub fn observ::LocalTxObservation<M>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for observ::LocalTxObservation<M> where U: core::convert::TryFrom<T>
+pub type observ::LocalTxObservation<M>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn observ::LocalTxObservation<M>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for observ::LocalTxObservation<M> where T: 'static + ?core::marker::Sized
+pub fn observ::LocalTxObservation<M>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for observ::LocalTxObservation<M> where T: ?core::marker::Sized
+pub fn observ::LocalTxObservation<M>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for observ::LocalTxObservation<M> where T: ?core::marker::Sized
+pub fn observ::LocalTxObservation<M>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for observ::LocalTxObservation<M>
+pub fn observ::LocalTxObservation<M>::from(T) -> T
+impl<T> tracing::instrument::Instrument for observ::LocalTxObservation<M>
+impl<T> tracing::instrument::WithSubscriber for observ::LocalTxObservation<M>
+impl<T> typenum::type_operators::Same for observ::LocalTxObservation<M>
+pub type observ::LocalTxObservation<M>::Output = T
 pub trait observ::MetricLabel
 pub fn observ::MetricLabel::key(&self) -> &'static str
 pub fn observ::MetricLabel::value(&self) -> observ::LabelValue

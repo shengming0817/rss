@@ -385,7 +385,7 @@ impl PolicyId {
 /// - `InvalidPolicy`：策略构造 / 校验失败。
 /// - `PermissionDenied`：handler / 服务层把 `Decision::Deny` 落为域错误时使用（生产接线待 W 阶段 PR5）。
 /// - `CredentialNotFound`：`CredentialRepo` 查无凭据（PR3）。
-/// - `VersionConflict`：`CredentialRepo::bump_version` CAS 期望版本不匹配（并发密码变更，PR3）。
+/// - `VersionConflict`：`CredentialRepo::apply_password_change` CAS 期望版本不匹配（并发密码变更，PR3）。
 /// - `Storage`：持久化层错误（`RoleReadRepo` postgres adapter 边界把 sqlx 等存储错误收口于此；#1250）。
 ///   原始错误进 `#[source]`，不进 Display / wire——message 是 `&'static str` const literal，
 ///   runtime 细节仅进服务端日志（error-handling.md §Message 与 PII）。

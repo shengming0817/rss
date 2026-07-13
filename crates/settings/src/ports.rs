@@ -21,7 +21,7 @@
 use consistency::EventEntry;
 use diport::OutboxEnvelopeParts;
 use dynosaur::dynosaur;
-use generated::http::settings_v2::{ROUTE as SECRET_HTTP_ROUTE, SPEC as SECRET_HTTP_SPEC};
+use generated::http::settings_v2::{LOCAL_TX as SECRET_LOCAL_TX, ROUTE as SECRET_HTTP_ROUTE};
 
 // 域形 port 的签名实体经本模块 façade 暴露（types `pub`，构造器仍 `pub(crate)` funnel）。
 pub use crate::domain::{
@@ -30,6 +30,9 @@ pub use crate::domain::{
 };
 pub use crate::domain::{SecretEntry, SecretKey, SecretRef, SecretRepoError, StoreId};
 pub use vocab::TenantId;
+
+/// Generated route marker retained by the HTTP secret-publish LocalTx command.
+pub type SecretPublishRouteMarker = generated::http::settings_v2::RouteMarker;
 
 /// Tenant-scoped repo capability for settings storage ports.
 ///
@@ -163,33 +166,32 @@ pub trait ConfigUnitOfWorkLocal: Send + Sync {
 /// `settings.secret-publish` HTTP 写命令。
 ///
 /// entry 与 LocalTx observation 一起封装；字段私有，外部 adapter 只能消费，不能伪造 contract / boundary
-/// evidence。构造始终经本 crate 从 generated `ROUTE + SPEC.local_tx` fail-closed 取得证据。
+/// evidence。构造始终经本 crate 从 generated `ROUTE + LOCAL_TX` 取得非可选证据。
 pub struct SecretPublishCommand {
     entry: SecretEntry,
-    observation: observ::LocalTxObservation,
+    observation: observ::LocalTxObservation<SecretPublishRouteMarker>,
 }
 
 impl SecretPublishCommand {
-    pub(crate) fn from_entry(entry: SecretEntry) -> Result<Self, SecretRepoError> {
-        let observation = SECRET_HTTP_SPEC
-            .local_tx
-            .map(|spec| observ::LocalTxObservation::new(SECRET_HTTP_ROUTE, spec.boundary))
-            .ok_or_else(|| {
-                SecretRepoError::Storage(Box::new(std::io::Error::other(
-                    "generated settings.secret-publish contract is missing LocalTx metadata",
-                )))
-            })?;
-        Ok(Self { entry, observation })
+    pub(crate) fn from_entry(entry: SecretEntry) -> Self {
+        let observation =
+            observ::LocalTxObservation::new(SECRET_HTTP_ROUTE, SECRET_LOCAL_TX.boundary);
+        Self { entry, observation }
     }
 
     /// Adapter 消费命令并取得不可伪造的 LocalTx evidence。
-    pub fn into_parts(self) -> (SecretEntry, observ::LocalTxObservation) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        SecretEntry,
+        observ::LocalTxObservation<SecretPublishRouteMarker>,
+    ) {
         (self.entry, self.observation)
     }
 
     /// 下游 adapter conformance 测试仍经同一 generated evidence funnel 构造。
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(entry: SecretEntry) -> Result<Self, SecretRepoError> {
+    pub fn for_test(entry: SecretEntry) -> Self {
         Self::from_entry(entry)
     }
 }

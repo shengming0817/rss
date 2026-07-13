@@ -108,7 +108,11 @@ impl<T, E> LocalTxAttempt<T, E> {
     }
 
     /// Consume settlement evidence at the bounded retry boundary.
-    #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+    #[cfg(any(
+        feature = "domain-settings",
+        feature = "domain-identity",
+        feature = "domain-audit"
+    ))]
     pub(crate) fn into_retry_result(
         self,
         classify: impl FnOnce(&E) -> TxRetryClass,
@@ -135,14 +139,22 @@ impl<T, E> LocalTxAttempt<T, E> {
 }
 
 /// Failure shape consumed only by the generic retry engine.
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 #[derive(Debug)]
 pub(crate) struct LocalTxRetryError<E> {
     error: E,
     class: TxRetryClass,
 }
 
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(
+    feature = "domain-settings",
+    feature = "domain-identity",
+    feature = "domain-audit"
+))]
 impl<E> LocalTxRetryError<E> {
     /// Settlement-safe retry class.
     pub(crate) fn class(&self) -> TxRetryClass {

@@ -10,9 +10,10 @@
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
 //! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries" } —
-//! Postgres retry wrappers are confined to their exact config commit, secret mutation, and
-//! credential bump boundaries. `PgSecretUnitOfWork::publish` is the only settings secret LocalTx
-//! owner: it must consume the command-carried generated observation beside `retry_write`;
+//! Postgres retry wrappers are confined to their exact config commit, secret mutation, password
+//! change, and session logout boundaries. Each LocalTx owner must consume its command-carried
+//! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
+//! secret LocalTx owner;
 //! internal publish / republish must use the generic runner and may not impersonate the HTTP
 //! contract.
 //!
@@ -307,7 +308,8 @@ fn required_retry_site_findings(
         "settings-secret-publish",
         "settings-secret-publish-internal",
         "settings-secret-republish",
-        "identity-credential-bump-version",
+        "identity-password-change",
+        "identity-session-logout",
     ]
     .into_iter()
     .filter(|required| !sites.contains(required))
@@ -481,12 +483,12 @@ fn retry_placement_findings(
             ));
         }
     }
-    findings.extend(scan.settings_secret_factory_calls.iter().map(|(line, function)| {
+    findings.extend(scan.legacy_command_evidence_calls.iter().map(|(line, function)| {
         finding(
             Rule::RetryPlacement,
             site_subject(rel, *line),
             format!(
-                "Postgres adapter function {} must consume SecretPublishCommand evidence; it may not call the settings secret-publish factory",
+                "Postgres adapter function {} must consume typed command evidence; removed optional LocalTx observation factories are forbidden",
                 function.as_deref().unwrap_or("<module>")
             ),
         )
@@ -502,7 +504,10 @@ fn retry_placement_findings(
 
     let allowed = match rel {
         "config_repo.rs" => Some(("commit", "settings-config-commit")),
-        "credential_repo.rs" => Some(("bump_version", "identity-credential-bump-version")),
+        "credential_repo.rs" => Some(("apply_password_change", "identity-password-change")),
+        "session_lifecycle.rs" => Some(("logout", "identity-session-logout")),
+        "refresh_token_store.rs" => Some(("rotate", "identity-refresh-rotate")),
+        "audit_repo.rs" => Some(("append", "audit-append")),
         _ => None,
     };
     let Some((fn_marker, site)) = allowed else {
@@ -510,7 +515,7 @@ fn retry_placement_findings(
             findings.push(finding(
                 Rule::RetryPlacement,
                 site_subject(rel, call.line),
-                "Postgres retry wrappers are restricted to settings config commit, typed settings secret mutations, and identity credential bump_version",
+                "Postgres retry wrappers are restricted to the closed settings, identity, and audit transaction owners",
             ));
         }
         return findings;
@@ -533,7 +538,10 @@ fn retry_placement_findings(
     let valid = calls.len() == 1
         && match rel {
             "config_repo.rs" => valid_settings_retry(calls[0]),
-            "credential_repo.rs" => valid_identity_retry(calls[0]),
+            "credential_repo.rs" => valid_identity_password_retry(calls[0]),
+            "session_lifecycle.rs" => valid_identity_logout_retry(calls[0]),
+            "refresh_token_store.rs" => valid_identity_refresh_retry(calls[0]),
+            "audit_repo.rs" => valid_audit_append_retry(calls[0]),
             _ => false,
         };
     if valid {
@@ -611,7 +619,7 @@ fn settings_secret_retry_findings(
 }
 
 type RetryScope = BTreeMap<String, Option<RetryBinding>>;
-type ObservationScope = BTreeMap<String, Option<ObservationFactory>>;
+type ObservationScope = BTreeMap<String, Option<CommandEvidence>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RetryBinding {
@@ -756,17 +764,18 @@ enum RetryWrapper {
 #[derive(Debug, Default)]
 struct RetryExprFacts {
     exact_path: Option<String>,
-    observation_factory: Option<ObservationFactory>,
+    command_evidence: Option<CommandEvidence>,
     operation_method: Option<String>,
     scoped_operation_calls: usize,
     legacy_write: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ObservationFactory {
-    IdentityPasswordChange,
-    SettingsSecretPublish,
-    SettingsSecretPublishCommand,
+enum CommandEvidence {
+    PasswordChange,
+    SessionLogout,
+    RefreshRotation,
+    SecretPublish,
 }
 
 struct RetryAstScan {
@@ -774,10 +783,10 @@ struct RetryAstScan {
     observation_scopes: Vec<ObservationScope>,
     current_impl: Option<String>,
     current_function: Option<String>,
-    current_secret_publish_command: Option<String>,
+    current_typed_command: Option<(String, CommandEvidence)>,
     direct_calls: Vec<RetryCall>,
     wrapper_calls: Vec<RetryCall>,
-    settings_secret_factory_calls: Vec<(usize, Option<String>)>,
+    legacy_command_evidence_calls: Vec<(usize, Option<String>)>,
 }
 
 impl RetryAstScan {
@@ -787,18 +796,18 @@ impl RetryAstScan {
             observation_scopes: vec![ObservationScope::new()],
             current_impl: None,
             current_function: None,
-            current_secret_publish_command: None,
+            current_typed_command: None,
             direct_calls: Vec::new(),
             wrapper_calls: Vec::new(),
-            settings_secret_factory_calls: Vec::new(),
+            legacy_command_evidence_calls: Vec::new(),
         }
     }
 
     fn visit_function(&mut self, name: String, signature: &syn::Signature, block: &syn::Block) {
         let previous = self.current_function.replace(name.clone());
         let previous_command = std::mem::replace(
-            &mut self.current_secret_publish_command,
-            secret_publish_command_param(signature),
+            &mut self.current_typed_command,
+            typed_command_param(signature),
         );
         self.scopes.push(RetryScope::new());
         self.observation_scopes.push(ObservationScope::new());
@@ -810,7 +819,7 @@ impl RetryAstScan {
         <Self as syn::visit::Visit>::visit_block(self, block);
         self.observation_scopes.pop();
         self.scopes.pop();
-        self.current_secret_publish_command = previous_command;
+        self.current_typed_command = previous_command;
         self.current_function = previous;
     }
 
@@ -869,42 +878,25 @@ impl RetryAstScan {
         let Some(init) = &local.init else {
             return;
         };
-        if let Some(binding) = command_observation_binding(
-            &local.pat,
-            &init.expr,
-            self.current_secret_publish_command.as_deref(),
-        ) {
-            if let Some(scope) = self.observation_scopes.last_mut() {
-                scope.insert(
-                    binding,
-                    Some(ObservationFactory::SettingsSecretPublishCommand),
-                );
-            }
-            return;
-        }
-        let syn::Pat::Ident(binding) = &local.pat else {
-            return;
-        };
-        let Some(factory) = observation_factory_expr(&init.expr) else {
-            return;
-        };
-        if let Some(scope) = self.observation_scopes.last_mut() {
-            scope.insert(binding.ident.to_string(), Some(factory));
+        if let Some((command, factory)) = self.current_typed_command.as_ref()
+            && let Some(binding) =
+                command_observation_binding(&local.pat, &init.expr, Some(command.as_str()))
+            && let Some(scope) = self.observation_scopes.last_mut()
+        {
+            scope.insert(binding, Some(*factory));
         }
     }
 
-    fn observation_factory(&self, expr: &syn::Expr) -> Option<ObservationFactory> {
-        observation_factory_expr(expr).or_else(|| {
-            let path = exact_expr_path(expr)?;
-            if path.contains("::") {
-                return None;
-            }
-            self.observation_scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(&path).copied())
-                .flatten()
-        })
+    fn command_evidence(&self, expr: &syn::Expr) -> Option<CommandEvidence> {
+        let path = exact_expr_path(expr)?;
+        if path.contains("::") {
+            return None;
+        }
+        self.observation_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&path).copied())
+            .flatten()
     }
 
     fn invalidate_observation_binding(&mut self, expr: &syn::Expr) {
@@ -928,7 +920,7 @@ impl RetryAstScan {
         let operation_scan = scoped_operation_scan(expr);
         RetryExprFacts {
             exact_path: exact_expr_path(expr),
-            observation_factory: self.observation_factory(expr),
+            command_evidence: self.command_evidence(expr),
             operation_method: canonical_retry_operation(expr),
             scoped_operation_calls: operation_scan.calls,
             legacy_write: operation_scan.legacy_write,
@@ -986,10 +978,14 @@ impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
 
     fn visit_expr_call(&mut self, node: &syn::ExprCall) {
         use syn::spanned::Spanned as _;
-        if exact_expr_path(&node.func).as_deref()
-            == Some("settings::secret_publish_localtx_observation")
-        {
-            self.settings_secret_factory_calls
+        if matches!(
+            exact_expr_path(&node.func).as_deref(),
+            Some(
+                "identity::password_change_localtx_observation"
+                    | "settings::secret_publish_localtx_observation"
+            )
+        ) {
+            self.legacy_command_evidence_calls
                 .push((node.func.span().start().line, self.current_function.clone()));
         }
         if let syn::Expr::Path(path) = &*node.func
@@ -1030,25 +1026,49 @@ fn valid_settings_retry(call: &RetryCall) -> bool {
         && !call.arguments[1].legacy_write
 }
 
-fn valid_identity_retry(call: &RetryCall) -> bool {
+fn valid_identity_password_retry(call: &RetryCall) -> bool {
     call.wrapper == Some(RetryWrapper::Local)
-        && call.arguments.len() == 4
-        && call.arguments[0].exact_path.as_deref() == Some("IDENTITY_CREDENTIAL_BOUNDARY")
-        && call.arguments[1].observation_factory == Some(ObservationFactory::IdentityPasswordChange)
-        && call.arguments[2].operation_method.as_deref() == Some("retry_write")
-        && call.arguments[2].scoped_operation_calls == 1
-        && !call.arguments[2].legacy_write
+        && call.arguments.len() == 3
+        && call.arguments[0].command_evidence == Some(CommandEvidence::PasswordChange)
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
+}
+
+fn valid_identity_logout_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Local)
+        && call.arguments.len() == 3
+        && call.arguments[0].command_evidence == Some(CommandEvidence::SessionLogout)
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
+}
+
+fn valid_identity_refresh_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Local)
+        && call.arguments.len() == 3
+        && call.arguments[0].command_evidence == Some(CommandEvidence::RefreshRotation)
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
+}
+
+fn valid_audit_append_retry(call: &RetryCall) -> bool {
+    call.wrapper == Some(RetryWrapper::Generic)
+        && call.arguments.len() == 3
+        && call.arguments[0].exact_path.as_deref() == Some("AUDIT_APPEND_BOUNDARY")
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
 }
 
 fn valid_settings_secret_retry(call: &RetryCall) -> bool {
     call.wrapper == Some(RetryWrapper::Local)
-        && call.arguments.len() == 4
-        && call.arguments[0].exact_path.as_deref() == Some("SETTINGS_SECRET_BOUNDARY")
-        && call.arguments[1].observation_factory
-            == Some(ObservationFactory::SettingsSecretPublishCommand)
-        && call.arguments[2].operation_method.as_deref() == Some("retry_write")
-        && call.arguments[2].scoped_operation_calls == 1
-        && !call.arguments[2].legacy_write
+        && call.arguments.len() == 3
+        && call.arguments[0].command_evidence == Some(CommandEvidence::SecretPublish)
+        && call.arguments[1].operation_method.as_deref() == Some("retry_write")
+        && call.arguments[1].scoped_operation_calls == 1
+        && !call.arguments[1].legacy_write
 }
 
 fn valid_settings_secret_generic_retry(call: &RetryCall) -> bool {
@@ -1094,7 +1114,7 @@ fn collect_pattern_names(pattern: &syn::Pat, names: &mut Vec<String>) {
     }
 }
 
-fn secret_publish_command_param(signature: &syn::Signature) -> Option<String> {
+fn typed_command_param(signature: &syn::Signature) -> Option<(String, CommandEvidence)> {
     signature.inputs.iter().find_map(|input| {
         let syn::FnArg::Typed(typed) = input else {
             return None;
@@ -1102,13 +1122,17 @@ fn secret_publish_command_param(signature: &syn::Signature) -> Option<String> {
         let syn::Type::Path(path) = &*typed.ty else {
             return None;
         };
-        if path.path.segments.last()?.ident != "SecretPublishCommand" {
-            return None;
-        }
+        let factory = match path.path.segments.last()?.ident.to_string().as_str() {
+            "SecretPublishCommand" => CommandEvidence::SecretPublish,
+            "PasswordChangeMutation" => CommandEvidence::PasswordChange,
+            "SessionLogoutMutation" => CommandEvidence::SessionLogout,
+            "RefreshRotationMutation" => CommandEvidence::RefreshRotation,
+            _ => return None,
+        };
         let syn::Pat::Ident(binding) = &*typed.pat else {
             return None;
         };
-        Some(binding.ident.to_string())
+        Some((binding.ident.to_string(), factory))
     })
 }
 
@@ -1121,10 +1145,10 @@ fn command_observation_binding(
     let syn::Pat::Tuple(tuple) = pattern else {
         return None;
     };
-    if tuple.elems.len() != 2 {
+    if tuple.elems.len() < 2 {
         return None;
     }
-    let syn::Pat::Ident(observation) = &tuple.elems[1] else {
+    let syn::Pat::Ident(observation) = tuple.elems.last()? else {
         return None;
     };
     let syn::Expr::MethodCall(call) = transparent_expr(initializer) else {
@@ -1156,98 +1180,6 @@ fn exact_expr_path(expr: &syn::Expr) -> Option<String> {
             .collect::<Vec<_>>()
             .join("::"),
     )
-}
-
-fn observation_factory_expr(expr: &syn::Expr) -> Option<ObservationFactory> {
-    match transparent_expr(expr) {
-        syn::Expr::Call(call) => {
-            if !call.args.is_empty() {
-                return None;
-            }
-            match exact_expr_path(&call.func).as_deref() {
-                Some("identity::password_change_localtx_observation") => {
-                    Some(ObservationFactory::IdentityPasswordChange)
-                }
-                Some("settings::secret_publish_localtx_observation") => {
-                    Some(ObservationFactory::SettingsSecretPublish)
-                }
-                _ => None,
-            }
-        }
-        syn::Expr::MethodCall(method) if method.method == "ok_or_else" => {
-            observation_factory_expr(&method.receiver)
-        }
-        syn::Expr::Try(try_expr) => observation_factory_expr(&try_expr.expr),
-        syn::Expr::Match(match_expr) => canonical_observation_match(match_expr),
-        _ => None,
-    }
-}
-
-fn canonical_observation_match(match_expr: &syn::ExprMatch) -> Option<ObservationFactory> {
-    let factory = observation_factory_expr(&match_expr.expr)?;
-    if match_expr.arms.len() != 2 {
-        return None;
-    }
-    let some = &match_expr.arms[0];
-    let none = &match_expr.arms[1];
-    let binding = some_observation_binding(&some.pat)?;
-    (some.guard.is_none()
-        && exact_expr_path(&some.body).as_deref() == Some(binding.as_str())
-        && none.guard.is_none()
-        && is_none_pattern(&none.pat)
-        && is_return_err(&none.body))
-    .then_some(factory)
-}
-
-fn some_observation_binding(pattern: &syn::Pat) -> Option<String> {
-    let syn::Pat::TupleStruct(tuple) = pattern else {
-        return None;
-    };
-    if tuple.path.segments.len() != 1 || tuple.path.segments[0].ident != "Some" {
-        return None;
-    }
-    if tuple.elems.len() != 1 {
-        return None;
-    }
-    let syn::Pat::Ident(binding) = &tuple.elems[0] else {
-        return None;
-    };
-    Some(binding.ident.to_string())
-}
-
-fn is_none_pattern(pattern: &syn::Pat) -> bool {
-    match pattern {
-        syn::Pat::Path(path) => {
-            path.path.segments.len() == 1 && path.path.segments[0].ident == "None"
-        }
-        syn::Pat::Ident(ident) => {
-            ident.ident == "None"
-                && ident.by_ref.is_none()
-                && ident.mutability.is_none()
-                && ident.subpat.is_none()
-        }
-        _ => false,
-    }
-}
-
-fn is_return_err(expr: &syn::Expr) -> bool {
-    let expr = match transparent_expr(expr) {
-        syn::Expr::Block(block) if block.block.stmts.len() == 1 => match &block.block.stmts[0] {
-            syn::Stmt::Expr(expr, _) => transparent_expr(expr),
-            _ => return false,
-        },
-        expr => expr,
-    };
-    let syn::Expr::Return(return_expr) = expr else {
-        return false;
-    };
-    let Some(value) = &return_expr.expr else {
-        return false;
-    };
-    let syn::Expr::Call(call) = transparent_expr(value) else {
-        return false;
-    };
-    exact_expr_path(&call.func).as_deref() == Some("Err") && call.args.len() == 1
 }
 
 fn secret_repo_read_only_findings(rel: &str, content: &str) -> Vec<Finding> {
@@ -2929,7 +2861,6 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     async fn publish(&self, command: SecretPublishCommand) {
         let (entry, observation) = command.into_parts();
         run_pg_localtx_retry(
-            SETTINGS_SECRET_BOUNDARY,
             observation,
             |_attempt| async { self.pool.retry_write() },
             classify,
@@ -3890,15 +3821,15 @@ pub mod fault_matrix;
     }
 
     #[test]
-    fn retry_guard_accepts_local_wrapper_alias_with_identity_factory() {
+    fn retry_guard_accepts_local_wrapper_alias_with_typed_identity_command() {
         let mut sites = BTreeSet::new();
         let findings = retry_placement_findings(
             "credential_repo.rs",
-            "use crate::tx_retry::{run_pg_localtx_retry as retry}; impl Repo { async fn bump_version(&self){ retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
+            "use crate::tx_retry::{run_pg_localtx_retry as retry}; impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
             &mut sites,
         );
         assert!(findings.is_empty(), "{findings:?}");
-        assert!(sites.contains("identity-credential-bump-version"));
+        assert!(sites.contains("identity-password-change"));
     }
 
     #[test]
@@ -3910,7 +3841,6 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     async fn publish(&self, command: SecretPublishCommand) {
         let (entry, observation) = command.into_parts();
         retry(
-            SETTINGS_SECRET_BOUNDARY,
             observation,
             |_attempt| async { self.pool.retry_write() },
             classify,
@@ -4291,19 +4221,26 @@ pub trait SecretRepoLocal: Send + Sync {
     }
 
     #[test]
-    fn retry_guard_accepts_production_observation_match_shape() -> Result<()> {
-        let expression: syn::Expr = syn::parse_str(
-            r#"match identity::password_change_localtx_observation() {
-                Some(observation) => observation,
-                None => return Err(IdentityError::Storage(Box::new(missing))),
-            }"#,
-        )?;
-        assert!(
-            observation_factory_expr(&expression)
-                == Some(ObservationFactory::IdentityPasswordChange),
-            "generated observation match must preserve the Some binding and diverge on None"
-        );
-        Ok(())
+    fn retry_guard_rejects_removed_optional_observation_factories() {
+        for (rel, source) in [
+            (
+                "credential_repo.rs",
+                "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, command_observation) = mutation.into_parts(); let observation = identity::password_change_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            ),
+            (
+                "secret_repo.rs",
+                "impl Uow { async fn publish(&self, command: SecretPublishCommand){ let (_, command_observation) = command.into_parts(); let observation = settings::secret_publish_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            ),
+        ] {
+            let mut sites = BTreeSet::new();
+            let findings = retry_placement_findings(rel, source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "removed optional factory syntax must remain synthetic-red: {findings:?}"
+            );
+        }
     }
 
     #[test]
@@ -4316,19 +4253,63 @@ pub trait SecretRepoLocal: Send + Sync {
         );
         let identity = retry_placement_findings(
             "credential_repo.rs",
-            "impl Repo { async fn bump_version(&self){ run_pg_localtx_retry(IDENTITY_CREDENTIAL_BOUNDARY, identity::password_change_localtx_observation().ok_or_else(missing)?, || async { self.pool.retry_write() }, classify).await; } }",
+            "impl Repo { async fn apply_password_change(&self, mutation: PasswordChangeMutation){ let (_, _, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            &mut sites,
+        );
+        let logout = retry_placement_findings(
+            "session_lifecycle.rs",
+            "impl Repo { async fn logout(&self, mutation: SessionLogoutMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            &mut sites,
+        );
+        let refresh = retry_placement_findings(
+            "refresh_token_store.rs",
+            "impl Repo { async fn rotate(&self, mutation: RefreshRotationMutation){ let (_, observation) = mutation.into_parts(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }",
+            &mut sites,
+        );
+        let audit = retry_placement_findings(
+            "audit_repo.rs",
+            "impl Repo { async fn append(&self){ run_pg_tx_retry(AUDIT_APPEND_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
             &mut sites,
         );
         let secret =
             retry_placement_findings("secret_repo.rs", secret_retry_green_source(), &mut sites);
         assert!(config.is_empty(), "{config:?}");
         assert!(identity.is_empty(), "{identity:?}");
+        assert!(logout.is_empty(), "{logout:?}");
+        assert!(refresh.is_empty(), "{refresh:?}");
+        assert!(audit.is_empty(), "{audit:?}");
         assert!(secret.is_empty(), "{secret:?}");
         assert!(sites.contains("settings-config-commit"));
         assert!(sites.contains("settings-secret-publish"));
         assert!(sites.contains("settings-secret-publish-internal"));
         assert!(sites.contains("settings-secret-republish"));
-        assert!(sites.contains("identity-credential-bump-version"));
+        assert!(sites.contains("identity-password-change"));
+        assert!(sites.contains("identity-session-logout"));
+        assert!(sites.contains("identity-refresh-rotate"));
+        assert!(sites.contains("audit-append"));
+    }
+
+    #[test]
+    fn retry_guard_rejects_wrong_refresh_and_audit_boundaries() {
+        for (rel, source) in [
+            (
+                "refresh_token_store.rs",
+                "impl Repo { async fn rotate(&self, mutation: RefreshRotationMutation){ let (_, observation) = mutation.into_parts(); run_pg_tx_retry(IDENTITY_REFRESH_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            ),
+            (
+                "audit_repo.rs",
+                "impl Repo { async fn append(&self){ run_pg_tx_retry(SETTINGS_CONFIG_BOUNDARY, || async { self.pool.retry_write() }, classify).await; } }",
+            ),
+        ] {
+            let mut sites = BTreeSet::new();
+            let findings = retry_placement_findings(rel, source, &mut sites);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::RetryPlacement),
+                "wrong retry boundary must remain synthetic-red: {findings:?}"
+            );
+        }
     }
 
     #[test]
@@ -4340,7 +4321,13 @@ pub trait SecretRepoLocal: Send + Sync {
         for (rel, source) in files.iter().filter(|(rel, _)| {
             matches!(
                 rel.as_str(),
-                "tx_retry.rs" | "config_repo.rs" | "secret_repo.rs" | "credential_repo.rs"
+                "tx_retry.rs"
+                    | "config_repo.rs"
+                    | "secret_repo.rs"
+                    | "credential_repo.rs"
+                    | "session_lifecycle.rs"
+                    | "refresh_token_store.rs"
+                    | "audit_repo.rs"
             )
         }) {
             findings.extend(retry_placement_findings(rel, source, &mut sites));
@@ -4349,7 +4336,10 @@ pub trait SecretRepoLocal: Send + Sync {
         assert_eq!(
             sites,
             BTreeSet::from([
-                "identity-credential-bump-version",
+                "identity-password-change",
+                "identity-refresh-rotate",
+                "identity-session-logout",
+                "audit-append",
                 "settings-config-commit",
                 "settings-secret-publish",
                 "settings-secret-publish-internal",

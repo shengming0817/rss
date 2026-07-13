@@ -1,9 +1,16 @@
+use consistency::LocalTxBoundary;
 use observ::LocalTxObservation;
+use std::marker::PhantomData;
+use tracing::Span;
+
+struct Route;
 
 fn main() {
-    let _ = LocalTxObservation {
+    let _ = LocalTxObservation::<Route> {
         domain: "runtime-domain",
         contract_id: "runtime-contract",
-        boundary: "runtime-boundary",
+        boundary: LocalTxBoundary::SingleDomain,
+        span: Span::none(),
+        marker: PhantomData,
     };
 }

@@ -65,7 +65,7 @@ command。Postgres adapter 在同一 transaction attempt 内先获取 `(tenant, 
 publish/publish、publish/delete 与 delete/delete 均按同一 key 线性化，不能用未锁定连接直接写 `secret_refs`。
 
 `identity.password-change` 同样使用 `repo-atomic-cas`：handler 路径为 find credential → 校验旧密码 →
-`rotate` 构造下一版本 → 单次 `CredentialRepo::bump_version` CAS；业务正确性由该次条件写保证。
+`rotate` 构造下一版本 → `PasswordChangeMutation` → 单次 `CredentialRepo::apply_password_change` CAS；业务正确性由该次条件写保证。
 `VersionConflict` / 写入结果未知不得由 handler 自动重试；调用方须基于新版本发起新的业务请求。
 不得把 find 与 CAS 描述成同一显式 UoW。
 
@@ -90,9 +90,14 @@ Postgres `run_pg_tx_retry` / `LocalTxAttempt` 仍可作为 **mutation port 内**
 `testkit` 只接受调用方注入的泛型闭包和快照，不依赖 production adapter、domain crate 或 LocalTx canonical
 enum。真实 backend marker 直接复用 `HttpRouteBinding<RouteMarker, LocalTx> = generated::ROUTE` 的 Hard 类型身份；
 profile 模型与 required probes 始终由 contract manifest 的 canonical `LocalTxModel` 推导，adapter 不得用字符串、
-第二套 enum 或 allowlist 重述。`localtx-coverage` 将每个 active contract 注册到 `adapters/*` 的真实 provider tests，并按 provider 聚合 probe；
-缺 enrollment、错用较小 profile、缺 probe、伪造 dependency 或孤儿 marker 均阻断 verify。类型签名承担 Hard 的
-route 身份约束，跨 manifest/source/test 的完整闭环评级为 Medium。
+第二套 enum 或 allowlist 重述。`localtx-coverage` 将每个 active contract 注册到 `adapters/*` 的真实 provider
+tests；每个测试函数只能声明一个 `LOCALTX_BACKEND_PROFILE_*` marker，禁止多个 contract 共用同组 probes。
+同一 contract 可拆成多个 contract-specific shard，required probes 只在 route + provider 二元组完全一致时合计。
+每个 shard 还必须声明匹配的 `LOCALTX_BACKEND_PROVIDER_*: PhantomData<(RouteMarker, ProviderFixture)>`，并在
+测试体中通过 `ProviderFixture::new(...)` 构造真实 provider；`run_global_transaction` 与
+`localtx_profile_probe` toy table 明确禁止作为 backend evidence。缺 enrollment、错用较小 profile、缺 probe、
+缺 provider binding、单测试多 marker、伪造 dependency 或孤儿 marker 均阻断 verify。
+类型签名承担 Hard 的 route 身份约束，跨 manifest/source/test 的完整闭环评级为 Medium。
 
 `tenant-scoped-uow` profile 必须组合：
 
@@ -135,7 +140,7 @@ validation/authorization no-write、tenant isolation 与 bounded retry；unknown
 tombstone monotonicity 证明位于真实 `PgSecretRepo` + `PgSecretUnitOfWork` / `secret_refs` backend matrix；通用
 toy transaction table 不作为该 contract 的仓储语义证据。
 
-ref: sqlx sqlx-core/src/transaction.rs@v0.8.6
+ref: sqlx sqlx-core/src/transaction.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d77e
 
 Postgres runner 以 `cotx::settlement` 私有模块持有的 crate-private `LocalTxAttempt<T, E>` opaque 和式
 状态承载 `Committed` / `Unsettled` / `RolledBack` / `RollbackFailed` / `CommitUnknown`，非法的
@@ -147,25 +152,30 @@ funnel commit 或显式 rollback。显式 rollback 失败时经 `map_storage` �
 Postgres retry operation 只接受 `LocalTxAttempt`：`Unsettled` / `RolledBack` 仅在分类为 transient 时有界
 重试，`RollbackFailed` / `CommitUnknown` 强制不可重试。通用 `run_pg_tx_retry` 保留 adapter operation
 boundary 的 retry-loop 指标；LocalTx contract 必须改用 `run_pg_localtx_retry`，并传 opaque
-`LocalTxObservation`。该 observation 只能由 typed `HttpRouteBinding<Marker, LocalTx>` 构造；identity 域从
-同一 generated password-change `ROUTE` + `SPEC.local_tx.boundary` 提供 fail-closed factory，Postgres adapter
-不建立被分层禁止的 production generated 依赖。settings 域在构造 `SecretPublishCommand` 时同样从 generated
-secret-publish `ROUTE` + `SPEC.local_tx.boundary` fail-closed 铸造 observation；adapter 只能消费
-`command.into_parts()`，不得自行调用 factory 或手制 evidence。`PgSecretUnitOfWork::publish` 使用
-`run_pg_localtx_retry` 发射 HTTP contract telemetry；`publish_internal` 与 rollback `republish` 不携带该 command，
+`LocalTxObservation<M>`。每个 LocalTx generated module 暴露非可选 `LOCAL_TX`，并令 `SPEC.local_tx =
+Some(LOCAL_TX)`；非 LocalTx module 不生成该常量。observation 由 typed
+`HttpRouteBinding<Marker, LocalTx>` 构造并用私有 `PhantomData<M>` 保留 route marker。identity 应用层分别把
+generated logout/password-change `ROUTE + LOCAL_TX.boundary` 封装进私有字段 `SessionLogoutMutation` /
+`PasswordChangeMutation`；settings 同样封装进 `SecretPublishCommand`。生产 adapter 只能消费
+`command.into_parts()`，不得调用 domain factory、替换 observation 或手制 evidence；Postgres 不建立被分层禁止的
+production generated 依赖，而是消费 domain port 暴露的 marker alias。`PgSecretUnitOfWork::publish`、
+`PgCredentialRepo::apply_password_change` 与 `PgSessionLifecycle::logout` 使用 `run_pg_localtx_retry` 发射 HTTP
+contract telemetry；`publish_internal` 与 rollback `republish` 不携带该 command，
 只经 `run_pg_tx_retry` 发射 generic `settings.secret` retry telemetry 与闭值 `tx_settlement_final_total`，不能冒充
 HTTP 调用；generic settlement 不携带 domain / contract id，unsafe 终态仍可独立告警。两个 runner
 复用同一个私有 retry core，不以 `Option` context
 或 bool 在运行期区分语义。该 core 既服务 `tenant-scoped-uow` 准入路径，也可被
 `repo-atomic-cas` adapter 用于单次 CAS 的底层 settlement；
 业务层 CAS 冲突仍按 `repo-atomic-cas` 规则上抛，不经 handler 自动重试。retry engine 与两个准入 UoW
-以及 settings secret publish 的精确放置由 `LOCALTX-PG-RETRY-PLACEMENT-01`（`pg-tenant-tx-guard`，
-Medium）守住：HTTP 路径只接受 `PgSecretUnitOfWork::publish` 中的 closed boundary、command-carried
-observation、`run_pg_localtx_retry` 与 `retry_write` 同址 AST 形状；旧 `SecretRepo::save`、adapter factory、
-generic/legacy `write` 或手制 observation 均阻断 verify。internal publish / republish 只接受 generic runner，
+以及三个准入 HTTP mutation 的精确放置由 `LOCALTX-PG-RETRY-PLACEMENT-01`（`pg-tenant-tx-guard`，
+Medium）守住：HTTP 路径只接受 typed command 解包出的 marker-preserving observation、无 boundary 参数的
+`run_pg_localtx_retry` 与 `retry_write` 同址 AST 形状。crate-private `PgLocalTxOperation` 仅为三个已知 domain
+route marker 实现，并从 marker 派生唯一 `PgTxRetryBoundary`；错误 route/boundary 配对不可编译。旧
+`SecretRepo::save`、identity 旧 port、adapter factory、generic/legacy `write`、手制 observation 或手工 boundary
+均阻断 verify。internal publish / republish 只接受 generic runner，
 三条 publish 语义最终共享唯一 keyed CAS attempt funnel；delete 共享同一 lock capability 并只追加 tombstone。
 
-`observ::LocalTxObservation` 从 typed generated route 私有提取 domain / contract id，并以
+`observ::LocalTxObservation<M>` 从 typed generated route 私有提取 domain / contract id、在类型中保留 marker，并以
 `LocalTxBoundary` / `TxRetryClass` / `LocalTxFinalStatus` 的闭标签发射 metrics 与 trace。每个 failed attempt
 记录 settlement-safe retry class；invocation 结束只在本轮曾存在真实 settlement 时发 final 指标，并保留最后
 一个 `Some(LocalTxFinalStatus)`，后续 begin 前 `Unsettled` 不得擦除已观测 settlement。全程只有 `Unsettled`
@@ -221,14 +231,20 @@ const LOCALTX_BACKEND_PROFILE_IDENTITY_LOGOUT: ::vocab::HttpRouteBinding<
     ::generated::http::identity_v1::logout::RouteMarker,
     ::vocab::http::LocalTx,
 > = ::generated::http::identity_v1::logout::ROUTE;
+const LOCALTX_BACKEND_PROVIDER_IDENTITY_LOGOUT: ::std::marker::PhantomData<(
+    ::generated::http::identity_v1::logout::RouteMarker,
+    crate::PgSessionLifecycle,
+)> = ::std::marker::PhantomData;
 ```
 
 该 marker 必须是 `LOCALTX_BACKEND_PROFILE_*` 具名 const、处于真实 test function，并由同一 adapter provider 的
-测试合计提供 manifest-derived required probes；helper 只有作为 test body 顶层且实际 `.await?` 才计入，未轮询
-future、分支内符号或别名调用都不构成 evidence。
+同一 typed provider fixture 的测试 shards 合计提供 manifest-derived required probes；provider binding 名必须与
+profile suffix 一致，route marker 必须一致，且 fixture 构造必须出现在同一 test body。helper 只有作为 test body
+顶层且实际 `.await?` 才计入，未轮询 future、分支内符号或别名调用都不构成 evidence。
 `tenant-scoped-uow` 额外要求 rollback 与 rollback-failed-no-replay，两个 profile 都要求 validation 与 authorization
 各一次 no-write（因此 `assert_rejected_no_write` 至少出现两次）。该闭环由
-`LOCALTX-BACKEND-PROFILE-CLOSURE-01` 的 synthetic red 与真实 workspace anti-vacuity 承载（Medium）。
+`LOCALTX-BACKEND-PROFILE-CLOSURE-01` 的 missing-binding、toy-transaction、multiple-marker、missing-probe
+synthetic red 与真实 workspace anti-vacuity 承载（Medium）。
 
 ## Follow-up boundary
 
