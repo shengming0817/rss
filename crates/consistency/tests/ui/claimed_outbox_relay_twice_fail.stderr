@@ -1,0 +1,10 @@
+error[E0382]: use of moved value: `claim`
+ --> tests/ui/claimed_outbox_relay_twice_fail.rs:8:25
+  |
+5 |     claim: R::Claim,
+  |     ----- move occurs because `claim` has type `<R as OutboxSource>::Claim`, which does not implement the `Copy` trait
+6 | ) -> Result<(), EngineError> {
+7 |     let _ = relay.relay(claim).await?;
+  |                         ----- value moved here
+8 |     let _ = relay.relay(claim).await?;
+  |                         ^^^^^ value used here after move

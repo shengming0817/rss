@@ -15,7 +15,7 @@
 //! - `outbox_pending_depth{domain,contract_id,tenant_id}` /
 //!   `outbox_oldest_pending_age_seconds{domain,contract_id,tenant_id}`（Gauge）—— 采样器。
 //! - `outbox_partition_blocked_depth{domain,contract_id,tenant_id}`（Gauge）—— partition head gate 阻塞行数。
-//! - `outbox_relay_tick_duration_seconds{phase}`（Histogram，phase=poll|publish）—— relay tick 分相耗时。
+//! - `outbox_relay_tick_duration_seconds{phase}`（Histogram，phase=claim|publish）—— relay tick 分相耗时。
 //!
 //! # INVARIANT: OUTBOX-METRICS-PORT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
@@ -30,11 +30,11 @@ use vocab::DomainName;
 /// relay tick 计时相位闭值集（histogram `phase` label）。
 ///
 /// settle（CAS 落库）是 adapter 内部、对 eventexec 不可见，故 `Publish` 相涵盖 `relay()` 端到端
-/// （publish + adapter 内 settle）；只分 poll/publish 两相。
+/// （publish + adapter 内 settle）；只分 claim/publish 两相。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayPhase {
-    /// `poll_pending` 扫描相。
-    Poll,
+    /// `claim_batch` 原子 claim 相。
+    Claim,
     /// 逐条 `relay()`（含 adapter 内 settle）相。
     Publish,
 }
@@ -43,7 +43,7 @@ impl RelayPhase {
     /// 稳定低基数 label（crate-owned 闭映射）。
     pub fn as_label(self) -> &'static str {
         match self {
-            RelayPhase::Poll => "poll",
+            RelayPhase::Claim => "claim",
             RelayPhase::Publish => "publish",
         }
     }
@@ -191,14 +191,74 @@ mod tests {
         )
     }
 
-    #[test]
-    fn relay_phase_as_label_distinct() {
-        assert_eq!(RelayPhase::Poll.as_label(), "poll");
-        assert_eq!(RelayPhase::Publish.as_label(), "publish");
-        assert_ne!(RelayPhase::Poll.as_label(), RelayPhase::Publish.as_label());
+    #[derive(Debug, PartialEq, Eq)]
+    struct ParsedSample {
+        metric: String,
+        labels: Vec<(String, String)>,
+        value: String,
     }
 
-    // facade 发射：同线程 with_local_recorder 断言 metric 名/label 出现（含 Reject → publish+dlx 双记）。
+    /// Parse Prometheus samples into an order-independent exact representation.
+    /// HELP/TYPE metadata is intentionally excluded from value assertions.
+    fn parse_samples(rendered: &str) -> Vec<ParsedSample> {
+        rendered
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| {
+                let (series, value) = line.rsplit_once(' ')?;
+                let (metric, raw_labels) = match series.split_once('{') {
+                    Some((metric, labels)) => (metric, labels.strip_suffix('}')?),
+                    None => (series, ""),
+                };
+                let mut labels = raw_labels
+                    .split(',')
+                    .filter(|label| !label.is_empty())
+                    .map(|label| {
+                        let (key, value) = label.split_once('=')?;
+                        Some((
+                            key.to_string(),
+                            value.strip_prefix('"')?.strip_suffix('"')?.to_string(),
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                labels.sort_unstable();
+                Some(ParsedSample {
+                    metric: metric.to_string(),
+                    labels,
+                    value: value.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn values_for(samples: &[ParsedSample], metric: &str, labels: &[(&str, &str)]) -> Vec<String> {
+        let mut expected_labels = labels
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<Vec<_>>();
+        expected_labels.sort_unstable();
+        samples
+            .iter()
+            .filter(|sample| sample.metric == metric && sample.labels == expected_labels)
+            .map(|sample| sample.value.clone())
+            .collect()
+    }
+
+    fn metric_sample_count(samples: &[ParsedSample], metric: &str) -> usize {
+        samples
+            .iter()
+            .filter(|sample| sample.metric == metric)
+            .count()
+    }
+
+    #[test]
+    fn relay_phase_as_label_distinct() {
+        assert_eq!(RelayPhase::Claim.as_label(), "claim");
+        assert_eq!(RelayPhase::Publish.as_label(), "publish");
+        assert_ne!(RelayPhase::Claim.as_label(), RelayPhase::Publish.as_label());
+    }
+
+    // facade 发射：同线程 recorder 精确断言每条 series 的 label 集和值。
     #[test]
     fn metrics_facade_emits_publish_and_dlx_on_reject() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -214,28 +274,55 @@ mod tests {
             m.record_tick_duration(RelayPhase::Publish, 0.25);
         });
         let rendered = handle.render();
-        assert!(rendered.contains("outbox_publish_total"), "{rendered}");
-        assert!(rendered.contains("outbox_dlx_total"), "{rendered}");
-        assert!(rendered.contains("contract_id"), "{rendered}");
-        assert!(rendered.contains("identity.session-created"), "{rendered}");
-        assert!(rendered.contains("tenant_id"), "{rendered}");
-        assert!(
-            rendered.contains("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
-            "{rendered}"
+        let samples = parse_samples(&rendered);
+        let scope = [
+            ("contract_id", "identity.session-created"),
+            ("domain", "identity"),
+            ("tenant_id", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+        ];
+        let mut reject_scope = scope.to_vec();
+        reject_scope.push(("status", "reject"));
+        assert_eq!(
+            values_for(&samples, "outbox_publish_total", &reject_scope),
+            vec!["1"]
         );
-        assert!(rendered.contains("reject"), "{rendered}");
-        assert!(rendered.contains("outbox_pending_depth"), "{rendered}");
-        assert!(
-            rendered.contains("outbox_oldest_pending_age_seconds"),
-            "{rendered}"
+        assert_eq!(values_for(&samples, "outbox_dlx_total", &scope), vec!["1"]);
+        assert_eq!(
+            values_for(&samples, "outbox_pending_depth", &scope),
+            vec!["7"]
         );
-        assert!(
-            rendered.contains("outbox_partition_blocked_depth"),
-            "{rendered}"
+        assert_eq!(
+            values_for(&samples, "outbox_oldest_pending_age_seconds", &scope),
+            vec!["305"]
         );
-        assert!(
-            rendered.contains("outbox_relay_tick_duration_seconds"),
-            "{rendered}"
+        assert_eq!(
+            values_for(&samples, "outbox_partition_blocked_depth", &scope),
+            vec!["2"]
+        );
+        assert_eq!(
+            values_for(
+                &samples,
+                "outbox_relay_tick_duration_seconds_sum",
+                &[("phase", "publish")],
+            ),
+            vec!["0.25"]
+        );
+        assert_eq!(
+            values_for(
+                &samples,
+                "outbox_relay_tick_duration_seconds_count",
+                &[("phase", "publish")],
+            ),
+            vec!["1"]
+        );
+        assert_eq!(
+            values_for(
+                &samples,
+                "outbox_relay_tick_duration_seconds_count",
+                &[("phase", "poll")],
+            ),
+            Vec::<String>::new(),
+            "legacy phase=poll must never be emitted: {rendered}"
         );
     }
 
@@ -252,11 +339,25 @@ mod tests {
                 MetricsOutboxMetrics.record_publish(&scope, disposition);
             });
             let rendered = handle.render();
-            assert!(rendered.contains("outbox_publish_total"), "{rendered}");
-            assert!(
-                !rendered.contains("outbox_dlx_total"),
-                "non-reject {} must not emit dlx: {rendered}",
-                disposition.as_label()
+            let samples = parse_samples(&rendered);
+            assert_eq!(
+                values_for(
+                    &samples,
+                    "outbox_publish_total",
+                    &[
+                        ("contract_id", "identity.session-created"),
+                        ("domain", "settings"),
+                        ("status", disposition.as_label()),
+                        ("tenant_id", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+                    ],
+                ),
+                vec!["1"]
+            );
+            assert_eq!(
+                metric_sample_count(&samples, "outbox_dlx_total"),
+                0,
+                "non-reject {} must not emit any DLX series: {rendered}",
+                disposition.as_label(),
             );
         }
     }

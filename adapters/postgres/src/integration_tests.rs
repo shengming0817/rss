@@ -4384,7 +4384,7 @@ async fn probe_count(store: &PgStore) -> Result<i64, sqlx::Error> {
 // T3: relay→published（Ack）
 // T4: relay→pending+retry_after（Requeue）
 // T5: relay→dlx（Reject）
-// T6: 崩溃重投（stale publishing → poll_pending 重捞 → relay → published；幂等 Ack）+ 跨域隔离负向
+// T6: 崩溃重投（stale publishing → claim_batch 重捞 → relay → published；幂等 Ack）+ 跨域隔离负向
 // T7: 并发 CAS fencing（两连接各 relay → 至多 publish 一次）
 // T8: sweep 删超保留期 published、保留 dlx + 保留期内 published/pending anti-vacuity
 // T9: lease_token CAS fencing（stale token 不能结算被新租约接管的行）
@@ -4395,8 +4395,8 @@ use std::sync::{Arc, Mutex};
 
 use consistency::{
     BacklogMetricSample, BacklogSample, Disposition, EngineErrorKind, EventEntry, EventTopic,
-    HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactIdentity,
-    OutboxMetricSubject, OutboxRelay, OutboxSource, PendingEntry, RetentionSweeper,
+    HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxFactIdentity, OutboxRelay,
+    OutboxSource, RetentionSweeper,
 };
 use diport::{
     AckAction, Acker, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, Delivery,
@@ -4414,8 +4414,8 @@ use testkit::eventing_conformance as eventconf;
 
 use crate::dead_letter_payload::tests::test_protector;
 use crate::outbox::{
-    MAX_PUBLISH_ATTEMPTS, OutboxAppendError, OutboxEnvelope, OutboxMetadata, PgOutbox,
-    STATUS_PUBLISHED, SettleOutcome, append_outbox, append_outbox_with_projection,
+    MAX_PUBLISH_ATTEMPTS, OutboxAppendError, OutboxEnvelope, OutboxMetadata, PgClaimedOutboxEntry,
+    PgOutbox, STATUS_PUBLISHED, SettleOutcome, append_outbox, append_outbox_with_projection,
 };
 use crate::outbox_cdc::append_outbox_log;
 
@@ -4453,6 +4453,14 @@ async fn set_outbox_terminal_for_test(
         r#"
         UPDATE outbox
         SET status = $1,
+            lease_token = CASE
+                WHEN $1 = 'publishing' THEN gen_random_uuid()
+                ELSE NULL
+            END,
+            lease_until = CASE
+                WHEN $1 = 'publishing' THEN now() + interval '60 seconds'
+                ELSE NULL
+            END,
             published_at = CASE
                 WHEN $1 = 'published' THEN now() - make_interval(secs => $2::double precision)
                 ELSE NULL
@@ -4500,7 +4508,7 @@ fn uuid_like() -> String {
 /// 对 `sample_backlog(domain)` 这种**按 domain 聚合**的查询不够——外部持久库重复跑时，上一轮同 domain 旧行会被
 /// 计入，使精确 depth 累加而 flaky（#1194 review F1）。去全表 DELETE 后唯一隔离手段即「event_id + domain 双唯一」。
 fn unique_domain(prefix: &str) -> String {
-    unique_event_id(prefix)
+    unique_event_id(prefix).replace('-', "_")
 }
 
 /// 构造测试用 EventEntry + Envelope。
@@ -4514,47 +4522,43 @@ fn make_entry(event_id: &str) -> EventEntry {
     )
 }
 
-fn make_pending_entry(
-    entry: EventEntry,
-    tenant: vocab::TenantId,
-    contract_id: &str,
-) -> PendingEntry {
-    #[allow(clippy::unwrap_used)]
-    // reason: integration fixture uses known-valid contract ids.
-    PendingEntry::new(
-        consistency::StoredOutboxEntry::hydrate(
-            entry.topic().as_str(),
-            entry.idem_key().clone(),
-            OutboxPayload::from_reviewed_event_bytes(entry.payload().to_vec()),
-        )
-        .unwrap(),
-        OutboxMetricSubject::new(tenant, OutboxContractId::parse(contract_id).unwrap()),
-    )
+async fn claimed_entry_for_event(
+    store: &PgStore,
+    event_id: &str,
+) -> Result<PgClaimedOutboxEntry, String> {
+    let domain: String = sqlx::query_scalar("SELECT domain FROM outbox WHERE event_id = $1")
+        .bind(event_id)
+        .fetch_one(&store.pool)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let outbox = make_pg_outbox_for_domain(
+        store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    outbox
+        .claim_batch(10_000)
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .into_iter()
+        .find(|entry| entry.idem_key().as_str() == event_id)
+        .ok_or_else(|| format!("claim_batch did not return event {event_id}"))
 }
 
-async fn pending_entry_for_event(store: &PgStore, event_id: &str) -> Result<PendingEntry, String> {
-    let row: (String, String, String, Vec<u8>) = sqlx::query_as(
-        r#"
-        SELECT tenant_id::text, contract_id, topic, payload
-        FROM outbox
-        WHERE event_id = $1
-        "#,
-    )
-    .bind(event_id)
-    .fetch_one(&store.pool)
-    .await
-    .map_err(|e| format!("{e:?}"))?;
-
-    let (tenant_id, contract_id, topic, payload) = row;
-    let tenant = vocab::TenantId::parse(&tenant_id).map_err(|e| format!("{e:?}"))?;
-    let topic = EventTopic::parse(&topic).map_err(|e| format!("{e:?}"))?;
-    let idem_key = IdemKey::parse(event_id).map_err(|e| format!("{e:?}"))?;
-    let entry = EventEntry::new(
-        topic,
-        idem_key,
-        OutboxPayload::from_reviewed_event_bytes(payload),
-    );
-    Ok(make_pending_entry(entry, tenant, &contract_id))
+async fn claim_entry_for_relay(
+    outbox: &PgOutbox,
+    event_id: &str,
+) -> Result<PgClaimedOutboxEntry, String> {
+    outbox
+        .claim_batch(10_000)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .into_iter()
+        .find(|entry| entry.idem_key().as_str() == event_id)
+        .ok_or_else(|| format!("provider-bound claim did not return event {event_id}"))
 }
 
 fn summarize_backlog(samples: &[BacklogMetricSample]) -> BacklogSample {
@@ -5717,8 +5721,19 @@ fn make_pg_outbox_with_publisher(
     store: &PgStore,
     publisher: impl Publisher + Sync + 'static,
 ) -> PgOutbox {
+    make_pg_outbox_for_domain(store, "identity", publisher)
+}
+
+#[allow(clippy::expect_used)]
+// reason: integration fixtures pass domain strings already validated by make_test_env/unique_domain.
+fn make_pg_outbox_for_domain(
+    store: &PgStore,
+    domain: &str,
+    publisher: impl Publisher + Sync + 'static,
+) -> PgOutbox {
     PgOutbox::new(
         store,
+        vocab::DomainName::parse(domain).expect("valid test outbox domain"),
         DynPublisher::new_box(publisher),
         test_tenant_authority(),
         test_dlx_payload_protector(),
@@ -5727,19 +5742,25 @@ fn make_pg_outbox_with_publisher(
 
 /// Conformance publisher：记录 broker-visible message_id，并按脚本返回 publish 结果。
 struct ConformancePublisher {
-    mode: eventconf::PublishMode,
+    mode: Arc<Mutex<eventconf::PublishMode>>,
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+struct ConformancePublisherState {
+    mode: Arc<Mutex<eventconf::PublishMode>>,
     messages: Arc<Mutex<Vec<String>>>,
 }
 
 impl ConformancePublisher {
-    fn new(mode: eventconf::PublishMode) -> (Self, Arc<Mutex<Vec<String>>>) {
+    fn new() -> (Self, ConformancePublisherState) {
+        let mode = Arc::new(Mutex::new(eventconf::PublishMode::Ok));
         let messages = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
-                mode,
+                mode: Arc::clone(&mode),
                 messages: Arc::clone(&messages),
             },
-            messages,
+            ConformancePublisherState { mode, messages },
         )
     }
 }
@@ -5750,7 +5771,8 @@ impl Publisher for ConformancePublisher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(request.event_id().as_str().to_string());
-        match self.mode {
+        let mode = *self.mode.lock().unwrap_or_else(|e| e.into_inner());
+        match mode {
             eventconf::PublishMode::Ok => Ok(()),
             eventconf::PublishMode::Transient => Err(PublisherError::transient(
                 std::io::Error::other("eventing conformance transient publish"),
@@ -5947,13 +5969,41 @@ async fn conf_seed_pending(
 
 async fn conf_relay(
     store: &PgStore,
+    outbox: &PgOutbox,
+    publisher_mode: &Mutex<eventconf::PublishMode>,
+    messages: &Mutex<Vec<String>>,
+    claims: &Mutex<HashMap<String, PgClaimedOutboxEntry>>,
     event_id: String,
     mode: eventconf::PublishMode,
 ) -> Result<eventconf::RelayObservation, String> {
-    let (publisher, messages) = ConformancePublisher::new(mode);
-    let outbox = make_pg_outbox_with_publisher(store, publisher);
-    let pending = pending_entry_for_event(store, &event_id).await?;
-    let disposition = outbox.relay(&pending).await.map_err(|e| format!("{e:?}"))?;
+    *publisher_mode
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = mode;
+    messages
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
+    let cached = claims
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&event_id);
+    let claimed = match cached {
+        Some(claimed) => claimed,
+        None => {
+            // Conformance retries immediately; make only the target test row eligible again while
+            // preserving the production retry predicate and typed claim path.
+            sqlx::query(
+                "UPDATE outbox SET retry_after = clock_timestamp() - interval '1 microsecond' \
+                 WHERE event_id = $1 AND status = 'pending' AND retry_after IS NOT NULL",
+            )
+            .bind(&event_id)
+            .execute(&store.pool)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+            claim_entry_for_relay(outbox, &event_id).await?
+        }
+    };
+    let disposition = outbox.relay(claimed).await.map_err(|e| format!("{e:?}"))?;
     let messages = messages.lock().unwrap_or_else(|e| e.into_inner());
     let message_id = messages.last().cloned();
     let publish_count = messages.len() as u64;
@@ -5971,15 +6021,23 @@ async fn conf_relay(
     })
 }
 
-async fn conf_poll_pending(store: &PgStore, domain: String) -> Result<Vec<String>, String> {
-    let outbox = make_pg_outbox(store, || Ok(()));
+async fn conf_claim_batch(
+    outbox: &PgOutbox,
+    claims: &Mutex<HashMap<String, PgClaimedOutboxEntry>>,
+    _domain: String,
+) -> Result<Vec<String>, String> {
     outbox
-        .poll_pending(&domain, 100)
+        .claim_batch(100)
         .await
         .map(|entries| {
+            let mut claims = claims.lock().unwrap_or_else(|error| error.into_inner());
             entries
                 .into_iter()
-                .map(|entry| entry.idem_key().as_str().to_string())
+                .map(|entry| {
+                    let event_id = entry.idem_key().as_str().to_string();
+                    claims.insert(event_id.clone(), entry);
+                    event_id
+                })
                 .collect()
         })
         .map_err(|e| format!("{e:?}"))
@@ -6035,7 +6093,8 @@ async fn conf_backdate_publishing(store: &PgStore, event_id: String) -> Result<(
         "UPDATE outbox \
          SET status='publishing', lease_token = gen_random_uuid(), \
              created_at = now() - make_interval(secs => $1), \
-             updated_at = now() - make_interval(secs => $1) \
+             updated_at = now() - make_interval(secs => $1), \
+             lease_until = now() - interval '10 seconds' \
          WHERE event_id = $2",
     )
     .bind(crate::outbox::LEASE_TTL_SECONDS + 10)
@@ -6098,6 +6157,9 @@ async fn eventing_conformance_outbox_enrolls_postgres() -> TestResult {
     let domain = unique_domain("eventing-conf-domain");
     let other_domain = unique_domain("eventing-conf-other-domain");
     let event_id = unique_event_id("eventing-conf-outbox");
+    let claims: Mutex<HashMap<String, PgClaimedOutboxEntry>> = Mutex::new(HashMap::new());
+    let (publisher, publisher_state) = ConformancePublisher::new();
+    let relay = make_pg_outbox_for_domain(&store, &domain, publisher);
 
     eventconf::assert_outbox_relay_conformance(eventconf::OutboxRelayCase {
         ids: eventconf::EventingIds::new(
@@ -6112,8 +6174,18 @@ async fn eventing_conformance_outbox_enrolls_postgres() -> TestResult {
         seed_pending: Box::new(|args| {
             Box::pin(conf_seed_pending(&store, args.event_id, args.domain))
         }),
-        relay: Box::new(|args| Box::pin(conf_relay(&store, args.event_id, args.mode))),
-        poll_pending: Box::new(|args| Box::pin(conf_poll_pending(&store, args.domain))),
+        relay: Box::new(|args| {
+            Box::pin(conf_relay(
+                &store,
+                &relay,
+                &publisher_state.mode,
+                &publisher_state.messages,
+                &claims,
+                args.event_id,
+                args.mode,
+            ))
+        }),
+        claim_batch: Box::new(|args| Box::pin(conf_claim_batch(&relay, &claims, args.domain))),
         state: Box::new(|args| Box::pin(conf_outbox_state(&store, args.event_id))),
         backdate_publishing: Box::new(|args| {
             Box::pin(conf_backdate_publishing(&store, args.event_id))
@@ -6199,10 +6271,10 @@ async fn outbox_relay_and_cdc_envelope_parity_conformance() -> TestResult {
 
     let (publisher, captured_requests) = CapturedPublishRequestPublisher::new();
     let outbox = make_pg_outbox_with_publisher(&store, publisher);
-    let pending = pending_entry_for_event(&store, &event_id)
+    let pending = claim_entry_for_relay(&outbox, &event_id)
         .await
         .map_err(std::io::Error::other)?;
-    let disposition = outbox.relay(&pending).await?;
+    let disposition = outbox.relay(pending).await?;
     assert_eq!(disposition, Disposition::Ack);
 
     let relay_request = {
@@ -6974,7 +7046,7 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
     let entry = make_entry(&event_id);
     // t3 仅验 relay 路径、不断言 metadata；用 make_test_env（无 subject_id），避免 make_envelope 的
     // subject_id 在下方闭包重建时被丢弃的冗余（#1194 review F3）。
-    let env = make_test_env("t3-domain", "contract-1");
+    let env = make_test_env("t3_domain", "contract-1");
 
     // seed: 1 行 pending。
     store
@@ -6995,10 +7067,10 @@ async fn t3_relay_ok_publishes_and_acks() -> TestResult {
         .await?;
 
     let (pub_, calls) = RecordingPublisher::always_ok();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_);
+    let outbox = make_pg_outbox_for_domain(&store, "t3_domain", pub_);
 
-    let pending = pending_entry_for_event(&store, &event_id).await?;
-    let disposition = outbox.relay(&pending).await?;
+    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
+    let disposition = outbox.relay(pending).await?;
     assert_eq!(disposition, Disposition::Ack, "should Ack on publish Ok");
 
     // DB 状态 published。
@@ -7032,7 +7104,7 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
-                "t4-domain".to_string(),
+                "t4_domain".to_string(),
                 "c".to_string(),
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
@@ -7046,10 +7118,10 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
         .await?;
 
     let (pub_, _) = RecordingPublisher::always_transient();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_);
+    let outbox = make_pg_outbox_for_domain(&store, "t4_domain", pub_);
 
-    let pending = pending_entry_for_event(&store, &event_id).await?;
-    let disposition = outbox.relay(&pending).await?;
+    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
+    let disposition = outbox.relay(pending).await?;
     assert_eq!(
         disposition,
         Disposition::Requeue,
@@ -7080,11 +7152,11 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
             .await?;
     assert!(future_check.0, "retry_after should be in the future");
 
-    // 退避负向：retry_after 在将来 → poll_pending 本轮不应重新捞回该行（L2 退避可靠性闭环）。
-    let re = outbox.poll_pending("t4-domain", 10).await?;
+    // 退避负向：retry_after 在将来 → claim_batch 本轮不应重新捞回该行（L2 退避可靠性闭环）。
+    let re = outbox.claim_batch(10).await?;
     assert!(
         !re.iter().any(|e| e.idem_key().as_str() == event_id),
-        "requeued entry must not be re-polled within backoff window"
+        "requeued entry must not be reclaimed within backoff window"
     );
 
     store.shutdown().await?;
@@ -7106,7 +7178,7 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
-                "t5-domain".to_string(),
+                "t5_domain".to_string(),
                 "c".to_string(),
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
@@ -7127,10 +7199,10 @@ async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
         .await?;
 
     let (pub_, _) = RecordingPublisher::always_transient();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_);
+    let outbox = make_pg_outbox_for_domain(&store, "t5_domain", pub_);
 
-    let pending = pending_entry_for_event(&store, &event_id).await?;
-    let disposition = outbox.relay(&pending).await?;
+    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
+    let disposition = outbox.relay(pending).await?;
     assert_eq!(
         disposition,
         Disposition::Reject,
@@ -7168,7 +7240,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
             let env = OutboxEnvelope::new(
-                "t5b-domain".to_string(),
+                "t5b_domain".to_string(),
                 "c".to_string(),
                 OutboxMetadata::new(0, test_tenant(), test_contract()),
             );
@@ -7182,10 +7254,10 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
         .await?;
 
     let (pub_, calls) = RecordingPublisher::always_permanent();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_);
+    let outbox = make_pg_outbox_for_domain(&store, "t5b_domain", pub_);
 
-    let pending = pending_entry_for_event(&store, &event_id).await?;
-    let disposition = outbox.relay(&pending).await?;
+    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
+    let disposition = outbox.relay(pending).await?;
     assert_eq!(
         disposition,
         Disposition::Reject,
@@ -7214,7 +7286,7 @@ async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
     Ok(())
 }
 
-// ── T6: 崩溃重投（stale publishing → poll_pending 重捞 → relay → published）──
+// ── T6: 崩溃重投（stale publishing → claim_batch 重捞 → relay → published）──
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
@@ -7224,11 +7296,11 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
     let event_id = unique_event_id("t6");
     let entry = make_entry(&event_id);
 
-    // seed: 1 行，手动置为 status='publishing' 且 updated_at 早于 LEASE_TTL+10s 前（模拟崩溃残留）。
+    // seed: 1 行，手动置为 status='publishing' 且 lease_until 已过期（模拟崩溃残留）。
     store
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
-            let env = make_test_env("crash-domain", "c");
+            let env = make_test_env("crash_domain", "c");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -7241,14 +7313,16 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
     // 模拟崩溃：把行置 publishing + updated_at 很久之前。
     let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
     sqlx::query(
-        "UPDATE outbox SET status='publishing', updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+        "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+         updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
+         WHERE event_id = $2",
     )
     .bind(lease_ttl + 10)
     .bind(&event_id)
     .execute(&store.pool)
     .await?;
 
-    // 跨域隔离负向：另插一条 other-domain 的 stale publishing 行；poll("crash-domain") 不应返回它
+    // 跨域隔离负向：另插一条 other-domain 的 stale publishing 行；claim("crash-domain") 不应返回它
     //（令下方 entries.len()==1 断言具 anti-vacuity 意义）。
     let other_id = unique_event_id("t6-other");
     let other_entry = make_entry(&other_id);
@@ -7256,7 +7330,7 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = other_entry.clone();
             Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &make_test_env("other-domain", "c"))
+                let _outcome = append_outbox(cap, &entry, &make_test_env("other_domain", "c"))
                     .await
                     .map_err(test_append_error)?;
                 Ok(())
@@ -7264,27 +7338,29 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
         })
         .await?;
     sqlx::query(
-        "UPDATE outbox SET status='publishing', updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+        "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+         updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
+         WHERE event_id = $2",
     )
     .bind(lease_ttl + 10)
     .bind(&other_id)
     .execute(&store.pool)
     .await?;
 
-    // poll_pending 能捞回 stale publishing 行。
+    // claim_batch 能原子重捞 stale publishing 行。
     let (pub_, calls) = RecordingPublisher::always_ok();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_);
+    let outbox = make_pg_outbox_for_domain(&store, "crash_domain", pub_);
 
-    let entries = outbox.poll_pending("crash-domain", 10).await?;
+    let mut entries = outbox.claim_batch(10).await?;
     assert_eq!(
         entries.len(),
         1,
-        "stale publishing row should be returned by poll_pending"
+        "stale publishing row should be returned by claim_batch"
     );
     assert_eq!(entries[0].idem_key().as_str(), event_id);
 
     // relay → published。
-    let disposition = outbox.relay(&entries[0]).await?;
+    let disposition = outbox.relay(entries.remove(0)).await?;
     assert_eq!(disposition, Disposition::Ack);
 
     let status: (String,) = sqlx::query_as("SELECT status FROM outbox WHERE event_id = $1")
@@ -7293,14 +7369,16 @@ async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
         .await?;
     assert_eq!(status.0, "published");
 
-    // 再 relay 一次（已 published）→ acquire 0 行 → 幂等 Ack，publisher 不再被调用（calls = 1）。
-    let outbox2 = make_pg_outbox(&store, || Ok(()));
-    let disposition2 = outbox2.relay(&entries[0]).await?;
-    assert_eq!(
-        disposition2,
-        Disposition::Ack,
-        "second relay of published entry should be Ack"
+    // 已 published 行无法再次 claim，publisher 不再被调用（calls = 1）。
+    let outbox2 = make_pg_outbox_for_domain(
+        &store,
+        "crash_domain",
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
     );
+    assert!(outbox2.claim_batch(10).await?.is_empty());
 
     #[allow(clippy::unwrap_used)]
     let call_count = *calls.lock().unwrap();
@@ -7327,7 +7405,7 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
     store
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
-            let env = make_test_env("t7-domain", "c");
+            let env = make_test_env("t7_domain", "c");
             Box::pin(async move {
                 let _outcome = append_outbox(cap, &entry, &env)
                     .await
@@ -7350,21 +7428,22 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
         calls: calls_clone,
     };
 
-    let outbox1 = make_pg_outbox_with_publisher(&store, pub1);
-    let outbox2 = make_pg_outbox_with_publisher(&store, pub2);
+    let outbox1 = make_pg_outbox_for_domain(&store, "t7_domain", pub1);
+    let outbox2 = make_pg_outbox_for_domain(&store, "t7_domain", pub2);
 
-    // 两个 relay 并发执行：只有一个能 CAS acquire 成功，另一个返回 Ack（0 行更新）。
-    let pending = pending_entry_for_event(&store, &event_id).await?;
-    let pending_clone = pending.clone();
-    let (d1, d2) = tokio::join!(outbox1.relay(&pending), outbox2.relay(&pending_clone));
-
-    assert!(d1.is_ok() && d2.is_ok(), "both relay should return Ok");
-    let d1 = d1?;
-    let d2 = d2?;
-
-    // 两个都返回 Ack（一个真正 publish，另一个 CAS 0 行 → 幂等 Ack）。
-    assert_eq!(d1, Disposition::Ack);
-    assert_eq!(d2, Disposition::Ack);
+    // 两个独立连接并发 claim：原子 SQL 保证同一 row 只会出现在一个结果集。
+    let (claims1, claims2) = tokio::join!(outbox1.claim_batch(10), outbox2.claim_batch(10));
+    let mut claims1 = claims1?;
+    let mut claims2 = claims2?;
+    assert_eq!(claims1.len() + claims2.len(), 1);
+    let disposition = if let Some(claimed) = claims1.pop() {
+        outbox1.relay(claimed).await?
+    } else {
+        outbox2
+            .relay(claims2.pop().ok_or("missing concurrent claim winner")?)
+            .await?
+    };
+    assert_eq!(disposition, Disposition::Ack);
 
     // publisher 至多调用一次。
     #[allow(clippy::unwrap_used)]
@@ -7380,6 +7459,226 @@ async fn t7_concurrent_relay_publishes_at_most_once() -> TestResult {
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(status.0, "published");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t7b_atomic_claim_uses_independent_database_connections() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t7b_domain");
+    let event_id = unique_event_id("t7b");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "concurrent.claim");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let mut first = store.pool.acquire().await?;
+    let mut second = store.pool.acquire().await?;
+    let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *first)
+        .await?;
+    let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *second)
+        .await?;
+    assert_ne!(
+        first_pid, second_pid,
+        "test must exercise independent sessions"
+    );
+
+    let first_domain = domain.clone();
+    let second_domain = domain.clone();
+    let (first_claim, second_claim) = tokio::join!(
+        async {
+            sqlx::query_scalar::<_, String>("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
+                .bind(first_domain)
+                .fetch_all(&mut *first)
+                .await
+        },
+        async {
+            sqlx::query_scalar::<_, String>("SELECT event_id FROM rss_outbox_claim_batch($1, 10)")
+                .bind(second_domain)
+                .fetch_all(&mut *second)
+                .await
+        }
+    );
+    let claimed: Vec<String> = first_claim?.into_iter().chain(second_claim?).collect();
+    assert_eq!(claimed, vec![event_id.clone()]);
+
+    let durable: (String, bool, bool) = sqlx::query_as(
+        "SELECT status, lease_token IS NOT NULL, lease_until IS NOT NULL \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (crate::outbox::STATUS_PUBLISHING.to_string(), true, true),
+        "exactly one independent session must durably own the claim"
+    );
+
+    drop(first);
+    drop(second);
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// Provider 边界必须在任何数据库 I/O 前拒绝非法 batch limit，并分类为永久 invariant。
+#[tokio::test(flavor = "multi_thread")]
+async fn claim_batch_rejects_invalid_provider_limits_before_database_io() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        "identity",
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    store.shutdown().await?;
+
+    for limit in [0, 10_001] {
+        let Err(error) = outbox.claim_batch(limit).await else {
+            return Err(format!("provider must reject invalid claim limit {limit}").into());
+        };
+        assert_eq!(
+            error.kind(),
+            EngineErrorKind::Invariant,
+            "invalid provider limit {limit} is permanent caller input, not transient database I/O"
+        );
+    }
+    Ok(())
+}
+
+/// Claim provenance binds the exact provider instance, not only a matching textual domain.
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_rejects_claim_from_another_provider_instance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("provider-provenance");
+    let event_id = unique_event_id("provider-provenance");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "provider.provenance");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let (claim_publisher, claim_calls) = RecordingPublisher::always_ok();
+    let claim_provider = make_pg_outbox_for_domain(&store, &domain, claim_publisher);
+    let claim = claim_entry_for_relay(&claim_provider, &event_id).await?;
+
+    let (other_publisher, other_calls) = RecordingPublisher::always_ok();
+    let other_provider = make_pg_outbox_for_domain(&store, &domain, other_publisher);
+    let Err(error) = other_provider.relay(claim).await else {
+        return Err("another provider instance must not relay the claim".into());
+    };
+    assert_eq!(error.kind(), EngineErrorKind::Invariant);
+    #[allow(clippy::unwrap_used)]
+    {
+        assert_eq!(*claim_calls.lock().unwrap(), 0);
+        assert_eq!(*other_calls.lock().unwrap(), 0);
+    }
+
+    let status: String = sqlx::query_scalar("SELECT status FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(status, crate::outbox::STATUS_PUBLISHING);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// Publish preflight reserves the settle margin inside the fixed 60-second database lease.
+#[tokio::test(flavor = "multi_thread")]
+async fn lease_publish_preflight_requires_full_publish_budget() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("publish-budget");
+    let event_id = unique_event_id("publish-budget");
+    let entry = make_entry(&event_id);
+    let env = make_test_env(&domain, "publish.budget");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let claim = claim_entry_for_relay(&outbox, &event_id).await?;
+
+    let short_deadline: i64 = sqlx::query_scalar(
+        "UPDATE outbox SET lease_until = clock_timestamp() + interval '49 seconds' \
+         WHERE event_id = $1 \
+         RETURNING (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let short_budget: bool =
+        sqlx::query_scalar("SELECT rss_outbox_lease_can_publish($1, $2::uuid, $3)")
+            .bind(&event_id)
+            .bind(claim.lease_token())
+            .bind(short_deadline)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        !short_budget,
+        "49 seconds cannot fund a 40-second publish plus settle margin"
+    );
+
+    let full_deadline: i64 = sqlx::query_scalar(
+        "UPDATE outbox SET lease_until = clock_timestamp() + interval '55 seconds' \
+         WHERE event_id = $1 \
+         RETURNING (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let full_budget: bool =
+        sqlx::query_scalar("SELECT rss_outbox_lease_can_publish($1, $2::uuid, $3)")
+            .bind(&event_id)
+            .bind(claim.lease_token())
+            .bind(full_deadline)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        full_budget,
+        "55 seconds must satisfy the 50-second preflight budget"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -7402,7 +7701,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
             let delayed_entry = delayed_entry.clone();
             Box::pin(async move {
                 let _outcome =
-                    append_outbox(cap, &delayed_entry, &make_test_env("sweep-domain", "c"))
+                    append_outbox(cap, &delayed_entry, &make_test_env("sweep_domain", "c"))
                         .await
                         .map_err(test_append_error)?;
                 Ok(())
@@ -7415,12 +7714,19 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
     .bind(&delayed_event)
     .execute(&store.pool)
     .await?;
-    let delayed_outbox = make_pg_outbox(&store, || Ok(()));
-    let delayed_pending = delayed_outbox.poll_pending("sweep-domain", 100).await?;
+    let delayed_outbox = make_pg_outbox_for_domain(
+        &store,
+        "sweep_domain",
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let delayed_pending = delayed_outbox.claim_batch(100).await?;
     let delayed_pending = delayed_pending
-        .iter()
+        .into_iter()
         .find(|entry| entry.idem_key().as_str() == delayed_event)
-        .ok_or("delayed pending row must be pollable")?;
+        .ok_or("delayed pending row must be claimable")?;
     assert_eq!(
         delayed_outbox.relay(delayed_pending).await?,
         Disposition::Ack
@@ -7438,7 +7744,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         store
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 Box::pin(async move {
-                    let env = make_test_env("sweep-domain", "c");
+                    let env = make_test_env("sweep_domain", "c");
                     let _outcome = append_outbox(cap, &entry_c, &env)
                         .await
                         .map_err(test_append_error)?;
@@ -7465,7 +7771,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 Box::pin(async move {
                     let _outcome =
-                        append_outbox(cap, &entry_c, &make_test_env("sweep-domain", "c"))
+                        append_outbox(cap, &entry_c, &make_test_env("sweep_domain", "c"))
                             .await
                             .map_err(test_append_error)?;
                     Ok(())
@@ -7487,7 +7793,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         store
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 Box::pin(async move {
-                    let _outcome = append_outbox(cap, &entry, &make_test_env("sweep-domain", "c"))
+                    let _outcome = append_outbox(cap, &entry, &make_test_env("sweep_domain", "c"))
                         .await
                         .map_err(test_append_error)?;
                     Ok(())
@@ -8876,9 +9182,9 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .await?;
 
     let (publisher, calls) = RecordingPublisher::always_permanent();
-    let outbox = make_pg_outbox_with_publisher(&store, publisher);
-    let pending = pending_entry_for_event(&store, &event_id).await?;
-    let disposition = outbox.relay(&pending).await?;
+    let outbox = make_pg_outbox_for_domain(&store, &domain, publisher);
+    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
+    let disposition = outbox.relay(pending).await?;
     assert_eq!(disposition, Disposition::Reject);
     assert_eq!(*calls.lock().unwrap(), 1);
 
@@ -9031,8 +9337,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .fetch_one(&store.pool)
         .await?;
     assert!(
-        before_redrive.3.is_some(),
-        "dlx row should retain the failed relay lease before redrive"
+        before_redrive.3.is_none(),
+        "DLX settlement must clear the failed relay lease before redrive"
     );
     let terminal_before_redrive: (bool, bool, i64, i64) = sqlx::query_as(
         "SELECT published_at IS NULL, dlx_at IS NOT NULL, \
@@ -9165,7 +9471,7 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
         .run_global_transaction::<_, _, sqlx::Error>(|cap| {
             let entry = entry.clone();
             Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &make_test_env("t9-domain", "c"))
+                let _outcome = append_outbox(cap, &entry, &make_test_env("t9_domain", "c"))
                     .await
                     .map_err(test_append_error)?;
                 Ok(())
@@ -9173,29 +9479,33 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
         })
         .await?;
 
-    // A 取租约 → tokenA（行置 publishing）。
-    let lease = crate::outbox::acquire_lease(&store.pool, &event_id).await?;
-    let (
-        _rc,
-        token_a,
-        _tenant_id,
-        _metadata_json,
-        _domain,
-        _contract_id,
-        _topic,
-        _contract_version,
-        _schema_hash,
-        _now_epoch,
-    ) = lease.ok_or("acquire_lease should return a lease for pending row")?;
+    // A 原子 claim；随后令 deadline 过期并由 B 重新 claim。
+    let claim_a = claimed_entry_for_event(&store, &event_id).await?;
+    let durable_lease: (String, i64, i64) = sqlx::query_as(
+        "SELECT lease_token::text, (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint, \
+         EXTRACT(EPOCH FROM updated_at)::bigint FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(durable_lease.0, claim_a.lease_token());
+    assert_eq!(
+        durable_lease.1,
+        claim_a.lease_deadline_epoch_micros(),
+        "typed claim deadline must be the exact persisted microsecond value"
+    );
+    assert_eq!(durable_lease.2, claim_a.claim_epoch_seconds());
+    sqlx::query(
+        "UPDATE outbox SET updated_at=clock_timestamp()-interval '61 seconds', \
+         lease_until=clock_timestamp()-interval '1 second' WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await?;
+    let claim_b = claimed_entry_for_event(&store, &event_id).await?;
 
-    // 模拟 B 重新 acquire：覆盖 lease_token = tokenB，A 的 tokenA 变 stale。
-    sqlx::query("UPDATE outbox SET lease_token = gen_random_uuid() WHERE event_id = $1")
-        .bind(&event_id)
-        .execute(&store.pool)
-        .await?;
-
-    // A 用 stale tokenA 结算 → WHERE lease_token 不匹配 → 0 行 → 行不变（仍 publishing）且返 LostLease（F3）。
-    let stale_outcome = crate::outbox::settle_published(&store.pool, &event_id, &token_a).await?;
+    // A 的 token/deadline 组合已 stale，无法结算 B 持有的行。
+    let stale_outcome = crate::outbox::settle_published(&store.pool, &claim_a).await?;
     assert_eq!(
         stale_outcome,
         SettleOutcome::LostLease,
@@ -9216,14 +9526,8 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
         "stale settle must not write terminal timestamps"
     );
 
-    // B 用正确 tokenB 结算 → published；返 Settled（F3）。
-    let token_b: (String,) =
-        sqlx::query_as("SELECT lease_token::text FROM outbox WHERE event_id = $1")
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
-    let settled_outcome =
-        crate::outbox::settle_published(&store.pool, &event_id, &token_b.0).await?;
+    // B 用当前精确 token/deadline 组合结算 → published。
+    let settled_outcome = crate::outbox::settle_published(&store.pool, &claim_b).await?;
     assert_eq!(
         settled_outcome,
         SettleOutcome::Settled,
@@ -9247,7 +9551,389 @@ async fn t9_settle_rejects_stale_lease_token() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn generated_fingerprint_allows_real_relay_acquire_settle_and_redrive() -> TestResult {
+async fn t9b_settle_rejects_expired_current_lease_before_reclaim() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_id = unique_event_id("t9b");
+    let entry = make_entry(&event_id);
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome =
+                    append_outbox(cap, &entry, &make_test_env("t9b_domain", "strict-expiry"))
+                        .await
+                        .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+
+    let original = claimed_entry_for_event(&store, &event_id).await?;
+    let expired_deadline_epoch_micros: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE outbox
+        SET updated_at = clock_timestamp() - interval '61 seconds',
+            lease_until = clock_timestamp() - interval '1 second'
+        WHERE event_id = $1
+        RETURNING (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint
+        "#,
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    let changed: i64 = sqlx::query_scalar("SELECT rss_outbox_settle_published($1, $2::uuid, $3)")
+        .bind(&event_id)
+        .bind(original.lease_token())
+        .bind(expired_deadline_epoch_micros)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        changed, 0,
+        "an expired lease must not settle even before another worker reclaims it"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(status, crate::outbox::STATUS_PUBLISHING);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t9c_each_settle_rejects_token_and_deadline_mismatch_independently() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_ids = [
+        unique_event_id("t9c-published"),
+        unique_event_id("t9c-retry"),
+        unique_event_id("t9c-dlx"),
+    ];
+    for (index, event_id) in event_ids.iter().enumerate() {
+        let entry = make_entry(event_id);
+        let env = make_test_env(&unique_domain(&format!("t9c-{index}")), "lease.fencing");
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    let published_claim = claimed_entry_for_event(&store, &event_ids[0]).await?;
+    let retry_claim = claimed_entry_for_event(&store, &event_ids[1]).await?;
+    let dlx_claim = claimed_entry_for_event(&store, &event_ids[2]).await?;
+    let wrong_token = "00000000-0000-4000-8000-000000000001";
+
+    for (token, deadline, label) in [
+        (
+            wrong_token,
+            published_claim.lease_deadline_epoch_micros(),
+            "token",
+        ),
+        (
+            published_claim.lease_token(),
+            published_claim.lease_deadline_epoch_micros() + 1,
+            "deadline",
+        ),
+    ] {
+        let changed: i64 =
+            sqlx::query_scalar("SELECT rss_outbox_settle_published($1, $2::uuid, $3)")
+                .bind(&event_ids[0])
+                .bind(token)
+                .bind(deadline)
+                .fetch_one(&store.pool)
+                .await?;
+        assert_eq!(changed, 0, "published settle must reject {label} mismatch");
+    }
+
+    for (token, deadline, label) in [
+        (
+            wrong_token,
+            retry_claim.lease_deadline_epoch_micros(),
+            "token",
+        ),
+        (
+            retry_claim.lease_token(),
+            retry_claim.lease_deadline_epoch_micros() + 1,
+            "deadline",
+        ),
+    ] {
+        let changed: i64 = sqlx::query_scalar("SELECT rss_outbox_settle_retry($1, $2::uuid, $3)")
+            .bind(&event_ids[1])
+            .bind(token)
+            .bind(deadline)
+            .fetch_one(&store.pool)
+            .await?;
+        assert_eq!(changed, 0, "retry settle must reject {label} mismatch");
+    }
+
+    for (token, deadline, label) in [
+        (
+            wrong_token,
+            dlx_claim.lease_deadline_epoch_micros(),
+            "token",
+        ),
+        (
+            dlx_claim.lease_token(),
+            dlx_claim.lease_deadline_epoch_micros() + 1,
+            "deadline",
+        ),
+    ] {
+        let retry_count: Option<i32> =
+            sqlx::query_scalar("SELECT retry_count FROM rss_outbox_mark_dlx($1, $2::uuid, $3)")
+                .bind(&event_ids[2])
+                .bind(token)
+                .bind(deadline)
+                .fetch_optional(&store.pool)
+                .await?;
+        assert_eq!(retry_count, None, "DLX settle must reject {label} mismatch");
+    }
+
+    let states: BTreeMap<String, (String, i32)> = sqlx::query_as::<_, (String, String, i32)>(
+        "SELECT event_id, status, retry_count FROM outbox WHERE event_id = ANY($1)",
+    )
+    .bind(event_ids.to_vec())
+    .fetch_all(&store.pool)
+    .await?
+    .into_iter()
+    .map(|(event_id, status, retry_count)| (event_id, (status, retry_count)))
+    .collect();
+    assert_eq!(
+        states,
+        BTreeMap::from(
+            event_ids
+                .map(|event_id| { (event_id, (crate::outbox::STATUS_PUBLISHING.to_string(), 0),) })
+        ),
+        "all six fencing misses must leave durable state untouched"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 三个 settle 都必须等拿到目标行锁后再取结算时钟；等待期间过期的 lease 不得被结算。
+#[tokio::test(flavor = "multi_thread")]
+async fn t9d_each_settle_takes_expiry_clock_after_row_lock() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_ids = [
+        unique_event_id("t9d-lock-published"),
+        unique_event_id("t9d-lock-retry"),
+        unique_event_id("t9d-lock-dlx"),
+    ];
+    let mut leases = Vec::new();
+    for (index, event_id) in event_ids.iter().enumerate() {
+        let entry = make_entry(event_id);
+        let env = make_test_env(
+            &unique_domain(&format!("t9d-lock-{index}")),
+            "settle.lock.clock",
+        );
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+        let claim = claimed_entry_for_event(&store, event_id).await?;
+        let deadline: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE outbox
+            SET updated_at = clock_timestamp() - interval '1 second',
+                lease_until = clock_timestamp() + interval '2 seconds'
+            WHERE event_id = $1
+            RETURNING (EXTRACT(EPOCH FROM lease_until) * 1000000)::bigint
+            "#,
+        )
+        .bind(event_id)
+        .fetch_one(&store.pool)
+        .await?;
+        leases.push((claim.lease_token().to_string(), deadline));
+    }
+
+    enum LockedSettleResult {
+        Count(i64),
+        Dlx(Option<i32>),
+    }
+
+    for (index, event_id) in event_ids.iter().enumerate() {
+        let mut settle_conn = store.pool.acquire().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *settle_conn)
+            .await?;
+        let mut blocker = store.pool.begin().await?;
+        let locked: String =
+            sqlx::query_scalar("SELECT event_id FROM outbox WHERE event_id = $1 FOR UPDATE")
+                .bind(event_id)
+                .fetch_one(&mut *blocker)
+                .await?;
+        assert_eq!(locked, *event_id);
+
+        let controller = async {
+            let mut blocked = false;
+            for _ in 0..100 {
+                let blockers: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
+                    .bind(waiter_pid)
+                    .fetch_one(&store.pool)
+                    .await?;
+                if !blockers.is_empty() {
+                    blocked = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if !blocked {
+                return Err::<(), TestError>("settle session must wait on the row lock".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+            blocker.commit().await?;
+            Ok::<(), TestError>(())
+        };
+        let settle = async {
+            match index {
+                0 => sqlx::query_scalar::<_, i64>(
+                    "SELECT rss_outbox_settle_published($1, $2::uuid, $3)",
+                )
+                .bind(event_id)
+                .bind(&leases[index].0)
+                .bind(leases[index].1)
+                .fetch_one(&mut *settle_conn)
+                .await
+                .map(LockedSettleResult::Count),
+                1 => {
+                    sqlx::query_scalar::<_, i64>("SELECT rss_outbox_settle_retry($1, $2::uuid, $3)")
+                        .bind(event_id)
+                        .bind(&leases[index].0)
+                        .bind(leases[index].1)
+                        .fetch_one(&mut *settle_conn)
+                        .await
+                        .map(LockedSettleResult::Count)
+                }
+                _ => sqlx::query_scalar::<_, i32>(
+                    "SELECT retry_count FROM rss_outbox_mark_dlx($1, $2::uuid, $3)",
+                )
+                .bind(event_id)
+                .bind(&leases[index].0)
+                .bind(leases[index].1)
+                .fetch_optional(&mut *settle_conn)
+                .await
+                .map(LockedSettleResult::Dlx),
+            }
+        };
+        let (settle, controller) = tokio::join!(settle, controller);
+        controller?;
+        match settle? {
+            LockedSettleResult::Count(changed) => {
+                assert_eq!(changed, 0, "settle {index} must reject after lock wait");
+            }
+            LockedSettleResult::Dlx(retry_count) => {
+                assert_eq!(retry_count, None, "DLX settle must reject after lock wait");
+            }
+        }
+    }
+
+    let states: Vec<(String, i32, bool, bool)> = sqlx::query_as(
+        "SELECT status, retry_count, published_at IS NULL, dlx_at IS NULL \
+         FROM outbox WHERE event_id = ANY($1) ORDER BY event_id",
+    )
+    .bind(event_ids.to_vec())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(states.len(), 3);
+    assert!(
+        states.iter().all(|state| {
+            state == &(crate::outbox::STATUS_PUBLISHING.to_string(), 0, true, true)
+        })
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t9e_relay_rejects_lost_lease_before_publish() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let event_ids = [
+        unique_event_id("t9d-publish-ok"),
+        unique_event_id("t9d-publish-failed"),
+    ];
+    let domains = [
+        unique_domain("t9e-publish-ok"),
+        unique_domain("t9e-publish-failed"),
+    ];
+    for (event_id, domain) in event_ids.iter().zip(&domains) {
+        let entry = make_entry(event_id);
+        let env = make_test_env(domain, "lost.lease");
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+    let (success_publisher, success_calls) = RecordingPublisher::always_ok();
+    let success_relay = make_pg_outbox_for_domain(&store, &domains[0], success_publisher);
+    let published_claim = claim_entry_for_relay(&success_relay, &event_ids[0]).await?;
+
+    let (failed_publisher, failed_calls) = RecordingPublisher::always_transient();
+    let failed_relay = make_pg_outbox_for_domain(&store, &domains[1], failed_publisher);
+    let failed_claim = claim_entry_for_relay(&failed_relay, &event_ids[1]).await?;
+    sqlx::query("UPDATE outbox SET lease_token = gen_random_uuid() WHERE event_id = ANY($1)")
+        .bind(event_ids.to_vec())
+        .execute(&store.pool)
+        .await?;
+
+    let Err(success_error) = success_relay.relay(published_claim).await else {
+        return Err("lost lease must be rejected before publish".into());
+    };
+    assert_eq!(success_error.kind(), EngineErrorKind::Transient);
+
+    let Err(failed_error) = failed_relay.relay(failed_claim).await else {
+        return Err("lost lease must be rejected before failed publish attempt".into());
+    };
+    assert_eq!(failed_error.kind(), EngineErrorKind::Transient);
+
+    #[allow(clippy::unwrap_used)]
+    {
+        assert_eq!(*success_calls.lock().unwrap(), 0);
+        assert_eq!(*failed_calls.lock().unwrap(), 0);
+    }
+    let states: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT event_id, status, retry_count FROM outbox \
+         WHERE event_id = ANY($1) ORDER BY event_id",
+    )
+    .bind(event_ids.to_vec())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(states.len(), 2);
+    assert!(states.iter().all(|(_, status, retry_count)| {
+        status == crate::outbox::STATUS_PUBLISHING && *retry_count == 0
+    }));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_fingerprint_allows_real_claim_settle_and_redrive() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
@@ -9259,7 +9945,7 @@ async fn generated_fingerprint_allows_real_relay_acquire_settle_and_redrive() ->
             .run_global_transaction::<_, _, sqlx::Error>(|cap| {
                 Box::pin(async move {
                     let _outcome =
-                        append_outbox(cap, &entry, &make_test_env("generated-permission", "event"))
+                        append_outbox(cap, &entry, &make_test_env("generated_permission", "event"))
                             .await
                             .map_err(test_append_error)?;
                     Ok(())
@@ -9268,21 +9954,36 @@ async fn generated_fingerprint_allows_real_relay_acquire_settle_and_redrive() ->
             .await?;
     }
 
-    let settled_lease = crate::outbox::acquire_lease(&store.pool, &settled_id)
-        .await?
-        .ok_or("relay acquire must update a generated-fingerprint row")?;
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        "generated_permission",
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let claims = outbox.claim_batch(10).await?;
+    let mut settled_claim = None;
+    let mut dlx_claim = None;
+    for claim in claims {
+        if claim.idem_key().as_str() == settled_id {
+            settled_claim = Some(claim);
+        } else if claim.idem_key().as_str() == dlx_id {
+            dlx_claim = Some(claim);
+        }
+    }
+    let settled_claim = settled_claim.ok_or("missing generated-fingerprint settle claim")?;
     assert_eq!(
-        crate::outbox::settle_published(&store.pool, &settled_id, &settled_lease.1).await?,
+        crate::outbox::settle_published(&store.pool, &settled_claim).await?,
         SettleOutcome::Settled
     );
 
-    let dlx_lease = crate::outbox::acquire_lease(&store.pool, &dlx_id)
-        .await?
-        .ok_or("relay acquire before redrive must succeed")?;
+    let dlx_claim = dlx_claim.ok_or("missing generated-fingerprint dlx claim")?;
     let marked: Option<(String,)> =
-        sqlx::query_as("SELECT tenant_id FROM rss_outbox_mark_dlx($1, 1, $2::uuid)")
+        sqlx::query_as("SELECT tenant_id FROM rss_outbox_mark_dlx($1, $2::uuid, $3)")
             .bind(&dlx_id)
-            .bind(&dlx_lease.1)
+            .bind(dlx_claim.lease_token())
+            .bind(dlx_claim.lease_deadline_epoch_micros())
             .fetch_optional(&store.pool)
             .await?;
     assert!(
@@ -10036,7 +10737,7 @@ async fn t13_cotx_idempotent_reemit() -> TestResult {
 // T15: 专属 domain 无行 → BacklogSample::empty()（depth=0, age=0；domain-scoped，不依赖全表净起点）。
 // T16: pending 行计入 depth；published/dlx/publishing 行不计。
 // T17: oldest_age_seconds 来自 min(created_at)（最老 pending 行；允许小容差）。
-// T18: retry_after > now() 的行排除在 depth 之外（与 poll_pending pending 谓词同源）。
+// T18: retry_after > now() 的行排除在 depth 之外（与 claim_batch pending 谓词同源）。
 
 /// T15: 对一个无任何用例写入的专属 domain（`t15-domain`）采样 → 无 scoped sample。
 /// domain-scoped 断言：不依赖全表净起点，去掉 `setup_outbox` 全表 DELETE 后仍恒空（#1194）。
@@ -10045,7 +10746,14 @@ async fn t15_sample_backlog_empty_domain_returns_empty() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let outbox = make_pg_outbox(&store, || Ok(()));
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        "t15_domain",
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
     // 用 t15 专属 domain（无任何其它用例写入）→ domain-scoped 采样恒空，断言不依赖全表净起点（#1194）。
     let samples = outbox.sample_backlog("t15-domain").await?;
     let sample = summarize_backlog(&samples);
@@ -10088,7 +10796,14 @@ async fn t15b_sample_backlog_observed_scope_without_backlog_returns_zero() -> Te
         .await?;
     set_outbox_terminal_for_test(&store, &event_id, STATUS_PUBLISHED, 0).await?;
 
-    let outbox = make_pg_outbox(&store, || Ok(()));
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
     let samples = outbox.sample_backlog(&domain).await?;
 
     assert_eq!(
@@ -10106,39 +10821,148 @@ async fn t15b_sample_backlog_observed_scope_without_backlog_returns_zero() -> Te
     Ok(())
 }
 
-/// T15c: DB 中非法 contract_id 回读到 typed metric subject 时 fail-closed 为 Invariant。
 #[tokio::test(flavor = "multi_thread")]
-async fn t15c_poll_pending_rejects_invalid_persisted_contract_id() -> TestResult {
+async fn t15b_backlog_returns_exact_multi_tenant_contract_map() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+
+    let domain = unique_domain("t15b-scope-map");
+    let tenant_a = test_tenant();
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    for (tenant, contract_id, count) in [
+        (tenant_a, "metrics.alpha", 2_u8),
+        (tenant_a, "metrics.beta", 1_u8),
+        (tenant_b, "metrics.alpha", 3_u8),
+    ] {
+        for index in 0..count {
+            let event_id = unique_event_id(&format!("t15b-map-{contract_id}-{index}"));
+            let entry = make_entry(&event_id);
+            let env = make_test_env_for_tenant(&domain, contract_id, tenant);
+            store
+                .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                    Box::pin(async move {
+                        let _outcome = append_outbox(cap, &entry, &env)
+                            .await
+                            .map_err(test_append_error)?;
+                        Ok(())
+                    }) as BoxFuture<'_, Result<(), sqlx::Error>>
+                })
+                .await?;
+        }
+    }
+
+    let outbox = make_pg_outbox(&store, || Ok(()));
+    let actual: BTreeMap<(String, String), (u64, u64)> = outbox
+        .sample_backlog(&domain)
+        .await?
+        .into_iter()
+        .map(|sample| {
+            (
+                (
+                    sample.subject().tenant_id().to_string(),
+                    sample.subject().contract_id().as_str().to_string(),
+                ),
+                (sample.sample().depth(), sample.partition_blocked_depth()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual,
+        BTreeMap::from([
+            ((tenant_a.to_string(), "metrics.alpha".to_string()), (2, 0),),
+            ((tenant_a.to_string(), "metrics.beta".to_string()), (1, 0),),
+            ((tenant_b.to_string(), "metrics.alpha".to_string()), (3, 0),),
+        ]),
+        "backlog metrics must preserve the exact tenant/contract partition map"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// T15c: batch 中任一非法 contract_id 回读到 typed metric subject 时 fail-closed，并回滚整批 claim。
+#[tokio::test(flavor = "multi_thread")]
+async fn t15c_claim_batch_rolls_back_invalid_persisted_contract_id() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let domain = unique_domain("t15c-domain");
-    let event_id = unique_event_id("t15c-invalid-contract");
-    store
-        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
-            let entry = make_entry(&event_id);
-            let env = make_test_env(&domain, "metrics.valid");
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
-        .await?;
+    let good_event_id = unique_event_id("t15c-good-contract");
+    let bad_event_id = unique_event_id("t15c-invalid-contract");
+    for event_id in [&good_event_id, &bad_event_id] {
+        let entry = make_entry(event_id);
+        let env = make_test_env(&domain, "metrics.valid");
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
     sqlx::query("UPDATE outbox SET contract_id = 'Metrics.Invalid' WHERE event_id = $1")
-        .bind(&event_id)
+        .bind(&bad_event_id)
         .execute(&store.pool)
         .await?;
 
-    let outbox = make_pg_outbox(&store, || Ok(()));
-    let Err(err) = outbox.poll_pending(&domain, 10).await else {
-        return Err("poll_pending must reject invalid persisted contract_id".into());
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let Err(err) = outbox.claim_batch(10).await else {
+        return Err("claim_batch must reject invalid persisted contract_id".into());
     };
     assert_eq!(
         err.kind(),
         EngineErrorKind::Invariant,
         "invalid persisted contract_id should be an invariant failure"
+    );
+    let durable_states: Vec<(String, String, bool, bool)> = sqlx::query_as(
+        "SELECT event_id, status, lease_token IS NULL, lease_until IS NULL \
+         FROM outbox WHERE event_id = ANY($1) ORDER BY event_id",
+    )
+    .bind(vec![good_event_id.clone(), bad_event_id.clone()])
+    .fetch_all(&store.pool)
+    .await?;
+    let actual: BTreeMap<_, _> = durable_states
+        .into_iter()
+        .map(|(event_id, status, token_is_null, deadline_is_null)| {
+            (event_id, (status, token_is_null, deadline_is_null))
+        })
+        .collect();
+    let pending = (crate::outbox::STATUS_PENDING.to_string(), true, true);
+    assert_eq!(
+        actual,
+        BTreeMap::from([
+            (good_event_id.clone(), pending.clone()),
+            (bad_event_id.clone(), pending),
+        ]),
+        "one bad hydration must roll back both the valid and invalid row claims"
+    );
+
+    sqlx::query("UPDATE outbox SET contract_id = 'metrics.valid' WHERE event_id = $1")
+        .bind(&bad_event_id)
+        .execute(&store.pool)
+        .await?;
+    let mut reclaimed_ids: Vec<String> = outbox
+        .claim_batch(10)
+        .await?
+        .into_iter()
+        .map(|claim| claim.idem_key().as_str().to_string())
+        .collect();
+    reclaimed_ids.sort();
+    let mut expected_ids = vec![good_event_id, bad_event_id];
+    expected_ids.sort();
+    assert_eq!(
+        reclaimed_ids, expected_ids,
+        "after repairing the bad row, both rolled-back entries must remain claimable"
     );
 
     store.shutdown().await?;
@@ -10262,7 +11086,7 @@ async fn t17_sample_backlog_age_tracks_oldest_pending() -> TestResult {
     Ok(())
 }
 
-/// T18: retry_after > now() 的行**不**计入 depth（与 poll_pending pending 谓词同源）。
+/// T18: retry_after > now() 的行**不**计入 depth（与 claim_batch pending 谓词同源）。
 #[tokio::test(flavor = "multi_thread")]
 async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -10323,8 +11147,8 @@ async fn t18_sample_backlog_excludes_future_retry_after() -> TestResult {
     Ok(())
 }
 
-/// T19: **stale** publishing（lease 过期、poll_pending 会重捞）计入 depth + oldest-age；**非-stale**
-/// publishing（lease 仍有效）排除。锁定 sample_backlog 与 poll_pending 可投递集合同源（#1209 review F1）。
+/// T19: **stale** publishing（lease 过期、claim_batch 会重捞）计入 depth + oldest-age；**非-stale**
+/// publishing（lease 仍有效）排除。锁定 sample_backlog 与 claim_batch 可投递集合同源（#1209 review F1）。
 #[tokio::test(flavor = "multi_thread")]
 async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -10335,7 +11159,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
     let domain = domain.as_str();
     let lease_ttl = crate::outbox::LEASE_TTL_SECONDS;
 
-    // seed 两行 publishing：stale（updated_at 回拨 LEASE_TTL+10s）+ fresh（updated_at≈now()）。
+    // seed 两行 publishing：stale（lease_until 已过期）+ fresh（lease_until 在将来）。
     for (prefix, stale) in [("t19-stale", true), ("t19-fresh", false)] {
         let eid = unique_event_id(prefix);
         let entry = make_entry(&eid);
@@ -10353,7 +11177,9 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
             .await?;
         if stale {
             sqlx::query(
-                "UPDATE outbox SET status='publishing', created_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+                "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+                 created_at=now()-make_interval(secs => $1), updated_at=now()-make_interval(secs => $1), \
+                 lease_until=now()-interval '10 seconds' WHERE event_id = $2",
             )
             .bind(lease_ttl + 10)
             .bind(&eid)
@@ -10361,7 +11187,8 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
             .await?;
         } else {
             sqlx::query(
-                "UPDATE outbox SET status='publishing', updated_at = now() WHERE event_id = $1",
+                "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+                 updated_at=now(), lease_until=now()+interval '60 seconds' WHERE event_id = $1",
             )
             .bind(&eid)
             .execute(&store.pool)
@@ -10397,7 +11224,7 @@ async fn t19_sample_backlog_counts_stale_publishing() -> TestResult {
 // t26: 跨 partition 不互阻 + NULL-partition 无序并行路径不变
 // t27: dlx 队头阻塞 partition，re-drive 后恢复
 // t28: crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）
-// t29: sample_backlog 计入 gated 后继（backlog poll-only by design）
+// t29: sample_backlog 计入 gated 后继（backlog claim-only by design）
 
 use crate::outbox::{LEASE_TTL_SECONDS, STATUS_DLX, STATUS_PENDING};
 
@@ -10484,7 +11311,7 @@ async fn t24_seq_monotonic_and_app_cannot_forge() -> TestResult {
     Ok(())
 }
 
-/// t25：同 (domain, 'p1') partition → `poll_pending` 仅返队头；relay → published → poll → 后继。
+/// t25：同 (domain, 'p1') partition → `claim_batch` 仅返队头；relay → published → claim → 后继。
 ///
 /// 反真空：S2/S3 在 H 未 published 前缺席（head-of-partition gating 生效）。
 /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
@@ -10522,15 +11349,15 @@ async fn t25_partition_serial_in_order() -> TestResult {
     }
 
     let (pub_ok, _) = RecordingPublisher::always_ok();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_ok);
+    let outbox = make_pg_outbox_for_domain(&store, &domain, pub_ok);
 
-    // poll → 仅 H（S2/S3 被 gate）。
-    let entries = outbox.poll_pending(&domain, 10).await?;
-    assert_eq!(entries.len(), 1, "t25: 首轮 poll 应仅返队头 H");
+    // claim → 仅 H（S2/S3 被 gate）。
+    let entries = outbox.claim_batch(10).await?;
+    assert_eq!(entries.len(), 1, "t25: 首轮 claim 应仅返队头 H");
     assert_eq!(
         entries[0].idem_key().as_str(),
         h_id,
-        "t25: 首轮 poll 必须是 H"
+        "t25: 首轮 claim 必须是 H"
     );
     // 反真空：S2/S3 确实缺席。
     assert!(
@@ -10544,16 +11371,16 @@ async fn t25_partition_serial_in_order() -> TestResult {
 
     // relay H → published。
     let h_entry = entries.into_iter().next().unwrap();
-    let disp = outbox.relay(&h_entry).await?;
+    let disp = outbox.relay(h_entry).await?;
     assert_eq!(disp, Disposition::Ack, "t25: relay H 应返 Ack");
 
-    // poll → S2（H 已 published，S2 现在是队头）。
-    let entries2 = outbox.poll_pending(&domain, 10).await?;
-    assert_eq!(entries2.len(), 1, "t25: 第二轮 poll 应仅返 S2");
+    // claim → S2（H 已 published，S2 现在是队头）。
+    let entries2 = outbox.claim_batch(10).await?;
+    assert_eq!(entries2.len(), 1, "t25: 第二轮 claim 应仅返 S2");
     assert_eq!(
         entries2[0].idem_key().as_str(),
         s2_id,
-        "t25: 第二轮 poll 必须是 S2"
+        "t25: 第二轮 claim 必须是 S2"
     );
     // 反真空：S3 第二轮仍被 gate（与首轮 S3 缺席对称）。
     assert!(
@@ -10563,15 +11390,15 @@ async fn t25_partition_serial_in_order() -> TestResult {
 
     // relay S2 → published。
     let s2_entry = entries2.into_iter().next().unwrap();
-    outbox.relay(&s2_entry).await?;
+    outbox.relay(s2_entry).await?;
 
-    // poll → S3。
-    let entries3 = outbox.poll_pending(&domain, 10).await?;
-    assert_eq!(entries3.len(), 1, "t25: 第三轮 poll 应仅返 S3");
+    // claim → S3。
+    let entries3 = outbox.claim_batch(10).await?;
+    assert_eq!(entries3.len(), 1, "t25: 第三轮 claim 应仅返 S3");
     assert_eq!(
         entries3[0].idem_key().as_str(),
         s3_id,
-        "t25: 第三轮 poll 必须是 S3"
+        "t25: 第三轮 claim 必须是 S3"
     );
 
     store.shutdown().await?;
@@ -10580,7 +11407,7 @@ async fn t25_partition_serial_in_order() -> TestResult {
 
 /// t26：跨 partition 不互阻 + NULL-partition 无序并行路径不变。
 ///
-/// 同 domain 下：p1-head + p2-head + 2 个 NULL-partition 行 → 一轮 poll 返 4 行。
+/// 同 domain 下：p1-head + p2-head + 2 个 NULL-partition 行 → 一轮 claim 返 4 行。
 /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -10651,8 +11478,15 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
             .await?;
     }
 
-    let outbox = make_pg_outbox(&store, || Ok(()));
-    let entries = outbox.poll_pending(&domain, 10).await?;
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let entries = outbox.claim_batch(10).await?;
     assert_eq!(
         entries.len(),
         4,
@@ -10669,7 +11503,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
     ] {
         assert!(
             ids_in.contains(&expected),
-            "t26: {expected} 应在 poll 结果中"
+            "t26: {expected} 应在 claim 结果中"
         );
     }
 
@@ -10679,8 +11513,8 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
 
 /// t27：dlx 队头阻塞 partition，re-drive 后恢复。
 ///
-/// append H, S2 同 partition；强制 H→dlx；poll 该 partition 空；
-/// re-drive H → relay → published → poll → S2。
+/// append H, S2 同 partition；强制 H→dlx；claim 该 partition 空；
+/// re-drive H → relay → published → claim → S2。
 /// 反真空：NULL-partition dlx 行不阻塞任何东西。
 /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
@@ -10719,9 +11553,16 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     // 强制 H → dlx（直接 UPDATE status）。
     set_outbox_terminal_for_test(&store, &h_id, STATUS_DLX, 0).await?;
 
-    // poll → 该 partition 空（H 在 dlx，S2 被 gate）。
-    let outbox = make_pg_outbox(&store, || Ok(()));
-    let blocked = outbox.poll_pending(&domain, 10).await?;
+    // claim → 该 partition 空（H 在 dlx，S2 被 gate）。
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let blocked = outbox.claim_batch(10).await?;
     assert!(
         blocked.is_empty(),
         "t27: dlx 队头必须完全阻塞 partition（blocked={blocked:?}）"
@@ -10747,7 +11588,7 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     }
     set_outbox_terminal_for_test(&store, &null_dlx_id, STATUS_DLX, 0).await?;
 
-    let after_null_dlx = outbox.poll_pending(&domain, 10).await?;
+    let after_null_dlx = outbox.claim_batch(10).await?;
     assert!(
         after_null_dlx
             .iter()
@@ -10767,16 +11608,16 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     assert_eq!(redrive, DlqRedriveOutcome::Redriven);
 
     // relay H → published。
-    let redriven = outbox.poll_pending(&domain, 10).await?;
+    let redriven = outbox.claim_batch(10).await?;
     let h_entry = redriven
-        .iter()
+        .into_iter()
         .find(|e| e.idem_key().as_str() == h_id)
-        .expect("t27: re-drive 后 H 应出现在 poll 结果中");
+        .expect("t27: re-drive 后 H 应出现在 claim 结果中");
     let disp = outbox.relay(h_entry).await?;
     assert_eq!(disp, Disposition::Ack, "t27: relay H 应返 Ack");
 
-    // poll → S2 现在可见。
-    let unblocked = outbox.poll_pending(&domain, 10).await?;
+    // claim → S2 现在可见。
+    let unblocked = outbox.claim_batch(10).await?;
     assert!(
         unblocked.iter().any(|e| e.idem_key().as_str() == s2_id),
         "t27: H published 后 S2 应解除阻塞"
@@ -10830,15 +11671,22 @@ async fn t27b_outbox_cross_tenant_partition_dlx_does_not_block() -> TestResult {
 
     set_outbox_terminal_for_test(&store, &a_head, STATUS_DLX, 0).await?;
 
-    let outbox = make_pg_outbox(&store, || Ok(()));
-    let polled = outbox.poll_pending(&domain, 10).await?;
-    let ids: Vec<&str> = polled
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+    let claimed = outbox.claim_batch(10).await?;
+    let ids: Vec<&str> = claimed
         .iter()
         .map(|entry| entry.idem_key().as_str())
         .collect();
     assert!(
         ids.contains(&b_head.as_str()),
-        "tenant B same partition key must remain pollable; got {ids:?}"
+        "tenant B same partition key must remain claimable; got {ids:?}"
     );
     assert!(
         !ids.contains(&a_tail.as_str()),
@@ -10943,7 +11791,10 @@ async fn migration_0055_backfills_legacy_mutable_outbox_with_rust_parity() -> Te
              schema_hash text NOT NULL, payload bytea NOT NULL, metadata jsonb NOT NULL, \
              causation_id text NULL \
          ); \
-         CREATE TABLE reconcile_targets (target_id uuid PRIMARY KEY DEFAULT gen_random_uuid())",
+         CREATE TABLE reconcile_targets ( \
+             target_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), \
+             status text NOT NULL DEFAULT 'active' \
+         )",
     )
     .execute(&store.pool)
     .await?;
@@ -11199,6 +12050,11 @@ async fn outbox_terminal_timestamp_checks_reject_invalid_state_combinations() ->
             r#"
             UPDATE outbox
             SET status = $1,
+                lease_token = CASE WHEN $1 = 'publishing' THEN gen_random_uuid() ELSE NULL END,
+                lease_until = CASE
+                    WHEN $1 = 'publishing' THEN now() + interval '60 seconds'
+                    ELSE NULL
+                END,
                 published_at = CASE WHEN $2 THEN now() ELSE NULL END,
                 dlx_at = CASE WHEN $3 THEN now() ELSE NULL END
             WHERE event_id = $4
@@ -11266,17 +12122,21 @@ async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestRe
         FROM pg_proc p
         JOIN pg_roles owner ON owner.oid = p.proowner
         WHERE p.oid IN (
-            'rss_outbox_settle_published(text, uuid)'::regprocedure,
-            'rss_outbox_mark_dlx(text, integer, uuid)'::regprocedure,
+            'rss_outbox_claim_batch(text, bigint)'::regprocedure,
+            'rss_outbox_lease_can_publish(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_settle_published(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_settle_retry(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_mark_dlx(text, uuid, bigint)'::regprocedure,
             'rss_outbox_redrive(text, uuid)'::regprocedure,
-            'rss_sweep_outbox_published(bigint)'::regprocedure
+            'rss_sweep_outbox_published(bigint)'::regprocedure,
+            'rss_outbox_sample_backlog(text)'::regprocedure
         )
         ORDER BY p.oid::regprocedure::text
         "#,
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(functions.len(), 4);
+    assert_eq!(functions.len(), 8);
     for (signature, owner, owner_can_login, security_definer, fixed_path, no_public, app_exec) in
         functions
     {
@@ -11395,6 +12255,281 @@ async fn create_rss_app_role_for_migration_test(store: &PgStore) -> TestResult {
     )
     .execute(&store.pool)
     .await?;
+    Ok(())
+}
+
+fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
+    let all = sqlx::migrate!("./migrations");
+    sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            all.iter()
+                .filter(|migration| migration.version <= max_version)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    }
+}
+
+/// 0057 必须能由 SQLx 的真实迁移账本从 0056 升级，且保留/回填所有既有状态。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0057_upgrades_real_through_0056_database() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(56).run(&store.pool).await?;
+
+    let fixtures = [
+        (unique_event_id("0057-pending"), "pending"),
+        (unique_event_id("0057-publishing"), "publishing"),
+        (unique_event_id("0057-published"), "published"),
+        (unique_event_id("0057-dlx"), "dlx"),
+    ];
+    for (event_id, _) in &fixtures {
+        let entry = make_entry(event_id);
+        let env = make_test_env("migration_0057_upgrade", "migration.outbox");
+        store
+            .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            })
+            .await?;
+    }
+
+    for (ordinal, (event_id, status)) in fixtures.iter().enumerate() {
+        sqlx::query(
+            r#"
+            UPDATE outbox
+            SET status = $1,
+                retry_count = $2,
+                lease_token = gen_random_uuid(),
+                retry_after = CASE WHEN $1 = 'pending'
+                                   THEN TIMESTAMPTZ '2024-02-01 00:00:00+00'
+                                   ELSE NULL END,
+                published_at = CASE WHEN $1 = 'published'
+                                    THEN TIMESTAMPTZ '2024-01-03 00:00:00+00'
+                                    ELSE NULL END,
+                dlx_at = CASE WHEN $1 = 'dlx'
+                              THEN TIMESTAMPTZ '2024-01-04 00:00:00+00'
+                              ELSE NULL END,
+                updated_at = TIMESTAMPTZ '2024-01-01 00:00:00+00'
+                             + $2 * INTERVAL '1 hour'
+            WHERE event_id = $3
+            "#,
+        )
+        .bind(status)
+        .bind(i32::try_from(ordinal)?)
+        .bind(event_id)
+        .execute(&store.pool)
+        .await?;
+    }
+
+    sqlx::migrate!("./migrations").run(&store.pool).await?;
+
+    type UpgradeState = (String, String, i32, bool, bool, Option<i64>, bool, bool);
+    let states: BTreeMap<String, UpgradeState> = sqlx::query_as::<_, UpgradeState>(
+        r#"
+        SELECT event_id,
+               status,
+               retry_count,
+               lease_token IS NULL,
+               lease_until IS NULL,
+               EXTRACT(EPOCH FROM (lease_until - updated_at))::bigint,
+               published_at IS NOT DISTINCT FROM TIMESTAMPTZ '2024-01-03 00:00:00+00',
+               dlx_at IS NOT DISTINCT FROM TIMESTAMPTZ '2024-01-04 00:00:00+00'
+        FROM outbox
+        WHERE event_id = ANY($1)
+        "#,
+    )
+    .bind(
+        fixtures
+            .iter()
+            .map(|(event_id, _)| event_id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&store.pool)
+    .await?
+    .into_iter()
+    .map(|row| (row.0.clone(), row))
+    .collect();
+    assert_eq!(states.len(), 4);
+    for (event_id, status) in &fixtures {
+        let row = states.get(event_id).ok_or("missing upgraded fixture")?;
+        assert_eq!(row.1.as_str(), *status);
+        if *status == "publishing" {
+            assert!(!row.3, "publishing token must survive the upgrade");
+            assert!(!row.4, "publishing deadline must be backfilled");
+            assert_eq!(row.5, Some(60));
+        } else {
+            assert!(row.3 && row.4, "non-publishing leases must be cleared");
+        }
+        assert_eq!(row.6, *status == "published");
+        assert_eq!(row.7, *status == "dlx");
+    }
+
+    for (sql, constraint) in [
+        (
+            "UPDATE outbox SET retry_count = -1 WHERE event_id = $1",
+            "outbox_retry_count_nonnegative",
+        ),
+        (
+            "UPDATE outbox SET lease_token = gen_random_uuid() WHERE event_id = $1",
+            "outbox_lease_token_matches_status",
+        ),
+    ] {
+        let result = sqlx::query(sql)
+            .bind(&fixtures[0].0)
+            .execute(&store.pool)
+            .await;
+        let Err(error) = result else {
+            return Err(format!("0057 constraint {constraint} must reject invalid state").into());
+        };
+        assert!(
+            error.to_string().contains(constraint),
+            "unexpected 0057 constraint error: {error}"
+        );
+    }
+
+    type UpgradedSettleFunction = (String, String, String, bool, bool, bool, bool, bool);
+    let settle_definitions: Vec<UpgradedSettleFunction> = sqlx::query_as(
+        r#"
+        SELECT p.oid::regprocedure::text,
+               pg_get_functiondef(p.oid),
+               owner.rolname,
+               owner.rolcanlogin,
+               p.prosecdef,
+               COALESCE('search_path=public, pg_temp' = ANY(p.proconfig), false),
+               NOT EXISTS (
+                   SELECT 1
+                   FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                   WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+               ),
+               has_function_privilege('rss_app', p.oid, 'EXECUTE')
+        FROM pg_proc AS p
+        JOIN pg_roles AS owner ON owner.oid = p.proowner
+        WHERE p.oid IN (
+            'rss_outbox_settle_published(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_settle_retry(text, uuid, bigint)'::regprocedure,
+            'rss_outbox_mark_dlx(text, uuid, bigint)'::regprocedure
+        )
+        ORDER BY p.oid::regprocedure::text
+        "#,
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(settle_definitions.len(), 3);
+    for (
+        signature,
+        definition,
+        owner,
+        owner_can_login,
+        security_definer,
+        fixed_path,
+        no_public,
+        app_execute,
+    ) in settle_definitions
+    {
+        assert!(
+            definition.to_ascii_lowercase().contains("for update"),
+            "upgraded settle function must lock before taking its clock: {signature}"
+        );
+        assert_eq!(owner, "rss_outbox_maintenance", "owner drift: {signature}");
+        assert!(!owner_can_login, "owner must remain NOLOGIN: {signature}");
+        assert!(security_definer, "SECURITY DEFINER drift: {signature}");
+        assert!(fixed_path, "fixed search_path drift: {signature}");
+        assert!(no_public, "PUBLIC execute must be revoked: {signature}");
+        assert!(app_execute, "rss_app execute grant missing: {signature}");
+    }
+
+    type UpgradedPreflightFunction = (String, String, bool, bool, bool, bool, bool);
+    let preflight: UpgradedPreflightFunction = sqlx::query_as(
+        r#"
+        SELECT pg_get_functiondef(p.oid),
+               owner.rolname,
+               owner.rolcanlogin,
+               p.prosecdef,
+               COALESCE('search_path=public, pg_temp' = ANY(p.proconfig), false),
+               NOT EXISTS (
+                   SELECT 1
+                   FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                   WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+               ),
+               has_function_privilege('rss_app', p.oid, 'EXECUTE')
+        FROM pg_proc AS p
+        JOIN pg_roles AS owner ON owner.oid = p.proowner
+        WHERE p.oid = 'rss_outbox_lease_can_publish(text, uuid, bigint)'::regprocedure
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        preflight.0.contains("interval '50 seconds'"),
+        "upgraded publish preflight must reserve the authoritative lease budget"
+    );
+    assert_eq!(preflight.1, "rss_outbox_maintenance");
+    assert!(!preflight.2, "preflight owner must remain NOLOGIN");
+    assert!(preflight.3, "preflight must remain SECURITY DEFINER");
+    assert!(preflight.4, "preflight fixed search_path drift");
+    assert!(preflight.5, "preflight PUBLIC execute must be revoked");
+    assert!(preflight.6, "preflight rss_app execute grant missing");
+
+    let legacy_overloads: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM (VALUES
+            ('rss_outbox_settle_published(text,uuid)'),
+            ('rss_outbox_settle_retry(text,integer,bigint,uuid)'),
+            ('rss_outbox_mark_dlx(text,integer,uuid)')
+        ) AS legacy(signature)
+        WHERE to_regprocedure(signature) IS NOT NULL
+        "#,
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(legacy_overloads, 0, "0057 must remove legacy overloads");
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// 0057 的 fail-fast 前置条件也必须由真实 SQLx 升级路径验证，而非只匹配迁移文本。
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0057_rejects_0056_publishing_row_without_token() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    migrations_through(56).run(&store.pool).await?;
+
+    let event_id = unique_event_id("0057-missing-token");
+    let entry = make_entry(&event_id);
+    let env = make_test_env("migration_0057_reject", "migration.outbox");
+    store
+        .run_global_transaction::<_, _, sqlx::Error>(|cap| {
+            Box::pin(async move {
+                let _outcome = append_outbox(cap, &entry, &env)
+                    .await
+                    .map_err(test_append_error)?;
+                Ok(())
+            }) as BoxFuture<'_, Result<(), sqlx::Error>>
+        })
+        .await?;
+    sqlx::query("UPDATE outbox SET status = 'publishing', lease_token = NULL WHERE event_id = $1")
+        .bind(&event_id)
+        .execute(&store.pool)
+        .await?;
+
+    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
+    let Err(error) = result else {
+        return Err("0057 must reject publishing rows without a lease token".into());
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("publishing outbox rows must have lease_token"),
+        "unexpected 0057 fail-fast error: {error}"
+    );
+
+    store.shutdown().await?;
     Ok(())
 }
 
@@ -11703,20 +12838,34 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         .execute(&mut *tx)
         .await?;
     crate::cotx::set_local_tenant(&mut tx, test_tenant()).await?;
-    let direct_update = sqlx::query("UPDATE outbox SET status = 'published' WHERE event_id = $1")
+    let direct_update = sqlx::query("UPDATE outbox SET retry_count = -1 WHERE event_id = $1")
         .bind(&event_id)
         .execute(&mut *tx)
         .await;
     assert!(
         direct_update.is_err(),
-        "rss_app must not directly mutate outbox relay state"
+        "rss_app must not directly forge retry_count"
     );
     tx.rollback().await?;
 
+    let invalid_retry_count = sqlx::query("UPDATE outbox SET retry_count = -1 WHERE event_id = $1")
+        .bind(&event_id)
+        .execute(&store.pool)
+        .await;
+    let Err(invalid_retry_count_error) = invalid_retry_count else {
+        return Err("negative retry_count must fail the table CHECK".into());
+    };
+    assert!(
+        invalid_retry_count_error
+            .to_string()
+            .contains("outbox_retry_count_nonnegative"),
+        "unexpected retry_count CHECK error: {invalid_retry_count_error}"
+    );
+
     for (limit_sql, expected) in [
-        ("NULL::bigint", "poll limit must be non-null"),
-        ("0", "poll limit must be in range"),
-        ("10001", "poll limit must be in range"),
+        ("NULL::bigint", "limit must be non-null"),
+        ("0", "limit must be in range"),
+        ("10001", "limit must be in range"),
     ] {
         let mut tx = store.pool.begin().await?;
         sqlx::query("SET LOCAL ROLE rss_app")
@@ -11724,19 +12873,102 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
             .await?;
         crate::cotx::set_local_tenant(&mut tx, test_tenant()).await?;
         let result = sqlx::query(&format!(
-            "SELECT * FROM rss_outbox_poll_pending('outbox-perm', {limit_sql})"
+            "SELECT * FROM rss_outbox_claim_batch('outbox-perm', {limit_sql})"
         ))
         .execute(&mut *tx)
         .await;
         let Err(err) = result else {
-            return Err("rss_app poll_pending must reject invalid limits".into());
+            return Err("rss_app claim_batch must reject invalid limits".into());
         };
         assert!(
             err.to_string().contains(expected),
-            "unexpected poll_pending limit error for {limit_sql}: {err}"
+            "unexpected claim_batch limit error for {limit_sql}: {err}"
         );
         tx.rollback().await?;
     }
+
+    let mut claim_tx = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *claim_tx)
+        .await?;
+    crate::cotx::set_local_tenant(&mut claim_tx, test_tenant()).await?;
+    let lease: (String, i64) = sqlx::query_as(
+        "SELECT lease_token, deadline_epoch_micros \
+         FROM rss_outbox_claim_batch('outbox-perm', 1) WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&mut *claim_tx)
+    .await?;
+    claim_tx.commit().await?;
+
+    let settle_retry_as_app = |lease_token: String, lease_deadline: i64| {
+        let pool = store.pool.clone();
+        let event_id = event_id.clone();
+        async move {
+            let mut tx = pool.begin().await?;
+            sqlx::query("SET LOCAL ROLE rss_app")
+                .execute(&mut *tx)
+                .await?;
+            crate::cotx::set_local_tenant(&mut tx, test_tenant()).await?;
+            let changed =
+                sqlx::query_scalar::<_, i64>("SELECT rss_outbox_settle_retry($1, $2::uuid, $3)")
+                    .bind(&event_id)
+                    .bind(lease_token)
+                    .bind(lease_deadline)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            tx.commit().await?;
+            Ok::<i64, sqlx::Error>(changed)
+        }
+    };
+    assert_eq!(settle_retry_as_app(lease.0, lease.1).await?, 1);
+    let retry_state: (String, i32, i64, bool, bool) = sqlx::query_as(
+        "SELECT status, retry_count, EXTRACT(EPOCH FROM (retry_after - updated_at))::bigint, \
+                lease_token IS NULL, lease_until IS NULL \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        retry_state,
+        (crate::outbox::STATUS_PENDING.to_string(), 1, 1, true, true),
+        "first retry must derive an exact one-second backoff from persisted retry_count=0"
+    );
+
+    sqlx::query(
+        "UPDATE outbox SET retry_count = 9, retry_after = clock_timestamp() - interval '1 second' \
+         WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .execute(&store.pool)
+    .await?;
+    let mut high_claim_tx = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *high_claim_tx)
+        .await?;
+    crate::cotx::set_local_tenant(&mut high_claim_tx, test_tenant()).await?;
+    let high_lease: (String, i64) = sqlx::query_as(
+        "SELECT lease_token, deadline_epoch_micros \
+         FROM rss_outbox_claim_batch('outbox-perm', 1) WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&mut *high_claim_tx)
+    .await?;
+    high_claim_tx.commit().await?;
+    assert_eq!(settle_retry_as_app(high_lease.0, high_lease.1).await?, 1);
+    let high_retry_state: (i32, i64) = sqlx::query_as(
+        "SELECT retry_count, EXTRACT(EPOCH FROM (retry_after - updated_at))::bigint \
+         FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        high_retry_state,
+        (10, 512),
+        "retry must derive exponential backoff from the database row, not caller input"
+    );
 
     set_outbox_terminal_for_test(&store, &event_id, STATUS_PUBLISHED, 0).await?;
     for (invalid_retain, label) in [(Some(0_i64), "0"), (Some(-1_i64), "-1"), (None, "NULL")] {
@@ -11762,12 +12994,13 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
         assert_eq!(remains, 1, "invalid retention {label} must not delete rows");
     }
 
-    let can_execute: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    let can_execute: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
-        SELECT has_function_privilege('rss_app', 'rss_outbox_poll_pending(text, bigint)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_outbox_acquire_lease(text)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid)', 'EXECUTE'),
-               has_function_privilege('rss_app', 'rss_outbox_mark_dlx(text, int, uuid)', 'EXECUTE'),
+        SELECT has_function_privilege('rss_app', 'rss_outbox_claim_batch(text, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_lease_can_publish(text, uuid, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_settle_published(text, uuid, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_settle_retry(text, uuid, bigint)', 'EXECUTE'),
+               has_function_privilege('rss_app', 'rss_outbox_mark_dlx(text, uuid, bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_redrive(text, uuid)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_sweep_outbox_published(bigint)', 'EXECUTE'),
                has_function_privilege('rss_app', 'rss_outbox_sample_backlog(text)', 'EXECUTE')
@@ -11777,8 +13010,31 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
     .await?;
     assert_eq!(
         can_execute,
-        (true, true, true, true, true, true, true),
+        (true, true, true, true, true, true, true, true),
         "rss_app should only receive the fixed outbox function surface"
+    );
+    let legacy_present: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT signature
+        FROM (VALUES
+            ('rss_outbox_poll_pending(text,bigint)'),
+            ('rss_outbox_acquire_lease(text)'),
+            ('rss_outbox_settle_published(text,uuid)'),
+            ('rss_outbox_settle_retry(text,integer,bigint,uuid)'),
+            ('rss_outbox_settle_retry(text,integer,bigint,uuid,bigint)'),
+            ('rss_outbox_settle_retry(text,bigint,uuid,bigint)'),
+            ('rss_outbox_mark_dlx(text,integer,uuid)'),
+            ('rss_outbox_mark_dlx(text,integer,uuid,bigint)')
+        ) AS legacy(signature)
+        WHERE to_regprocedure(signature) IS NOT NULL
+        ORDER BY signature
+        "#,
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert!(
+        legacy_present.is_empty(),
+        "legacy relay overloads must be absent: {legacy_present:?}"
     );
 
     store.shutdown().await?;
@@ -11788,7 +13044,7 @@ async fn outbox_rss_app_uses_fixed_functions_not_direct_global_dml() -> TestResu
 /// t28：crash recovery 保持 partition 顺序（stale publishing 头 gate 后继）。
 ///
 /// append H, S2 同 partition；置 H status='publishing', updated_at 很久之前（模拟崩溃）；
-/// poll → 仅 H（stale publishing 被重捞，S2 被 gate）；relay H→published → poll → S2。
+/// claim → 仅 H（stale publishing 被重捞，S2 被 gate）；relay H→published → claim → S2。
 /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -11822,9 +13078,11 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
             .await?;
     }
 
-    // 模拟 H 崩溃：status=publishing, updated_at 回拨超 LEASE_TTL。
+    // 模拟 H 崩溃：status=publishing, lease_until 已过期。
     sqlx::query(
-        "UPDATE outbox SET status='publishing', updated_at = now() - make_interval(secs => $1) WHERE event_id = $2",
+        "UPDATE outbox SET status='publishing', lease_token=gen_random_uuid(), \
+         updated_at=now()-make_interval(secs => $1), lease_until=now()-interval '10 seconds' \
+         WHERE event_id = $2",
     )
     .bind(LEASE_TTL_SECONDS + 10)
     .bind(&h_id)
@@ -11832,10 +13090,10 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
     .await?;
 
     let (pub_ok, _) = RecordingPublisher::always_ok();
-    let outbox = make_pg_outbox_with_publisher(&store, pub_ok);
+    let outbox = make_pg_outbox_for_domain(&store, &domain, pub_ok);
 
-    // poll → 仅 H（stale publishing 可捞，S2 被 gate）。
-    let entries = outbox.poll_pending(&domain, 10).await?;
+    // claim → 仅 H（stale publishing 可捞，S2 被 gate）。
+    let entries = outbox.claim_batch(10).await?;
     assert_eq!(entries.len(), 1, "t28: crash recovery 仅应返回 H");
     assert_eq!(entries[0].idem_key().as_str(), h_id, "t28: 返回的必须是 H");
     assert!(
@@ -11845,26 +13103,26 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
 
     // relay H → published。
     let h_entry = entries.into_iter().next().unwrap();
-    let disp = outbox.relay(&h_entry).await?;
+    let disp = outbox.relay(h_entry).await?;
     assert_eq!(disp, Disposition::Ack, "t28: relay H 应返 Ack");
 
-    // poll → S2（H published 后解锁）。
-    let entries2 = outbox.poll_pending(&domain, 10).await?;
-    assert_eq!(entries2.len(), 1, "t28: 第二轮 poll 应仅返 S2");
+    // claim → S2（H published 后解锁）。
+    let entries2 = outbox.claim_batch(10).await?;
+    assert_eq!(entries2.len(), 1, "t28: 第二轮 claim 应仅返 S2");
     assert_eq!(
         entries2[0].idem_key().as_str(),
         s2_id,
-        "t28: 第二轮 poll 必须是 S2"
+        "t28: 第二轮 claim 必须是 S2"
     );
 
     store.shutdown().await?;
     Ok(())
 }
 
-/// t29：sample_backlog 计入 gated 后继（backlog poll-only by design）。
+/// t29：sample_backlog 计入 gated 后继（backlog claim-only by design）。
 ///
 /// H + 3 后继同 partition → `sample_backlog.depth()==4`（gate 不减 depth）；
-/// `poll_pending` 返 1（仅队头）。
+/// `claim_batch` 返 1（仅队头）。
 /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
@@ -11899,7 +13157,14 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
             .await?;
     }
 
-    let outbox = make_pg_outbox(&store, || Ok(()));
+    let outbox = make_pg_outbox_for_domain(
+        &store,
+        &domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
 
     // sample_backlog depth = 4（全部计入，gate 不减少 backlog 深度）。
     let samples = outbox.sample_backlog(&domain).await?;
@@ -11927,17 +13192,17 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         sample.oldest_age_seconds()
     );
 
-    // poll_pending 仅返 1（队头）——反真空：gate 确实生效。
-    let polled = outbox.poll_pending(&domain, 10).await?;
+    // claim_batch 仅返 1（队头）——反真空：gate 确实生效。
+    let claimed = outbox.claim_batch(10).await?;
     assert_eq!(
-        polled.len(),
+        claimed.len(),
         1,
-        "t29: poll_pending 应仅返队头（1 行），gate 生效"
+        "t29: claim_batch 应仅返队头（1 行），gate 生效"
     );
     assert_eq!(
-        polled[0].idem_key().as_str(),
+        claimed[0].idem_key().as_str(),
         ids[0],
-        "t29: poll_pending 返回的必须是 H（最小 seq 的队头）"
+        "t29: claim_batch 返回的必须是 H（最小 seq 的队头）"
     );
 
     let dlx_domain = unique_domain("t29-dlx");
@@ -11962,6 +13227,15 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     }
     set_outbox_terminal_for_test(&store, &dlx_ids[0], STATUS_DLX, 0).await?;
 
+    let dlx_outbox = make_pg_outbox_for_domain(
+        &store,
+        &dlx_domain,
+        RecordingPublisher {
+            result: || Ok(()),
+            calls: Arc::new(Mutex::new(0)),
+        },
+    );
+
     let dlx_samples = outbox.sample_backlog(&dlx_domain).await?;
     assert_eq!(
         dlx_samples[0].partition_blocked_depth(),
@@ -11974,7 +13248,7 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         "t29: DLX 队头本身不计入 pending backlog depth，后继仍计入"
     );
     assert!(
-        outbox.poll_pending(&dlx_domain, 10).await?.is_empty(),
+        dlx_outbox.claim_batch(10).await?.is_empty(),
         "t29: DLX 队头必须阻塞同 partition 后继投递"
     );
 
@@ -11988,13 +13262,15 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
         .await?;
     assert_eq!(redrive, DlqRedriveOutcome::Redriven);
 
-    let redriven_head = outbox.poll_pending(&dlx_domain, 10).await?;
+    let redriven_head = dlx_outbox.claim_batch(10).await?;
     assert_eq!(redriven_head.len(), 1, "t29: redrive 后仅队头可投递");
     assert_eq!(redriven_head[0].idem_key().as_str(), dlx_ids[0]);
-    let disp = outbox.relay(&redriven_head[0]).await?;
+    let disp = dlx_outbox
+        .relay(redriven_head.into_iter().next().unwrap())
+        .await?;
     assert_eq!(disp, Disposition::Ack, "t29: redriven 队头应成功发布");
 
-    let unblocked = outbox.poll_pending(&dlx_domain, 10).await?;
+    let unblocked = dlx_outbox.claim_batch(10).await?;
     assert_eq!(unblocked.len(), 1, "t29: 队头发布后仅第一后继可投递");
     assert_eq!(
         unblocked[0].idem_key().as_str(),

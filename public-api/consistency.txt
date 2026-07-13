@@ -981,25 +981,6 @@ impl core::marker::Unpin for consistency::outbox::PartitionKey
 impl core::marker::UnsafeUnpin for consistency::outbox::PartitionKey
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PartitionKey
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PartitionKey
-pub struct consistency::outbox::PendingEntry
-impl consistency::outbox::PendingEntry
-pub fn consistency::outbox::PendingEntry::entry(&self) -> &consistency::outbox::StoredOutboxEntry
-pub fn consistency::outbox::PendingEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
-pub fn consistency::outbox::PendingEntry::new(consistency::outbox::StoredOutboxEntry, consistency::outbox::OutboxMetricSubject) -> Self
-pub fn consistency::outbox::PendingEntry::payload(&self) -> &[u8]
-pub fn consistency::outbox::PendingEntry::subject(&self) -> &consistency::outbox::OutboxMetricSubject
-pub fn consistency::outbox::PendingEntry::topic(&self) -> &consistency::outbox::StoredOutboxTopic
-impl core::clone::Clone for consistency::outbox::PendingEntry
-pub fn consistency::outbox::PendingEntry::clone(&self) -> consistency::outbox::PendingEntry
-impl core::fmt::Debug for consistency::outbox::PendingEntry
-pub fn consistency::outbox::PendingEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for consistency::outbox::PendingEntry
-impl core::marker::Send for consistency::outbox::PendingEntry
-impl core::marker::Sync for consistency::outbox::PendingEntry
-impl core::marker::Unpin for consistency::outbox::PendingEntry
-impl core::marker::UnsafeUnpin for consistency::outbox::PendingEntry
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PendingEntry
-impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PendingEntry
 pub struct consistency::outbox::PermanentError(_)
 impl consistency::outbox::PermanentError
 pub fn consistency::outbox::PermanentError::kind(&self) -> consistency::outbox::PermanentErrorKind
@@ -1055,10 +1036,13 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::StoredOutb
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::StoredOutboxTopic
 pub trait consistency::outbox::OutboxBacklog
 pub async fn consistency::outbox::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
-pub trait consistency::outbox::OutboxRelay
-pub async fn consistency::outbox::OutboxRelay::relay(&self, &consistency::outbox::PendingEntry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
+pub trait consistency::outbox::OutboxRelay: consistency::outbox::OutboxSource
+pub async fn consistency::outbox::OutboxRelay::relay(&self, Self::Claim) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
 pub trait consistency::outbox::OutboxSource
-pub async fn consistency::outbox::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::PendingEntry>, consistency::error::EngineError>
+pub type consistency::outbox::OutboxSource::Claim
+pub async fn consistency::outbox::OutboxSource::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
+pub fn consistency::outbox::OutboxSource::claim_domain(&self) -> &vocab::contract::owner::DomainName
+pub fn consistency::outbox::OutboxSource::claim_subject(&Self::Claim) -> &consistency::outbox::OutboxMetricSubject
 pub trait consistency::outbox::RetentionSweeper
 pub async fn consistency::outbox::RetentionSweeper::sweep(&self, u64) -> core::result::Result<u64, consistency::error::EngineError>
 pub fn consistency::outbox::is_canonical_topic_name(&str) -> bool
@@ -3843,25 +3827,6 @@ impl core::marker::Unpin for consistency::outbox::PartitionKey
 impl core::marker::UnsafeUnpin for consistency::outbox::PartitionKey
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PartitionKey
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PartitionKey
-pub struct consistency::PendingEntry
-impl consistency::outbox::PendingEntry
-pub fn consistency::outbox::PendingEntry::entry(&self) -> &consistency::outbox::StoredOutboxEntry
-pub fn consistency::outbox::PendingEntry::idem_key(&self) -> &consistency::idempotency::IdemKey
-pub fn consistency::outbox::PendingEntry::new(consistency::outbox::StoredOutboxEntry, consistency::outbox::OutboxMetricSubject) -> Self
-pub fn consistency::outbox::PendingEntry::payload(&self) -> &[u8]
-pub fn consistency::outbox::PendingEntry::subject(&self) -> &consistency::outbox::OutboxMetricSubject
-pub fn consistency::outbox::PendingEntry::topic(&self) -> &consistency::outbox::StoredOutboxTopic
-impl core::clone::Clone for consistency::outbox::PendingEntry
-pub fn consistency::outbox::PendingEntry::clone(&self) -> consistency::outbox::PendingEntry
-impl core::fmt::Debug for consistency::outbox::PendingEntry
-pub fn consistency::outbox::PendingEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for consistency::outbox::PendingEntry
-impl core::marker::Send for consistency::outbox::PendingEntry
-impl core::marker::Sync for consistency::outbox::PendingEntry
-impl core::marker::Unpin for consistency::outbox::PendingEntry
-impl core::marker::UnsafeUnpin for consistency::outbox::PendingEntry
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PendingEntry
-impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PendingEntry
 pub struct consistency::PermanentError(_)
 impl consistency::outbox::PermanentError
 pub fn consistency::outbox::PermanentError::kind(&self) -> consistency::outbox::PermanentErrorKind
@@ -4373,10 +4338,13 @@ pub async fn consistency::InboxStore::release(&self, &consistency::inbox::InboxR
 pub async fn consistency::InboxStore::try_claim(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::SeenState, consistency::error::EngineError>
 pub trait consistency::OutboxBacklog
 pub async fn consistency::OutboxBacklog::sample_backlog(&self, &str) -> core::result::Result<alloc::vec::Vec<consistency::outbox::BacklogMetricSample>, consistency::error::EngineError>
-pub trait consistency::OutboxRelay
-pub async fn consistency::OutboxRelay::relay(&self, &consistency::outbox::PendingEntry) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
+pub trait consistency::OutboxRelay: consistency::outbox::OutboxSource
+pub async fn consistency::OutboxRelay::relay(&self, Self::Claim) -> core::result::Result<consistency::outbox::Disposition, consistency::error::EngineError>
 pub trait consistency::OutboxSource
-pub async fn consistency::OutboxSource::poll_pending(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<consistency::outbox::PendingEntry>, consistency::error::EngineError>
+pub type consistency::OutboxSource::Claim
+pub async fn consistency::OutboxSource::claim_batch(&self, usize) -> core::result::Result<alloc::vec::Vec<Self::Claim>, consistency::error::EngineError>
+pub fn consistency::OutboxSource::claim_domain(&self) -> &vocab::contract::owner::DomainName
+pub fn consistency::OutboxSource::claim_subject(&Self::Claim) -> &consistency::outbox::OutboxMetricSubject
 pub trait consistency::PartitionSerialDelivery
 pub trait consistency::ProjectionEvent
 pub fn consistency::ProjectionEvent::lsn(&self) -> consistency::projection::Lsn

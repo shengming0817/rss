@@ -21,7 +21,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器（默认 ≤60s/轮） | 可投递 backlog：到期 pending + stale publishing；正常 in-flight publishing 排除 |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | `now()−min(created_at)`；**进程内已观测 scope 后续无 backlog ⇒ 0**（非缺失，防 Prometheus 把 drain 误判采样器死亡） |
 | `outbox_partition_blocked_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | backlog 采样器 | 同 tenant/domain/partition 前序未 published 阻塞的行数；不暴露 `partition_key` |
-| `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`poll`(扫描相)/`publish`(逐条中继+adapter 内 settle 相) |
+| `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`claim`(原子租约相)/`publish`(同批即时并发中继的 wall time + adapter 内 settle 相) |
 | `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；kind=`dead_letter_replay`/`outbox_dlx_redrive`；一次性 CLI 发射，长期告警看 audit/log |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
@@ -32,9 +32,13 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 ### Label 闭值集
 
 - `status`：闭合于 `consistency::Disposition::as_label()`，值 `ack`/`requeue`/`reject`。
-- `phase`：闭合于 `eventexec::RelayPhase::as_label()`，值 `poll`/`publish`。settle（CAS 落库）是 postgres
+- `phase`：闭合于 `eventexec::RelayPhase::as_label()`，值 `claim`/`publish`。settle（CAS 落库）是 postgres
   adapter 内部、对 eventexec 不可见，故并入 `publish` 相，不单列。
-- `domain`：来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式），operator 配置、
+- `claim` 相完整覆盖 `PgOutbox::claim_batch`。该 provider 铸造并按值交接 opaque
+  `PgClaimedOutboxEntry`；lease/durable context 不进 `consistency` 公开可 hydrate 面，也不进 metric
+  label。relay 只借出 typed metric subject，因此 operator 不应从 metric 反推 token/deadline。
+- `domain`：来自 provider 构造期绑定并经 `claim_domain()` 暴露的 typed `vocab::DomainName`；
+  `RelayConfig` 不保存 domain，`claim_batch(limit)` 也不接受 raw domain。该值由 assembly/provider 声明、
   非请求/租户派生，基数有界。**不**经 `observ` typed enum（层矩阵禁 `eventexec`→`observ`）；收敛进 `observ`
   词表统一 otel 映射是 #1076 后续项。
 - `contract_id` / `tenant_id`：#1625 例外的 outbox 路由维度，分别来自
@@ -66,6 +70,18 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 - `saga_dead_letters_total.outcome`：闭合于 `eventexec::saga` emit site 的模块内 literal，值
   `written`/`write_error`；`domain`/`contract_id` 来自 `SagaExecutorConfig`，禁止携带 saga_id、step、
   tenant、payload 或 store error 派生值。
+
+### Relay 并发与租约预算
+
+- `RelayConfig::max_in_flight` 构造期只接受 `1..=64`，同时是单轮 claim 上限与 publish 并发上限。claim
+  返回后同批立即并发 dispatch，不能用整批串行发布造成批尾已持 lease 却排队等待。
+- SQL head-of-partition gate 保证同批对每个非空 `(tenant_id, domain, partition_key)` 至多一个唯一队头；
+  不同 partition 与无序 entry 可并发，分区内顺序仍由数据库 gate 承载。
+- 每条 broker publish 前，Postgres provider 以 DB 当前时间做 token/deadline lease budget preflight；剩余
+  预算不足以覆盖 40s publish timeout 时不得调用 broker。timeout/confirm 不确定结果可能已经 delivery，按
+  at-least-once 路径用稳定身份重试，不能从客户端 timeout 推断“broker 未收到”。
+- `publish` phase histogram 记录这一批即时并发 relay 的 wall time，不是各 entry 耗时之和。接近 40s 的
+  样本优先排查 broker confirm 延迟、publish timeout 与 lost-lease/reclaim 日志。
 
 ## SLO 与告警
 
@@ -112,11 +128,13 @@ DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历
 
 ## 已知差距 / 范围说明
 
-- **tick_duration 仅分 poll/publish 两相（settle 未单独计时）**：issue #1209 原述「分 poll/publish/settle」，但
+- **tick_duration 仅分 claim/publish 两相（settle 未单独计时）**：issue #1209 原述「分
+  claim/publish/settle」，但
   settle（CAS 落库）发生在 postgres adapter 的 `relay()` 内部、对 `eventexec` 不可见。从 eventexec 层看，`publish`
   相即 `relay()` 端到端（publish + adapter 内 settle）。若后续需分离 settle 相，须在 adapter 层注入计时器单独发射，
   属 #1208 接线时决策。当前是有意的范围收窄，非遗漏。
-- **对标 gocell RelayCollector**：RSS 覆盖 pending depth gauge、oldest-age gauge、三处置耗时（poll/publish）、
+- **对标 gocell RelayCollector**：RSS 覆盖 pending depth gauge、oldest-age gauge、三处置耗时
+  （claim/publish）、
   reject 计数（`outbox_dlx_total` = gocell `reject_total` 等效）。**fail-open drop 率无对应**——RSS relay **不采用
   fail-open**：broker 失败走 `Requeue` 退避 / 预算耗尽 `Reject` 进 DLX，无 drop 路径，故不设 `fail_open_drop` metric。
 - **relay/sampler worker unhealthy 无专属 Prometheus 告警**：worker 健康经 `WorkerHealth` → readyz probe
@@ -141,15 +159,15 @@ DLX，主告警仍由 `OutboxDlxGrowth` 承载。排障时用 `reason` 区分历
 
 ## 配置护栏（误配防护）
 
-relay/sweeper 驱动参数经 `RelayConfig` / `SweeperConfig` 构造期 fail-fast 校验（私有字段 + 唯一 `new()`
+relay/sampler/sweeper 驱动参数经 `RelayConfig` / `SamplerConfig` / `SweeperConfig` 构造期 fail-fast 校验（私有字段 + 唯一 `new()`
 funnel，未校验 config 类型层不可表达）：
 
 | 参数 | 范围 | 失败模式 |
 |------|------|----------|
-| `poll_interval` | [100ms, 300s] | 0ms → `tokio::time::interval` 连发 → poll 热轮询打爆 DB |
-| `batch` | [1, 10000] | 0 → poll 恒空 relay 永不推进；过大 → 单 tick 拉爆内存/长事务 |
+| `poll_interval` | [100ms, 300s] | 0ms → `tokio::time::interval` 连发 → claim 定时轮询打爆 DB |
+| `max_in_flight` | [1, 64] | 0 → claim 恒空、relay 永不推进；过大 → 在途 I/O/内存失控且 lease 预算承压 |
 | `sample_interval` | [1s, 60s] | 0 → 采样聚合查询热轮询；>60s → 5min SLO 窗口采样不足 |
-| `domains` | 1..=64 + canonical | 空 → relay 空转；过多/非法 → metrics label 基数失控 |
+| sampler `domains` | 1..=64 + canonical | 空 → sampler 无 scope；过多/非法 → metrics label 基数失控；relay domain 不走此参数 |
 | `sweep_interval` | ≥1s | 0 → DELETE 热轮询 |
 | `retain_seconds` | >0（per-table 下限见下） | outbox 0/负数由 DB 函数 fail-closed；inbox_receipts 低于重投窗口 → 迟到重投误判 Fresh 重复执行 |
 

@@ -29,7 +29,8 @@ use diport::{
     PublisherError, RedactedBytes,
 };
 use eventexec::{
-    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, WorkerHealth, backlog_sampler_loop,
+    OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, SamplerConfig, WorkerHealth,
+    backlog_sampler_loop,
 };
 use generated::event::settings_v1::{
     self, SettingsConfigChangeKind, SettingsConfigVersionChangedPayload,
@@ -549,12 +550,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     );
 
     let telemetry = Arc::new(TestTelemetry::default());
-    let sampler_config = RelayConfig::new(
-        vec!["settings".to_string()],
-        Duration::from_millis(100),
-        16,
-        Duration::from_secs(1),
-    )?;
+    let sampler_config = SamplerConfig::new(vec!["settings".to_string()], Duration::from_secs(1))?;
     let sampler_health = Arc::new(WorkerHealth::healthy());
     let sampler_token = CancellationToken::new();
     let sampler_task = tokio::spawn(backlog_sampler_loop(
@@ -579,12 +575,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let relay = eventexec::spawn_relay(
         "settings-durable-e2e-relay".to_string(),
         outbox,
-        RelayConfig::new(
-            vec!["settings".to_string()],
-            Duration::from_millis(100),
-            16,
-            Duration::from_secs(1),
-        )?,
+        RelayConfig::new(Duration::from_millis(100), 16)?,
         Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
         CancellationToken::new(),
         Arc::clone(&relay_health),

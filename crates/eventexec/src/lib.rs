@@ -39,7 +39,10 @@ pub use relay::{
 
 // #1209 outbox relay 配置护栏（构造期 fail-fast）+ 可观测性发射端口（注入式）。
 pub mod relay_config;
-pub use relay_config::{RelayConfig, RelayConfigError, SweeperConfig, SweeperConfigError};
+pub use relay_config::{
+    RelayConfig, RelayConfigError, SamplerConfig, SamplerConfigError, SweeperConfig,
+    SweeperConfigError,
+};
 pub mod relay_metrics;
 pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, RelayPhase};
 

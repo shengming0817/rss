@@ -32,7 +32,7 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 | Outbox partition blocked | `sum by (domain, contract_id, tenant_id) (outbox_partition_blocked_depth)` | `domain`, `contract_id`, `tenant_id` | `OutboxPartitionBlocked`; inspect DLX head, no partition key in metric |
 | Outbox publish disposition | `sum by (domain, status) (rate(outbox_publish_total[5m]))` | `domain`, `status` | Requeue storm / reject path diagnosis |
 | Outbox DLX rate | `sum by (domain) (rate(outbox_dlx_total[5m]))` | `domain` | `OutboxDlxGrowth`; identify tenant before tenant-scoped DLQ CLI |
-| Relay tick P95 | `histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))` | `phase` | `OutboxRelayTickSlow`; split poll vs publish pressure |
+| Relay tick P95 | `histogram_quantile(0.95, sum by (phase, le) (rate(outbox_relay_tick_duration_seconds_bucket[5m])))` | `phase` | `OutboxRelayTickSlow`; split claim vs publish pressure |
 | Consumer settle outcome | `sum by (domain, action, outcome) (rate(consumer_settle_total[5m]))` | `domain`, `action`, `outcome` | Broker settle failures and reject/requeue mix |
 | Consumer DLX write | `sum by (domain, outcome) (increase(consumer_dlx_write_total[5m]))` | `domain`, `outcome` | `ConsumerDlxWriteError`; DLX audit write failed |
 | Consumer release failed | `sum by (domain) (increase(consumer_release_failed_total[5m]))` | `domain` | `ConsumerReleaseFailed`; claim release failed after DLX failure |

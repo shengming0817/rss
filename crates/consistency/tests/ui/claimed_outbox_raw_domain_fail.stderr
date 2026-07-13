@@ -1,0 +1,16 @@
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/ui/claimed_outbox_raw_domain_fail.rs:4:20
+  |
+4 |     let _ = source.claim_batch("identity", 10).await?;
+  |                    ^^^^^^^^^^^ ---------- unexpected argument #1 of type `&'static str`
+  |
+note: method defined here
+ --> src/outbox.rs
+  |
+  |     async fn claim_batch(
+  |              ^^^^^^^^^^^
+help: remove the extra argument
+  |
+4 -     let _ = source.claim_batch("identity", 10).await?;
+4 +     let _ = source.claim_batch(10).await?;
+  |

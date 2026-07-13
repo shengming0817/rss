@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `new` found for struct `postgres::outbox::PgClaimedOutboxEntry` in the current scope
+ --> tests/ui/pg_outbox_claim_construct_fail.rs:6:12
+  |
+6 |     Claim::new()
+  |            ^^^ associated function or constant not found in `postgres::outbox::PgClaimedOutboxEntry`

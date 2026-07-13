@@ -1,0 +1,17 @@
+error[E0308]: mismatched types
+ --> tests/ui/claimed_outbox_relay_unclaimed_fail.rs:7:25
+  |
+7 |     let _ = relay.relay(entry).await?;
+  |                   ----- ^^^^^ expected associated type, found `StoredOutboxEntry`
+  |                   |
+  |                   arguments to this method are incorrect
+  |
+  = note: expected associated type `<R as OutboxSource>::Claim`
+                      found struct `StoredOutboxEntry`
+  = help: consider constraining the associated type `<R as OutboxSource>::Claim` to `StoredOutboxEntry`
+  = note: for more information, visit https://doc.rust-lang.org/book/ch19-03-advanced-traits.html
+note: method defined here
+ --> src/outbox.rs
+  |
+  |     async fn relay(&self, entry: Self::Claim) -> Result<Disposition, crate::error::EngineError>;
+  |              ^^^^^

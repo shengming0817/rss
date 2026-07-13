@@ -1,0 +1,10 @@
+error[E0624]: method `lease_token` is private
+ --> tests/ui/pg_outbox_claim_lease_read_fail.rs:6:19
+  |
+6 |     let _ = claim.lease_token();
+  |                   ^^^^^^^^^^^ private method
+  |
+ ::: src/outbox.rs
+  |
+  |     pub(crate) fn lease_token(&self) -> &str {
+  |     ---------------------------------------- private method defined here

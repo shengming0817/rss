@@ -22,11 +22,11 @@ use anyhow::{Context as _, Result};
 use audit::ports::{AuditChainHasher, DynAuditReadRepo};
 use audit::{AuditDomain, InMemAuditRepo};
 use base64::Engine as _;
-use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload, OutboxSource};
+use consistency::{EventEntry, EventTopic, IdemKey, OutboxPayload};
 use diport::{
-    DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName,
-    KeyProvider, KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor,
-    PublishRequest, Publisher, RedactedBytes, Topic,
+    DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
+    KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
+    Publisher, RedactedBytes, Topic,
 };
 use eventexec::TenantAuthorityBinding;
 use generated::event::identity_v1::{
@@ -207,30 +207,6 @@ fn config_value_protections() -> Result<postgres::ConfigValueProtections> {
     ))
 }
 
-// ── NoopPublisher（outbox read-only poll view；publish 从不调用）────────────────────────────
-
-/// outbox 只读 poll 视图所用的占位 publisher——`id.outbox(DynPublisher::new_box(NoopPublisher))`
-/// 创建 `PgOutbox` 实例仅用于 `OutboxSource::poll_pending`，从不调 `publish`。
-struct NoopPublisher;
-
-// reason: NoopPublisher 仅供 e2e 测试中的 outbox read-only poll view；runtime（assemblies/runtime）
-// 是合法组合根（DIPORT-IMPL-ALLOWLIST-01 组合根例外），unknown_lints 防 clippy 报 dylint lint 未知。
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
-impl diport::Publisher for NoopPublisher {
-    async fn publish(
-        &self,
-        _request: diport::PublishRequest,
-    ) -> Result<(), diport::PublisherError> {
-        // reason: e2e 只读 outbox poll view；publish 设计上不被调用（relay worker 才是真发布路径）。
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<(), diport::PublisherError> {
-        // reason: 无后端连接资源，shutdown 为空操作。
-        Ok(())
-    }
-}
-
 // ── CapturingVerifier（自 journeys/tests/common/mod.rs 复制）──────────────────────────────
 
 /// 审计链 HMAC 测试 verifier：捕获每次 `sign` 调用的 message，确定性折叠产出 32B 标签（链一致）。
@@ -396,6 +372,35 @@ async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) 
     .fetch_one(pool)
     .await?;
     Ok(event_id)
+}
+
+/// 测试专用只读观察：不经过生产 outbox API，因此不会夺取后台 relay 的租约。
+/// tenant/domain/topic 均为必填过滤条件；bounded 查询后在 Rust 解码本轮 session payload。
+async fn outbox_session_event(
+    pool: &sqlx::PgPool,
+    tenant: TenantId,
+    domain: &str,
+    topic: &str,
+    session_id: &str,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        r#"
+        SELECT event_id, payload
+        FROM outbox
+        WHERE tenant_id = $1::uuid AND domain = $2 AND topic = $3
+        ORDER BY created_at DESC, event_id DESC
+        LIMIT 64
+        "#,
+    )
+    .bind(tenant.to_string())
+    .bind(domain)
+    .bind(topic)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().find(|(_, payload)| {
+        serde_json::from_slice::<IdentitySessionCreatedPayload>(payload)
+            .is_ok_and(|decoded| decoded.session_id == session_id)
+    }))
 }
 
 async fn audit_login_count(pool: &sqlx::PgPool, tenant: TenantId, session_id: &str) -> Result<i64> {
@@ -673,7 +678,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "RSS_AMQP_URL" => Some(vhost_url.clone()),
         "RSS_AMQP_ALLOW_PLAINTEXT" => Some("true".to_string()),
         "RSS_RELAY_POLL_INTERVAL_MS" => Some("2000".to_string()),
-        "RSS_RELAY_BATCH_SIZE" => Some("16".to_string()),
+        "RSS_RELAY_MAX_IN_FLIGHT" => Some("16".to_string()),
         "RSS_RELAY_SAMPLE_INTERVAL_MS" => Some("30000".to_string()),
         "RSS_OUTBOX_SWEEP_INTERVAL_MS" => Some("60000".to_string()),
         "RSS_OUTBOX_RETAIN_SECONDS" => Some("604800".to_string()),
@@ -684,15 +689,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "RSS_VAULT_TRANSIT_MOUNT" => Some("transit".to_string()),
         _ => None,
     })?;
-    let poll_tenant_authority = cfg
+    let redeliver_tenant_authority = cfg
         .tenant_authority
         .clone()
         .context("durable e2e tenant authority missing")?;
-    let redeliver_tenant_authority = Arc::clone(&poll_tenant_authority);
-    let poll_dlx_payload_protector = cfg
-        .dlx_payload_protector
-        .clone()
-        .context("durable e2e dlx payload protector missing")?;
 
     // ── 步骤 6：wire_event_transport → DomainModuleResult（relay OS 线程 + consumer worker 启动）────
 
@@ -950,45 +950,28 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .await?;
     let session_id = response.data.session_id.clone();
 
-    // ── 步骤 9：只读 poll outbox（NoopPublisher；relay 2s 间隔给足 poll 窗口）─────────────────
+    // ── 步骤 9：测试专用 PostgreSQL 只读观察（不 claim，不干扰后台 relay）────────────────────
 
-    // 独立 PgOutbox 实例（只读 poll 视图；relay worker 已持有另一实例负责实际发布）。
-    // NoopPublisher 的 publish 设计上不被调用——此 outbox 句柄仅 OutboxSource::poll_pending 用。
-    let poll_view = id.outbox(
-        DynPublisher::new_box(NoopPublisher),
-        poll_tenant_authority,
-        poll_dlx_payload_protector,
-    );
-
-    // bounded 轮询（最多 50 次 × 100ms = 5s），按 payload.sessionId 关联本轮 entry。
-    // 2s relay 间隔保证：登录后立即 poll 时，relay 的下一次轮询还未到来，pending entry 仍存在。
+    // bounded 轮询（最多 50 次 × 100ms = 5s），以 tenant/domain/topic 限定后按
+    // payload.sessionId 关联本轮 entry；published 行仍保留，因此无需抢在 relay 前读取。
     let (captured_event_id, captured_payload) = {
         let mut found = None;
         for _ in 0..50u8 {
-            let pending = OutboxSource::poll_pending(&poll_view, "identity", 64).await?;
-            for entry in &pending {
-                let Ok(pl) =
-                    serde_json::from_slice::<IdentitySessionCreatedPayload>(entry.payload())
-                else {
-                    continue;
-                };
-                if pl.session_id == session_id {
-                    found = Some((
-                        entry.idem_key().as_str().to_string(),
-                        entry.payload().to_vec(),
-                    ));
-                    break;
-                }
-            }
+            found = outbox_session_event(
+                &assertion_pool,
+                tenant,
+                "identity",
+                SESSION_CREATED_TOPIC,
+                &session_id,
+            )
+            .await?;
             if found.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         found.ok_or_else(|| {
-            anyhow::anyhow!(
-                "outbox 缺本轮 session-created pending entry（session_id={session_id}）"
-            )
+            anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
         })?
     };
 
@@ -1116,7 +1099,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
     assert!(failures.is_empty(), "shutdown 存在失败项: {failures:?}");
 
     // fixture guard drop：停两个容器（pg / rmq）。
-    drop(poll_view);
     drop(id);
     drop(assertion_pool);
     drop(pg);

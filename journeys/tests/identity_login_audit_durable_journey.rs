@@ -212,11 +212,19 @@ impl DeadLetterStore for NoopDlx {
     }
 }
 
+#[derive(Clone)]
+struct CapturedBrokerMessage {
+    event_id: String,
+    payload: Vec<u8>,
+    metadata: EnvelopeMetadata,
+}
+
 /// Journey-local audit decode/repo append → run_consumer HandleResult handler。
-/// `captured` 记录每条消费消息的 envelope metadata（#1160 端到端 occurred_at/subjectId/correlation 保真断言）。
+/// `captured` 记录 broker-visible 消息（#1160 端到端 payload/event id/metadata 保真断言），不旁路读取
+/// provider-owned opaque outbox claim 的 durable/lease context。
 fn consumer_handler(
     repo: Arc<DynAuditWriteRepo<'static>>,
-    captured: Arc<Mutex<Vec<EnvelopeMetadata>>>,
+    captured: Arc<Mutex<Vec<CapturedBrokerMessage>>>,
 ) -> impl Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync {
     move |message: Message| {
         let repo = Arc::clone(&repo);
@@ -225,7 +233,11 @@ fn consumer_handler(
             captured
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(message.metadata.clone());
+                .push(CapturedBrokerMessage {
+                    event_id: message.id.as_str().to_string(),
+                    payload: message.payload.as_bytes().to_vec(),
+                    metadata: message.metadata.clone(),
+                });
             let record =
                 match audit_record_from_event_message(AuditEventKind::SessionCreated, &message) {
                     Ok(record) => record,
@@ -326,8 +338,8 @@ async fn login_audit_durable_topology() -> Result<()> {
             group.as_str(),
             Arc::clone(&durable_authority),
         );
-        // #1160：捕获消费侧 envelope metadata，端到端断言 outbox→relay→MemBus→consumer 全链保真。
-        let captured: Arc<Mutex<Vec<EnvelopeMetadata>>> = Arc::new(Mutex::new(Vec::new()));
+        // #1160：捕获 broker-visible 消息，端到端断言 outbox→relay→MemBus→consumer 全链保真。
+        let captured: Arc<Mutex<Vec<CapturedBrokerMessage>>> = Arc::new(Mutex::new(Vec::new()));
         let consume = run_consumer(
             stream,
             claimer.clone(),
@@ -363,6 +375,10 @@ async fn login_audit_durable_topology() -> Result<()> {
             Arc::clone(&durable_authority),
             dlx_payload_protector(),
         );
+        anyhow::ensure!(
+            OutboxSource::claim_domain(&relay).as_str() == IDENTITY_DOMAIN,
+            "identity relay 必须绑定 identity claim domain"
+        );
 
         let drive = async {
             // #1160：login emit（PgSessionLifecycle co-tx）在 diagctx scope 内执行 ⇒ correlation 经 ambient
@@ -381,23 +397,30 @@ async fn login_audit_durable_topology() -> Result<()> {
             // F1 后：idem_key = 独立 EventId（非 session_id）；以 payload.sessionId 关联本轮 entry（F6）。
             let session_id = response.data.session_id.clone();
 
-            // F6：bounded 轮询（最多 50 次 × 100ms），经 payload 解码匹配本轮 session_id——
-            // 对抗 stale pending 行，不依赖 pending 数量/顺序。
-            let our = {
+            // bounded claim（最多 50 次 × 100ms），逐条按值 relay 后从 broker-visible capture 解码匹配
+            // 本轮 session_id。对抗其它可投递行且不依赖批次数量/顺序；opaque claim 不暴露观察 accessor。
+            let (event_id, payload) = {
                 let mut found = None;
                 for _ in 0..50 {
-                    let pending = OutboxSource::poll_pending(&relay, IDENTITY_DOMAIN, 64).await?;
-                    for entry in &pending {
-                        let Ok(pl) = serde_json::from_slice::<IdentitySessionCreatedPayload>(
-                            entry.payload(),
-                        ) else {
-                            continue;
-                        };
-                        if pl.session_id == session_id {
-                            found = Some(entry.clone());
-                            break;
-                        }
+                    let claimed = OutboxSource::claim_batch(&relay, 64).await?;
+                    for entry in claimed {
+                        let disposition = OutboxRelay::relay(&relay, entry).await?;
+                        anyhow::ensure!(
+                            disposition == Disposition::Ack,
+                            "outbox relay 未发布：{disposition:?}"
+                        );
                     }
+                    found = captured
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .find(|message| {
+                            serde_json::from_slice::<IdentitySessionCreatedPayload>(
+                                &message.payload,
+                            )
+                            .is_ok_and(|decoded| decoded.session_id == session_id)
+                        })
+                        .map(|message| (message.event_id.clone(), message.payload.clone()));
                     if found.is_some() {
                         break;
                     }
@@ -409,14 +432,7 @@ async fn login_audit_durable_topology() -> Result<()> {
                     )
                 })?
             };
-            // relay CAS 中继 → MemBus（message_id = entry 自身的独立 EventId）。
-            let event_id = our.idem_key().as_str().to_string();
-            let payload = our.payload().to_vec();
-            let disposition = OutboxRelay::relay(&relay, &our).await?;
-            anyhow::ensure!(
-                disposition == Disposition::Ack,
-                "outbox relay 未发布：{disposition:?}"
-            );
+            // claim batch 已逐条按值 relay → MemBus（message_id = entry 自身的独立 EventId）。
             wait_until_audited(&audit).await.with_context(|| {
                 let consumed = captured.lock().unwrap_or_else(|e| e.into_inner()).len();
                 format!("audit 未落链；consumer 已观察 {consumed} 条消息")
@@ -466,7 +482,8 @@ async fn login_audit_durable_topology() -> Result<()> {
         let seen = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let md = seen
             .iter()
-            .find(|m| !m.is_empty())
+            .map(|message| &message.metadata)
+            .find(|metadata| !metadata.is_empty())
             .ok_or_else(|| anyhow::anyhow!("consumer 未收到任何携 envelope metadata 的消息"))?;
         anyhow::ensure!(
             md.occurred_at_secs() == Some(NOW_SECS as i64),

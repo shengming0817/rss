@@ -13,7 +13,7 @@ use std::pin::Pin;
 type CaseFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'a>>;
 type OutboxSeedFn<'a> = Box<dyn FnMut(OutboxSeedArgs) -> CaseFuture<'a, ()> + 'a>;
 type OutboxRelayFn<'a> = Box<dyn FnMut(OutboxRelayArgs) -> CaseFuture<'a, RelayObservation> + 'a>;
-type OutboxPollFn<'a> = Box<dyn FnMut(DomainArgs) -> CaseFuture<'a, Vec<String>> + 'a>;
+type OutboxClaimFn<'a> = Box<dyn FnMut(DomainArgs) -> CaseFuture<'a, Vec<String>> + 'a>;
 type OutboxStateFn<'a> = Box<dyn FnMut(EventIdArgs) -> CaseFuture<'a, OutboxState> + 'a>;
 type OutboxBackdateFn<'a> = Box<dyn FnMut(EventIdArgs) -> CaseFuture<'a, ()> + 'a>;
 type OutboxSampleFn<'a> = Box<dyn FnMut(DomainArgs) -> CaseFuture<'a, BacklogSample> + 'a>;
@@ -368,7 +368,7 @@ pub struct OutboxRelayCase<'a> {
     pub max_attempts: u32,
     pub seed_pending: OutboxSeedFn<'a>,
     pub relay: OutboxRelayFn<'a>,
-    pub poll_pending: OutboxPollFn<'a>,
+    pub claim_batch: OutboxClaimFn<'a>,
     pub state: OutboxStateFn<'a>,
     pub backdate_publishing: OutboxBackdateFn<'a>,
     pub sample_backlog: OutboxSampleFn<'a>,
@@ -395,14 +395,14 @@ pub async fn assert_outbox_relay_conformance(
     let old_published_id = format!("{}-old-published", case.ids.event_id);
     let old_dlx_id = format!("{}-old-dlx", case.ids.event_id);
 
-    assert_outbox_poll_and_ack(&mut case, other_id).await?;
+    assert_outbox_claim_and_ack(&mut case, other_id).await?;
     assert_outbox_transient_retry(&mut case, retry_id).await?;
     assert_outbox_permanent_dlx(&mut case, permanent_id).await?;
     assert_outbox_stale_and_sample(&mut case, stale_id).await?;
     assert_outbox_sweeper(&mut case, old_published_id, old_dlx_id).await
 }
 
-async fn assert_outbox_poll_and_ack(
+async fn assert_outbox_claim_and_ack(
     case: &mut OutboxRelayCase<'_>,
     other_id: String,
 ) -> Result<(), EventingConformanceError> {
@@ -419,17 +419,17 @@ async fn assert_outbox_poll_and_ack(
     .await
     .map_err(|e| provider("outbox.seed.other-domain", e))?;
 
-    let polled = (case.poll_pending)(DomainArgs {
+    let claimed = (case.claim_batch)(DomainArgs {
         domain: case.domain.clone(),
     })
     .await
-    .map_err(|e| provider("outbox.poll", e))?;
+    .map_err(|e| provider("outbox.claim", e))?;
     expect(
-        "outbox.poll.domain",
+        "outbox.claim.domain",
         &case.ids,
-        polled.contains(&case.ids.event_id) && !polled.contains(&other_id),
+        claimed.contains(&case.ids.event_id) && !claimed.contains(&other_id),
         "target event present and other-domain event absent",
-        format!("{polled:?}"),
+        format!("{claimed:?}"),
     )?;
 
     let ok = (case.relay)(OutboxRelayArgs {
@@ -631,19 +631,6 @@ async fn assert_outbox_stale_and_sample(
     })
     .await
     .map_err(|e| provider("outbox.backdate.stale", e))?;
-    let polled = (case.poll_pending)(DomainArgs {
-        domain: case.domain.clone(),
-    })
-    .await
-    .map_err(|e| provider("outbox.poll.stale", e))?;
-    expect(
-        "outbox.stale.reclaim",
-        &case.ids,
-        polled.contains(&stale_id),
-        "stale publishing event present",
-        format!("{polled:?}"),
-    )?;
-
     let sample = (case.sample_backlog)(DomainArgs {
         domain: case.domain.clone(),
     })
@@ -662,6 +649,19 @@ async fn assert_outbox_stale_and_sample(
         sample.oldest_age_seconds >= 1,
         "oldest_age_seconds >= 1",
         format!("oldest_age_seconds={}", sample.oldest_age_seconds),
+    )?;
+
+    let claimed = (case.claim_batch)(DomainArgs {
+        domain: case.domain.clone(),
+    })
+    .await
+    .map_err(|e| provider("outbox.claim.stale", e))?;
+    expect(
+        "outbox.stale.reclaim",
+        &case.ids,
+        claimed.contains(&stale_id),
+        "stale publishing event present",
+        format!("{claimed:?}"),
     )
 }
 
@@ -1166,7 +1166,7 @@ mod tests {
                     })
                 })
             }),
-            poll_pending: Box::new(|DomainArgs { .. }| {
+            claim_batch: Box::new(|DomainArgs { .. }| {
                 Box::pin(async {
                     Ok(vec![
                         "evt-outbox".to_string(),

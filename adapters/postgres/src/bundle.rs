@@ -100,7 +100,17 @@ mod sealed {
 ///
 /// 实现集封闭在本 crate（[`caps`] 下的 ZST）；外部 crate 既不能命名内层 `Sealed`、也不能新增 marker，
 /// 故 `PgDomainDeps<D>` 的 `D` 只能是本 crate 声明的域（PG-BUNDLE-DOMAIN-02）。
-pub trait PgDomain: sealed::Sealed {}
+pub trait PgDomain: sealed::Sealed {
+    /// 与 sealed capability marker 一一绑定的 durable event domain。
+    const NAME: &'static str;
+}
+
+#[allow(clippy::expect_used)]
+// reason: NAME 只由本 crate 的 sealed marker 常量提供；解析把 marker 变成 provider-bound typed domain。
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+fn bound_domain<D: PgDomain>() -> vocab::DomainName {
+    vocab::DomainName::parse(D::NAME).expect("sealed postgres domain marker must be valid")
+}
 
 /// per-domain 能力 marker ZST。
 ///
@@ -121,15 +131,21 @@ pub mod caps {
 #[cfg(feature = "domain-settings")]
 impl sealed::Sealed for caps::Settings {}
 #[cfg(feature = "domain-settings")]
-impl PgDomain for caps::Settings {}
+impl PgDomain for caps::Settings {
+    const NAME: &'static str = "settings";
+}
 #[cfg(feature = "domain-identity")]
 impl sealed::Sealed for caps::Identity {}
 #[cfg(feature = "domain-identity")]
-impl PgDomain for caps::Identity {}
+impl PgDomain for caps::Identity {
+    const NAME: &'static str = "identity";
+}
 #[cfg(feature = "domain-audit")]
 impl sealed::Sealed for caps::Audit {}
 #[cfg(feature = "domain-audit")]
-impl PgDomain for caps::Audit {}
+impl PgDomain for caps::Audit {
+    const NAME: &'static str = "audit";
+}
 
 /// 组合根级 postgres 生命周期 owner：集中 connect + migration，并唯一拥有 pool 与 sampler 的关闭权。
 ///
@@ -827,7 +843,13 @@ impl PgDomainDeps<caps::Settings> {
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
-        PgOutbox::new(&self.store, publisher, tenant_authority, payload_protector)
+        PgOutbox::new(
+            &self.store,
+            bound_domain::<caps::Settings>(),
+            publisher,
+            tenant_authority,
+            payload_protector,
+        )
     }
 
     /// ConsumerTx handler for `settings.config-version-changed`.
@@ -912,7 +934,13 @@ impl PgDomainDeps<caps::Identity> {
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
     ) -> PgOutbox {
-        PgOutbox::new(&self.store, publisher, tenant_authority, payload_protector)
+        PgOutbox::new(
+            &self.store,
+            bound_domain::<caps::Identity>(),
+            publisher,
+            tenant_authority,
+            payload_protector,
+        )
     }
 
     /// 凭据仓储（credentials 表 + 折叠锁定态 + 行锁原子 RMW）。

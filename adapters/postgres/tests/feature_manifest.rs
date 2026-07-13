@@ -78,10 +78,14 @@ fn domain_dependencies_are_optional_and_features_are_explicit()
             Some(expected_path.as_str()),
             "{domain} must resolve to the workspace domain crate"
         );
+        let mut expected_members = BTreeSet::from([format!("dep:{domain}")]);
+        if domain == "identity" {
+            expected_members.insert("dep:observ".to_owned());
+        }
         assert_eq!(
             feature_set(features, feature_name)?,
-            BTreeSet::from([format!("dep:{domain}")]),
-            "{feature_name} must activate only its matching dependency"
+            expected_members,
+            "{feature_name} must activate only its matching dependency and reviewed companions"
         );
     }
 

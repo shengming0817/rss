@@ -6,13 +6,17 @@
 //!
 //! # INVARIANT: RELAY-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
-//! `relay_loop` / `backlog_sampler_loop` 只接 [`RelayConfig`]（非裸 `Duration`/`usize`/`Vec<String>`）；
-//! 私有字段 + 唯一 [`RelayConfig::new`] funnel ⇒ **未校验的 config 不可表达**（构造器 funnel +
-//! input-struct-field-exclusion，Hard）。误配 `poll_interval=0`（`tokio::time::interval` 立即连发 → poll
-//! 在 DB 上热轮询打爆连接池）、`batch=0`（poll 恒空 → relay 永不推进、静默积压）、`batch` 过大（单 tick 拉爆
-//! 内存/长事务）在构造点即拒。`domains` 数量上限 + 经 `vocab::DomainName`（crate-name 形 `[a-z][a-z0-9_]*`，
-//! grammar 单源）逐个校验 + 去重，同时 515 住 metrics `domain` label 基数（#1076 对齐：domain label 值集由
-//! config funnel——typed `DomainName` + 数量/去重——而非编译期枚举封边，因 domain 是 runtime 配置）。
+//! `relay_loop` 只接 [`RelayConfig`]（非裸 `Duration`/`usize`）；私有字段 + 唯一
+//! [`RelayConfig::new`] funnel ⇒ **未校验的 config 不可表达**（构造器 funnel +
+//! input-struct-field-exclusion，Hard）。误配 `poll_interval=0`（`tokio::time::interval` 立即连发 → DB
+//! 热轮询打爆连接池）、`max_in_flight=0`（claim 恒空 → relay 永不推进、静默积压）或并发上限过大，
+//! 均在构造点即拒。relay domain 由 provider 绑定，不进入 config，避免双输入错插。
+//!
+//! # INVARIANT: SAMPLER-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+//!
+//! `backlog_sampler_loop` 只接 [`SamplerConfig`]；`domains` 数量上限 + 经 `vocab::DomainName`
+//! （crate-name 形 `[a-z][a-z0-9_]*`，grammar 单源）逐个校验 + 去重，同时限制 metrics `domain`
+//! label 基数（#1076 对齐：domain 是 runtime 配置，故由 typed funnel 而非编译期枚举封边）。
 //!
 //! # INVARIANT: SWEEPER-CONFIG-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 //!
@@ -29,15 +33,15 @@ use vocab::DomainName;
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// relay poll 间隔上限：超 5min 则 backlog 投递延迟 SLO 失去意义。
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
-/// relay 单轮 batch 下限：0 ⇒ poll 恒空、relay 永不推进（静默积压）。
-const MIN_BATCH: usize = 1;
-/// relay 单轮 batch 上限：防单 tick 重建超大 `Vec<StoredOutboxEntry>`（拉爆内存）+ 长事务锁窗。
-const MAX_BATCH: usize = 10_000;
+/// relay 单轮并发 claim/publish 下限：0 ⇒ claim 恒空、relay 永不推进（静默积压）。
+const MIN_MAX_IN_FLIGHT: usize = 1;
+/// relay 单轮并发 claim/publish 上限：限制在途 I/O、内存与 lease 到期前无法完成的风险。
+const MAX_MAX_IN_FLIGHT: usize = 64;
 /// backlog 采样间隔下限：非零 + 防热轮询聚合查询。
 const MIN_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// backlog 采样间隔上限：≤60s 保证 5min oldest-age SLO 窗口内多次采样。
 const MAX_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
-/// relay 扫描 domain 数上限（metrics `domain` label 基数闸）。
+/// sampler 扫描 domain 数上限（metrics `domain` label 基数闸）。
 const MAX_DOMAINS: usize = 64;
 
 /// sweeper 扫描间隔下限：非零 + 防热轮询 DELETE。
@@ -49,15 +53,6 @@ const MIN_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RelayConfigError {
-    /// domain 数为空或超 [`MAX_DOMAINS`]。
-    #[error("relay domains count {got} out of range [1, {max}]")]
-    DomainCount { got: usize, max: usize },
-    /// 某 domain 非合法 [`DomainName`]（crate-name 形 `[a-z][a-z0-9_]*`，单源 vocab）。
-    #[error("relay domain {domain:?} is not a valid DomainName (crate-name form [a-z][a-z0-9_]*)")]
-    DomainInvalid { domain: String },
-    /// domain 集含重复（重复 ⇒ 同 domain 重复采样 / 双发 gauge，构造期拒）。
-    #[error("relay domains contain duplicate {domain:?}")]
-    DomainDuplicate { domain: String },
     /// poll 间隔越界。
     #[error("relay poll_interval {got:?} out of range [{min:?}, {max:?}]")]
     PollIntervalOutOfRange {
@@ -65,58 +60,23 @@ pub enum RelayConfigError {
         min: Duration,
         max: Duration,
     },
-    /// batch 越界。
-    #[error("relay batch {got} out of range [{min}, {max}]")]
-    BatchOutOfRange { got: usize, min: usize, max: usize },
-    /// 采样间隔越界。
-    #[error("relay sample_interval {got:?} out of range [{min:?}, {max:?}]")]
-    SampleIntervalOutOfRange {
-        got: Duration,
-        min: Duration,
-        max: Duration,
-    },
+    /// 最大在途数越界。
+    #[error("relay max_in_flight {got} out of range [{min}, {max}]")]
+    MaxInFlightOutOfRange { got: usize, min: usize, max: usize },
 }
 
-/// relay 子系统驱动配置（relay_loop + backlog 采样器共用，同一 domain 集）。
+/// relay 驱动配置；domain 由实现 [`consistency::OutboxSource`] 的 provider 自身绑定。
 ///
-/// 私有字段 + 唯一 [`RelayConfig::new`] funnel（RELAY-CONFIG-01）。`Clone`：组合根分别 clone 给
-/// relay worker 与 sampler worker（各自 `tokio::spawn` 拥有）。
+/// 私有字段 + 唯一 [`RelayConfig::new`] funnel（RELAY-CONFIG-01）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayConfig {
-    domains: Vec<DomainName>,
     poll_interval: Duration,
-    batch: usize,
-    sample_interval: Duration,
+    max_in_flight: usize,
 }
 
 impl RelayConfig {
-    /// 构造并 fail-fast 校验（域数量、经 `DomainName` 逐个解析、去重、poll 间隔、batch、采样间隔越界即拒）。
-    pub fn new(
-        domains: Vec<String>,
-        poll_interval: Duration,
-        batch: usize,
-        sample_interval: Duration,
-    ) -> Result<Self, RelayConfigError> {
-        if domains.is_empty() || domains.len() > MAX_DOMAINS {
-            return Err(RelayConfigError::DomainCount {
-                got: domains.len(),
-                max: MAX_DOMAINS,
-            });
-        }
-        // 逐个经 vocab::DomainName 解析（grammar 单源）+ 去重（重复 domain 会双发 gauge）。
-        let mut parsed: Vec<DomainName> = Vec::with_capacity(domains.len());
-        for raw in &domains {
-            let dn = DomainName::parse(raw).map_err(|_| RelayConfigError::DomainInvalid {
-                domain: raw.clone(),
-            })?;
-            if parsed.contains(&dn) {
-                return Err(RelayConfigError::DomainDuplicate {
-                    domain: raw.clone(),
-                });
-            }
-            parsed.push(dn);
-        }
-        let domains = parsed;
+    /// 构造并 fail-fast 校验（poll 间隔、最大在途数越界即拒）。
+    pub fn new(poll_interval: Duration, max_in_flight: usize) -> Result<Self, RelayConfigError> {
         if poll_interval < MIN_POLL_INTERVAL || poll_interval > MAX_POLL_INTERVAL {
             return Err(RelayConfigError::PollIntervalOutOfRange {
                 got: poll_interval,
@@ -124,31 +84,17 @@ impl RelayConfig {
                 max: MAX_POLL_INTERVAL,
             });
         }
-        if !(MIN_BATCH..=MAX_BATCH).contains(&batch) {
-            return Err(RelayConfigError::BatchOutOfRange {
-                got: batch,
-                min: MIN_BATCH,
-                max: MAX_BATCH,
-            });
-        }
-        if sample_interval < MIN_SAMPLE_INTERVAL || sample_interval > MAX_SAMPLE_INTERVAL {
-            return Err(RelayConfigError::SampleIntervalOutOfRange {
-                got: sample_interval,
-                min: MIN_SAMPLE_INTERVAL,
-                max: MAX_SAMPLE_INTERVAL,
+        if !(MIN_MAX_IN_FLIGHT..=MAX_MAX_IN_FLIGHT).contains(&max_in_flight) {
+            return Err(RelayConfigError::MaxInFlightOutOfRange {
+                got: max_in_flight,
+                min: MIN_MAX_IN_FLIGHT,
+                max: MAX_MAX_IN_FLIGHT,
             });
         }
         Ok(Self {
-            domains,
             poll_interval,
-            batch,
-            sample_interval,
+            max_in_flight,
         })
-    }
-
-    /// 扫描的 domain 集（已校验数量、grammar、去重；typed [`DomainName`]）。
-    pub fn domains(&self) -> &[DomainName] {
-        &self.domains
     }
 
     /// relay poll 间隔。
@@ -156,9 +102,84 @@ impl RelayConfig {
         self.poll_interval
     }
 
-    /// relay 单轮 batch 上限。
-    pub fn batch(&self) -> usize {
-        self.batch
+    /// relay 单轮最大在途 claim/publish 数。
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight
+    }
+}
+
+// ── SamplerConfig ─────────────────────────────────────────────────────────────
+
+/// [`SamplerConfig`] 构造校验错误（构造期，非 wire；`#[non_exhaustive]` thiserror）。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SamplerConfigError {
+    /// domain 数为空或超 [`MAX_DOMAINS`]。
+    #[error("sampler domains count {got} out of range [1, {max}]")]
+    DomainCount { got: usize, max: usize },
+    /// 某 domain 非合法 [`DomainName`]（crate-name 形 `[a-z][a-z0-9_]*`，单源 vocab）。
+    #[error(
+        "sampler domain {domain:?} is not a valid DomainName (crate-name form [a-z][a-z0-9_]*)"
+    )]
+    DomainInvalid { domain: String },
+    /// domain 集含重复（重复会双发 gauge，构造期拒）。
+    #[error("sampler domains contain duplicate {domain:?}")]
+    DomainDuplicate { domain: String },
+    /// 采样间隔越界。
+    #[error("sampler sample_interval {got:?} out of range [{min:?}, {max:?}]")]
+    SampleIntervalOutOfRange {
+        got: Duration,
+        min: Duration,
+        max: Duration,
+    },
+}
+
+/// backlog sampler 驱动配置（SAMPLER-CONFIG-01）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamplerConfig {
+    domains: Vec<DomainName>,
+    sample_interval: Duration,
+}
+
+impl SamplerConfig {
+    /// 构造并 fail-fast 校验（域数量、`DomainName` grammar、去重、采样间隔越界即拒）。
+    pub fn new(
+        domains: Vec<String>,
+        sample_interval: Duration,
+    ) -> Result<Self, SamplerConfigError> {
+        if domains.is_empty() || domains.len() > MAX_DOMAINS {
+            return Err(SamplerConfigError::DomainCount {
+                got: domains.len(),
+                max: MAX_DOMAINS,
+            });
+        }
+        let mut parsed = Vec::with_capacity(domains.len());
+        for raw in domains {
+            let domain =
+                DomainName::parse(&raw).map_err(|_| SamplerConfigError::DomainInvalid {
+                    domain: raw.clone(),
+                })?;
+            if parsed.contains(&domain) {
+                return Err(SamplerConfigError::DomainDuplicate { domain: raw });
+            }
+            parsed.push(domain);
+        }
+        if sample_interval < MIN_SAMPLE_INTERVAL || sample_interval > MAX_SAMPLE_INTERVAL {
+            return Err(SamplerConfigError::SampleIntervalOutOfRange {
+                got: sample_interval,
+                min: MIN_SAMPLE_INTERVAL,
+                max: MAX_SAMPLE_INTERVAL,
+            });
+        }
+        Ok(Self {
+            domains: parsed,
+            sample_interval,
+        })
+    }
+
+    /// 扫描的 domain 集（已校验数量、grammar、去重）。
+    pub fn domains(&self) -> &[DomainName] {
+        &self.domains
     }
 
     /// backlog 采样间隔。
@@ -228,12 +249,12 @@ mod tests {
             (Duration::ZERO, false),
             (Duration::from_millis(50), false),
             (Duration::from_millis(99), false),
-            (Duration::from_millis(100), true), // MIN 边界放行
-            (Duration::from_secs(300), true),   // MAX 边界放行
+            (Duration::from_millis(100), true),
+            (Duration::from_secs(300), true),
             (Duration::from_secs(301), false),
         ];
         for &(poll, ok) in cases {
-            let got = RelayConfig::new(vec!["dom".into()], poll, 10, Duration::from_secs(15));
+            let got = RelayConfig::new(poll, 10);
             assert_eq!(got.is_ok(), ok, "poll_interval={poll:?}");
             if !ok {
                 assert!(matches!(
@@ -245,24 +266,32 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_rejects_out_of_range_batch() {
-        let cases: &[(usize, bool)] = &[(0, false), (1, true), (10_000, true), (10_001, false)];
-        for &(batch, ok) in cases {
-            let got = RelayConfig::new(
-                vec!["dom".into()],
-                Duration::from_millis(100),
-                batch,
-                Duration::from_secs(15),
-            );
-            assert_eq!(got.is_ok(), ok, "batch={batch}");
+    fn relay_config_rejects_out_of_range_max_in_flight() {
+        let cases: &[(usize, bool)] = &[(0, false), (1, true), (64, true), (65, false)];
+        for &(max_in_flight, ok) in cases {
+            let got = RelayConfig::new(Duration::from_millis(100), max_in_flight);
+            assert_eq!(got.is_ok(), ok, "max_in_flight={max_in_flight}");
             if !ok {
-                assert!(matches!(got, Err(RelayConfigError::BatchOutOfRange { .. })));
+                assert!(matches!(
+                    got,
+                    Err(RelayConfigError::MaxInFlightOutOfRange { .. })
+                ));
             }
         }
     }
 
     #[test]
-    fn relay_config_rejects_out_of_range_sample_interval() {
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
+    fn relay_config_accessors_round_trip() {
+        let cfg = RelayConfig::new(Duration::from_millis(250), 32).expect("valid config");
+        assert_eq!(cfg.poll_interval(), Duration::from_millis(250));
+        assert_eq!(cfg.max_in_flight(), 32);
+    }
+
+    // ── SamplerConfig：domain funnel + sample interval ───────────────────────
+    #[test]
+    fn sampler_config_rejects_out_of_range_sample_interval() {
         let cases: &[(Duration, bool)] = &[
             (Duration::ZERO, false),
             (Duration::from_millis(999), false),
@@ -271,114 +300,68 @@ mod tests {
             (Duration::from_secs(61), false),
         ];
         for &(sample, ok) in cases {
-            let got = RelayConfig::new(vec!["dom".into()], Duration::from_millis(100), 10, sample);
+            let got = SamplerConfig::new(vec!["dom".into()], sample);
             assert_eq!(got.is_ok(), ok, "sample_interval={sample:?}");
             if !ok {
                 assert!(matches!(
                     got,
-                    Err(RelayConfigError::SampleIntervalOutOfRange { .. })
+                    Err(SamplerConfigError::SampleIntervalOutOfRange { .. })
                 ));
             }
         }
     }
 
     #[test]
-    fn relay_config_rejects_domain_count() {
-        // 空 → DomainCount。
+    fn sampler_config_rejects_domain_count() {
         assert_eq!(
-            RelayConfig::new(
-                vec![],
-                Duration::from_millis(100),
-                10,
-                Duration::from_secs(15)
-            ),
-            Err(RelayConfigError::DomainCount { got: 0, max: 64 })
+            SamplerConfig::new(vec![], Duration::from_secs(15)),
+            Err(SamplerConfigError::DomainCount { got: 0, max: 64 })
         );
-        // > 64 → DomainCount（count 先于 grammar 校验，故用 dom_{i} 下划线形保证仅 count 触发）。
         let many: Vec<String> = (0..65).map(|i| format!("dom_{i}")).collect();
         assert!(matches!(
-            RelayConfig::new(
-                many,
-                Duration::from_millis(100),
-                10,
-                Duration::from_secs(15)
-            ),
-            Err(RelayConfigError::DomainCount { got: 65, max: 64 })
+            SamplerConfig::new(many, Duration::from_secs(15)),
+            Err(SamplerConfigError::DomainCount { got: 65, max: 64 })
         ));
-        // 1 放行。
-        assert!(
-            RelayConfig::new(
-                vec!["dom".into()],
-                Duration::from_millis(100),
-                10,
-                Duration::from_secs(15)
-            )
-            .is_ok()
-        );
-        // 恰好 64 放行（与 65 拒绝对称边界，防 `>` 误写成 `>=`）。
+        assert!(SamplerConfig::new(vec!["dom".into()], Duration::from_secs(15)).is_ok());
         let exactly_64: Vec<String> = (0..64).map(|i| format!("dom_{i}")).collect();
         assert!(
-            RelayConfig::new(
-                exactly_64,
-                Duration::from_millis(100),
-                10,
-                Duration::from_secs(15)
-            )
-            .is_ok(),
+            SamplerConfig::new(exactly_64, Duration::from_secs(15)).is_ok(),
             "exactly MAX_DOMAINS=64 must be accepted"
         );
     }
 
     #[test]
-    fn relay_config_rejects_invalid_domain() {
-        // 非 DomainName（crate-name 形 [a-z][a-z0-9_]*）：大写 / 数字首 / hyphen / 空格 / 点 / 空。
+    fn sampler_config_rejects_invalid_domain() {
         let bad: &[&str] = &["Dom", "1dom", "-dom", "do-main", "do main", "do.main", ""];
-        for &d in bad {
+        for &domain in bad {
             assert!(
                 matches!(
-                    RelayConfig::new(
-                        vec![d.into()],
-                        Duration::from_millis(100),
-                        10,
-                        Duration::from_secs(15)
-                    ),
-                    Err(RelayConfigError::DomainInvalid { .. })
+                    SamplerConfig::new(vec![domain.into()], Duration::from_secs(15)),
+                    Err(SamplerConfigError::DomainInvalid { .. })
                 ),
-                "expected DomainInvalid for {d:?}"
+                "expected DomainInvalid for {domain:?}"
             );
         }
-        // 合法 DomainName 放行（下划线 / 数字非首位）。
-        for &d in &["dom", "test_domain", "identity", "domain1", "a_b_c2"] {
+        for &domain in &["dom", "test_domain", "identity", "domain1", "a_b_c2"] {
             assert!(
-                RelayConfig::new(
-                    vec![d.into()],
-                    Duration::from_millis(100),
-                    10,
-                    Duration::from_secs(15)
-                )
-                .is_ok(),
-                "expected Ok for {d:?}"
+                SamplerConfig::new(vec![domain.into()], Duration::from_secs(15)).is_ok(),
+                "expected Ok for {domain:?}"
             );
         }
     }
 
     #[test]
-    fn relay_config_rejects_duplicate_domain() {
+    fn sampler_config_rejects_duplicate_domain() {
         assert!(matches!(
-            RelayConfig::new(
+            SamplerConfig::new(
                 vec!["identity".into(), "settings".into(), "identity".into()],
-                Duration::from_millis(100),
-                10,
                 Duration::from_secs(15)
             ),
-            Err(RelayConfigError::DomainDuplicate { .. })
+            Err(SamplerConfigError::DomainDuplicate { .. })
         ));
-        // 无重复放行。
         assert!(
-            RelayConfig::new(
+            SamplerConfig::new(
                 vec!["identity".into(), "settings".into()],
-                Duration::from_millis(100),
-                10,
                 Duration::from_secs(15)
             )
             .is_ok()
@@ -388,18 +371,14 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
-    fn relay_config_accessors_round_trip() {
-        let cfg = RelayConfig::new(
+    fn sampler_config_accessors_round_trip() {
+        let cfg = SamplerConfig::new(
             vec!["identity".into(), "settings".into()],
-            Duration::from_millis(250),
-            500,
             Duration::from_secs(30),
         )
         .expect("valid config");
         let domain_strs: Vec<&str> = cfg.domains().iter().map(DomainName::as_str).collect();
         assert_eq!(domain_strs, vec!["identity", "settings"]);
-        assert_eq!(cfg.poll_interval(), Duration::from_millis(250));
-        assert_eq!(cfg.batch(), 500);
         assert_eq!(cfg.sample_interval(), Duration::from_secs(30));
     }
 

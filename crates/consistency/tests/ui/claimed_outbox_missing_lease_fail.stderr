@@ -1,0 +1,11 @@
+error[E0451]: fields `subject`, `lease_token` and `deadline_epoch_micros` of struct `Claim` are private
+  --> tests/ui/claimed_outbox_missing_lease_fail.rs:40:9
+   |
+39 |     let _ = provider::Claim {
+   |             --------------- in this type
+40 |         subject,
+   |         ^^^^^^^ private field
+41 |         lease_token: "forged".into(),
+   |         ^^^^^^^^^^^ private field
+42 |         deadline_epoch_micros: 1,
+   |         ^^^^^^^^^^^^^^^^^^^^^ private field

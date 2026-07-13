@@ -3,7 +3,7 @@
 //! # 设计摘要
 //!
 //! `consistency` 的三个 AFIT trait（`OutboxSource`/`OutboxRelay`/`RetentionSweeper`）是 native AFIT、
-//! **无 Send 变体**。`tokio::spawn` 要求 future Send，而泛型 `<A: OutboxSource>` 下 `A::poll_pending(..)`
+//! **无 Send 变体**。`tokio::spawn` 要求 future Send，而泛型 `<A: OutboxSource>` 下 `A::claim_batch(..)`
 //! 的 future 在 stable Rust 上无法证明 Send（RTN 未稳定）。因此：
 //! - 泛型 `relay_loop` / `sweeper_loop`：纯 loop 体，**不 spawn**——泛型 async fn 不要求 Send，能编过。
 //! - spawn 发生在**具体类型 call site**（生产=组合根 PgOutbox，测试=具体 Fake）——单态化后 future 具体 Send。
@@ -21,12 +21,12 @@ use tokio_util::sync::CancellationToken;
 
 use consistency::{
     BacklogSample, Disposition, OutboxBacklog, OutboxContractId, OutboxMetricSubject, OutboxRelay,
-    OutboxSource, PendingEntry, RetentionSweeper,
+    OutboxSource, RetentionSweeper,
 };
 use primitives::healthz::HealthStatus;
 use vocab::DomainName;
 
-use crate::relay_config::{RelayConfig, SweeperConfig};
+use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
 use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
 
 // ── probe 名常量 ────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ const HEALTH_DLX_WRITE_ERROR: u8 = 5;
 
 /// Worker 运行期健康（原子 u8，Send+Sync；0=Healthy 1=Degraded 2=Unhealthy）。
 ///
-/// poll/relay/sweep 错误 → `mark_degraded`；loop 退出（worker 不再运行）→ `mark_stopped`（Unhealthy）。
+/// claim/relay/sweep 错误 → `mark_degraded`；loop 退出（worker 不再运行）→ `mark_stopped`（Unhealthy）。
 /// readyz 聚合经 `health()` 读此状态，据此翻 probe。
 pub struct WorkerHealth(AtomicU8);
 
@@ -120,14 +120,14 @@ impl WorkerHealth {
         }
     }
 
-    /// 一整轮 poll/relay（或 sweep）干净成功 → 恢复 Healthy（瞬态故障自愈，**非**单向 latch；F5）。
+    /// 一整轮 claim/relay（或 sweep）干净成功 → 恢复 Healthy（瞬态故障自愈，**非**单向 latch；F5）。
     ///
     /// 与 [`WorkerHealth::mark_degraded`] 同档（无条件 store）；仅在运行期由 tick 调用。
     pub(crate) fn mark_healthy(&self) {
         self.0.store(HEALTH_HEALTHY, Ordering::Release);
     }
 
-    /// poll/relay/sweep 出错，或 relay 业务处置为 Requeue/Reject → Degraded（无条件 store，**非** CAS）。
+    /// claim/relay/sweep 出错，或 relay 业务处置为 Requeue/Reject → Degraded（无条件 store，**非** CAS）。
     ///
     /// 顺序不变式由**构造**保证而非此方法：loop 仅在运行期每轮 tick 据结果二选一调
     /// `mark_healthy`/`mark_degraded`，退出时恰调一次终态 `mark_stopped`（Unhealthy）；cancel 后不再
@@ -160,11 +160,12 @@ impl WorkerHealth {
 
 /// Outbox relay 驱动循环（泛型，**不** spawn；spawn 在具体类型 call site）。
 ///
-/// 每轮 tick 遍历 `config.domains()`，按 `config.batch()` 大小拉取 pending entry，逐条 relay，并经
+/// 每轮 tick 从 provider 自身绑定的 domain 按 `config.max_in_flight()` 拉取一批 pending entry，立即并发
+/// relay，并经
 /// `metrics` 发射 `outbox_publish_total{status}` / `outbox_dlx_total` / `outbox_relay_tick_duration_seconds`
 /// （#1209）。取消信号（`token.cancelled()`）在每轮循环顶部检查——当前条 relay 跑完再退，在途写不丢；
 /// 取消在下一轮 loop 顶部生效（单条有界，尊重 shutdown budget）。`config` 经 [`RelayConfig`] funnel 已
-/// 校验（`poll_interval`/`batch`/domains 越界在构造点即拒，RELAY-CONFIG-01），此处不再防御 0ms 热轮询。
+/// 校验（`poll_interval`/`max_in_flight` 越界在构造点即拒，RELAY-CONFIG-01），此处不再防御 0ms 热轮询。
 /// loop 退出（无论 cancel 还是 panic 外的正常返回）→ `health.mark_stopped()`。
 pub async fn relay_loop<A>(
     store: Arc<A>,
@@ -184,8 +185,7 @@ pub async fn relay_loop<A>(
             _ = ticker.tick() => {
                 relay_tick(
                     &store,
-                    config.domains(),
-                    config.batch(),
+                    config.max_in_flight(),
                     clock.as_ref(),
                     &health,
                     metrics.as_ref(),
@@ -197,44 +197,31 @@ pub async fn relay_loop<A>(
     health.mark_stopped();
 }
 
-/// 单轮（或单 domain）relay 健康结果——驱动 worker health（F4 把业务处置通道并入映射）。
+/// 单轮 relay 健康结果——驱动 worker health（F4 把业务处置通道并入映射）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TickOutcome {
-    /// 全部 entry Ack（或空批次），无 poll/relay 错误。
+    /// 全部 entry Ack（或空批次），无 claim/relay 错误。
     Clean,
-    /// 出现 poll/relay 错误，或 relay 处置为 Requeue/Reject（broker 失败 / DLX）。
+    /// 出现 claim/relay 错误，或 relay 处置为 Requeue/Reject（broker 失败 / DLX）。
     Degraded,
 }
 
-impl TickOutcome {
-    /// 取更差者（Degraded 吸收 Clean）——跨 domain 聚合用。
-    fn worse(self, other: TickOutcome) -> TickOutcome {
-        if self == TickOutcome::Degraded || other == TickOutcome::Degraded {
-            TickOutcome::Degraded
-        } else {
-            TickOutcome::Clean
-        }
-    }
-}
-
-/// relay 单轮 tick（抽出控制认知复杂度 ≤15）：逐 domain 委派 [`relay_domain_once`]，整轮结果一次性翻 health。
+/// relay 单轮 tick（抽出控制认知复杂度 ≤15）：domain 只由 provider 暴露，避免 config 与 publisher
+/// 形成可错插的双输入；本轮结果一次性翻 health。
 ///
-/// 全 domain 干净（含空轮）→ `mark_healthy`（F5：瞬态故障下一轮自愈）；任一 poll/relay 错误或
+/// 干净（含空轮）→ `mark_healthy`（F5：瞬态故障下一轮自愈）；任一 claim/relay 错误或
 /// Requeue/Reject 处置 → `mark_degraded`（F4：health 不再只表达异常通道）。
 async fn relay_tick<A>(
     store: &Arc<A>,
-    domains: &[DomainName],
-    batch: usize,
+    max_in_flight: usize,
     clock: &dyn diport::Clock,
     health: &Arc<WorkerHealth>,
     metrics: &dyn OutboxMetrics,
 ) where
     A: OutboxSource + OutboxRelay,
 {
-    let mut tick = TickOutcome::Clean;
-    for domain in domains {
-        tick = tick.worse(relay_domain_once(store, domain, batch, clock, metrics).await);
-    }
+    let domain = store.claim_domain();
+    let tick = relay_domain_once(store, domain, max_in_flight, clock, metrics).await;
     match tick {
         TickOutcome::Clean => health.mark_healthy(),
         TickOutcome::Degraded => health.mark_degraded(),
@@ -251,7 +238,7 @@ fn secs_since(clock: &dyn diport::Clock, start: SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// 单 domain 一轮：扫一批（计 poll 相耗时）→ 逐条中继（计 publish 相耗时 + 发 publish 计数），返回该
+/// 单 domain 一轮：原子 claim 一批（计 claim 相耗时）→ 即时并发中继（计 publish 相耗时 + 发 publish 计数），返回该
 /// domain 的 [`TickOutcome`]（早返展平嵌套 + 批中继抽 [`relay_batch`]，认知复杂度 ≤15）。
 async fn relay_domain_once<A>(
     store: &Arc<A>,
@@ -263,18 +250,18 @@ async fn relay_domain_once<A>(
 where
     A: OutboxSource + OutboxRelay,
 {
-    let poll_start = clock.now();
-    let poll_result = store.poll_pending(domain.as_str(), batch).await;
-    metrics.record_tick_duration(RelayPhase::Poll, secs_since(clock, poll_start));
-    let entries = match poll_result {
+    let claim_start = clock.now();
+    let claim_result = store.claim_batch(batch).await;
+    metrics.record_tick_duration(RelayPhase::Claim, secs_since(clock, claim_start));
+    let entries = match claim_result {
         Ok(entries) => entries,
         Err(e) => {
-            log_poll_failed(domain.as_str(), &e);
+            log_claim_failed(domain.as_str(), &e);
             return TickOutcome::Degraded;
         }
     };
     if !entries.is_empty() {
-        log_polled(domain.as_str(), entries.len());
+        log_claimed(domain.as_str(), entries.len());
     }
     let publish_start = clock.now();
     let outcome = relay_batch(store, domain, entries, metrics).await;
@@ -282,32 +269,37 @@ where
     outcome
 }
 
-/// 逐条中继一批 entry：发 `outbox_publish_total{status}`（含 Ack）+ 翻 [`TickOutcome`]（抽出控制
+/// 并发中继一批 entry：发 `outbox_publish_total{status}`（含 Ack）+ 翻 [`TickOutcome`]（抽出控制
 /// [`relay_domain_once`] 认知复杂度 ≤15）。
 ///
-/// # INVARIANT: OUTBOX-RELAY-SERIAL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+/// # INVARIANT: OUTBOX-RELAY-IMMEDIATE-DISPATCH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
-/// entries **顺序**投递（for 循环线性推进）；per-partition in-order 由 SQL head-of-partition gating
-/// （adapter `poll_pending` 只拿各 partition 最旧未投条目）+ CAS settle 承载，relay 本身不感知
-/// partition key。**禁止并行化** relay_batch——并行投递同 partition 多条会破坏顺序语义
-/// （outbox-seq-partition #1211，PROJECTION-SERIAL-WITNESS-01 的基础约束在 relay 侧的对应声明）。
+/// entries **立即并发**投递；per-partition in-order 由 SQL head-of-partition gating 承载：同一 claim
+/// batch 对每个 `(tenant, domain, partition)` 至多返回队头一条，因此本批内不存在同 partition 的并发项。
+/// `RelayConfig::max_in_flight` 同时限制 claim 数和并发数，不让已持租 entry 在应用队列中串行等待至过期。
 ///
 /// 不在 relay 外套 select!：当前条 publish+CAS 跑完再退，在途写不丢；取消在下一轮 loop 顶部生效
 /// （单条有界，尊重 shutdown budget）。
 async fn relay_batch<A>(
     store: &Arc<A>,
     domain: &DomainName,
-    entries: Vec<PendingEntry>,
+    entries: Vec<A::Claim>,
     metrics: &dyn OutboxMetrics,
 ) -> TickOutcome
 where
-    A: OutboxSource + OutboxRelay,
+    A: OutboxRelay,
 {
     let mut outcome = TickOutcome::Clean;
-    for entry in entries {
-        match store.relay(&entry).await {
+    let results = futures::future::join_all(entries.into_iter().map(|entry| async move {
+        // Claim 按值消费；仅复制低基数 metric subject，绝不复制 lease capability。
+        let subject = A::claim_subject(&entry).clone();
+        (subject, store.relay(entry).await)
+    }))
+    .await;
+    for (subject, result) in results {
+        match result {
             Ok(disposition) => {
-                let scope = OutboxMetricScope::new(domain, entry.subject());
+                let scope = OutboxMetricScope::new(domain, &subject);
                 metrics.record_publish(&scope, disposition);
                 if disposition != Disposition::Ack {
                     // Requeue（broker 瞬态失败，退避重投）/ Reject（预算耗尽进 DLX）——业务处置通道映射为
@@ -333,12 +325,12 @@ where
 // 测试约束）；adapter 层 sqlx 错误已在落 EngineError 前经 `secure::redact_error` 清洗。**前提**：EngineError
 // 若未来新增携 runtime 数据的 variant，本处需复核（同 consumer.rs `log_dead_lettered` 假设）。
 
-/// poll_pending 失败：退避到下一 tick 前结构化记录。
-fn log_poll_failed(domain: &str, e: &impl std::fmt::Display) {
+/// claim_batch 失败：退避到下一 tick 前结构化记录。
+fn log_claim_failed(domain: &str, e: &impl std::fmt::Display) {
     tracing::warn!(
         domain,
         error = %e,
-        "relay: poll_pending failed, marking worker degraded; backing off to next tick"
+        "relay: claim_batch failed, marking worker degraded; backing off to next tick"
     );
 }
 
@@ -361,8 +353,8 @@ fn log_relay_disposition(domain: &str, disposition: Disposition) {
 }
 
 /// 单轮捞到非空批次：结构化记录批量（正常路径可观测；空轮不记，减噪）。
-fn log_polled(domain: &str, polled: usize) {
-    tracing::debug!(domain, polled, "relay: tick polled");
+fn log_claimed(domain: &str, claimed: usize) {
+    tracing::debug!(domain, claimed, "relay: tick claimed");
 }
 
 // ── sweeper_loop（泛型，不 spawn）────────────────────────────────────────────
@@ -461,11 +453,11 @@ impl ObservedBacklogScope {
 /// 独立于 relay/sweeper 的专用 worker（独立 [`WorkerHealth`]）：gauge 新鲜度由 `config.sample_interval()`
 /// 解耦 relay 吞吐与 retention 周期（默认数十秒，远密于 5min oldest-age SLO 窗口），采样失败只降级
 /// `outbox_sampler` probe、不污染 relay readyz。取消/错误骨架同 `sweeper_loop`。
-/// `config`（domains / sample_interval）经 [`RelayConfig`] funnel 已校验（INVARIANT: RELAY-CONFIG-01， { level = "Medium", exec = "manual/opt-in", source = "code" }
+/// `config`（domains / sample_interval）经 [`SamplerConfig`] funnel 已校验（SAMPLER-CONFIG-01），
 /// 同 [`relay_loop`]），此处不再防御 0 间隔 / 越界 domain 集。
 pub async fn backlog_sampler_loop<B>(
     store: Arc<B>,
-    config: RelayConfig,
+    config: SamplerConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn OutboxMetrics>,
@@ -723,33 +715,39 @@ mod tests {
 
     use consistency::outbox::{
         BacklogMetricSample, BacklogSample, Disposition, OutboxContractId, OutboxMetricSubject,
-        OutboxPayload, PendingEntry, StoredOutboxEntry,
     };
     use consistency::{OutboxBacklog, OutboxRelay, OutboxSource, RetentionSweeper};
     use diport::ManagedResource;
     use primitives::healthz::{HealthStatus, ProbeName};
+    use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
+    use vocab::DomainName;
 
     use super::{
         OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, SWEEPER_WORKER_NAME,
         SamplerWorker, SweeperWorker, WorkerHealth, backlog_sampler_loop, sweeper_loop,
     };
     use crate::relay::{RelayWorker, relay_loop};
-    use crate::relay_config::{RelayConfig, SweeperConfig};
+    use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
     use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
     // ── 测试配置 / metrics 辅助 ───────────────────────────────────────────────
 
-    /// 合法测试 RelayConfig（batch=10, sample=15s；domains 经 &[&str]）。
+    /// 合法测试 RelayConfig（max_in_flight=10）。
     #[allow(clippy::expect_used)]
     // reason: 测试 happy-path 断言已知合法 config，item-level carve-out（error-handling.md §Carve-out）。
-    fn relay_config(domains: &[&str], poll: Duration) -> RelayConfig {
-        RelayConfig::new(
-            domains.iter().map(|d| (*d).to_string()).collect(),
-            poll,
-            10,
-            Duration::from_secs(15),
+    fn relay_config(poll: Duration) -> RelayConfig {
+        RelayConfig::new(poll, 10).expect("valid test relay config")
+    }
+
+    /// 合法测试 SamplerConfig。
+    #[allow(clippy::expect_used)]
+    // reason: 测试 happy-path 断言已知合法 config，item-level carve-out。
+    fn sampler_config(domains: &[&str], sample: Duration) -> SamplerConfig {
+        SamplerConfig::new(
+            domains.iter().map(|domain| (*domain).to_owned()).collect(),
+            sample,
         )
-        .expect("valid test relay config")
+        .expect("valid test sampler config")
     }
 
     /// 合法测试 SweeperConfig。
@@ -916,21 +914,19 @@ mod tests {
 
     // ── Fake store（具体类型；Send 友好：用 Arc<Mutex>/Atomic，不跨 await 持有锁）──
 
-    /// 构造测试持久化 entry（topic + idem_key + payload）。
-    fn make_entry() -> StoredOutboxEntry {
-        #[allow(clippy::unwrap_used)]
-        // reason: 测试 happy-path，item-level carve-out
-        StoredOutboxEntry::hydrate(
-            "session.created",
-            consistency::idempotency::IdemKey::parse("evt-001").unwrap(),
-            OutboxPayload::from_reviewed_event_bytes(vec![1u8, 2, 3]),
-        )
-        .unwrap()
+    /// Fake provider 私有铸造、按值消费的 non-Clone claim。
+    struct FakeClaim {
+        subject: OutboxMetricSubject,
     }
 
-    /// 构造带 metric subject 的测试 PendingEntry。
-    fn make_pending_entry() -> PendingEntry {
-        PendingEntry::new(make_entry(), subject("identity.session-created"))
+    impl FakeClaim {
+        fn new(subject: OutboxMetricSubject) -> Self {
+            Self { subject }
+        }
+    }
+
+    fn make_claimed_entry() -> FakeClaim {
+        FakeClaim::new(subject("identity.session-created"))
     }
 
     /// bounded yield：让 spawned worker task 推进，至多 32 次 yield 等到 `want` 状态后返回 true。
@@ -947,66 +943,69 @@ mod tests {
     }
 
     /// Fake store：同时 impl OutboxSource + OutboxRelay。
-    /// - poll：按轮次从预置队列吐 entries（每次 poll 返回队列头部至多 batch 条）。
+    /// - claim：按轮次从预置队列吐 entries（每次 claim 返回队列头部至多 batch 条）。
     /// - relay：计数调用，按预置策略返 Ok(Disposition)/Err。
     struct FakeStore {
-        /// 预置 entries（每次 poll 弹出头部 batch 条）。
-        pending: Mutex<Vec<PendingEntry>>,
+        /// provider 构造时绑定的唯一发布域。
+        domain: DomainName,
+        /// 预置 claims（每次 claim 弹出头部 batch 条）。
+        claims: Mutex<Vec<FakeClaim>>,
         /// relay 调用计数。
         relay_count: AtomicUsize,
         /// relay 返回错误策略：None=Ok(relay_disposition)，Some(kind)=Err。
         relay_err: Option<consistency::error::EngineErrorKind>,
         /// relay 成功路径返回的处置（默认 Ack；测 F4 时置 Requeue/Reject）。
         relay_disposition: Disposition,
-        /// poll 返回错误策略：None=Ok，Some(kind)=Err。
-        poll_err: Option<consistency::error::EngineErrorKind>,
+        /// claim 返回错误策略：None=Ok，Some(kind)=Err。
+        claim_err: Option<consistency::error::EngineErrorKind>,
     }
 
     impl FakeStore {
-        fn new(entries: Vec<PendingEntry>) -> Arc<Self> {
+        fn new(entries: Vec<FakeClaim>) -> Arc<Self> {
             Arc::new(Self {
-                pending: Mutex::new(entries),
+                domain: dn("identity"),
+                claims: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
                 relay_err: None,
                 relay_disposition: Disposition::Ack,
-                poll_err: None,
+                claim_err: None,
             })
         }
 
         fn with_relay_err(
-            entries: Vec<PendingEntry>,
+            entries: Vec<FakeClaim>,
             kind: consistency::error::EngineErrorKind,
         ) -> Arc<Self> {
             Arc::new(Self {
-                pending: Mutex::new(entries),
+                domain: dn("identity"),
+                claims: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
                 relay_err: Some(kind),
                 relay_disposition: Disposition::Ack,
-                poll_err: None,
+                claim_err: None,
             })
         }
 
         /// relay 成功但返回非-Ack 处置（Requeue/Reject）——测 F4 health 映射。
-        fn with_relay_disposition(
-            entries: Vec<PendingEntry>,
-            disposition: Disposition,
-        ) -> Arc<Self> {
+        fn with_relay_disposition(entries: Vec<FakeClaim>, disposition: Disposition) -> Arc<Self> {
             Arc::new(Self {
-                pending: Mutex::new(entries),
+                domain: dn("identity"),
+                claims: Mutex::new(entries),
                 relay_count: AtomicUsize::new(0),
                 relay_err: None,
                 relay_disposition: disposition,
-                poll_err: None,
+                claim_err: None,
             })
         }
 
-        fn with_poll_err(kind: consistency::error::EngineErrorKind) -> Arc<Self> {
+        fn with_claim_err(kind: consistency::error::EngineErrorKind) -> Arc<Self> {
             Arc::new(Self {
-                pending: Mutex::new(vec![]),
+                domain: dn("identity"),
+                claims: Mutex::new(vec![]),
                 relay_count: AtomicUsize::new(0),
                 relay_err: None,
                 relay_disposition: Disposition::Ack,
-                poll_err: Some(kind),
+                claim_err: Some(kind),
             })
         }
 
@@ -1016,19 +1015,28 @@ mod tests {
     }
 
     impl OutboxSource for FakeStore {
-        async fn poll_pending(
+        type Claim = FakeClaim;
+
+        fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
+            &claim.subject
+        }
+
+        fn claim_domain(&self) -> &DomainName {
+            &self.domain
+        }
+
+        async fn claim_batch(
             &self,
-            _domain: &str,
             limit: usize,
-        ) -> Result<Vec<PendingEntry>, consistency::error::EngineError> {
-            if let Some(kind) = self.poll_err {
+        ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
+            if let Some(kind) = self.claim_err {
                 return Err(consistency::error::EngineError::new(kind));
             }
             #[allow(clippy::unwrap_used)]
             // reason: Mutex lock in test，item-level carve-out
-            let mut pending = self.pending.lock().unwrap();
-            let drain_end = limit.min(pending.len());
-            let batch: Vec<PendingEntry> = pending.drain(..drain_end).collect();
+            let mut claims = self.claims.lock().unwrap();
+            let drain_end = limit.min(claims.len());
+            let batch = claims.drain(..drain_end).collect();
             Ok(batch)
         }
     }
@@ -1036,7 +1044,7 @@ mod tests {
     impl OutboxRelay for FakeStore {
         async fn relay(
             &self,
-            _entry: &PendingEntry,
+            _entry: Self::Claim,
         ) -> Result<Disposition, consistency::error::EngineError> {
             if let Some(kind) = self.relay_err {
                 return Err(consistency::error::EngineError::new(kind));
@@ -1044,6 +1052,67 @@ mod tests {
             self.relay_count.fetch_add(1, AtomOrd::Release);
             Ok(self.relay_disposition)
         }
+    }
+
+    /// 所有 relay future 必须同时开始，才能越过 barrier；串行实现会超时。
+    struct ConcurrentRelayStore {
+        domain: DomainName,
+        barrier: Barrier,
+    }
+
+    impl ConcurrentRelayStore {
+        fn new(width: usize) -> Arc<Self> {
+            Arc::new(Self {
+                domain: dn("dom"),
+                barrier: Barrier::new(width),
+            })
+        }
+    }
+
+    impl OutboxSource for ConcurrentRelayStore {
+        type Claim = FakeClaim;
+
+        fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
+            &claim.subject
+        }
+
+        fn claim_domain(&self) -> &DomainName {
+            &self.domain
+        }
+
+        async fn claim_batch(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl OutboxRelay for ConcurrentRelayStore {
+        async fn relay(
+            &self,
+            _entry: Self::Claim,
+        ) -> Result<Disposition, consistency::error::EngineError> {
+            self.barrier.wait().await;
+            Ok(Disposition::Ack)
+        }
+    }
+
+    /// F4 复现：一批 claim 必须即时并发 dispatch；串行等待会让批尾在首次 publish 前消耗租约。
+    #[tokio::test]
+    async fn claimed_batch_is_dispatched_without_serial_tail_wait() {
+        let width = 3;
+        let store = ConcurrentRelayStore::new(width);
+        let entries = (0..width).map(|_| make_claimed_entry()).collect();
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            super::relay_batch(&store, &dn("dom"), entries, &CountingMetrics::default()),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "all claimed entries must begin relay concurrently within the lease budget"
+        );
     }
 
     /// Fake sweeper：impl RetentionSweeper，计数调用并按策略返结果。
@@ -1095,7 +1164,7 @@ mod tests {
     /// 再 cancel → shutdown → 断言 relay_count == entry 数。
     #[tokio::test(start_paused = true)]
     async fn t8_shutdown_drains_in_flight_entries() {
-        let entries: Vec<PendingEntry> = (0..3).map(|_| make_pending_entry()).collect();
+        let entries: Vec<FakeClaim> = (0..3).map(|_| make_claimed_entry()).collect();
         let entry_count = entries.len();
         let store = FakeStore::new(entries);
         let health = Arc::new(WorkerHealth::healthy());
@@ -1104,7 +1173,7 @@ mod tests {
         // spawn relay_loop（具体类型 FakeStore，future 具体 Send，tokio::spawn 编得过）。
         let handle = tokio::spawn(relay_loop(
             store.clone(),
-            relay_config(&["testdomain"], Duration::from_millis(100)),
+            relay_config(Duration::from_millis(100)),
             fixed_clock(),
             token.clone(),
             health.clone(),
@@ -1143,7 +1212,7 @@ mod tests {
 
         let handle = tokio::spawn(relay_loop(
             store.clone(),
-            relay_config(&["testdomain"], Duration::from_secs(60)),
+            relay_config(Duration::from_secs(60)),
             fixed_clock(),
             token.clone(),
             health.clone(),
@@ -1201,7 +1270,7 @@ mod tests {
         assert!(result.is_ok(), "sweeper shutdown must succeed: {result:?}");
     }
 
-    // ── T10：worker 退出 → health Unhealthy；poll/relay 错误 → Degraded ────────
+    // ── T10：worker 退出 → health Unhealthy；claim/relay 错误 → Degraded ────────
 
     /// T10a：cancel → shutdown 后 health 变 Unhealthy（mark_stopped）。
     #[tokio::test]
@@ -1212,7 +1281,7 @@ mod tests {
 
         let handle = tokio::spawn(relay_loop(
             store.clone(),
-            relay_config(&["dom"], Duration::from_secs(60)),
+            relay_config(Duration::from_secs(60)),
             fixed_clock(),
             token.clone(),
             health.clone(),
@@ -1242,23 +1311,20 @@ mod tests {
     #[tokio::test]
     async fn t10b_relay_error_marks_degraded() {
         let store = FakeStore::with_relay_err(
-            vec![make_pending_entry()],
+            vec![make_claimed_entry()],
             consistency::error::EngineErrorKind::Transient,
         );
         let health = Arc::new(WorkerHealth::healthy());
-        super::relay_tick(
-            &store,
-            &[dn("dom")],
-            10,
-            &FixedClock,
-            &health,
-            &CountingMetrics::default(),
-        )
-        .await;
+        let metrics = CountingMetrics::default();
+        super::relay_tick(&store, 10, &FixedClock, &health, &metrics).await;
         assert_eq!(
             health.status(),
             HealthStatus::Degraded,
             "relay error round must mark worker Degraded"
+        );
+        assert!(
+            metrics.publishes().is_empty(),
+            "transient relay errors must not be cross-counted as Ack"
         );
     }
 
@@ -1267,11 +1333,10 @@ mod tests {
     #[tokio::test]
     async fn relay_non_ack_disposition_marks_degraded() {
         for disposition in [Disposition::Requeue, Disposition::Reject] {
-            let store = FakeStore::with_relay_disposition(vec![make_pending_entry()], disposition);
+            let store = FakeStore::with_relay_disposition(vec![make_claimed_entry()], disposition);
             let health = Arc::new(WorkerHealth::healthy());
             super::relay_tick(
                 &store,
-                &[dn("dom")],
                 10,
                 &FixedClock,
                 &health,
@@ -1291,15 +1356,13 @@ mod tests {
     #[tokio::test]
     async fn relay_tick_recovers_to_healthy_after_clean_round() {
         let health = Arc::new(WorkerHealth::healthy());
-        let domains = [dn("dom")];
         // 第一轮：relay Err → Degraded。
         let erroring = FakeStore::with_relay_err(
-            vec![make_pending_entry()],
+            vec![make_claimed_entry()],
             consistency::error::EngineErrorKind::Transient,
         );
         super::relay_tick(
             &erroring,
-            &domains,
             10,
             &FixedClock,
             &health,
@@ -1315,7 +1378,6 @@ mod tests {
         let clean = FakeStore::new(vec![]);
         super::relay_tick(
             &clean,
-            &domains,
             10,
             &FixedClock,
             &health,
@@ -1334,15 +1396,13 @@ mod tests {
     #[tokio::test]
     async fn relay_tick_recovers_to_healthy_after_all_ack_nonempty_round() {
         let health = Arc::new(WorkerHealth::healthy());
-        let domains = [dn("dom")];
         // 第一轮：relay Err → Degraded。
         let erroring = FakeStore::with_relay_err(
-            vec![make_pending_entry()],
+            vec![make_claimed_entry()],
             consistency::error::EngineErrorKind::Transient,
         );
         super::relay_tick(
             &erroring,
-            &domains,
             10,
             &FixedClock,
             &health,
@@ -1355,10 +1415,9 @@ mod tests {
             "relay error → Degraded"
         );
         // 第二轮：非空批次、全 Ack（默认 disposition）→ relay_batch 执行但 outcome Clean → Healthy。
-        let all_ack = FakeStore::new(vec![make_pending_entry(), make_pending_entry()]);
+        let all_ack = FakeStore::new(vec![make_claimed_entry(), make_claimed_entry()]);
         super::relay_tick(
             &all_ack,
-            &domains,
             10,
             &FixedClock,
             &health,
@@ -1390,16 +1449,16 @@ mod tests {
         );
     }
 
-    /// T10c：poll 返回 Err → health Degraded（poll_pending 路径）。
+    /// T10c：claim 返回 Err → health Degraded（claim_batch 路径）。
     #[tokio::test(start_paused = true)]
-    async fn t10c_poll_error_marks_degraded() {
-        let store = FakeStore::with_poll_err(consistency::error::EngineErrorKind::Transient);
+    async fn t10c_claim_error_marks_degraded() {
+        let store = FakeStore::with_claim_err(consistency::error::EngineErrorKind::Transient);
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
 
         let _handle = tokio::spawn(relay_loop(
             store.clone(),
-            relay_config(&["dom"], Duration::from_millis(100)),
+            relay_config(Duration::from_millis(100)),
             fixed_clock(),
             token.clone(),
             health.clone(),
@@ -1408,17 +1467,17 @@ mod tests {
 
         tokio::time::advance(std::time::Duration::from_millis(200)).await;
 
-        // 精确断言：worker 仍运行时 poll 错误必已触发 mark_degraded（Degraded，未被终态覆盖）。
+        // 精确断言：worker 仍运行时 claim 错误必已触发 mark_degraded（Degraded，未被终态覆盖）。
         assert!(
             yield_until(&health, HealthStatus::Degraded).await,
-            "poll error must mark Degraded while worker still running"
+            "claim error must mark Degraded while worker still running"
         );
 
         token.cancel();
         tokio::time::advance(std::time::Duration::from_millis(200)).await;
         assert!(
             yield_until(&health, HealthStatus::Unhealthy).await,
-            "stopped worker must become Unhealthy after poll error"
+            "stopped worker must become Unhealthy after claim error"
         );
     }
 
@@ -1517,7 +1576,7 @@ mod tests {
         let token = CancellationToken::new();
         let handle = tokio::spawn(relay_loop(
             store,
-            relay_config(&["dom"], Duration::from_secs(60)),
+            relay_config(Duration::from_secs(60)),
             fixed_clock(),
             token.clone(),
             health.clone(),
@@ -1565,7 +1624,7 @@ mod tests {
         let token = CancellationToken::new();
         let handle = tokio::spawn(backlog_sampler_loop(
             store,
-            relay_config(&["dom"], Duration::from_secs(60)),
+            sampler_config(&["dom"], Duration::from_secs(60)),
             token.clone(),
             health.clone(),
             noop_metrics(),
@@ -1581,18 +1640,10 @@ mod tests {
     #[tokio::test]
     async fn relay_records_publish_counter_per_disposition() {
         for disposition in [Disposition::Ack, Disposition::Requeue, Disposition::Reject] {
-            let store = FakeStore::with_relay_disposition(vec![make_pending_entry()], disposition);
+            let store = FakeStore::with_relay_disposition(vec![make_claimed_entry()], disposition);
             let health = Arc::new(WorkerHealth::healthy());
             let metrics = CountingMetrics::new();
-            super::relay_tick(
-                &store,
-                &[dn("identity")],
-                10,
-                &FixedClock,
-                &health,
-                metrics.as_ref(),
-            )
-            .await;
+            super::relay_tick(&store, 10, &FixedClock, &health, metrics.as_ref()).await;
             assert_eq!(
                 metrics.publishes(),
                 vec![(
@@ -1607,25 +1658,17 @@ mod tests {
         }
     }
 
-    /// relay tick 每 domain 各发一次 poll 相 + 一次 publish 相耗时（settle 并入 publish）。
+    /// relay tick 每 domain 各发一次 claim 相 + 一次 publish 相耗时（settle 并入 publish）。
     #[tokio::test]
-    async fn relay_records_tick_duration_poll_and_publish() {
-        let store = FakeStore::new(vec![make_pending_entry()]);
+    async fn relay_records_tick_duration_claim_and_publish() {
+        let store = FakeStore::new(vec![make_claimed_entry()]);
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
-        super::relay_tick(
-            &store,
-            &[dn("identity")],
-            10,
-            &FixedClock,
-            &health,
-            metrics.as_ref(),
-        )
-        .await;
+        super::relay_tick(&store, 10, &FixedClock, &health, metrics.as_ref()).await;
         assert_eq!(
             metrics.tick_phases(),
-            vec![RelayPhase::Poll, RelayPhase::Publish],
-            "tick must observe poll then publish phase"
+            vec![RelayPhase::Claim, RelayPhase::Publish],
+            "tick must observe claim then publish phase"
         );
     }
 

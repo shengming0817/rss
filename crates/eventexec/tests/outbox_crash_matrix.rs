@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use consistency::{
-    BacklogSample, Disposition, IdemKey, InboxState, LeaseOutcome, LeaseToken, OutboxContractId,
-    OutboxMetricSubject, OutboxRelay, OutboxSource, PendingEntry, SeenState, StoredOutboxEntry,
+    BacklogSample, Disposition, InboxState, LeaseOutcome, LeaseToken, OutboxContractId,
+    OutboxMetricSubject, OutboxRelay, OutboxSource, SeenState,
 };
 use eventexec::{
     OutboxMetricScope, OutboxMetrics, RelayConfig, RelayPhase, WorkerHealth, relay_loop,
@@ -22,6 +22,8 @@ const TOPIC: &str = "identity.session-created";
 const CONTRACT_ID: &str = "identity.session-created";
 const PARTITION_KEY: &str = "session-01";
 const PAYLOAD: &[u8] = br#"{"sessionId":"session-01"}"#;
+const START_EPOCH_MICROS: i64 = 1_000_000;
+const LEASE_TTL_MICROS: i64 = 60_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DurableStatus {
@@ -43,36 +45,73 @@ struct Delivery {
 struct DurableRow {
     delivery: Delivery,
     status: DurableStatus,
-    lease_expired: bool,
+    lease_token: Option<String>,
+    lease_deadline_epoch_micros: Option<i64>,
+}
+
+/// CrashStore 私有铸造、按值消费的 durable claim capability。
+struct CrashClaim {
+    subject: OutboxMetricSubject,
+    message_id: String,
+    lease_token: String,
+    lease_deadline_epoch_micros: i64,
+}
+
+impl CrashClaim {
+    #[allow(clippy::expect_used)]
+    // reason: fixed crash fixture tenant/contract values are valid by construction.
+    fn new(row: &DurableRow, lease_token: String, lease_deadline_epoch_micros: i64) -> Self {
+        Self {
+            subject: OutboxMetricSubject::new(
+                vocab::TenantId::parse(&row.delivery.tenant_id).expect("valid tenant"),
+                OutboxContractId::parse(&row.delivery.contract_id).expect("valid contract"),
+            ),
+            message_id: row.delivery.message_id.clone(),
+            lease_token,
+            lease_deadline_epoch_micros,
+        }
+    }
 }
 
 struct CrashStore {
+    domain: vocab::DomainName,
     rows: Mutex<Vec<DurableRow>>,
     deliveries: Mutex<Vec<Delivery>>,
     published_before_settle: Notify,
     settled: Notify,
     block_first_settle: Mutex<bool>,
+    now_epoch_micros: Mutex<i64>,
+    next_token: Mutex<u64>,
+    first_claim: Mutex<Option<(String, i64)>>,
 }
 
 impl CrashStore {
+    #[allow(clippy::expect_used)]
+    // reason: fixed crash fixture provider domain is valid by construction.
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            domain: vocab::DomainName::parse("identity").expect("valid fixture domain"),
             rows: Mutex::new(vec![
                 DurableRow {
                     delivery: delivery(TENANT_A, MESSAGE_ID),
                     status: DurableStatus::Pending,
-                    lease_expired: false,
+                    lease_token: None,
+                    lease_deadline_epoch_micros: None,
                 },
                 DurableRow {
                     delivery: delivery(TENANT_B, "other-tenant-message"),
                     status: DurableStatus::Publishing,
-                    lease_expired: false,
+                    lease_token: Some("00000000-0000-4000-8000-000000000002".to_string()),
+                    lease_deadline_epoch_micros: Some(i64::MAX),
                 },
             ]),
             deliveries: Mutex::new(Vec::new()),
             published_before_settle: Notify::new(),
             settled: Notify::new(),
             block_first_settle: Mutex::new(true),
+            now_epoch_micros: Mutex::new(START_EPOCH_MICROS),
+            next_token: Mutex::new(10),
+            first_claim: Mutex::new(None),
         })
     }
 
@@ -91,25 +130,31 @@ impl CrashStore {
     #[allow(clippy::expect_used)]
     // reason: hermetic fake uses fixed rows; missing/poisoned state is a test invariant failure.
     fn expire_lease(&self, tenant_id: &str) {
-        let mut rows = self.rows.lock().expect("row lock");
-        let row = rows
-            .iter_mut()
-            .find(|row| row.delivery.tenant_id == tenant_id)
-            .expect("tenant row");
-        assert_eq!(row.status, DurableStatus::Publishing);
-        row.lease_expired = true;
+        let deadline = {
+            let rows = self.rows.lock().expect("row lock");
+            let row = rows
+                .iter()
+                .find(|row| row.delivery.tenant_id == tenant_id)
+                .expect("tenant row");
+            assert_eq!(row.status, DurableStatus::Publishing);
+            row.lease_deadline_epoch_micros
+                .expect("publishing row deadline")
+        };
+        *self.now_epoch_micros.lock().expect("clock lock") = deadline;
     }
 
     #[allow(clippy::expect_used)]
     // reason: hermetic fake uses fixed rows; missing/poisoned state is a test invariant failure.
     fn lease_expired(&self, tenant_id: &str) -> bool {
+        let now = *self.now_epoch_micros.lock().expect("clock lock");
         self.rows
             .lock()
             .expect("row lock")
             .iter()
             .find(|row| row.delivery.tenant_id == tenant_id)
             .expect("tenant row")
-            .lease_expired
+            .lease_deadline_epoch_micros
+            .is_some_and(|deadline| deadline <= now)
     }
 
     #[allow(clippy::expect_used)]
@@ -131,41 +176,88 @@ impl CrashStore {
     fn deliveries(&self) -> Vec<Delivery> {
         self.deliveries.lock().expect("delivery lock").clone()
     }
+
+    #[allow(clippy::expect_used)]
+    // reason: first relay always records one claim before notifying the crash point.
+    fn first_claim_is_lost(&self) -> bool {
+        let (token, deadline) = self
+            .first_claim
+            .lock()
+            .expect("claim lock")
+            .clone()
+            .expect("first claim");
+        let now = *self.now_epoch_micros.lock().expect("clock lock");
+        let rows = self.rows.lock().expect("row lock");
+        let row = rows
+            .iter()
+            .find(|row| row.delivery.message_id == MESSAGE_ID)
+            .expect("claimed row");
+        deadline <= now
+            || row.lease_token.as_deref() != Some(token.as_str())
+            || row.lease_deadline_epoch_micros != Some(deadline)
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: hermetic fake lock poisoning is a test invariant failure.
+    fn mint_lease_token(&self) -> String {
+        let mut next = self.next_token.lock().expect("token lock");
+        let token = format!("00000000-0000-4000-8000-{:012x}", *next);
+        *next += 1;
+        token
+    }
 }
 
 impl OutboxSource for CrashStore {
+    type Claim = CrashClaim;
+
+    fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
+        &claim.subject
+    }
+
+    fn claim_domain(&self) -> &vocab::DomainName {
+        &self.domain
+    }
+
     #[allow(clippy::expect_used)]
     // reason: hermetic fake uses fixed rows; poisoned state is a test invariant failure.
-    async fn poll_pending(
+    async fn claim_batch(
         &self,
-        _domain: &str,
         limit: usize,
-    ) -> Result<Vec<PendingEntry>, consistency::EngineError> {
-        let rows = self.rows.lock().expect("row lock");
-        Ok(rows
-            .iter()
-            .filter(|row| {
-                row.status == DurableStatus::Pending
-                    || (row.status == DurableStatus::Publishing && row.lease_expired)
-            })
-            .take(limit)
-            .map(pending_entry)
-            .collect())
+    ) -> Result<Vec<Self::Claim>, consistency::EngineError> {
+        let now = *self.now_epoch_micros.lock().expect("clock lock");
+        let deadline = now + LEASE_TTL_MICROS;
+        let mut rows = self.rows.lock().expect("row lock");
+        let mut claimed = Vec::new();
+        for row in rows.iter_mut().filter(|row| {
+            row.status == DurableStatus::Pending
+                || (row.status == DurableStatus::Publishing
+                    && row
+                        .lease_deadline_epoch_micros
+                        .is_some_and(|lease_until| lease_until <= now))
+        }) {
+            if claimed.len() == limit {
+                break;
+            }
+            let lease_token = self.mint_lease_token();
+            row.status = DurableStatus::Publishing;
+            row.lease_token = Some(lease_token.clone());
+            row.lease_deadline_epoch_micros = Some(deadline);
+            claimed.push(CrashClaim::new(row, lease_token, deadline));
+        }
+        Ok(claimed)
     }
 }
 
 impl OutboxRelay for CrashStore {
     #[allow(clippy::expect_used)]
     // reason: hermetic fake uses fixed rows; missing/poisoned state is a test invariant failure.
-    async fn relay(&self, entry: &PendingEntry) -> Result<Disposition, consistency::EngineError> {
+    async fn relay(&self, entry: Self::Claim) -> Result<Disposition, consistency::EngineError> {
         let delivery = {
-            let mut rows = self.rows.lock().expect("row lock");
+            let rows = self.rows.lock().expect("row lock");
             let row = rows
-                .iter_mut()
-                .find(|row| row.delivery.message_id == entry.idem_key().as_str())
-                .expect("polled row");
-            row.status = DurableStatus::Publishing;
-            row.lease_expired = false;
+                .iter()
+                .find(|row| row.delivery.message_id == entry.message_id)
+                .expect("claimed row");
             row.delivery.clone()
         };
         self.deliveries
@@ -178,16 +270,27 @@ impl OutboxRelay for CrashStore {
             std::mem::take(&mut *first)
         };
         if block {
+            *self.first_claim.lock().expect("claim lock") =
+                Some((entry.lease_token.clone(), entry.lease_deadline_epoch_micros));
             self.published_before_settle.notify_one();
             std::future::pending::<()>().await;
         }
 
+        let now = *self.now_epoch_micros.lock().expect("clock lock");
         let mut rows = self.rows.lock().expect("row lock");
         let row = rows
             .iter_mut()
-            .find(|row| row.delivery.message_id == entry.idem_key().as_str())
+            .find(|row| row.delivery.message_id == entry.message_id)
             .expect("relayed row");
+        assert_eq!(row.lease_token.as_deref(), Some(entry.lease_token.as_str()));
+        assert_eq!(
+            row.lease_deadline_epoch_micros,
+            Some(entry.lease_deadline_epoch_micros)
+        );
+        assert!(entry.lease_deadline_epoch_micros > now);
         row.status = DurableStatus::Published;
+        row.lease_token = None;
+        row.lease_deadline_epoch_micros = None;
         self.settled.notify_one();
         Ok(Disposition::Ack)
     }
@@ -202,22 +305,6 @@ fn delivery(tenant_id: &str, message_id: &str) -> Delivery {
         contract_id: CONTRACT_ID.to_string(),
         payload: PAYLOAD.to_vec(),
     }
-}
-
-#[allow(clippy::expect_used)]
-// reason: fixed test identity is valid by construction; parse failure must fail the test.
-fn pending_entry(row: &DurableRow) -> PendingEntry {
-    let entry = StoredOutboxEntry::hydrate(
-        row.delivery.topic.clone(),
-        IdemKey::parse(&row.delivery.message_id).expect("valid message id"),
-        consistency::outbox::OutboxPayload::from_reviewed_event_bytes(row.delivery.payload.clone()),
-    )
-    .expect("valid stored outbox entry");
-    let subject = OutboxMetricSubject::new(
-        vocab::TenantId::parse(&row.delivery.tenant_id).expect("valid tenant"),
-        OutboxContractId::parse(&row.delivery.contract_id).expect("valid contract"),
-    );
-    PendingEntry::new(entry, subject)
 }
 
 struct FixedClock;
@@ -239,14 +326,8 @@ impl OutboxMetrics for NoopMetrics {
 
 #[allow(clippy::expect_used)]
 // reason: fixed relay limits are valid by construction; rejection must fail the test.
-fn relay_config(domain: &str) -> RelayConfig {
-    RelayConfig::new(
-        vec![domain.to_string()],
-        Duration::from_millis(100),
-        10,
-        Duration::from_secs(15),
-    )
-    .expect("valid relay config")
+fn relay_config() -> RelayConfig {
+    RelayConfig::new(Duration::from_millis(100), 10).expect("valid relay config")
 }
 
 fn consume_deliveries_once(deliveries: &[Delivery]) -> usize {
@@ -289,7 +370,7 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
     let store = CrashStore::new();
     let worker = tokio::spawn(relay_loop(
         store.clone(),
-        relay_config(fixture.domain()),
+        relay_config(),
         Arc::new(FixedClock),
         CancellationToken::new(),
         Arc::new(WorkerHealth::healthy()),
@@ -312,11 +393,15 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
     store.expire_lease(TENANT_A);
     assert!(store.lease_expired(TENANT_A));
     assert!(!store.lease_expired(TENANT_B));
+    assert!(
+        store.first_claim_is_lost(),
+        "expired claim must lose settle authority before another worker reclaims it"
+    );
 
     let token = CancellationToken::new();
     let restarted = tokio::spawn(relay_loop(
         store.clone(),
-        relay_config(fixture.domain()),
+        relay_config(),
         Arc::new(FixedClock),
         token.clone(),
         Arc::new(WorkerHealth::healthy()),

@@ -23,5 +23,8 @@ fn tx_capability_ui() {
     t.compile_fail("tests/ui/pg_runtime_handle_lifecycle_fail.rs");
     t.compile_fail("tests/ui/pg_readiness_sampler_factory_clone_fail.rs");
     t.compile_fail("tests/ui/pg_readiness_sampler_factory_consume_twice_fail.rs");
+    t.compile_fail("tests/ui/pg_outbox_claim_clone_fail.rs");
+    t.compile_fail("tests/ui/pg_outbox_claim_lease_read_fail.rs");
+    t.compile_fail("tests/ui/pg_outbox_claim_construct_fail.rs");
     t.pass("tests/ui/pg_public_funnels_pass.rs");
 }

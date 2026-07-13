@@ -74,7 +74,7 @@ groups:
           severity: warning
         annotations:
           summary: "Outbox relay tick P95 耗时过高（phase={{ $labels.phase }}）"
-          description: "relay tick {{ $labels.phase }} 相 P95={{ $value }}s；poll 慢=DB 扫描慢，publish 慢=broker/CAS 慢，排查对应依赖。"
+          description: "relay tick {{ $labels.phase }} 相 P95={{ $value }}s；claim 慢=DB 原子租约慢，publish 慢=broker/CAS 慢，排查对应依赖。"
 
       # Consumer app DLX store 写失败：死信未落库，worker health 已降级；必须人工排查 PG/Vault/KeyProvider。
       - alert: ConsumerDlxWriteError

@@ -188,6 +188,15 @@ retention 只按 `published_at` 的 partial index 清理，DLX 继续保留供�
 `outbox` 锁且维护窗口可覆盖 terminal 行回填、CHECK validation 与普通事务型 partial index 重建。超限时停止启动，
 扩大经评审的维护窗口后用新的 forward-only migration 调整容量边界，不绕过保护或恢复旧 sweep 路径。
 
+`0057` 将 mutable outbox 从“扫描候选 + 单条 acquire”硬切为 typed atomic `claim_batch`。新函数在一个数据库语句/事务内按 `seq` 确定性选取、`FOR UPDATE SKIP LOCKED`、写入 UUIDv4 token 与显式 `lease_until`、并返回完整 claimed rows。`publishing` 与 token/deadline 由独立 CHECK 双向绑定；published/retry/DLX settle 必须同时匹配 token、精确 deadline 且 deadline 仍新鲜，成功后清除 lease。stale claim、backlog 与 partial index 统一以 `lease_until` 为单源，不再从 `updated_at + 60s` 推断。
+
+### 0057 breaking cutover runbook
+
+1. 先停止全部旧 relay 实例；旧 binary 依赖的 poll/acquire 与 settle overload 会被删除，禁止新旧版本滚动混跑。
+2. 确认 `outbox <= 10 GiB`、无长事务持锁，维护窗口可覆盖 publishing deadline 回填、terminal token 清理、CHECK 与 partial index 替换。migration 以 5 秒 lock timeout / 5 分钟 statement timeout fail-fast。
+3. 运行唯一正式 migration runner；若发现 `publishing` 行缺 token 则终止，不伪造所有权。失败后只做新的 forward-only 修复，不恢复旧函数。
+4. 验证 `rss_app` 仅有新 claim/settle/redrive/backlog 函数 EXECUTE，旧 poll/acquire 及旧 settle 签名不存在；再启动新 binary。
+
 `0043` 新增 `saga_instances` tenant 表，并前向 tenantize `saga_journal`。`saga_instances` 保存
 instance status 与 lease token/holder/epoch/expiry，授予 `rss_app` SELECT/INSERT/UPDATE 且不授 DELETE；
 `saga_journal` 主键改为 `(tenant_id, saga_id, seq)`，通过 composite FK 指回 instance，仍是 append-only，

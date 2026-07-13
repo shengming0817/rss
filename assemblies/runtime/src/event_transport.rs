@@ -40,8 +40,9 @@ use diport::{
 use eventexec::{
     ConsumerMeta, ConsumerTxHandlerFn, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics,
     OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayConfig,
-    SWEEPER_WORKER_NAME, SweeperConfig, SweeperWorker, TenantAuthority, WorkerHealth,
-    backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay, sweeper_loop,
+    SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
+    WorkerHealth, backlog_sampler_loop, spawn_consumer_ackable_tx_subscriber, spawn_relay,
+    sweeper_loop,
 };
 use generated::event::{
     EventSpec, SubscriberReadiness, SubscriptionDispatchKey, SubscriptionEffect,
@@ -89,8 +90,8 @@ pub struct EventTransportConfig {
     pub transport: bootstrap::eventtransport::TransportConfig,
     /// Outbox relay 轮询间隔。
     pub relay_poll_interval: Duration,
-    /// Outbox relay 单次批量大小。
-    pub relay_batch: usize,
+    /// Outbox relay 单轮最大在途 claim/publish 数。
+    pub relay_max_in_flight: usize,
     /// Outbox relay backlog 采样间隔。
     pub relay_sample_interval: Duration,
     /// Outbox published-row sweeper 扫描间隔。
@@ -192,7 +193,7 @@ impl ManagedResource for ThreadedEventWorker {
 /// Relay 时序参数聚合（减少 [`wire_durable`] 参数列表长度）。
 struct RelayTiming {
     poll: Duration,
-    batch: usize,
+    max_in_flight: usize,
     sample: Duration,
     sweep: Duration,
     retain_seconds: u64,
@@ -444,7 +445,7 @@ pub(crate) async fn wire_event_transport(
     let required_refs: Vec<&str> = required.iter().map(String::as_str).collect();
     let timing = RelayTiming {
         poll: cfg.relay_poll_interval,
-        batch: cfg.relay_batch,
+        max_in_flight: cfg.relay_max_in_flight,
         sample: cfg.relay_sample_interval,
         sweep: cfg.outbox_sweep_interval,
         retain_seconds: cfg.outbox_retain_seconds,
@@ -479,7 +480,7 @@ pub(crate) async fn wire_event_transport(
 ///
 /// 可选 env var（缺失时使用括号内默认值）：
 /// - `RSS_RELAY_POLL_INTERVAL_MS`（200ms）
-/// - `RSS_RELAY_BATCH_SIZE`（16）
+/// - `RSS_RELAY_MAX_IN_FLIGHT`（16）
 /// - `RSS_RELAY_SAMPLE_INTERVAL_MS`（30000ms）
 /// - `RSS_OUTBOX_SWEEP_INTERVAL_MS`（300000ms）
 /// - `RSS_OUTBOX_RETAIN_SECONDS`（604800s）
@@ -542,7 +543,11 @@ pub fn build_event_transport_config_from(
             "RSS_RELAY_POLL_INTERVAL_MS",
             200,
         ),
-        relay_batch: parse_usize_env(get("RSS_RELAY_BATCH_SIZE"), "RSS_RELAY_BATCH_SIZE", 16),
+        relay_max_in_flight: parse_usize_env(
+            get("RSS_RELAY_MAX_IN_FLIGHT"),
+            "RSS_RELAY_MAX_IN_FLIGHT",
+            16,
+        ),
         relay_sample_interval: parse_duration_ms_env(
             get("RSS_RELAY_SAMPLE_INTERVAL_MS"),
             "RSS_RELAY_SAMPLE_INTERVAL_MS",
@@ -663,21 +668,16 @@ fn relay_publisher(
 /// panic-safety 守卫，与 ConsumerWorker 对称）+ 一个 per-domain readyz 探针，收进 module。
 ///
 /// `outbox` 已绑该域 vhost publisher（调用方按 `caps::*` marker 构造，编译期防跨域错插）；`PgOutbox: Send+!Sync`
-/// → `spawn_relay` 接 `store: A`（`A: Send`），在专用线程内 `Arc::new(store)`；relay_loop 经 `RelayConfig` 的
-/// domain 过滤 outbox 表行。
+/// → `spawn_relay` 接 `store: A`（`A: Send`），在专用线程内 `Arc::new(store)`；provider-bound
+/// `PgOutbox` 是 relay domain 的单一输入。
 fn wire_domain_relay(
     domain: &str,
     outbox: postgres::PgOutbox,
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let relay_cfg = RelayConfig::new(
-        vec![domain.to_string()],
-        timing.poll,
-        timing.batch,
-        timing.sample,
-    )
-    .context("build relay config")?;
+    let relay_cfg =
+        RelayConfig::new(timing.poll, timing.max_in_flight).context("build relay config")?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_name = format!("outbox-relay-{domain}");
     let worker_health = Arc::clone(&health);
@@ -718,13 +718,11 @@ fn wire_outbox_maintenance(
     timing: &RelayTiming,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let relay_cfg = RelayConfig::new(
+    let sampler_cfg = SamplerConfig::new(
         generated::event::PRODUCER_DOMAINS
             .iter()
             .map(|domain| domain.as_str().to_string())
             .collect(),
-        timing.poll,
-        timing.batch,
         timing.sample,
     )
     .context("build outbox sampler config")?;
@@ -735,7 +733,7 @@ fn wire_outbox_maintenance(
     let coordinator = distributed.outbox_maintenance_coordinator();
     wire_sampler_worker(
         CoordinatedOutboxBacklog::new(maintenance.clone(), coordinator.clone()),
-        relay_cfg,
+        sampler_cfg,
         module,
     )?;
     wire_sweeper_worker(
@@ -765,7 +763,7 @@ fn wire_outbox_maintenance(
 
 fn wire_sampler_worker(
     maintenance: CoordinatedOutboxBacklog<postgres::PgOutboxMaintenance>,
-    config: RelayConfig,
+    config: SamplerConfig,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::healthy());
@@ -1793,7 +1791,7 @@ mod tests {
         assert!(result.is_ok(), "full durable config should succeed");
         let cfg = result.unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.relay_poll_interval, Duration::from_millis(200));
-        assert_eq!(cfg.relay_batch, 16);
+        assert_eq!(cfg.relay_max_in_flight, 16);
         assert_eq!(cfg.relay_sample_interval, Duration::from_millis(30_000));
         assert_eq!(cfg.outbox_sweep_interval, Duration::from_millis(300_000));
         assert_eq!(cfg.outbox_retain_seconds, 604_800);
@@ -1803,6 +1801,33 @@ mod tests {
         );
         assert!(cfg.tenant_authority.is_some());
         assert!(cfg.dlx_payload_protector.is_some());
+    }
+
+    #[test]
+    fn config_builder_uses_only_relay_max_in_flight_env() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
+            "RSS_RELAY_MAX_IN_FLIGHT" => Some("32".into()),
+            "RSS_RELAY_BATCH_SIZE" => Some("63".into()),
+            _ => durable_security_env(name),
+        });
+        assert!(result.is_ok(), "full durable config should succeed");
+        let cfg = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.relay_max_in_flight, 32);
+    }
+
+    #[test]
+    fn config_builder_does_not_alias_legacy_relay_batch_size() {
+        let result = build_event_transport_config_from(|name| match name {
+            "RSS_TOPOLOGY" => Some("durable-shared".into()),
+            "RSS_IDENTITY_AMQP_URL" => Some("amqps://user:pass@host/vhost".into()),
+            "RSS_RELAY_BATCH_SIZE" => Some("32".into()),
+            _ => durable_security_env(name),
+        });
+        assert!(result.is_ok(), "full durable config should succeed");
+        let cfg = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.relay_max_in_flight, 16);
     }
 
     #[test]

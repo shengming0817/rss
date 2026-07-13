@@ -80,7 +80,25 @@ PostgreSQL adapter 有两条显式 outbox 写入模式，二者不可 fallback /
 
 Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event/message ID 发布；publish 成功、settle 前崩溃允许 broker duplicate，broker confirm 的 ambiguous outcome 也必须按可能已发布处理并重试，不能换 ID 或假定消息尚未到达。
 
-`acquire_lease` / settle CAS 只围栏当前 lease holder 与 stale writer 的状态写回，不提供 broker exactly-once，也不能撤销已经成功的 publish。duplicate 由 tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用：业务写、outgoing outbox 与 receipt done 在同一事务提交，提交成功后才 broker Ack。
+每个 outbox provider 在构造期绑定唯一 typed `DomainName`；relay 只能经 `claim_domain()` 观察该归属，
+`claim_batch(limit)` 不接收调用方传入的 raw domain，`RelayConfig` 也不另存一份可与 publisher 错插的 domain。
+`claim_batch` 在同一数据库语句内选取、铸造 token/deadline 并持久化。Postgres provider
+只经 `PgOutbox::claim_batch` 铸造 provider-owned opaque `PgClaimedOutboxEntry`；调用方只能将它
+按值交给同一 `PgOutbox` 的 relay 路径，无法构造、hydrate 或读取 provider-private 的
+lease/durable context。`consistency::OutboxSource::Claim` 只是 provider 关联类型接缝，不定义可
+hydrate 的通用 claim 实体。settle CAS 同时匹配 token 与精确 deadline，且拒绝已过期
+租约。这只围栏当前 lease holder 与 stale writer 的状态写回，不提供 broker
+exactly-once，也不能撤销已经成功的 publish。duplicate 由 tenant-scoped `Inbox` / `ConsumerTx` 收口重复数据库副作用：
+业务写、outgoing outbox 与 receipt done 在同一事务
+提交，提交成功后才 broker Ack。
+
+`RelayConfig::max_in_flight` 同时限制单轮 claim 数与 publish 并发数，构造期只接受 `1..=64`。claim
+返回后同批 entry 立即并发 dispatch，不得整批串行等待；SQL head-of-partition gate 保证同批对每个非空
+`(tenant_id, domain, partition_key)` 至多返回唯一队头，故不同 partition 与无序 entry 可并行而不破坏
+分区内顺序。每条 broker publish 前，Postgres provider 必须以 DB 当前时间做 lease budget preflight：只有
+当前 token/deadline 仍匹配且剩余租约足以覆盖完整 publish deadline 才调用 broker。单条 publish timeout
+固定为 40s；preflight 不足不得发 broker 请求，timeout/confirm 不确定结果仍按 at-least-once 语义以稳定
+身份重试，不能把本地超时解释为 broker 未收到。
 
 稳定 event ID 是幂等锚，不是 exactly-once 保证。MDM 变更、设备命令、外部 API 等事务外副作用仍须透传稳定 idempotency key，或由 reconcile 闭环收敛；不得因 relay CAS 或 Inbox receipt 省略外部系统自己的幂等边界。
 
@@ -252,9 +270,10 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
 - **`partition_key IS NULL`（默认）= 无序并行**：不同 entry 投递顺序无保证，跨 worker 并行。消费方须幂等、
   不依赖跨 entry 顺序（靠 inbox 去重 + 实体状态收敛）。emit 默认 `None`，行为同分区前。
 - **`partition_key` 设置 = 同 `(tenant_id, domain, partition_key)` 串行有序**：outbox 行持久化
-  `tenant_id` 并启用 RLS；relay 经 `poll_pending` 的
+  `tenant_id` 并启用 RLS；relay 经 provider-bound `claim_batch(limit)` 的
   **head-of-partition gating**——同 partition 仅放行 `min(seq)` 且尚未 `published` 的队头行（`NOT EXISTS`
-  更早未结清 sibling），即使多 worker + `SKIP LOCKED` 也**永不乱序、至多一条 in-flight**。`partition_key` 是
+  更早未结清 sibling），即使多 worker + `SKIP LOCKED` 也**永不乱序、至多一条 in-flight**；因此一个 claim
+  batch 内每个非空 partition 至多一个唯一队头，可与其它 partition 的队头即时并发 publish。`partition_key` 是
   不透明聚合根路由键（= Debezium `aggregateid`），经 write 路径 `diport::OutboxEnvelopeParts::with_partition_key`
   → adapter 落库，不进 `consistency::StoredOutboxEntry`（relay 读侧无需透传，顺序由 SQL gating 承载）。
   tenant 是 outbox envelope 的必填 typed 输入，adapter 将其落为列；同一 business key 在不同 tenant 下不共享
@@ -262,13 +281,13 @@ gap）+ 可空 `partition_key`，投递顺序按 `partition_key` 二分：
 
 **dlx fail-closed**：队头进 dlx（永久错误 / 预算耗尽）会**阻塞**该 partition 直到运维 re-drive
 （`eventexec::DlqRedriveRequest` → 当前 tenant scope 内
-`outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL, published_at=NULL, dlx_at=NULL`）
+`outbox.status='pending', retry_count=0, retry_after=NULL, lease_token=NULL, lease_until=NULL, published_at=NULL, dlx_at=NULL`）
 ——这是与「串行有序」一致的唯一选择（放行后继破坏 in-order 不变式）。`outbox.status='dlx'` 仍是 relay
 状态与 partition ordering gate；统一 DLQ 审计行写入 `dead_letter(source_kind='outbox_relay')`，不搬迁/删除
 原 outbox 行；redrive 清除 `dlx_at` 后，既往 DLX 历史继续由 append-only `dead_letter` 留存。代价有界且可观测：
 dlx `error!` 日志 + 行保留（sweep 不删）+ backlog `oldest_age` 增长。
 **已知前提**：队头判据假设同 partition 行按 seq 序提交，成立于同 partition 写入由
-聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 poll-only，
+聚合根并发控制串行化（partition = aggregate 标准契约）。**backlog 例外**：head-of-partition gate 是 claim-only，
 被 gate 的后继仍计入 backlog depth（否则 stalled partition 对 SLO 失明）。INVARIANT: OUTBOX-PARTITION-ORDER-01。
 
 > 机制本 PR 交付；哪些域事件 opt-in `partition_key` 仍是应用层决策，但决策必须前移到
@@ -383,8 +402,7 @@ topology spec。生产代码不得在 sanctioned bridge/bundle 外直接调用 `
 	  `rss_dlq_operator_callsite` 守。不存在 plaintext fallback decoder；
   replay decrypt 只把 `KeyProviderErrorKind::Rejected` 映射成坏 payload，`Unavailable/Timeout` 与
   `Forbidden/NotFound` 保留为 operator 可区分的依赖/配置错误。
-- PG outbox relay claim **与** consumer inbox claim 均写入 lease/fencing token；所有状态回写（commit / extend /
-  release）以 lease 做 CAS。inbox lease 带 TTL，过期可重捞（crash-recovery），长 handler 经 `extend` 续租（#1213）。
+- PG outbox relay claim 原子写入 token + `lease_until`，settle 以二者和 DB 当前时间做严格 CAS；consumer inbox claim 同样写入 fencing token。inbox lease 带 TTL，过期可重捞（crash-recovery），长 handler 经 `extend` 续租（#1213）。outbox 不在本轮引入续租，batch 尾部超时时由新 claim 重投并依赖 inbox 幂等收口。
 - crash-after-claim 后消息最多延迟 `INBOX_LEASE_TTL_SECONDS`（当前 60s）才被 TTL 重捞重跑（此前是永久静默丢失）；该上界当前不可按消费者配置，低延迟工作流需关注。
 - handler 不接触 lease；ConsumerBase 后台续租 + 终态 CAS 透传，relay / subscriber write-back 同理（handler 只返 `HandleResult`）。
 - consumer group 命名必须稳定，避免重放时变成新消费者。

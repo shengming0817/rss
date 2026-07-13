@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `postgres::outbox::PgClaimedOutboxEntry: Clone` is not satisfied
+ --> tests/ui/pg_outbox_claim_clone_fail.rs:8:22
+  |
+8 |     requires_clone::<Claim>();
+  |                      ^^^^^ the trait `Clone` is not implemented for `postgres::outbox::PgClaimedOutboxEntry`
+  |
+note: required by a bound in `requires_clone`
+ --> tests/ui/pg_outbox_claim_clone_fail.rs:5:22
+  |
+5 | fn requires_clone<T: Clone>() {}
+  |                      ^^^^^ required by this bound in `requires_clone`

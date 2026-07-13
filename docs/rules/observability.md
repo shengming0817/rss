@@ -204,14 +204,14 @@ outbox relay/sampler 发射下列 metric（bare 名，emit site = `eventexec` �
 | `outbox_pending_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | 可投递 backlog：到期 pending + stale publishing（采样器） |
 | `outbox_oldest_pending_age_seconds` | Gauge | `domain`,`contract_id`,`tenant_id` | 最老 backlog 龄；进程内已观测 scope 无 backlog ⇒ 0（非缺失） |
 | `outbox_partition_blocked_depth` | Gauge | `domain`,`contract_id`,`tenant_id` | 同 tenant/domain/partition 前序未 published 导致被队头阻塞的 outbox 行数；不暴露 `partition_key` |
-| `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=poll/publish；settle 并入 publish，见 §settle 相说明） |
+| `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick 耗时（phase=claim/publish；settle 并入 publish，见 §settle 相说明） |
 | `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | operator DLQ replay/redrive mutation 结果计数；kind=dead_letter_replay/outbox_dlx_redrive；仅在进程安装 metrics recorder 时可采集，一次性 `rss dlq` 的长期告警看 `dlq.maintenance` audit/log |
 
 label 闭值集纪律：
 
 - `status` 值集闭合于 `consistency::Disposition::as_label()`（`ack`/`requeue`/`reject`）；**不**经
   `observ::EventLabel`（其 `DispositionLabel` 为 `Ack`/`Nack`/`Requeue`，与 outbox 的 `Reject` 语义不符）。
-  `phase` 闭合于 `eventexec::RelayPhase::as_label()`（`poll`/`publish`）。两者均 crate 自有 `as_label()`
+  `phase` 闭合于 `eventexec::RelayPhase::as_label()`（`claim`/`publish`）。两者均 crate 自有 `as_label()`
   闭映射——单源、无副本可漂移。
 - `outbox_relay_envelope_validation_failure_total.reason` 闭合于 postgres relay 的
   `RelayEnvelopeValidationReason::as_label()`：`envelope_missing_tenant_id` / `envelope_invalid_tenant_id` /
@@ -222,8 +222,9 @@ label 闭值集纪律：
   `already_exists` / `redriven` / `not_found` / `invalid_id` / `invalid_cursor` / `not_replayable` /
   `invalid_payload` / `invalid_schema_headers` / `payload_key_unavailable` / `payload_key_forbidden` / `store`。
   `tenant_id` 必须来自 typed `vocab::TenantId`，禁止把 dead_letter id、event id、partition key、payload 或错误文本放入 label。
-- `domain` label 值来自 `RelayConfig` 构造期校验的 domain 集（数量 ≤64 + canonical 标识格式，
-  非请求/租户派生），基数有界，是 §HTTP Metrics domain Label 同款「assembly/config 声明 closed set」的
+- `domain` label 值来自 provider 构造期绑定并经 `claim_domain()` 暴露的 typed `vocab::DomainName`，而非
+  `RelayConfig` 或每次 `claim_batch` 的 raw 参数。它是 assembly/provider 声明、非请求/租户派生，基数有界，
+  是 §HTTP Metrics domain Label 同款「assembly/config 声明 closed set」的
   合法低基数用法。`eventexec`（Service 层）依层矩阵不能依赖 `observ`，故这些 label 暂不经 `observ`
   typed enum 入口；把 outbox label 收敛进 `observ` 词表（供 otel 映射统一）是 **#1076** 后续项。
 - `contract_id` / `tenant_id` 是 **#1625** 明确要求的 outbox 可观测路由维度：`contract_id` 必须先经
@@ -388,9 +389,18 @@ sealed metadata funnel 注入**（`occurred_at` 取注入的 `Clock`，producer 
 
 **统一 delivery envelope（#1160）**：envelope metadata 经统一类型 `diport::EnvelopeMetadata`
 （`string→string`，broker header 通用形态）；只有 transport-safe view 从 **producer→broker→consumer 全程保真**。relay 经
-`acquire_lease` 的 `UPDATE…RETURNING metadata::text, contract_version, schema_hash` 读 outbox 行（**不**扩 `consistency::StoredOutboxEntry`、
-**不**动 `poll_pending`），`hydrate_envelope_metadata` 重建后由物理列覆盖 `schemaVersion` / `schemaHash`，
-再携入 `PublishRequest`；adapter publisher 映射进
+provider 在构造期绑定唯一 typed domain；relay 以 `claim_domain()` 取得 metric scope，并只调用
+`claim_batch(limit)`，调用方不能再注入 raw domain。该方法的单语句 `UPDATE…RETURNING` 同时返回
+metadata、contract/schema header、retry count、claim 时刻与 token/deadline。Postgres adapter 在提交 claim 事务前完成校验，并且只能经
+`PgOutbox::claim_batch` 铸造 provider-owned opaque `PgClaimedOutboxEntry`。lease、metadata 原值与
+durable signing context 均保持 provider-private；跨 crate 调用方只能借出 typed metric subject，并将
+claim 按值交给同一 provider 的 relay 路径。relay 在 provider 内部从该 capability 重建
+`EnvelopeMetadata`，再由物理列覆盖 `schemaVersion` / `schemaHash`，
+再携入 `PublishRequest`。`RelayConfig::max_in_flight` 构造期限制为 `1..=64`，同时封住 claim 数与并发数；
+同批 claim 立即并发 dispatch，SQL gate 保证每个非空 `(tenant_id, domain, partition_key)` 在同批只有唯一
+队头，不用以整批串行换取分区顺序。每条 broker call 前，provider 以 DB 当前时间执行 token/deadline
+lease budget preflight，并只在剩余预算覆盖 40s publish timeout 时发出请求；预算不足不触达 broker，
+timeout/confirm 不确定结果仍可能已经 delivery，后续按稳定身份重试。adapter publisher 映射进
 broker header（AMQP `with_timestamp`(occurred_at) + transport-safe `FieldTable` headers / MQTT v5
 transport-safe `user_properties` / memory 直传）。broker-visible metadata 只能来自
 `EnvelopeMetadata::iter_transport_headers()` allowlist：`trace`、`correlation`、`occurredAt`、`tenantId`、

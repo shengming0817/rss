@@ -2,8 +2,8 @@
 //!
 //! `Disposition`/`HandleResult`/`PermanentError`/`EventEntry`/`StoredOutboxEntry` 是
 //! **纯态机类型**（sync，穷尽闭值集）；
-//! `OutboxRelay`/`OutboxSource` 是 L2 OutboxFact 引擎策略 trait（native AFIT：把已持久化 entry 中继到
-//! broker / 扫描待发）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
+//! `OutboxRelay`/`OutboxSource` 是 L2 OutboxFact 引擎策略 trait（native AFIT：原子 claim 已持久化 entry
+//! 并中继到 broker）；`RetentionSweeper` 是同 crate 暂置的通用保留期维护 trait，可驱动 outbox /
 //! inbox_receipts / dead_letter 等 durable 表清理。真实 broker I/O（AMQP）与 in-memory bus 在 `eventexec`/
 //! adapters，consistency 只冻类型 + 策略接缝。
 //! 语义见 `docs/rules/eventbus.md` §Disposition / §ConsumerBase。
@@ -551,7 +551,7 @@ pub fn is_canonical_topic_name(s: &str) -> bool {
 /// 有序投递分区键 newtype（私有字段，构造经 fallible funnel）。
 ///
 /// outbox 投递顺序保证的分区维度：设置时同 `(tenant_id, domain, partition_key)` 串行有序投递
-///（head-of-partition gating，SQL 侧 `poll_pending` 收口——每 tenant partition 仅放行 min(seq)
+///（head-of-partition gating，SQL 侧 `claim_batch` 收口——每 tenant partition 仅放行 min(seq)
 /// 未投队头）；不设置（write 路径 `None` ⇒ DB NULL）= 无序要求，并行投递（行为同分区前）。等价
 /// Debezium outbox 的 `aggregateid` / projection_events 的 `aggregate_id`——是**不透明聚合根路由键**，
 /// 非 dotted topic，故只拒空（fail-closed），不施 dotted 文法。
@@ -771,81 +771,51 @@ impl OutboxMetricSubject {
     }
 }
 
-/// 已持久化、可中继的 outbox entry，携带 metric subject。
-#[derive(Debug, Clone)]
-pub struct PendingEntry {
-    entry: StoredOutboxEntry,
-    subject: OutboxMetricSubject,
-}
-
-impl PendingEntry {
-    /// 由业务 entry + metric subject 构造 pending entry。
-    pub fn new(entry: StoredOutboxEntry, subject: OutboxMetricSubject) -> Self {
-        Self { entry, subject }
-    }
-
-    /// 借出业务 entry。
-    pub fn entry(&self) -> &StoredOutboxEntry {
-        &self.entry
-    }
-
-    /// 借出目标 topic。
-    pub fn topic(&self) -> &StoredOutboxTopic {
-        self.entry.topic()
-    }
-
-    /// 借出幂等 key。
-    pub fn idem_key(&self) -> &crate::idempotency::IdemKey {
-        self.entry.idem_key()
-    }
-
-    /// 借出已编码 payload。
-    pub fn payload(&self) -> &[u8] {
-        self.entry.payload()
-    }
-
-    /// 借出 metric subject。
-    pub fn subject(&self) -> &OutboxMetricSubject {
-        &self.subject
-    }
-}
-
 /// Outbox 中继策略（L1 引擎策略 trait，native AFIT）。
 ///
 /// 把**已持久化**的 outbox entry 中继到 broker（demo=进程内 bus / postgres=真实 broker，eventbus.md
 /// topology-gated）。native AFIT ⇒ 非 object-safe，消费方泛型 `<R: OutboxRelay>`，禁 `Box<dyn>`。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
-pub trait OutboxRelay {
-    /// 中继单条已持久化 entry。返回处置驱动 receipt commit / DLX / 退避（穷尽 `Disposition`）。
-    async fn relay(&self, entry: &PendingEntry) -> Result<Disposition, crate::error::EngineError>;
+pub trait OutboxRelay: OutboxSource {
+    /// 消费式中继单条已 claim entry。返回处置驱动 receipt commit / DLX / 退避（穷尽 `Disposition`）。
+    async fn relay(&self, entry: Self::Claim) -> Result<Disposition, crate::error::EngineError>;
 }
 
-/// Outbox 扫描源（L1 引擎策略 trait，native AFIT）。
+/// Provider-bound outbox claim 源（L1 引擎策略 trait，native AFIT）。
 ///
-/// 按 domain 扫描**待发** entry 批次（status=pending 且到期，含 lease 过期可回收的 in-flight），供
-/// relay 环逐条中继。读侧端口，与 [`OutboxRelay`]（写侧中继）同源构成 outbox 引擎接缝——SQL 在 adapter，
-/// 本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，消费方泛型 `<S: OutboxSource>`，禁 `Box<dyn>`。
+/// Provider 构造时绑定唯一 domain；调用方只能从该 domain claim **待发** entry 批次（status=pending 且到期，
+/// 含 lease 过期可回收的 in-flight），不能在每次调用时注入 raw domain。读侧端口与 [`OutboxRelay`]
+/// （写侧中继）同源构成 outbox 引擎接缝——SQL 在 adapter，本 crate 只冻接缝。native AFIT ⇒ 非 object-safe，
+/// 消费方泛型 `<S: OutboxSource>`，禁 `Box<dyn>`。
 ///
-/// 返回的 [`PendingEntry`] 是 adapter 内部按行重建（topic/idem_key/payload + metric subject），
-/// **不**携 row id / lease_token——
-/// relay 的 CAS settle 以 `entry.idem_key()`（= event_id 幂等锚）为键收口，故扫描与中继解耦无需透传 lease。
+/// `Claim` 是 provider-owned opaque capability：adapter 只公开类型名，不公开构造器或 durable/lease
+/// 字段。这样 production relay 只能消费同一 provider 的 `claim_batch` 返回值，调用方无法伪造或重建
+/// claim。任一行 hydration 失败须回滚整个事务。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait OutboxSource {
-    /// 扫描某 `domain` 至多 `limit` 条待发 entry（pending 且 `retry_after` 到期，或 lease 过期的 in-flight
-    /// 可回收行）。返回已重建的引擎 [`PendingEntry`]；空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
+    /// Adapter 私有铸造、按值消费的 claim capability。
+    type Claim;
+
+    /// 借出指标 scope；durable relay context 与 lease 仍保持 provider-private。
+    fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject;
+
+    /// 借出 provider 构造时绑定的唯一 domain；只用于路由/指标观察，不能由调用方改写。
+    fn claim_domain(&self) -> &vocab::DomainName;
+
+    /// 从 provider 绑定的 domain 原子 claim 至多 `limit` 条待发 entry（pending 且 `retry_after` 到期，或
+    /// deadline 过期的 publishing 可回收行）。空 vec ⇒ 当前无待发。`Transient` 错误 ⇒ 本轮退避重扫。
     ///
     /// 若 adapter 走分区串行投递，须在此实现 head-of-partition gating：同
     /// `(tenant_id, domain, partition_key)` 仅放行 min(seq) 的队头行，确保同 tenant partition 内严格按
     /// seq 顺序投递。参见
     /// `INVARIANT: OUTBOX-PARTITION-ORDER-01` { level = "Medium", exec = "manual/opt-in", source = "code" }（定义在 adapter impl，`adapters/postgres/src/outbox.rs`
     /// `OutboxSource for PgOutbox`）。
-    async fn poll_pending(
+    async fn claim_batch(
         &self,
-        domain: &str,
         limit: usize,
-    ) -> Result<Vec<PendingEntry>, crate::error::EngineError>;
+    ) -> Result<Vec<Self::Claim>, crate::error::EngineError>;
 }
 
 /// 保留期清理端口（L1 引擎策略 trait，native AFIT）——**跨 durable 表通用**。
@@ -959,19 +929,19 @@ impl BacklogMetricSample {
 ///
 /// 由可观测性采样背景 worker 周期驱动：聚合某 domain 的 pending 深度 + 最老 pending 龄，发射 backlog
 /// gauge（#1209）。与 [`OutboxSource`]（扫描）/ [`OutboxRelay`]（中继）/ [`RetentionSweeper`]（清理）同源
-/// 构成 outbox 背景机器的引擎接缝；聚合 SQL 在 adapter，本 crate 只冻接缝。读侧聚合端口，与 `poll_pending`
+/// 构成 outbox 背景机器的引擎接缝；聚合 SQL 在 adapter，本 crate 只冻接缝。读侧聚合端口，与 `claim_batch`
 /// 的行取扫描分离（不同访问形态、不同消费方），故独立 trait 而非扩 [`OutboxSource`]。
 /// native AFIT ⇒ 非 object-safe，消费方泛型 `<B: OutboxBacklog>`，禁 `Box<dyn>`。
 #[allow(async_fn_in_trait)]
 // reason: native AFIT 引擎策略 trait 仅泛型静态分发消费，无 Send-bound 跨 await 持有问题；这是 ADR-003 既定范式。
 pub trait OutboxBacklog {
-    /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxSource::poll_pending`]
+    /// 采样某 `domain` 的**可投递 backlog**（depth + 最老积压龄）。统计集合与 [`OutboxSource::claim_batch`]
     /// 的可重捞集合**同源**：`(pending 且到期) OR (stale publishing，lease 过期可被 relay 重捞)`——stale
     /// publishing 会被重投，属可恢复积压必须计入；只排除 lease 仍有效的正常 in-flight，避免把正常中继中的行
     /// 误计入。已观测 `(tenant_id, contract_id)` scope 无可投递行 ⇒ 带 [`BacklogSample::empty`] 的样本；
     /// 从未出现或已被清理到无历史行的 scope 不返回样本。`Transient` 错误 ⇒ 本轮跳过采样。
     ///
-    /// head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
+    /// head-of-partition gate 是 **claim-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
     /// partition 对 SLO 失明），故 backlog 谓词刻意不含 head-of-partition gate（#1211）。
     async fn sample_backlog(
         &self,
@@ -985,8 +955,8 @@ mod tests {
         BacklogMetricSample, BacklogSample, Disposition, EventEntry, EventTopic, EventTopicError,
         HandleResult, OUTBOX_FACT_CANONICAL_VERSION, OutboxAppendOutcome, OutboxContractId,
         OutboxContractIdError, OutboxFactConflict, OutboxFactIdentity, OutboxMetricSubject,
-        OutboxPayload, PartitionKey, PartitionKeyError, PendingEntry, PermanentError,
-        PermanentErrorKind, StoredOutboxEntry, append_canonical_json,
+        OutboxPayload, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,
+        StoredOutboxEntry, append_canonical_json,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -1261,23 +1231,13 @@ mod tests {
 
     #[test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 happy-path 构造已知合法值，item-level carve-out。
-    fn pending_entry_and_metric_samples_expose_scope() {
+    // reason: happy-path 构造值均为已知合法常量。
+    fn metric_samples_expose_scope() {
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let contract_id = OutboxContractId::parse("identity.session-created").unwrap();
         let subject = OutboxMetricSubject::new(tenant, contract_id.clone());
         assert_eq!(subject.tenant_id(), tenant);
         assert_eq!(subject.contract_id(), &contract_id);
-
-        let entry = StoredOutboxEntry::hydrate(
-            "session.created",
-            IdemKey::parse("evt-scoped").unwrap(),
-            OutboxPayload::from_reviewed_event_bytes(vec![1, 2, 3]),
-        )
-        .unwrap();
-        let pending = PendingEntry::new(entry.clone(), subject.clone());
-        assert_eq!(pending.entry().idem_key(), entry.idem_key());
-        assert_eq!(pending.subject(), &subject);
 
         let backlog = BacklogMetricSample::new(subject.clone(), BacklogSample::empty());
         assert_eq!(backlog.subject(), &subject);

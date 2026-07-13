@@ -19,7 +19,7 @@ use anyhow::{anyhow, bail};
 use consistency::{
     CompensationOutcome, ConsumerGroup, ConvergeAction, EngineError, EngineErrorKind, EventTopic,
     IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay,
-    OutboxSource, PartitionSerialDelivery, PendingEntry, ProjectionApplyOutcome, ProjectionEvent,
+    OutboxSource, PartitionSerialDelivery, ProjectionApplyOutcome, ProjectionEvent,
     ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaId, SagaInstanceRef,
     SagaJournalAppendRecord, SagaStep, SagaStepCtx, SeenState, SerialInOrder, StepName,
 };
@@ -271,7 +271,7 @@ impl PgFaultMatrixHarness {
         Ok(())
     }
 
-    /// Seed a pending outbox row as fixture input, then drive `PgOutbox::relay`.
+    /// Seed a pending outbox row as fixture input, then claim and drive `PgOutbox::relay`.
     pub async fn run_outbox_publish(
         &self,
         tenant: vocab::TenantId,
@@ -291,7 +291,6 @@ impl PgFaultMatrixHarness {
             FaultMatrixOutboxStatus::Pending,
         )
         .await?;
-        let pending = pending_entry(tenant, event_id, topic, contract_id)?;
         let publisher = outcome.publisher();
         let outbox = match domain {
             "identity" => self
@@ -314,7 +313,13 @@ impl PgFaultMatrixHarness {
                 ),
             _ => bail!("unsupported fault-matrix outbox domain `{domain}`"),
         };
-        outbox.relay(&pending).await?;
+        let claimed = outbox
+            .claim_batch(10)
+            .await?
+            .into_iter()
+            .find(|entry| entry.idem_key().as_str() == event_id)
+            .ok_or_else(|| anyhow!("seeded outbox row was not claimed"))?;
+        outbox.relay(claimed).await?;
         Ok(())
     }
 
@@ -336,19 +341,19 @@ impl PgFaultMatrixHarness {
             FaultMatrixOutboxStatus::Pending,
         )
         .await?;
-        let pending = pending_entry(tenant, event_id, topic, "identity.session-created")?;
         crate::outbox::fault_matrix_publish_before_settle(
             &self.owner_pool,
             publisher,
             test_tenant_authority()?,
             test_dlx_payload_protector()?,
-            &pending,
+            "identity",
+            event_id,
         )
         .await?;
         Ok(())
     }
 
-    /// Age the publishing lease, then recover through `PgOutbox::poll_pending` and `PgOutbox::relay`.
+    /// Age the publishing lease, then recover through `PgOutbox::claim_batch` and `PgOutbox::relay`.
     pub async fn recover_stale_outbox_publish(
         &self,
         tenant: vocab::TenantId,
@@ -378,12 +383,13 @@ impl PgFaultMatrixHarness {
                 ),
             _ => bail!("unsupported fault-matrix outbox domain `{domain}`"),
         };
-        let entries = outbox.poll_pending(domain, 10).await?;
-        let pending = entries
-            .iter()
+        let claimed = outbox
+            .claim_batch(10)
+            .await?
+            .into_iter()
             .find(|entry| entry.entry().idem_key().as_str() == event_id)
-            .ok_or_else(|| anyhow!("stale publishing outbox row was not polled"))?;
-        outbox.relay(pending).await?;
+            .ok_or_else(|| anyhow!("stale publishing outbox row was not reclaimed"))?;
+        outbox.relay(claimed).await?;
         Ok(())
     }
 
@@ -935,7 +941,9 @@ async fn age_outbox_publishing(
     event_id: &str,
 ) -> FaultMatrixResult<()> {
     sqlx::query(
-        "UPDATE outbox SET updated_at = now() - make_interval(secs => $4::int) \
+        "UPDATE outbox \
+         SET updated_at = clock_timestamp() - make_interval(secs => $4::int), \
+             lease_until = clock_timestamp() - interval '1 second' \
          WHERE tenant_id = $1::uuid AND event_id = $2 AND status = $3",
     )
     .bind(tenant.to_string())
@@ -963,24 +971,6 @@ async fn age_inbox_claim(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-fn pending_entry(
-    tenant: vocab::TenantId,
-    event_id: &str,
-    topic: &str,
-    contract_id: &str,
-) -> FaultMatrixResult<PendingEntry> {
-    let entry = consistency::StoredOutboxEntry::hydrate(
-        topic,
-        IdemKey::parse(event_id)?,
-        consistency::OutboxPayload::from_reviewed_event_bytes(vec![0x70]),
-    )?;
-    let subject = consistency::OutboxMetricSubject::new(
-        tenant,
-        consistency::OutboxContractId::parse(contract_id)?,
-    );
-    Ok(PendingEntry::new(entry, subject))
 }
 
 fn inbox_ctx(tenant: vocab::TenantId, group: &str) -> FaultMatrixResult<InboxReceiptContext> {

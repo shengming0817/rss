@@ -988,16 +988,31 @@ mod tests {
 
     // ── spawn_relay fakes ──────────────────────────────────────────────────────
 
-    /// noop relay store：`poll_pending` 恒返空批，`relay` 恒返 `Ok(Ack)`（spawn_relay happy-path 用）。
-    struct NoopRelayStore;
+    /// noop relay store：`claim_batch` 恒返空批，`relay` 恒返 `Ok(Ack)`（spawn_relay happy-path 用）。
+    struct NoopRelayStore {
+        domain: vocab::DomainName,
+    }
+
+    /// Noop provider 私有的 non-Clone claim；空批测试不会实际铸造它。
+    struct NoopRelayClaim {
+        subject: consistency::OutboxMetricSubject,
+    }
 
     impl consistency::OutboxSource for NoopRelayStore {
-        async fn poll_pending(
+        type Claim = NoopRelayClaim;
+
+        fn claim_subject(claim: &Self::Claim) -> &consistency::OutboxMetricSubject {
+            &claim.subject
+        }
+
+        fn claim_domain(&self) -> &vocab::DomainName {
+            &self.domain
+        }
+
+        async fn claim_batch(
             &self,
-            _domain: &str,
             _limit: usize,
-        ) -> Result<Vec<consistency::outbox::PendingEntry>, consistency::error::EngineError>
-        {
+        ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
             Ok(vec![])
         }
     }
@@ -1005,7 +1020,7 @@ mod tests {
     impl consistency::OutboxRelay for NoopRelayStore {
         async fn relay(
             &self,
-            _entry: &consistency::outbox::PendingEntry,
+            _entry: Self::Claim,
         ) -> Result<consistency::outbox::Disposition, consistency::error::EngineError> {
             Ok(consistency::outbox::Disposition::Ack)
         }
@@ -1037,12 +1052,18 @@ mod tests {
     // reason: 测试用合法 RelayConfig，parse 失败即参数写错；item-level carve-out。
     fn relay_cfg_for_test() -> crate::RelayConfig {
         crate::RelayConfig::new(
-            vec!["testdomain".to_string()],
             std::time::Duration::from_secs(60), // 长轮询间隔：测试期间不触发 tick
             10,
-            std::time::Duration::from_secs(60),
         )
         .expect("valid test relay config")
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: fixed test provider domain is valid by construction; item-level carve-out.
+    fn noop_relay_store() -> NoopRelayStore {
+        NoopRelayStore {
+            domain: vocab::DomainName::parse("testdomain").expect("valid test domain"),
+        }
     }
 
     // ── spawn_relay tests ──────────────────────────────────────────────────────
@@ -1055,7 +1076,7 @@ mod tests {
 
         let worker = spawn_relay(
             "outbox-relay-test".into(),
-            NoopRelayStore,
+            noop_relay_store(),
             relay_cfg_for_test(),
             Arc::new(FixedClockRelay),
             token.clone(),

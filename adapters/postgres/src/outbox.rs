@@ -8,11 +8,10 @@
 //! `PgTenantPool::co_tx_with_outbox` 注入租户事务后传入能力令牌，全局 outbox-only infra
 //! 路径也必须先显式打开事务并由 postgres adapter 铸造令牌——类型系统天然阻止无事务直接调用。
 //!
-//! **CAS fencing**：`relay` 以 `event_id`（= `IdemKey::as_str()`）为键 `UPDATE ... RETURNING retry_count`，
-//! 0 行 → lease 未取得、已被他人接管或已 published → `Ok(Disposition::Ack)`；CAS 只围栏 lease 获取与
-//! 状态写回，不提供 broker exactly-once。
+//! **CAS fencing**：`claim_batch` 在数据库内原子选择并铸造 token/deadline；settle 同时精确匹配二者且
+//! 拒绝过期租约。CAS 只围栏 durable 状态写回，不提供 broker exactly-once。
 //!
-//! **崩溃重投**：`poll_pending` 捞回 `status='publishing' AND updated_at <= now() - LEASE_TTL` 的 stale 行；
+//! **崩溃重投**：`claim_batch` 捞回 `status='publishing' AND lease_until <= clock_timestamp()` 的 stale 行；
 //! publish 成功而 settle 前崩溃会以同一 event/message id 重投，broker 可能收到重复 delivery；消费端 inbox
 //! 幂等才把重复业务副作用收口为一次。
 //!
@@ -20,15 +19,13 @@
 //! （`rows_affected()==1` 乐观锁 + UNIQUE 幂等 idiom 采纳来源）。
 
 use std::sync::Arc;
-#[cfg(feature = "domain-identity")]
-use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use consistency::{
     BacklogMetricSample, BacklogSample, EngineError, EngineErrorKind, EventEntry, IdemKey,
     OutboxAppendOutcome, OutboxBacklog, OutboxContractId, OutboxFactConflict,
     OutboxFactFingerprint, OutboxFactIdentity, OutboxMetricSubject, OutboxPayload, OutboxRelay,
-    OutboxSource, PendingEntry, RetentionSweeper, StoredOutboxEntry,
+    OutboxSource, RetentionSweeper, StoredOutboxEntry,
 };
 use diport::{
     DeadLetterSource, DynPublisher, EnvelopeCausationId, EnvelopeHeaderError, EnvelopeMetadata,
@@ -54,11 +51,23 @@ use crate::projection_events::{
 /// relay 每次最多重试次数（含当次）；超过后转 dlx。
 pub(crate) const MAX_PUBLISH_ATTEMPTS: i32 = 10;
 
-/// `publishing` 状态 lease 过期阈值（秒）；超过后 poll_pending 重新捞回（崩溃重投）。
+/// `publishing` 状态 lease TTL（秒）；数据库 claim 用它铸造显式 deadline。
 // reason(dead_code): 0031 SECURITY DEFINER SQL owns the runtime predicate; Rust constant remains the
 // migration/spec drift anchor exercised by outbox unit tests.
 #[allow(dead_code)]
 pub(crate) const LEASE_TTL_SECONDS: i64 = 60;
+/// Broker publish 的硬超时；claim 预检要求额外 settle 裕量。
+const OUTBOX_PUBLISH_TIMEOUT_SECONDS: u64 = 40;
+/// 开始 broker publish 前必须仍剩余的数据库租约预算。
+const OUTBOX_PUBLISH_LEASE_BUDGET_SECONDS: i64 = 50;
+
+/// 单次原子 claim 的 provider 边界；与 0057 SQL 防线由单测互锁。
+const OUTBOX_CLAIM_BATCH_MAX: usize = 10_000;
+
+const _: () = {
+    assert!(OUTBOX_PUBLISH_TIMEOUT_SECONDS < OUTBOX_PUBLISH_LEASE_BUDGET_SECONDS as u64);
+    assert!(OUTBOX_PUBLISH_LEASE_BUDGET_SECONDS < LEASE_TTL_SECONDS);
+};
 
 /// outbox status 值集——**生产单源**（F8）。所有 SQL 谓词 / SET 一律 `.bind(STATUS_*)`，不再内联裸
 /// 字符串；与 migration `0002` 的 `CHECK (status IN (...))` 由 `status_consts_match_migration_check`
@@ -75,18 +84,217 @@ pub(crate) const STATUS_DLX: &str = "dlx";
 const OUTBOX_RELAY_DLX_SUMMARY: &str = "outbox relay publish failed";
 const OUTBOX_RELAY_ENVELOPE_DLX_SUMMARY: &str = "outbox relay envelope validation failed";
 const KEY_RELAY_FAILURE_REASON: &str = "relayFailureReason";
-type AcquiredLeaseRow = (
-    i32,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-);
+#[derive(sqlx::FromRow)]
+struct ClaimedOutboxRow {
+    tenant_id: String,
+    contract_id: String,
+    topic: String,
+    event_id: String,
+    payload: Vec<u8>,
+    retry_count: i32,
+    metadata: String,
+    domain: String,
+    contract_version: String,
+    schema_hash: String,
+    claimed_at_epoch_seconds: i64,
+    lease_token: String,
+    deadline_epoch_micros: i64,
+}
+
+/// PostgreSQL 原子 claim 返回的 provider-owned relay capability。
+///
+/// 字段与构造路径均封闭在 postgres adapter；外部调用方只能从 [`OutboxSource::claim_batch`]
+/// 获得并按值交给同一 provider 的 [`OutboxRelay::relay`]。本类型刻意不实现 `Clone`。
+pub struct PgClaimedOutboxEntry {
+    provider: Arc<OutboxProviderIdentity>,
+    entry: StoredOutboxEntry,
+    subject: OutboxMetricSubject,
+    retry_count: u32,
+    domain: vocab::DomainName,
+    contract_version: String,
+    schema_hash: String,
+    metadata: serde_json::Map<String, serde_json::Value>,
+    claimed_at_epoch_seconds: i64,
+    lease: OutboxLease,
+}
+
+impl std::fmt::Debug for PgClaimedOutboxEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgClaimedOutboxEntry")
+            .field("entry", &"<redacted>")
+            .field("provider", &"<bound>")
+            .field("subject", &self.subject)
+            .field("retry_count", &self.retry_count)
+            .field("domain", &self.domain)
+            .field("contract_version", &self.contract_version)
+            .field("schema_hash", &self.schema_hash)
+            .field("metadata", &"<redacted>")
+            .field("claimed_at_epoch_seconds", &self.claimed_at_epoch_seconds)
+            .field("lease", &self.lease)
+            .finish()
+    }
+}
+
+/// 单个 [`PgOutbox`] 实例不可伪造的 publisher provenance；pointer identity 同时绑定 domain 与 publisher。
+struct OutboxProviderIdentity {
+    domain: vocab::DomainName,
+}
+
+impl PgClaimedOutboxEntry {
+    pub(crate) fn entry(&self) -> &StoredOutboxEntry {
+        &self.entry
+    }
+
+    pub(crate) fn topic(&self) -> &consistency::StoredOutboxTopic {
+        self.entry.topic()
+    }
+
+    pub(crate) fn idem_key(&self) -> &IdemKey {
+        self.entry.idem_key()
+    }
+
+    pub(crate) fn subject(&self) -> &OutboxMetricSubject {
+        &self.subject
+    }
+
+    fn retry_count(&self) -> u32 {
+        self.retry_count
+    }
+
+    fn domain(&self) -> &vocab::DomainName {
+        &self.domain
+    }
+
+    fn contract_version(&self) -> &str {
+        &self.contract_version
+    }
+
+    fn schema_hash(&self) -> &str {
+        &self.schema_hash
+    }
+
+    fn metadata(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.metadata
+    }
+
+    fn claimed_at_epoch_seconds(&self) -> i64 {
+        self.claimed_at_epoch_seconds
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn claim_epoch_seconds(&self) -> i64 {
+        self.claimed_at_epoch_seconds
+    }
+
+    pub(crate) fn lease_token(&self) -> &str {
+        self.lease.token()
+    }
+
+    pub(crate) fn lease_deadline_epoch_micros(&self) -> i64 {
+        self.lease.deadline_epoch_micros()
+    }
+}
+
+struct OutboxLease {
+    token: String,
+    deadline_epoch_micros: i64,
+}
+
+impl std::fmt::Debug for OutboxLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboxLease")
+            .field("token", &"<redacted>")
+            .field("deadline_epoch_micros", &self.deadline_epoch_micros)
+            .finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+enum OutboxLeaseError {
+    #[error("lease token is not a canonical uuid")]
+    Token,
+    #[error("lease token is not uuid v4")]
+    TokenVersion,
+    #[error("lease deadline is not positive epoch microseconds")]
+    Deadline,
+}
+
+impl OutboxLease {
+    fn hydrate(token: String, deadline_epoch_micros: i64) -> Result<Self, OutboxLeaseError> {
+        let parsed = uuid::Uuid::try_parse(&token).map_err(|_| OutboxLeaseError::Token)?;
+        if parsed.hyphenated().to_string() != token {
+            return Err(OutboxLeaseError::Token);
+        }
+        if parsed.get_version_num() != 4 {
+            return Err(OutboxLeaseError::TokenVersion);
+        }
+        if deadline_epoch_micros <= 0 {
+            return Err(OutboxLeaseError::Deadline);
+        }
+        Ok(Self {
+            token,
+            deadline_epoch_micros,
+        })
+    }
+
+    fn token(&self) -> &str {
+        &self.token
+    }
+
+    fn deadline_epoch_micros(&self) -> i64 {
+        self.deadline_epoch_micros
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+enum ClaimHydrationError {
+    #[error("invalid metric subject")]
+    MetricSubject,
+    #[error("invalid event id")]
+    EventId,
+    #[error("invalid stored entry")]
+    StoredEntry,
+    #[error("invalid retry count")]
+    RetryCount,
+    #[error("invalid domain")]
+    Domain,
+    #[error("claim domain does not match provider")]
+    ProviderDomain,
+    #[error("invalid metadata")]
+    Metadata,
+    #[error("invalid lease token")]
+    LeaseToken,
+    #[error("invalid lease token version")]
+    LeaseTokenVersion,
+    #[error("invalid lease deadline")]
+    LeaseDeadline,
+    #[error("empty contract version")]
+    ContractVersion,
+    #[error("empty schema hash")]
+    SchemaHash,
+    #[error("invalid claim epoch")]
+    ClaimedAt,
+}
+
+impl ClaimHydrationError {
+    fn phase(self) -> &'static str {
+        match self {
+            Self::MetricSubject => "metric_subject",
+            Self::EventId => "event_id",
+            Self::StoredEntry => "stored_entry",
+            Self::RetryCount => "retry_count",
+            Self::Domain => "domain",
+            Self::ProviderDomain => "provider_domain",
+            Self::Metadata => "metadata",
+            Self::LeaseToken => "lease_token",
+            Self::LeaseTokenVersion => "lease_token_version",
+            Self::LeaseDeadline => "lease_deadline",
+            Self::ContractVersion => "contract_version",
+            Self::SchemaHash => "schema_hash",
+            Self::ClaimedAt => "claimed_at",
+        }
+    }
+}
 
 struct TenantAuthoritySignInput<'a> {
     tenant: vocab::TenantId,
@@ -935,29 +1143,34 @@ pub(crate) fn classify_append_fingerprint(
 
 /// PostgreSQL outbox adapter：impl [`OutboxSource`] + [`OutboxRelay`] + [`RetentionSweeper`]。
 ///
-/// 持 `PgPool`（clone 自 [`PgStore`]）+ `Box<DynPublisher>`（Send 变体，跨 await 安全）。
-/// 构造必填两个参数，缺一编译报错（构造器必填参数 Hard 约束）。
+/// 持 `PgPool`（clone 自 [`PgStore`]）、`Box<DynPublisher>`（Send 变体，跨 await 安全）、
+/// [`TenantAuthority`]（租户权威签名）与 [`DlxPayloadProtector`]（DLX payload 加密）。这些持久化、
+/// broker、租户权威和 DLX 保护依赖均为构造期必填位置参数，缺失即编译失败。
 ///
-/// **时间源**：`poll_pending` / `acquire_lease` / `settle_retry` / `sweep` 的所有时间谓词
-/// 用 PostgreSQL `now()`（DB 事务时间），**刻意不注入 `Clock`**——relay 多实例并发下需要单一、
+/// **时间源**：`claim_batch` / `settle_retry` / `sweep` 的所有时间谓词
+/// 用 PostgreSQL 时钟，**刻意不注入 `Clock`**——relay 多实例并发下需要单一、
 /// 无跨进程偏移的时间源（lease TTL / retry_after / 保留期比较都在 DB 端一致求值）。这是对
 /// rust-standards `Clock` 构造器位置参规则的有意例外（clippy `disallowed_methods` 不覆盖 SQL `now()`）。
 pub struct PgOutbox {
     pool: sqlx::PgPool,
     tenant_pool: PgTenantPool,
+    provider: Arc<OutboxProviderIdentity>,
     publisher: Box<DynPublisher<'static>>,
     tenant_authority: Arc<TenantAuthority>,
     payload_protector: DlxPayloadProtector,
 }
 
 impl PgOutbox {
-    /// 由 [`PgStore`] + `Box<DynPublisher>` 构造（两者均必填）。
+    /// 由 [`PgStore`]、typed domain、`Box<DynPublisher>`、`Arc<TenantAuthority>` 与
+    /// [`DlxPayloadProtector`] 构造；domain 与 publisher 共同绑定 provider identity，其余依次提供
+    /// 持久化、broker 发布、租户权威签名和 DLX payload 保护能力。
     /// pool 从 `PgStore.pool`（`pub(crate)`，同 crate 可取）clone；DynPublisher 转移所有权。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::outbox` 收口。
     #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
     pub(crate) fn new(
         store: &PgStore,
+        domain: vocab::DomainName,
         publisher: Box<DynPublisher<'static>>,
         tenant_authority: Arc<TenantAuthority>,
         payload_protector: DlxPayloadProtector,
@@ -965,6 +1178,7 @@ impl PgOutbox {
         Self {
             pool: store.pool.clone(),
             tenant_pool: PgTenantPool::new(store),
+            provider: Arc::new(OutboxProviderIdentity { domain }),
             publisher,
             tenant_authority,
             payload_protector,
@@ -987,53 +1201,30 @@ pub(crate) async fn fault_matrix_publish_before_settle(
     publisher: Box<DynPublisher<'static>>,
     tenant_authority: Arc<TenantAuthority>,
     payload_protector: DlxPayloadProtector,
-    pending: &PendingEntry,
+    domain: &str,
+    event_id: &str,
 ) -> Result<(), EngineError> {
     let store = PgStore { pool: pool.clone() };
-    let relay = PgOutbox::new(&store, publisher, tenant_authority, payload_protector);
-    let entry = pending.entry();
-    let event_id = entry.idem_key().as_str();
-    let Some((
-        _retry_count,
-        _lease_token,
-        tenant_id,
-        metadata_json,
-        domain,
-        contract_id,
-        topic,
-        contract_version,
-        schema_hash,
-        now_epoch,
-    )) = acquire_lease(pool, event_id).await?
-    else {
-        return Err(EngineError::new(EngineErrorKind::Invariant));
-    };
-    let tenant = parse_tenant_id(&tenant_id)?;
-    let row_contract = parse_outbox_contract_id(&contract_id)?;
-    validate_lease_scope(event_id, pending.subject(), tenant, &row_contract)?;
-    let mut metadata = hydrate_envelope_metadata(&metadata_json);
-    metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
-    apply_schema_headers_from_columns(&mut metadata, &contract_version, &schema_hash);
-    let metadata = relay.sign_metadata(
-        metadata,
-        TenantAuthoritySignInput {
-            tenant,
-            domain: &domain,
-            contract_id: &contract_id,
-            topic: &topic,
-            event_id,
-            now_epoch,
-        },
-    )?;
-    let request = publish_request(entry, metadata);
-    validate_publish_request_envelope(&request)
+    let domain = vocab::DomainName::parse(domain)
         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    relay
-        .publisher
-        .publish(request)
-        .await
-        .map_err(|_| EngineError::new(EngineErrorKind::Transient))?;
-    Ok(())
+    let relay = PgOutbox::new(
+        &store,
+        domain,
+        publisher,
+        tenant_authority,
+        payload_protector,
+    );
+    let claimed = relay
+        .claim_batch(10)
+        .await?
+        .into_iter()
+        .find(|entry| entry.idem_key().as_str() == event_id)
+        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
+    match relay.publish_claimed(&claimed).await {
+        Ok(()) => Ok(()),
+        Err(ClaimPublishError::Engine(error)) => Err(error),
+        Err(ClaimPublishError::Publish(_)) => Err(EngineError::new(EngineErrorKind::Transient)),
+    }
 }
 
 /// PostgreSQL outbox maintenance adapter：impl [`OutboxBacklog`] + [`RetentionSweeper`]，不持 publisher。
@@ -1060,7 +1251,17 @@ impl PgOutboxMaintenance {
 // ── OutboxSource impl ─────────────────────────────────────────────────────────
 
 impl OutboxSource for PgOutbox {
-    /// 扫描 `domain` 下至多 `limit` 条待发 entry（pending 且到期，或 lease 过期 stale publishing）。
+    type Claim = PgClaimedOutboxEntry;
+
+    fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
+        claim.subject()
+    }
+
+    fn claim_domain(&self) -> &vocab::DomainName {
+        &self.provider.domain
+    }
+
+    /// 原子 claim `domain` 下至多 `limit` 条待发 entry（pending 且到期，或 lease 过期 stale publishing）。
     ///
     /// **Head-of-partition gating（#1211/#1581）**：对 `partition_key IS NOT NULL` 的行，仅当同
     /// `(tenant_id, domain, partition_key)` 内所有 `seq < o.seq` 的行均已 `published` 时才放行，
@@ -1072,138 +1273,175 @@ impl OutboxSource for PgOutbox {
     ///   ——这是与「serial in order」一致的唯一选择。
     /// - **已知前提**：`b.seq < o.seq` 队头判据假设同 partition 行按 seq 序提交，成立条件是同 partition 写入由
     ///   聚合根并发控制（行锁/version CAS）串行化（partition = aggregate 标准契约）。
-    /// - **backlog 注意**：head-of-partition gate 是 **poll-only by design**——被 gate 的后继仍计入 backlog
+    /// - **backlog 注意**：head-of-partition gate 是 **claim-only by design**——被 gate 的后继仍计入 backlog
     ///   depth（见 `sample_backlog` 注释），否则 stalled partition 对 SLO 失明。
     ///
-    /// `FOR UPDATE OF o SKIP LOCKED` 尽力减少并发重复扫描；`acquire_lease` CAS 围栏同一有效 lease 与 stale
-    /// writer 的状态写回。publish 成功、settle 前崩溃仍允许 broker duplicate，须由 consumer inbox 幂等收口。
+    /// `FOR UPDATE OF o SKIP LOCKED` 与同 statement `UPDATE ... RETURNING` 原子 claim，避免扫描/租约间隙。
+    /// publish 成功、settle 前崩溃仍允许 broker duplicate，须由 consumer inbox 幂等收口。
     /// parse 失败（topic / idem_key 无效）→ `EngineErrorKind::Invariant`（我们写入的数据不该无效）。
     ///
     /// INVARIANT: OUTBOX-PARTITION-ORDER-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
-    async fn poll_pending(
-        &self,
-        domain: &str,
-        limit: usize,
-    ) -> Result<Vec<PendingEntry>, EngineError> {
-        let rows: Vec<(String, String, String, String, Vec<u8>)> = sqlx::query_as(
+    async fn claim_batch(&self, limit: usize) -> Result<Vec<Self::Claim>, EngineError> {
+        if !(1..=OUTBOX_CLAIM_BATCH_MAX).contains(&limit) {
+            return Err(EngineError::new(EngineErrorKind::Invariant));
+        }
+        let domain = self.provider.domain.as_str();
+        let limit =
+            i64::try_from(limit).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: claim_batch begin error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
+        let rows: Vec<ClaimedOutboxRow> = sqlx::query_as(
             r#"
-            SELECT tenant_id, contract_id, topic, event_id, payload
-            FROM rss_outbox_poll_pending($1, $2)
+            SELECT tenant_id, contract_id, topic, event_id, payload, retry_count, metadata,
+                   domain, contract_version, schema_hash, claimed_at_epoch_seconds,
+                   lease_token, deadline_epoch_micros
+            FROM rss_outbox_claim_batch($1, $2)
             "#,
         )
         .bind(domain)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+        .bind(limit)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| {
-            tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: poll_pending db error");
+            tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: claim_batch db error");
             EngineError::new(EngineErrorKind::Transient)
         })?;
 
-        rows.into_iter()
-            .map(|(tenant_id, contract_id, topic_str, event_id, payload)| {
-                let subject = parse_metric_subject(&tenant_id, &contract_id)?;
-                let idem_key = IdemKey::parse(&event_id)
-                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                let entry = StoredOutboxEntry::hydrate(
-                    topic_str,
-                    idem_key,
-                    OutboxPayload::from_reviewed_event_bytes(payload),
-                )
-                .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-                Ok(PendingEntry::new(entry, subject))
-            })
-            .collect()
+        let claims = rows
+            .into_iter()
+            .map(|row| hydrate_claimed_outbox_row(row, &self.provider))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                tracing::error!(
+                    target: "postgres",
+                    domain,
+                    hydration_phase = error.phase(),
+                    error = %error,
+                    "outbox: claim_batch hydration error; rolling back batch"
+                );
+                EngineError::new(EngineErrorKind::Invariant)
+            })?;
+        tx.commit().await.map_err(|e| {
+            tracing::warn!(target: "postgres", domain, error = %secure::redact_error(&e), "outbox: claim_batch commit error");
+            EngineError::new(EngineErrorKind::Transient)
+        })?;
+        Ok(claims)
     }
 }
 
 // ── OutboxRelay impl ──────────────────────────────────────────────────────────
 
 impl OutboxRelay for PgOutbox {
-    /// CAS relay 单条 entry：acquire → publish → settle。
+    /// relay 单条 typed claim：publish → strict-deadline settle。
     ///
     /// `PublisherError` 携 kind（#1212）——`Permanent`（序列化 / 路由 / 编码非法）首投即 dlx（跳过重试预算）；
     /// `Transient`（连接闪断等可恢复）退避重试至预算耗尽再 dlx。分流见 [`settle_publish_failure`] /
-    /// [`dlx_decision`]。DB/CAS 失败返 `Err(EngineError)`；publish 失败是**已处置**（返 `Ok(Disposition)`）。
-    async fn relay(&self, pending: &PendingEntry) -> Result<consistency::Disposition, EngineError> {
-        let entry = pending.entry();
-        let event_id = entry.idem_key().as_str();
-
-        // 1. CAS acquire：把 pending（或 stale publishing）行翻转到 publishing，返 (retry_count, lease_token)。
-        let maybe_lease = acquire_lease(&self.pool, event_id).await?;
-
-        let (
-            retry_count,
-            lease_token,
-            tenant_id,
-            metadata_json,
-            domain,
-            contract_id,
-            topic,
-            contract_version,
-            schema_hash,
-            now_epoch,
-        ) = match maybe_lease {
-            // 0 行：已被他人发或已 published → 幂等 Ack，禁二次 publish。
-            None => return Ok(consistency::Disposition::Ack),
-            Some(lease) => lease,
-        };
-        let tenant = parse_tenant_id(&tenant_id)?;
-        let row_contract = parse_outbox_contract_id(&contract_id)?;
-        validate_lease_scope(event_id, pending.subject(), tenant, &row_contract)?;
-        let mut metadata = hydrate_envelope_metadata(&metadata_json);
-        metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
-        apply_schema_headers_from_columns(&mut metadata, &contract_version, &schema_hash);
-        let metadata = self.sign_metadata(
-            metadata,
-            TenantAuthoritySignInput {
-                tenant,
-                domain: &domain,
-                contract_id: &contract_id,
-                topic: &topic,
-                event_id,
-                now_epoch,
-            },
-        )?;
-
-        // 2. 发布到 broker。event_id（= idem_key）盖章到 broker message_id，经订阅侧流回消费幂等键
-        //    （至少一次 + 幂等去重端到端，eventbus.md §DLX 与幂等）。
-        //    metadata_json 从 outbox.metadata 列 hydrate → EnvelopeMetadata（#1160 A4）。
-        let request = publish_request(entry, metadata);
-        let publish_result = match validate_publish_request_envelope(&request) {
-            Ok(()) => self
-                .publisher
-                .publish(request)
-                .await
-                .map_err(RelayPublishFailure::Publisher),
-            Err(e) => {
-                record_relay_envelope_validation_failure(&domain, pending.subject(), e.reason());
-                Err(RelayPublishFailure::Envelope(e))
-            }
+    /// [`dlx_decision`]。DB/CAS 失败（含 LostLease）返 `Err(EngineError)`；publish 失败仅在 retry/DLX
+    /// settle 成功后才是**已处置**（返 `Ok(Disposition)`）。
+    async fn relay(&self, claimed: Self::Claim) -> Result<consistency::Disposition, EngineError> {
+        let event_id = claimed.idem_key().as_str();
+        self.validate_claim_provider(&claimed)?;
+        if !lease_can_publish(&self.pool, &claimed).await? {
+            return Err(lost_lease_error(event_id, "pre_publish_budget"));
+        }
+        let tenant = claimed.subject().tenant_id();
+        let publish_result = match self.publish_claimed(&claimed).await {
+            Ok(()) => Ok(()),
+            Err(ClaimPublishError::Engine(error)) => return Err(error),
+            Err(ClaimPublishError::Publish(error)) => Err(error),
         };
 
         match publish_result {
             Ok(()) => {
                 // 3a. 发布成功 → published（以本次 lease_token 比对，防 stale 持租者结算）。
-                // LostLease（0 行 CAS）= 租约已被新持租者接管并自行结算：事件仍已达 broker，故 Ack；
-                // 但不当「干净成功」静默吞——结构化记录 lost-lease 供运维感知（F3）。
-                if settle_published(&self.pool, event_id, &lease_token).await?
-                    == SettleOutcome::LostLease
-                {
-                    log_lost_lease(event_id, "settle_published");
+                // LostLease（0 行 CAS）不是干净成功：即使 broker 已收到事件，当前 worker 也未能证明
+                // durable settle，故返 Transient 让调度层显式感知并按租约状态恢复。
+                if settle_published(&self.pool, &claimed).await? == SettleOutcome::LostLease {
+                    return Err(lost_lease_error(event_id, "settle_published"));
                 }
                 Ok(consistency::Disposition::Ack)
             }
             // 3b. 发布失败 → dlx（预算耗尽）/ retry（退避），见 helper。
-            Err(e) => {
-                self.settle_publish_failure(tenant, entry, retry_count, &lease_token, &e)
-                    .await
-            }
+            Err(e) => self.settle_publish_failure(tenant, &claimed, &e).await,
         }
     }
 }
 
 impl PgOutbox {
+    fn validate_claim_provider(&self, claimed: &PgClaimedOutboxEntry) -> Result<(), EngineError> {
+        if Arc::ptr_eq(&self.provider, &claimed.provider) {
+            return Ok(());
+        }
+        tracing::error!(
+            target: "postgres",
+            expected_domain = self.provider.domain.as_str(),
+            claim_domain = claimed.domain().as_str(),
+            "outbox: claim belongs to a different provider instance"
+        );
+        Err(EngineError::new(EngineErrorKind::Invariant))
+    }
+
+    fn prepare_publish_request(
+        &self,
+        claimed: &PgClaimedOutboxEntry,
+    ) -> Result<PublishRequest, ClaimPublishError> {
+        let tenant = claimed.subject().tenant_id();
+        let mut metadata = hydrate_claimed_metadata(claimed.metadata());
+        metadata.insert_wire_pair(KEY_TENANT_ID, tenant.to_string());
+        apply_schema_headers_from_columns(
+            &mut metadata,
+            claimed.contract_version(),
+            claimed.schema_hash(),
+        );
+        let metadata = self
+            .sign_metadata(
+                metadata,
+                TenantAuthoritySignInput {
+                    tenant,
+                    domain: claimed.domain().as_str(),
+                    contract_id: claimed.subject().contract_id().as_str(),
+                    topic: claimed.topic().as_str(),
+                    event_id: claimed.idem_key().as_str(),
+                    now_epoch: claimed.claimed_at_epoch_seconds(),
+                },
+            )
+            .map_err(ClaimPublishError::Engine)?;
+        let request = publish_request(claimed.entry(), metadata);
+        validate_publish_request_envelope(&request).map_err(|error| {
+            record_relay_envelope_validation_failure(
+                claimed.domain().as_str(),
+                claimed.subject(),
+                error.reason(),
+            );
+            ClaimPublishError::Publish(RelayPublishFailure::Envelope(error))
+        })?;
+        Ok(request)
+    }
+
+    async fn publish_claimed(
+        &self,
+        claimed: &PgClaimedOutboxEntry,
+    ) -> Result<(), ClaimPublishError> {
+        let request = self.prepare_publish_request(claimed)?;
+        match tokio::time::timeout(
+            Duration::from_secs(OUTBOX_PUBLISH_TIMEOUT_SECONDS),
+            self.publisher.publish(request),
+        )
+        .await
+        {
+            Ok(result) => result
+                .map_err(|error| ClaimPublishError::Publish(RelayPublishFailure::Publisher(error))),
+            Err(_) => Err(ClaimPublishError::Publish(RelayPublishFailure::Publisher(
+                PublisherError::transient(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "outbox publisher timed out",
+                )),
+            ))),
+        }
+    }
+
     // reason: tenant-authority signing binds the protocol fields exactly as they are stored in the
     // outbox row; wrapping them only for this call would add DB-only code without stronger invariants.
     #[allow(clippy::too_many_arguments)]
@@ -1232,12 +1470,18 @@ impl PgOutbox {
     }
 }
 
+enum ClaimPublishError {
+    Engine(EngineError),
+    Publish(RelayPublishFailure),
+}
+
 /// outbox.metadata（jsonb→text）→ [`EnvelopeMetadata`]：逐 key-value 经 `insert_wire_pair` 透传。
 ///
 /// string 值直接用；number / bool 等 stringify（occurred_at 在 DB 存 number → 十进制 string，
 /// [`EnvelopeMetadata::occurred_at_secs`] 再反解析）。
 // reason: fail-safe——非对象 JSON / 解析失败返 empty 而非 Err，不阻 relay；relay 核心语义是
 // at-least-once 投递，envelope 降级省略 metadata 比阻断投递更安全。
+#[cfg(test)]
 fn hydrate_envelope_metadata(json: &str) -> EnvelopeMetadata {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) else {
         tracing::debug!(target: "postgres", json_len = json.len(), "outbox: hydrate_envelope_metadata: non-object/invalid json, proceeding without metadata");
@@ -1253,6 +1497,72 @@ fn hydrate_envelope_metadata(json: &str) -> EnvelopeMetadata {
         md.insert_wire_pair(k, s);
     }
     md
+}
+
+fn hydrate_claimed_metadata(map: &serde_json::Map<String, serde_json::Value>) -> EnvelopeMetadata {
+    let mut metadata = EnvelopeMetadata::empty();
+    for (key, value) in map {
+        let value = match value {
+            serde_json::Value::String(value) => value.clone(),
+            other => other.to_string(),
+        };
+        metadata.insert_wire_pair(key, value);
+    }
+    metadata
+}
+
+fn hydrate_claimed_outbox_row(
+    row: ClaimedOutboxRow,
+    provider: &Arc<OutboxProviderIdentity>,
+) -> Result<PgClaimedOutboxEntry, ClaimHydrationError> {
+    let subject = parse_metric_subject(&row.tenant_id, &row.contract_id)
+        .map_err(|_| ClaimHydrationError::MetricSubject)?;
+    let idem_key = IdemKey::parse(&row.event_id).map_err(|_| ClaimHydrationError::EventId)?;
+    let entry = StoredOutboxEntry::hydrate(
+        row.topic,
+        idem_key,
+        OutboxPayload::from_reviewed_event_bytes(row.payload),
+    )
+    .map_err(|_| ClaimHydrationError::StoredEntry)?;
+    let retry_count =
+        u32::try_from(row.retry_count).map_err(|_| ClaimHydrationError::RetryCount)?;
+    let domain = vocab::DomainName::parse(&row.domain).map_err(|_| ClaimHydrationError::Domain)?;
+    if domain != provider.domain {
+        return Err(ClaimHydrationError::ProviderDomain);
+    }
+    let metadata = match serde_json::from_str(&row.metadata) {
+        Ok(serde_json::Value::Object(metadata)) => metadata,
+        Ok(_) | Err(_) => return Err(ClaimHydrationError::Metadata),
+    };
+    let lease =
+        OutboxLease::hydrate(row.lease_token, row.deadline_epoch_micros).map_err(|error| {
+            match error {
+                OutboxLeaseError::Token => ClaimHydrationError::LeaseToken,
+                OutboxLeaseError::TokenVersion => ClaimHydrationError::LeaseTokenVersion,
+                OutboxLeaseError::Deadline => ClaimHydrationError::LeaseDeadline,
+            }
+        })?;
+    if row.contract_version.is_empty() {
+        return Err(ClaimHydrationError::ContractVersion);
+    }
+    if row.schema_hash.is_empty() {
+        return Err(ClaimHydrationError::SchemaHash);
+    }
+    if row.claimed_at_epoch_seconds <= 0 {
+        return Err(ClaimHydrationError::ClaimedAt);
+    }
+    Ok(PgClaimedOutboxEntry {
+        provider: Arc::clone(provider),
+        entry,
+        subject,
+        retry_count,
+        domain,
+        contract_version: row.contract_version,
+        schema_hash: row.schema_hash,
+        metadata,
+        claimed_at_epoch_seconds: row.claimed_at_epoch_seconds,
+        lease,
+    })
 }
 
 fn apply_schema_headers_from_columns(
@@ -1292,19 +1602,22 @@ fn record_relay_envelope_validation_failure(
 /// publish 失败处置（抽出控制 `relay` 认知复杂度 ≤15）：永久错误首投即 dlx、预算耗尽 → dlx；否则退避 retry
 /// （#1212，分流谓词见 [`dlx_decision`]）。
 ///
-/// settle CAS 命中 `LostLease`（0 行）⇒ 行已被新租约接管：本租约不拥有该行、不重复处置，记 lost-lease
-/// 后退化为 `Ack`（benign handoff，新持租者负责重投/退避），不误把 broker 失败上抛成本 worker 的降级（F3）。
+/// settle CAS 命中 `LostLease`（0 行）⇒ 行已被新租约接管：本租约不拥有该行、不重复处置，并返回
+/// `Transient` 使 worker 降级；不得把 publish/settle 的未确认结果伪装成 Ack。
 impl PgOutbox {
     async fn settle_publish_failure(
         &self,
         tenant: vocab::TenantId,
-        entry: &StoredOutboxEntry,
-        retry_count: i32,
-        lease_token: &str,
+        claimed: &PgClaimedOutboxEntry,
         err: &RelayPublishFailure,
     ) -> Result<consistency::Disposition, EngineError> {
+        let entry = claimed.entry();
+        let retry_count = i32::try_from(claimed.retry_count())
+            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
         let event_id = entry.idem_key().as_str();
-        let new_count = retry_count + 1;
+        let new_count = retry_count
+            .checked_add(1)
+            .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
         let permanent = err.is_permanent();
         log_publish_failed(event_id, entry.topic().as_str(), retry_count, err);
         if dlx_decision(permanent, new_count) {
@@ -1313,32 +1626,28 @@ impl PgOutbox {
                 &self.payload_protector,
                 DlxSettlement {
                     tenant,
-                    event_id,
-                    new_retry_count: new_count,
-                    lease_token,
+                    claimed,
                     error_summary: err.dlx_summary(),
                     relay_failure_reason: err.relay_failure_reason(),
                 },
             )
             .await?
             {
-                SettleOutcome::Settled => {
-                    log_dlx(event_id, new_count, permanent, err.reason_label());
+                DlxSettleOutcome::Settled(authoritative_retry_count) => {
+                    log_dlx(
+                        event_id,
+                        authoritative_retry_count,
+                        permanent,
+                        err.reason_label(),
+                    );
                     Ok(consistency::Disposition::Reject)
                 }
-                SettleOutcome::LostLease => {
-                    log_lost_lease(event_id, "settle_dlx");
-                    Ok(consistency::Disposition::Ack)
-                }
+                DlxSettleOutcome::LostLease => Err(lost_lease_error(event_id, "settle_dlx")),
             }
         } else {
-            let backoff = backoff_seconds(retry_count);
-            match settle_retry(&self.pool, event_id, new_count, backoff, lease_token).await? {
+            match settle_retry(&self.pool, claimed).await? {
                 SettleOutcome::Settled => Ok(consistency::Disposition::Requeue),
-                SettleOutcome::LostLease => {
-                    log_lost_lease(event_id, "settle_retry");
-                    Ok(consistency::Disposition::Ack)
-                }
+                SettleOutcome::LostLease => Err(lost_lease_error(event_id, "settle_retry")),
             }
         }
     }
@@ -1401,6 +1710,11 @@ fn log_lost_lease(event_id: &str, operation: &str) {
     tracing::warn!(target: "postgres", event_id, operation, "outbox: settle hit lost lease (0 rows); row owned by another lease");
 }
 
+fn lost_lease_error(event_id: &str, operation: &str) -> EngineError {
+    log_lost_lease(event_id, operation);
+    EngineError::new(EngineErrorKind::Transient)
+}
+
 // ── RetentionSweeper impl ────────────────────────────────────────────────────────
 
 impl RetentionSweeper for PgOutbox {
@@ -1433,15 +1747,15 @@ impl RetentionSweeper for PgOutboxMaintenance {
 impl OutboxBacklog for PgOutbox {
     /// 采样 `domain` 的**可投递积压**（深度 + 最老积压龄）。
     ///
-    /// 谓词与 [`OutboxSource::poll_pending`] 的可重捞集合**同源**（见本文件 `poll_pending` 的 WHERE）：
-    /// `(status=pending 且到期) OR (status=publishing 且 lease 过期 `updated_at <= now()-LEASE_TTL_SECONDS`)`。
+    /// 谓词与 [`OutboxSource::claim_batch`] 的可重捞集合**同源**：
+    /// `(status=pending 且到期) OR (status=publishing 且显式 `lease_until <= clock_timestamp()`)`。
     /// stale `publishing`（崩溃/超时 in-flight）会被 relay 重投，属可投递积压，**必须计入**——否则 oldest-age
     /// SLO 对可恢复积压失明（relay 重捞但 gauge 报 0）。只排除 lease 仍有效的正常 in-flight。无可投递行 ⇒
-    /// [`BacklogSample::empty`]。**不变式**：本谓词须随 `poll_pending` 同步改（集成测试 T16/T18 + stale-publishing
+    /// [`BacklogSample::empty`]。**不变式**：本谓词须随 `claim_batch` 同步改（集成测试 T16/T18 + stale-publishing
     /// 用例锁定漂移）。
     ///
-    /// **head-of-partition gate 是 poll-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
-    /// partition 对 SLO 失明）。backlog 谓词刻意不含 head-of-partition gate（见 `poll_pending` INVARIANT:
+    /// **head-of-partition gate 是 claim-only by design**——被 gate 的后继仍计入 backlog depth（否则 stalled
+    /// partition 对 SLO 失明）。backlog 谓词刻意不含 head-of-partition gate（见 `claim_batch` INVARIANT:
     /// OUTBOX-PARTITION-ORDER-01）。
     async fn sample_backlog(&self, domain: &str) -> Result<Vec<BacklogMetricSample>, EngineError> {
         sample_outbox_backlog(&self.pool, domain).await
@@ -1526,38 +1840,6 @@ async fn sample_outbox_backlog(
 
 // ── relay 拆分 helper fn（认知复杂度 ≤ 15）────────────────────────────────────
 
-/// CAS acquire：把 pending（或 stale publishing）行置 publishing，返回固定 definer tuple。
-/// 返回 `None` 表示 0 行更新（已 published 或被他人占）。
-///
-/// `lease_token::text` 文本往返（不给 sqlx 加 uuid feature）；`settle_*` 以此 token 比对，
-/// 防 stale 持租者把已被新租约结算的行误改（CAS fencing，spec data-model §outbox）。
-/// `metadata::text` 返回 jsonb 列的 JSON 字符串表示（NOT NULL DEFAULT '{}'，恒有值），
-/// relay 经 [`hydrate_envelope_metadata`] 重建为 [`EnvelopeMetadata`] 透传到 broker（#1160 A4）。
-/// `pub(crate)`：integration 测试做 lease fencing 断言。
-// reason: `rss_outbox_acquire_lease` returns a fixed SQL row tuple owned by the DB function.
-#[allow(clippy::type_complexity)]
-pub(crate) async fn acquire_lease(
-    pool: &sqlx::PgPool,
-    event_id: &str,
-) -> Result<Option<AcquiredLeaseRow>, EngineError> {
-    let row: Option<AcquiredLeaseRow> = sqlx::query_as(
-        r#"
-        SELECT retry_count, lease_token, tenant_id, metadata, domain, contract_id, topic,
-               contract_version, schema_hash, now_epoch
-        FROM rss_outbox_acquire_lease($1)
-        "#,
-    )
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        tracing::warn!(target: "postgres", event_id, operation = "acquire_lease", error = %secure::redact_error(&e), "outbox: acquire_lease db error");
-        EngineError::new(EngineErrorKind::Transient)
-    })?;
-
-    Ok(row)
-}
-
 /// CAS settle 结果：本租约确实结算（1 行），或租约已 stale（0 行 = lost-lease fencing miss）。
 ///
 /// 调用方据此区分「干净结算」与「丢租约」——后者不得当成功静默吞（F3）。
@@ -1571,11 +1853,14 @@ pub(crate) enum SettleOutcome {
 
 struct DlxSettlement<'a> {
     tenant: vocab::TenantId,
-    event_id: &'a str,
-    new_retry_count: i32,
-    lease_token: &'a str,
+    claimed: &'a PgClaimedOutboxEntry,
     error_summary: &'static str,
     relay_failure_reason: Option<&'static str>,
+}
+
+enum DlxSettleOutcome {
+    Settled(i32),
+    LostLease,
 }
 
 /// `rows_affected()` → [`SettleOutcome`]（1 = Settled，否则 LostLease）——三个 settle helper 同源映射。
@@ -1589,18 +1874,39 @@ fn settle_outcome(rows_affected: u64) -> SettleOutcome {
 
 /// 发布成功后把行置 published（以 `lease_token` 比对，防 stale 持租者结算）。
 /// `pub(crate)`：integration 测试做 lease fencing 断言。
+async fn lease_can_publish(
+    pool: &sqlx::PgPool,
+    claimed: &PgClaimedOutboxEntry,
+) -> Result<bool, EngineError> {
+    sqlx::query_scalar::<_, bool>("SELECT rss_outbox_lease_can_publish($1, $2::uuid, $3)")
+        .bind(claimed.idem_key().as_str())
+        .bind(claimed.lease_token())
+        .bind(claimed.lease_deadline_epoch_micros())
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target: "postgres",
+                error = %secure::redact_error(&error),
+                "outbox: lease publish-budget preflight failed"
+            );
+            EngineError::new(EngineErrorKind::Transient)
+        })
+}
+
 pub(crate) async fn settle_published(
     pool: &sqlx::PgPool,
-    event_id: &str,
-    lease_token: &str,
+    claimed: &PgClaimedOutboxEntry,
 ) -> Result<SettleOutcome, EngineError> {
+    let event_id = claimed.idem_key().as_str();
     let row: (i64,) = sqlx::query_as(
         r#"
-        SELECT rss_outbox_settle_published($1, $2::uuid)
+        SELECT rss_outbox_settle_published($1, $2::uuid, $3)
         "#,
     )
     .bind(event_id)
-    .bind(lease_token)
+    .bind(claimed.lease_token())
+    .bind(claimed.lease_deadline_epoch_micros())
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -1616,15 +1922,14 @@ async fn settle_dlx(
     tenant_pool: &PgTenantPool,
     payload_protector: &DlxPayloadProtector,
     input: DlxSettlement<'_>,
-) -> Result<SettleOutcome, EngineError> {
+) -> Result<DlxSettleOutcome, EngineError> {
     let DlxSettlement {
         tenant,
-        event_id,
-        new_retry_count,
-        lease_token,
+        claimed,
         error_summary,
         relay_failure_reason,
     } = input;
+    let event_id = claimed.idem_key().as_str();
     type MarkDlxRow = (
         String,
         String,
@@ -1634,11 +1939,13 @@ async fn settle_dlx(
         String,
         String,
         String,
+        i32,
     );
 
     let payload_protector = payload_protector.clone();
     let event_id = event_id.to_string();
-    let lease_token = lease_token.to_string();
+    let lease_token = claimed.lease_token().to_string();
+    let lease_deadline_epoch_micros = claimed.lease_deadline_epoch_micros();
     let tx_event_id = event_id.clone();
 
     tenant_pool
@@ -1652,13 +1959,13 @@ async fn settle_dlx(
                     let row: Option<MarkDlxRow> = sqlx::query_as(
                         r#"
                         SELECT tenant_id, domain, contract_id, topic, payload, metadata,
-                               contract_version, schema_hash
-                        FROM rss_outbox_mark_dlx($1, $2, $3::uuid)
+                               contract_version, schema_hash, retry_count
+                        FROM rss_outbox_mark_dlx($1, $2::uuid, $3)
                         "#,
                     )
                     .bind(&event_id)
-                    .bind(new_retry_count)
                     .bind(&lease_token)
+                    .bind(lease_deadline_epoch_micros)
                     .fetch_optional(conn.conn())
                     .await
                     .map_err(|e| {
@@ -1675,9 +1982,10 @@ async fn settle_dlx(
                         metadata_json,
                         contract_version,
                         schema_hash,
+                        authoritative_retry_count,
                     )) = row
                     else {
-                        return Ok(SettleOutcome::LostLease);
+                        return Ok(DlxSettleOutcome::LostLease);
                     };
 
                     let row_tenant = parse_tenant_id(&tenant_id)?;
@@ -1738,7 +2046,7 @@ async fn settle_dlx(
                     .bind(protected.payload_len())
                     .bind(DLX_ORIGINAL_ENTRY_ENCODING)
                     .bind(error_summary)
-                    .bind(new_retry_count)
+                    .bind(authoritative_retry_count)
                     .bind(DeadLetterSource::OutboxRelay.as_str())
                     .bind(sqlx::types::Json(&metadata))
                     .execute(conn.conn())
@@ -1748,7 +2056,7 @@ async fn settle_dlx(
                         EngineError::new(EngineErrorKind::Transient)
                     })?;
 
-                    Ok(SettleOutcome::Settled)
+                    Ok(DlxSettleOutcome::Settled(authoritative_retry_count))
                 })
             },
             move |e| {
@@ -1784,27 +2092,6 @@ fn parse_metric_subject(
         parse_tenant_id(tenant_id)?,
         parse_outbox_contract_id(contract_id)?,
     ))
-}
-
-fn validate_lease_scope(
-    event_id: &str,
-    expected: &OutboxMetricSubject,
-    row_tenant: vocab::TenantId,
-    row_contract_id: &OutboxContractId,
-) -> Result<(), EngineError> {
-    if expected.tenant_id() == row_tenant && expected.contract_id() == row_contract_id {
-        return Ok(());
-    }
-    tracing::error!(
-        target: "postgres",
-        event_id,
-        expected_tenant = %expected.tenant_id(),
-        row_tenant = %row_tenant,
-        expected_contract_id = expected.contract_id().as_str(),
-        row_contract_id = row_contract_id.as_str(),
-        "outbox: acquired lease scope differs from pending entry scope"
-    );
-    Err(EngineError::new(EngineErrorKind::Invariant))
 }
 
 fn metadata_json_with_column_tenant(
@@ -1853,20 +2140,17 @@ fn metadata_json_with_relay_failure(
 /// 还有预算时把行退回 pending + 退避（以 `lease_token` 比对，防 stale 持租者结算；WHERE 先于 SET 求值）。
 async fn settle_retry(
     pool: &sqlx::PgPool,
-    event_id: &str,
-    new_retry_count: i32,
-    backoff_secs: i64,
-    lease_token: &str,
+    claimed: &PgClaimedOutboxEntry,
 ) -> Result<SettleOutcome, EngineError> {
+    let event_id = claimed.idem_key().as_str();
     let row: (i64,) = sqlx::query_as(
         r#"
-        SELECT rss_outbox_settle_retry($1, $2, $3, $4::uuid)
+        SELECT rss_outbox_settle_retry($1, $2::uuid, $3)
         "#,
     )
     .bind(event_id)
-    .bind(new_retry_count)
-    .bind(backoff_secs)
-    .bind(lease_token)
+    .bind(claimed.lease_token())
+    .bind(claimed.lease_deadline_epoch_micros())
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -1926,15 +2210,19 @@ pub(crate) const fn max_redelivery_window_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     // reserved key / subject key 常量来自 diport 单源（#1160 A4）。
     use super::{
-        AppendFingerprintObservation, CanonicalOutboxFact, LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS,
-        OutboxAppendError, OutboxEnvelope, OutboxMetadata, OutboxWriteEntry,
+        AppendFingerprintObservation, CanonicalOutboxFact, ClaimHydrationError, ClaimedOutboxRow,
+        LEASE_TTL_SECONDS, MAX_PUBLISH_ATTEMPTS, OUTBOX_CLAIM_BATCH_MAX, OutboxAppendError,
+        OutboxEnvelope, OutboxLease, OutboxLeaseError, OutboxMetadata, OutboxWriteEntry,
         RelayEnvelopeValidationReason, STATUS_DLX, STATUS_PENDING, STATUS_PUBLISHED,
         STATUS_PUBLISHING, apply_schema_headers_from_columns, backoff_seconds,
-        classify_append_fingerprint, dlx_decision, hydrate_envelope_metadata,
-        max_redelivery_window_secs, metadata_with_ambient, publish_request,
-        record_relay_envelope_validation_failure, unix_secs, validate_publish_request_envelope,
+        classify_append_fingerprint, dlx_decision, hydrate_claimed_outbox_row,
+        hydrate_envelope_metadata, max_redelivery_window_secs, metadata_with_ambient,
+        publish_request, record_relay_envelope_validation_failure, unix_secs,
+        validate_publish_request_envelope,
     };
     use diport::{
         EnvelopeMetadata, EnvelopeSubjectId, KEY_ACTOR, KEY_CORRELATION, KEY_OCCURRED_AT,
@@ -1944,6 +2232,81 @@ mod tests {
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn valid_claimed_row() -> ClaimedOutboxRow {
+        ClaimedOutboxRow {
+            tenant_id: TENANT.to_string(),
+            contract_id: "identity.session-created".to_string(),
+            topic: "identity.session-created".to_string(),
+            event_id: "evt-opaque-claim".to_string(),
+            payload: b"SECRET_CLAIM_PAYLOAD".to_vec(),
+            retry_count: 2,
+            metadata: r#"{"trace":"SECRET_CLAIM_METADATA"}"#.to_string(),
+            domain: "identity".to_string(),
+            contract_version: "v1".to_string(),
+            schema_hash: HASH.to_string(),
+            claimed_at_epoch_seconds: 1_700_000_000,
+            lease_token: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            deadline_epoch_micros: 1_700_000_060_000_000,
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_provider_identity() -> Arc<super::OutboxProviderIdentity> {
+        Arc::new(super::OutboxProviderIdentity {
+            domain: vocab::DomainName::parse("identity").expect("valid test domain"),
+        })
+    }
+
+    #[test]
+    fn provider_lease_rejects_invalid_token_version_and_deadline() {
+        assert!(matches!(
+            OutboxLease::hydrate("not-a-uuid".to_string(), 1),
+            Err(OutboxLeaseError::Token)
+        ));
+        assert!(matches!(
+            OutboxLease::hydrate("f47ac10b-58cc-1372-a567-0e02b2c3d479".to_string(), 1),
+            Err(OutboxLeaseError::TokenVersion)
+        ));
+        assert!(matches!(
+            OutboxLease::hydrate("f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(), 0),
+            Err(OutboxLeaseError::Deadline)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed provider hydration fixture is valid by construction.
+    fn provider_claim_hydration_is_complete_and_debug_redacted() {
+        let claim = hydrate_claimed_outbox_row(valid_claimed_row(), &test_provider_identity())
+            .expect("valid provider claim");
+        assert_eq!(claim.subject().tenant_id(), tenant());
+        assert_eq!(
+            claim.subject().contract_id().as_str(),
+            "identity.session-created"
+        );
+        assert_eq!(claim.idem_key().as_str(), "evt-opaque-claim");
+        assert_eq!(claim.retry_count(), 2);
+        assert_eq!(claim.domain().as_str(), "identity");
+        assert_eq!(claim.contract_version(), "v1");
+        assert_eq!(claim.schema_hash(), HASH);
+        assert_eq!(claim.claimed_at_epoch_seconds(), 1_700_000_000);
+        assert_eq!(claim.lease_deadline_epoch_micros(), 1_700_000_060_000_000);
+
+        let debug = format!("{claim:?}");
+        assert!(!debug.contains("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!debug.contains("SECRET_CLAIM_PAYLOAD"));
+        assert!(!debug.contains("SECRET_CLAIM_METADATA"));
+    }
+
+    #[test]
+    fn provider_claim_hydration_reports_typed_failure_phase() {
+        let mut row = valid_claimed_row();
+        row.retry_count = -1;
+        let error = hydrate_claimed_outbox_row(row, &test_provider_identity()).err();
+        assert_eq!(error, Some(ClaimHydrationError::RetryCount));
+        assert_eq!(error.map(ClaimHydrationError::phase), Some("retry_count"));
+    }
 
     #[test]
     fn append_identity_failure_reasons_are_closed_and_payload_free() {
@@ -2647,6 +3010,115 @@ mod tests {
             assert!(
                 MIGRATION.contains(&format!("GRANT EXECUTE ON FUNCTION {signature} TO rss_app")),
                 "0056 must grant rss_app execute for {signature}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_claim_migration_is_deadline_fenced_and_breaking() {
+        const MIGRATION: &str = include_str!("../migrations/0057_atomic_outbox_claim.sql");
+        for needle in [
+            "SET LOCAL lock_timeout = '5s'",
+            "SET LOCAL statement_timeout = '5min'",
+            "pg_total_relation_size('outbox'::regclass) > 10737418240",
+            "ALTER TABLE outbox ADD COLUMN lease_until timestamptz",
+            "publishing outbox rows must have lease_token before atomic claim migration",
+            "lease_until = updated_at + make_interval(secs => 60)",
+            "CONSTRAINT outbox_lease_token_matches_status",
+            "CONSTRAINT outbox_lease_deadline_matches_status",
+            "CONSTRAINT outbox_lease_deadline_after_claim",
+            "CONSTRAINT outbox_retry_count_nonnegative",
+            "ON outbox (domain, lease_until)",
+            "DROP FUNCTION IF EXISTS rss_outbox_poll_pending(text, bigint)",
+            "DROP FUNCTION IF EXISTS rss_outbox_acquire_lease(text)",
+            "CREATE FUNCTION rss_outbox_claim_batch(p_domain text, p_limit bigint)",
+            "CREATE FUNCTION rss_outbox_lease_can_publish(",
+            "o.lease_until > clock_timestamp() + interval '50 seconds'",
+            "FOR UPDATE OF o SKIP LOCKED",
+            "ORDER BY claimed.seq",
+            "deadline_epoch_micros bigint",
+            "lease_until > settled_at",
+            "retry_count = o.retry_count + 1",
+            "WHEN o.retry_count >= 12 THEN 3600::double precision",
+            "ELSE (1::bigint << o.retry_count)::double precision",
+            "status = 'publishing' AND o.lease_until <= claim_clock.claimed_at",
+            "status = 'publishing' AND o.lease_until <= sample_clock.sampled_at",
+        ] {
+            assert!(MIGRATION.contains(needle), "0057 drift: missing {needle}");
+        }
+
+        for legacy_signature in [
+            "rss_outbox_settle_published(text, uuid)",
+            "rss_outbox_settle_retry(text, int, bigint, uuid)",
+            "rss_outbox_settle_retry(text, int, bigint, uuid, bigint)",
+            "rss_outbox_settle_retry(text, bigint, uuid, bigint)",
+            "rss_outbox_mark_dlx(text, int, uuid)",
+            "rss_outbox_mark_dlx(text, int, uuid, bigint)",
+        ] {
+            assert!(
+                MIGRATION.contains(&format!("DROP FUNCTION IF EXISTS {legacy_signature}")),
+                "0057 must remove legacy overload {legacy_signature}"
+            );
+        }
+        assert_eq!(
+            MIGRATION
+                .matches("WITH claim_clock AS MATERIALIZED")
+                .count(),
+            1,
+            "claim must use one materialized database clock"
+        );
+        assert!(MIGRATION.contains(&format!(
+            "p_limit < 1 OR p_limit > {OUTBOX_CLAIM_BATCH_MAX}"
+        )));
+        assert_eq!(
+            MIGRATION.matches("INTO locked_id").count(),
+            3,
+            "all settle functions must identify and lock their exact lease row"
+        );
+        assert_eq!(
+            MIGRATION.matches("FOR UPDATE OF o;").count(),
+            3,
+            "all settle functions must acquire the row lock before taking the clock"
+        );
+        assert_eq!(
+            MIGRATION
+                .matches("settled_at := clock_timestamp();")
+                .count(),
+            3,
+            "all settle functions must take their deadline clock after the row lock"
+        );
+        assert_eq!(
+            MIGRATION.matches("SET lock_timeout = '5s'").count(),
+            3,
+            "all settle functions must bound row-lock waits"
+        );
+    }
+
+    #[test]
+    fn atomic_claim_migration_restores_least_privilege_surface() {
+        const MIGRATION: &str = include_str!("../migrations/0057_atomic_outbox_claim.sql");
+        for signature in [
+            "rss_outbox_claim_batch(text, bigint)",
+            "rss_outbox_lease_can_publish(text, uuid, bigint)",
+            "rss_outbox_settle_published(text, uuid, bigint)",
+            "rss_outbox_settle_retry(text, uuid, bigint)",
+            "rss_outbox_mark_dlx(text, uuid, bigint)",
+            "rss_outbox_redrive(text, uuid)",
+            "rss_outbox_sample_backlog(text)",
+        ] {
+            assert!(
+                MIGRATION.contains(&format!(
+                    "ALTER FUNCTION {signature} OWNER TO rss_outbox_maintenance"
+                )),
+                "0057 must restore owner for {signature}"
+            );
+            assert!(
+                MIGRATION.contains(&format!("REVOKE ALL ON FUNCTION {signature} FROM PUBLIC")),
+                "0057 must revoke PUBLIC for {signature}"
+            );
+            assert!(
+                MIGRATION.contains(&format!("GRANT EXECUTE ON FUNCTION {signature} TO rss_app")),
+                "0057 must grant rss_app execute for {signature}"
             );
         }
     }

@@ -24,3 +24,14 @@ fn legacy_outbox_authoring_api_is_absent() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/legacy_outbox_authoring_api_fail.rs");
 }
+
+#[test]
+fn claimed_outbox_capability_is_type_enforced() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/claimed_outbox_relay_unclaimed_fail.rs");
+    t.compile_fail("tests/ui/claimed_outbox_missing_lease_fail.rs");
+    t.compile_fail("tests/ui/claimed_outbox_clone_fail.rs");
+    t.compile_fail("tests/ui/claimed_outbox_relay_twice_fail.rs");
+    t.compile_fail("tests/ui/claimed_outbox_raw_domain_fail.rs");
+    t.pass("tests/ui/claimed_outbox_relay_pass.rs");
+}
