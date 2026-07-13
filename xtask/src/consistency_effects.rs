@@ -2530,15 +2530,7 @@ fn generated_key(domain: &str, version: &str, slug: Option<&str>) -> String {
 fn forbidden_effect_wire(effect: EffectKind) -> Option<&'static str> {
     match effect {
         EffectKind::Auth | EffectKind::Read | EffectKind::Projection => None,
-        EffectKind::Write => Some("write"),
-        EffectKind::Transaction => Some("transaction"),
-        EffectKind::Outbox => Some("outbox"),
-        EffectKind::Publish => Some("publish"),
-        EffectKind::Workflow => Some("workflow"),
-        EffectKind::Saga => Some("saga"),
-        EffectKind::Reconcile => Some("reconcile"),
-        EffectKind::Worker => Some("worker"),
-        EffectKind::CrossTenantAudit => Some("cross-tenant-audit"),
+        other => Some(other.as_wire()),
     }
 }
 
@@ -3766,6 +3758,7 @@ fn conforms() {
 
     #[test]
     fn report_closed_vocabularies_are_exhaustively_wired() {
+        use crate::contract::manifest::EffectKind as ManifestEffect;
         use vocab::HttpConsistencyLevel as Level;
         use vocab::HttpEffectKind as Effect;
         let effects = [
@@ -3788,6 +3781,27 @@ fn conforms() {
                 .iter()
                 .copied()
                 .filter_map(forbidden_generated_effect_wire)
+                .count(),
+            9
+        );
+        let manifest_effects = [
+            ManifestEffect::Read,
+            ManifestEffect::Auth,
+            ManifestEffect::Projection,
+            ManifestEffect::Write,
+            ManifestEffect::Transaction,
+            ManifestEffect::Outbox,
+            ManifestEffect::Publish,
+            ManifestEffect::Workflow,
+            ManifestEffect::Saga,
+            ManifestEffect::Reconcile,
+            ManifestEffect::Worker,
+            ManifestEffect::CrossTenantAudit,
+        ];
+        assert_eq!(
+            manifest_effects
+                .into_iter()
+                .filter_map(forbidden_effect_wire)
                 .count(),
             9
         );

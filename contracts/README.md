@@ -154,7 +154,7 @@ contracts/{kind}/{domain}/{version}/
 - **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
 - **schema 规则**：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`、`REDACTION_POLICY_CHANGED`、`PROTECTION_POLICY_CHANGED`。
 - **manifest 规则**：HTTP 比较 `successStatus`、`auth.mode + permission`（忽略说明性 `reason`）、`idempotency`；L2 比较 topic、delivery、consistency level、outbox role/atomicity/emits，以及 subscription 集合、consumer/group、topology、execution/effect。`emits` 与 subscription 忽略排序，但任何增、删、替换都是 breaking；重复 contract identity 直接拒绝。
-- **lifecycle 分级**：以 base lifecycle 决定处置，`active` 恒 deny、`deprecated` 恒 warn、`draft` 跳过；active 降级不能绕过门。新 contract ID/version 且旧 identity 完整保留时放行，删除或破坏旧 identity 仍拦截。
+- **lifecycle 分级**：以 base lifecycle 决定处置，`active` 默认 deny；`LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定 warn，但缺少命令生成、绑定 base + canonical findings 的精确 `Contract-Review-Ack` commit trailer 时 fail-closed。`deprecated` 恒 warn、`draft` 跳过；active 降级不能绕过门。
 
 > 当前 4 个 draft HTTP（`seed.echo`、`audit.session-projection`、`identity.reconcile-loop`、`settings.config-projection`）声明 `successStatus = 200`仅为非 serving 的契约元数据，不构成运行时状态码承诺；激活前必须按实际 handler 重新确认。
 

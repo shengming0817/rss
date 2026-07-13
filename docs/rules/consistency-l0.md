@@ -93,6 +93,24 @@ model 渲染、稳定排序，且不包含时间、主机、Git SHA、绝对路�
 `declarationOnly/notApplicable`，不得解释为实际副作用证明或完整零信任 attest。非 port 副作用、实际调用及
 runtime conformance 仍由 #1694 闭合，auth/scope posture 不属于本报告。
 
+## Consistency / effect breaking review
+
+`cargo xtask contract breaking --against <git-ref>` 直接比较 base 与 working 的 typed manifest projection；
+它不读取 posture report artifact。`LOCAL_ONLY_BOUNDARY_CHANGED` 显式覆盖 `LocalOnly` 与任一 non-L0 等级的
+双向变化，`EFFECT_ADDED` / `EFFECT_REMOVED` 分别逐项报告 HTTP `effectProfile.effects` 集合增删。
+effect 声明重排不产生 finding，替换同时产生 removal 与 addition。
+
+这三条规则当前是固定 review-only warn：active/deprecated 都保留 finding，draft 延续 breaking window 跳过；
+non-L0 等级之间的 `CONSISTENCY_LEVEL_CHANGED` 及其它 active breaking 仍 deny。纯 review finding 不直接变成
+wire deny；active finding 未确认时 gate fail-closed，deprecated finding 始终为非阻断 warn。命令输出由 base
+commit 与排序后的 active rule/subject/detail 派生 fingerprint，审阅后须在承载变更或后续 commit body 中加入精确 `Contract-Review-Ack: sha256:<fingerprint>`。
+任一 finding 或 base 漂移都会使旧 trailer 失效。同一 diff 有其它 deny 时仍保留全部 review finding。
+该窗口不提供 flag、环境变量或时间开关；未来 ratchet 必须显式修改闭枚举 rule policy 与 synthetic red。
+
+HTTP base/working 两侧缺失、空或重复 `effectProfile.effects` 均 fail-closed，未知 effect 由 typed serde
+拒绝。该历史关系依赖 Git IO，执行门评级为 Medium；effect/consistency 闭枚举、穷举 wire 映射与默认 deny
+policy 构成 Hard 内核。完整 lifecycle 与威胁矩阵见 ADR-008。
+
 ## LocalOnly route state funnel
 
 `HttpRouteBinding<M, C>` 的 `C` 由 contract codegen 单源派生。`LocalOnly` endpoint 在类型层不提供普通

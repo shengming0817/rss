@@ -22,9 +22,13 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 ## 规则
 
 - contract 是跨域通信单源，共享 Rust 类型不是单源。
-- `active` 破坏式 wire 变更走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新 contract ID +
-  新一份 `contract.toml` + `*.schema.json`），并完整保留旧 contract identity。`deprecated` warn /
-  `draft` skip 只是 breaking 检查的处置范围，不得通过 lifecycle 降级绕过 active deny。
+- `active` 破坏式 wire 变更默认走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新 contract ID +
+  新一份 `contract.toml` + `*.schema.json`），并完整保留旧 contract identity。#1696 仅将
+  `LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定为 pre-ratchet review finding；
+  它们须有命令生成、绑定 base + rule/subject/detail 的精确 `Contract-Review-Ack` commit trailer 才能通过。
+  `deprecated` warn / `draft` skip 不得通过 lifecycle 降级绕过其它 active deny。
+- INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01（carrier 在 `xtask/src/contract/breaking.rs`）：active 默认 deny；
+  三条固定 review rule 未确认 fail-closed，且不提供 flag、环境变量、日期窗口或自由文本豁免。
 - generated diff 是一等审查材料。
 - 新增 contract kind 或 role 必须补 governance 与 codegen 测试。
 - 暂不支持的扇出项必须登记 GitHub Issue，不能写在 rules 中当计划占位。

@@ -209,7 +209,8 @@ settings cache refresh，并由 generated topology 的穷举 resolver 限制在 
 active L2 manifest 的 topic、delivery、consistency level、outbox role/atomicity/emits 以及 subscription
 集合、consumer/group、topology、execution/effect 都是 wire 语义，受 `cargo xtask contract breaking`
 跨版本门保护。`emits` 与 subscription 集合的排序不是语义，但元素任何增、删、替换都是
-breaking；active 恒 deny、deprecated warn、draft 跳过。
+breaking；active 默认 deny（跨 LocalOnly 边界的 consistency review rule 固定 warn，但须精确
+`Contract-Review-Ack` trailer）、deprecated warn、draft 跳过。
 
 `settings.config-version-changed` 的 `DomainEffect` 捕获 HTTP routes 使用的同一 `SettingsService`；成功路径必须
 先刷新该 singleton cache，再由 ConsumerTx 提交 inbox `done`。refresh transient 不提交 inbox、走 `Requeue`，

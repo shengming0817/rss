@@ -1,10 +1,10 @@
 # ADR-008：wire 破坏式变更检测门 — xtask typed manifest + JSON-Schema diff
 
-- **状态**：Accepted；2026-07-12 amendment 由 issue #1401 完成 manifest wire 语义闭环并立即收紧 active enforcement
-- **日期**：2026-06-23；amended 2026-07-12
-- **关联**：issue #1140 / #1147 / #1401 · epic #991 / Feature #1131
+- **状态**：Accepted；2026-07-12 amendment 由 issue #1401 完成 manifest wire 语义闭环；2026-07-13 issue #1696 增加固定的 consistency/effect review 窗口
+- **日期**：2026-06-23；amended 2026-07-12 / 2026-07-13
+- **关联**：issue #1140 / #1147 / #1401 / #1696 · epic #991 / Feature #1131
 - **归属**：framework（wire 契约版本治理，provider-agnostic 工具门）
-- **AI-robust 评级**：typed serde/codegen funnel **Hard**；历史 Git diff **Medium**；**零 Soft**
+- **AI-robust 评级**：`EffectKind` 等闭值域与穷举 wire 映射 **Hard**；profile 完整性及历史 Git diff **Medium**；**零 Soft**
 
 ---
 
@@ -20,8 +20,10 @@ RSS wire contract 由 `contract.toml` 和 JSON Schema 共同表达，HTTP / even
 ## 2. 决策
 
 > 不迁 protobuf、不引 Buf CLI；使用 `cargo xtask contract breaking [--against <git-ref>]`
-> 对 typed manifest projection 与 JSON Schema 做跨版本 diff。`active` 破坏恒 deny，`deprecated` warn，
-> `draft` 跳过。
+> 对 typed manifest projection 与 JSON Schema 做跨版本 diff。`active` 默认 deny；
+> `LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 是固定 review-only warn，
+> 但缺精确 `Contract-Review-Ack` 时 fail-closed；
+> `deprecated` warn，`draft` 跳过。
 
 决策要点：
 
@@ -32,6 +34,8 @@ RSS wire contract 由 `contract.toml` 和 JSON Schema 共同表达，HTTP / even
 4. 新 contract ID/version 且旧 identity 完整保留时放行；删除或破坏旧 identity 仍拦截。
 5. base ref 不可解析、Git 命令/对象读取失败、已枚举文件不可读、TOML/JSON 损坏都
    fail-closed；只有 Git 明确证明路径不存在时才视为新契约。重复 identity 直接拒绝。
+6. HTTP base/working 两侧都必须携非空、无重复的 typed `effectProfile.effects`；缺失 carrier
+   不是历史兼容窗口，不能按空集合或“无变化”处理。
 
 ### 2.1 对标依据
 
@@ -65,6 +69,8 @@ schema 以 contract + logical slot 取并集递归比较；删除整个契约或
 | `HTTP_STATUS_CODE_CHANGED` | `[endpoints.http].successStatus` 变化 |
 | `AUTH_REQUIREMENT_CHANGED` | `auth.mode + permission` 变化；说明性 `reason` 不参与比较 |
 | `IDEMPOTENCY_LEVEL_CHANGED` | `idempotency` 变化 |
+| `LOCAL_ONLY_BOUNDARY_CHANGED` | `LocalOnly` 与任一 non-L0 等级之间变化；固定 review-only warn，须精确确认 |
+| `EFFECT_ADDED` / `EFFECT_REMOVED` | `effectProfile.effects` 集合增删；每个 effect 独立、稳定报告，须精确确认 |
 
 所有 HTTP manifest 必须声明 `successStatus = <200..299>` 与
 `idempotency = "idempotent" | "non-idempotent"`。serde 拒未知值，codegen 将它们经 typed
@@ -92,35 +98,48 @@ subscription 必须声明 `execution = "adapter-native" | "domain-effect"`；`do
 对该 key 穷尽匹配实际 handler plan，新增订阅未接线即编译失败。guard 只验证该穷尽 funnel 的结构，
 不存在按 consumer 推断、wildcard、默认分支、平行实例清单或备用 registry。
 
+HTTP effect 集合以闭枚举 `EffectKind` 与稳定 wire name 投影，声明顺序不参与 identity。effect 替换必须同时
+报告 removal 与 addition；缺失、空集、重复或未知 effect 均 fail-closed。posture report 是 working tree
+当前快照，本门直接比较 base/working typed manifest，禁止拿 report artifact 代替历史 diff。
+
 ## 4. lifecycle 与失败语义
 
-- `active`：任何 finding 都是 deny，返回失败。
+- `active`：默认 deny；三条固定 review rule 保持 warn，但无精确确认时 gate 失败。
 - `deprecated`：finding 为 warn，不阻断命令。
 - `draft`：跳过历史破坏比较。
 
-不读墙上时钟，不提供 warn/deny 配置面。`cargo xtask verify` 始终运行本门；无法完成
-可信基线比较时即失败，不跳过。
+review-only 是按闭枚举 rule 写死的 disposition，不是可选 enforcement。命令对 base commit 与排序后的
+rule/subject/detail 做 SHA-256，要求 Git history 中存在精确 `Contract-Review-Ack: sha256:<fingerprint>`
+trailer；任一 finding 或 base 漂移都会使旧确认失效。命令不读墙上时钟，不提供 warn/deny 配置面、环境开关
+或延期参数。`cargo xtask verify` 始终运行本门；无法完成可信基线比较或读取确认时即失败。同一契约同时出现
+review warn 与其它 deny 时保留全部 finding，并以失败退出。
 
 ## 5. 威胁矩阵 / amendment
 
-**amendment**：2026-07-12 收紧原 ADR 的分期策略。issue #1401 落地后，active 破坏不再存在延期
-或人工选择的非阻断期，manifest carrier 与 runtime/codegen 消费也不再是未实现的 follow-up。
+**amendment**：2026-07-12 issue #1401 收紧通用 active wire 规则。2026-07-13 issue #1696 为首次纳入历史
+diff 的 LocalOnly 边界与 HTTP effect 集合设固定 review-only 证据窗口；窗口只由三个闭枚举 rule 表达，
+并以精确 Git trailer 证明审阅，不是人工口头选择、配置模式或时间开关。其它 active 规则继续 deny。
 
 | 威胁 | 缓解 | enforcement |
 |------|------|-------------|
-| 非法或不完整 manifest 值进入代码 | 闭枚举、`deny_unknown_fields`、必填关系、`HttpSuccessStatus`、codegen typed funnel、runtime 穷尽 match | **Hard** |
+| 非法 manifest 闭值进入代码 | 闭枚举、`deny_unknown_fields`、`HttpSuccessStatus`、codegen typed funnel、runtime 穷尽 match | **Hard** |
 | active 通过 lifecycle 降级绕门 | 以 base lifecycle 决定 disposition | **Medium** |
 | 契约删除、重复 identity 或新版本替换旧版本 | identity 并集比较；删除显式 finding；重复直接失败 | **Medium** |
 | Git 基线命令、对象或内容不可靠 | 区分路径确实不存在与读取失败；后者 fail-closed | **Medium** |
+| effect carrier 缺失被解释为空集合或假绿 | base/working HTTP 两侧严格要求 profile 在场、非空且无重复 | **Medium（条件完整性 + 历史读取）** |
+| review rule 被 generic consistency deny 覆盖或误放宽其它规则 | LocalOnly 边界使用独立 rule；rule-aware disposition 仅穷举三条 warn，其余默认 lifecycle policy | **Hard 闭枚举 + Medium diff** |
+| warning 在绿色命令中被忽略 | base + canonical findings 派生 SHA-256；缺精确 commit trailer fail-closed，漂移不可重放 | **Hard fingerprint 内核 + Medium Git 门** |
 | 规则实现恒真或漏比较 | 每条规则 synthetic red/green/anti-vacuity，并覆盖集合重排 | **Medium** |
 
 ## 6. AI-robust 分级
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
-| manifest 值域、必填关系与 generated/runtime 消费 | **Hard** | typed serde、闭枚举/newtype、codegen golden、穷尽 binding |
+| manifest 闭值域与 generated/runtime 消费 | **Hard** | `EffectKind` 等 typed serde 闭枚举/newtype、codegen golden、穷尽 binding |
+| effect profile 在场、非空、唯一 | **Medium** | base/working projection fail-closed、synthetic red/anti-vacuity、verify 必跑 |
 | 跨版本 wire 语义、lifecycle 与 Git IO | **Medium** | 历史 typed projection diff、synthetic red/anti-vacuity、verify fail-closed |
-| 人工清单、延期窗口或可选警告作为 enforcement | **禁止** | 零 Soft |
+| 固定 review evidence | **Hard policy/fingerprint 内核 + Medium 执行门** | 闭枚举 rule、deterministic finding、精确 trailer、verify 必跑 |
+| 人工清单、可配置 warn 或时间窗口作为 enforcement | **禁止** | 零 Soft |
 
 历史 diff 是 Medium 而非 Hard：“working 是否破坏 base”依赖 Git 中两个时点的内容，Rust 类型系统、
 crate 依赖图或可见性都无法独立表达这个时间关系，因此不能再上移。类型能表达的当前值域已全部
@@ -130,4 +149,5 @@ crate 依赖图或可见性都无法独立表达这个时间关系，因此不�
 
 - **迁移到 protobuf + Buf CLI**：会改写全部 wire 表达、serde camelCase 与 generated 流水线，代价与本问题不成比例。
 - **仅依赖人工扇出检查**：不能 fail-closed，是 Soft，与 AI-robust 章程冲突。
-- **保留可配置 warn 模式**：允许 active 破坏绕过门，与当前无外部兼容负担的一次性收紧策略相反。
+- **可配置 warn 模式**：会让调用方选择性绕过门；本 ADR 只允许三个闭枚举 rule 的固定 review evidence。
+- **比较 posture report artifact**：只有 working tree 当前 active 快照，会漏掉删除、降级和 base lifecycle。

@@ -18,8 +18,13 @@
 //!   manifest wire 投影另覆盖 HTTP、L2 topology、subscription 与 lifecycle 降级规则。当前不覆盖
 //!   `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
 //! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "verify", source = "code" }——
-//!   lifecycle 固定分级：active 恒 deny，deprecated 恒 warn，draft 跳过；既有契约以 base lifecycle
-//!   分级，working 降级不得绕过。
+//!   lifecycle 固定分级：active 默认 deny，deprecated warn，draft 跳过；仅下列 consistency/effect
+//!   review 规则固定 warn；active 未携精确 review ack 时 fail-closed，deprecated 仍为非阻断 warn。
+//!   既有契约以 base lifecycle 分级，working 降级不得绕过。
+//! INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 { level = "Medium", exec = "verify", source = "code", synthetic_red = "local_only_boundary_is_review_only_but_non_l0_drift_is_denied", anti_vacuity = "effect_reorder_is_clean" }——
+//!   LocalOnly 边界与 HTTP effect 集合漂移生成固定 review-only finding；base commit + 排序后的
+//!   rule/subject/detail 派生 SHA-256，Git commit trailer 提供机器确认。其余 breaking 规则仍按 lifecycle
+//!   fail-closed。base/working HTTP effectProfile 均严格投影，缺失、空集或重复值拒绝执行。
 //!
 //! anti-vacuity（ai-robust 第 4 档强制，守卫不恒真）：每条规则配 synthetic red（破坏→finding）+ green
 //! （兼容→无），并含「≥1 active 契约破坏」red（防恒真）+ draft 跳过 red（draft 删字段→无 finding）。
@@ -28,21 +33,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Output;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::discover;
 use super::manifest::{
-    ConsistencyLevel, ContractKind, ContractManifest, Delivery, HttpAuthMode, HttpIdempotency,
-    HttpMethod, HttpResourceSharingMode, Lifecycle, OutboxAtomicity, OutboxRole,
-    PartitionKeyStrategy, SubscriberReadiness, SubscriptionEffect, SubscriptionExecution,
+    ConsistencyLevel, ContractKind, ContractManifest, Delivery, EffectKind, EffectProfile,
+    HttpAuthMode, HttpIdempotency, HttpMethod, HttpResourceSharingMode, Lifecycle, OutboxAtomicity,
+    OutboxRole, PartitionKeyStrategy, SubscriberReadiness, SubscriptionEffect,
+    SubscriptionExecution,
 };
 use super::protection;
 use super::redaction;
 
 /// base ref 默认值（`--against` 缺省）：与 ADR-008 §3.2 一致（PR 基准分支）。
 pub(crate) const DEFAULT_AGAINST: &str = "origin/develop";
+
+const REVIEW_ACK_PREFIX: &str = "Contract-Review-Ack: sha256:";
+const REVIEW_POLICY_MARKER: &str = "INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01";
+const REVIEW_POLICY_DOCS: [&str; 2] = [
+    ".claude/rules/rss/api-versioning.md",
+    ".claude/rules/rss/contract-fanout.md",
+];
 
 /// JSON Schema `properties` 键名（DRY：compare_node + check_field_deletions 多处引用）。
 const PROPS: &str = "properties";
@@ -85,6 +99,9 @@ pub(crate) enum BreakingRule {
     TopicChanged,
     DeliveryChanged,
     ConsistencyLevelChanged,
+    LocalOnlyBoundaryChanged,
+    EffectAdded,
+    EffectRemoved,
     OutboxRoleChanged,
     OutboxAtomicityChanged,
     OutboxEmitsChanged,
@@ -97,6 +114,12 @@ pub(crate) enum BreakingRule {
     LifecycleDowngraded,
     ContractRemoved,
 }
+
+const REVIEW_ONLY_RULES: [BreakingRule; 3] = [
+    BreakingRule::LocalOnlyBoundaryChanged,
+    BreakingRule::EffectAdded,
+    BreakingRule::EffectRemoved,
+];
 
 impl BreakingRule {
     /// 稳定大写蛇形 ID（输出行 + 测试断言单源）。
@@ -127,6 +150,9 @@ impl BreakingRule {
             BreakingRule::TopicChanged => "TOPIC_CHANGED",
             BreakingRule::DeliveryChanged => "DELIVERY_CHANGED",
             BreakingRule::ConsistencyLevelChanged => "CONSISTENCY_LEVEL_CHANGED",
+            BreakingRule::LocalOnlyBoundaryChanged => "LOCAL_ONLY_BOUNDARY_CHANGED",
+            BreakingRule::EffectAdded => "EFFECT_ADDED",
+            BreakingRule::EffectRemoved => "EFFECT_REMOVED",
             BreakingRule::OutboxRoleChanged => "OUTBOX_ROLE_CHANGED",
             BreakingRule::OutboxAtomicityChanged => "OUTBOX_ATOMICITY_CHANGED",
             BreakingRule::OutboxEmitsChanged => "OUTBOX_EMITS_CHANGED",
@@ -165,6 +191,18 @@ pub(crate) fn disposition(lifecycle: Lifecycle) -> Disposition {
         Lifecycle::Active => Disposition::Deny,
         Lifecycle::Deprecated | Lifecycle::Draft => Disposition::Warn,
     }
+}
+
+fn rule_disposition(rule: BreakingRule, lifecycle: Lifecycle) -> Disposition {
+    if is_review_only_rule(rule) {
+        Disposition::Warn
+    } else {
+        disposition(lifecycle)
+    }
+}
+
+fn is_review_only_rule(rule: BreakingRule) -> bool {
+    REVIEW_ONLY_RULES.contains(&rule)
 }
 
 /// 是否对该 lifecycle 的契约做 diff：`active` + `deprecated` 检（draft 跳过）。
@@ -592,9 +630,11 @@ fn sorted(s: &BTreeSet<String>) -> Vec<&str> {
 
 // ───────────────────────────── 分级 + 编排（IO 在边界）─────────────────────────────
 
-/// 已分级 finding（diff + disposition 后）。
+/// 已分级 finding（diff + lifecycle + disposition 后）。lifecycle 保留到 IO gate，避免后续确认门
+/// 把 deprecated warning 错误升级为阻断。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GradedFinding {
+    pub(crate) lifecycle: Lifecycle,
     pub(crate) disposition: Disposition,
     pub(crate) rule: BreakingRule,
     /// `{label} {schema_file} ({pointer})`。
@@ -610,6 +650,7 @@ pub(crate) struct ManifestProjection {
     topic: Option<String>,
     delivery: Option<String>,
     consistency: Option<String>,
+    effects: BTreeSet<EffectKind>,
     outbox: Option<OutboxProjection>,
     subscriptions: BTreeSet<SubscriptionProjection>,
 }
@@ -802,16 +843,50 @@ pub(crate) fn compare_manifests(
         &old.delivery,
         &new.delivery,
     );
-    compare_optional(
-        &mut out,
-        BreakingRule::ConsistencyLevelChanged,
-        "consistencyLevel",
-        &old.consistency,
-        &new.consistency,
-    );
+    compare_consistency(&mut out, &old.consistency, &new.consistency);
+    compare_effects(&mut out, &old.effects, &new.effects);
     compare_outbox(&mut out, &old.outbox, &new.outbox);
     compare_subscriptions(&mut out, &old.subscriptions, &new.subscriptions);
     out
+}
+
+fn compare_consistency(out: &mut Vec<RawBreak>, old: &Option<String>, new: &Option<String>) {
+    if old.is_none() || old == new {
+        return;
+    }
+    let local_only_boundary =
+        old.as_deref() == Some("LocalOnly") || new.as_deref() == Some("LocalOnly");
+    out.push(changed(
+        if local_only_boundary {
+            BreakingRule::LocalOnlyBoundaryChanged
+        } else {
+            BreakingRule::ConsistencyLevelChanged
+        },
+        "consistencyLevel",
+        old,
+        new,
+    ));
+}
+
+fn compare_effects(
+    out: &mut Vec<RawBreak>,
+    old: &BTreeSet<EffectKind>,
+    new: &BTreeSet<EffectKind>,
+) {
+    for effect in old.difference(new) {
+        out.push(RawBreak {
+            rule: BreakingRule::EffectRemoved,
+            pointer: "effectProfile.effects".to_string(),
+            detail: format!("HTTP effect `{}` 被移除", effect.as_wire()),
+        });
+    }
+    for effect in new.difference(old) {
+        out.push(RawBreak {
+            rule: BreakingRule::EffectAdded,
+            pointer: "effectProfile.effects".to_string(),
+            detail: format!("HTTP effect `{}` 被新增", effect.as_wire()),
+        });
+    }
 }
 
 fn compare_outbox(
@@ -1143,6 +1218,7 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
         {
             push_finding(
                 &mut result,
+                c.lifecycle,
                 disp,
                 BreakingRule::LifecycleDowngraded,
                 format!("{} manifest (lifecycle)", c.label),
@@ -1152,6 +1228,7 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
         if c.removed {
             push_finding(
                 &mut result,
+                c.lifecycle,
                 disp,
                 BreakingRule::ContractRemoved,
                 c.label.clone(),
@@ -1162,7 +1239,8 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
             for b in compare_manifests(old, new) {
                 push_finding(
                     &mut result,
-                    disp,
+                    c.lifecycle,
+                    rule_disposition(b.rule, c.lifecycle),
                     b.rule,
                     format!("{} manifest ({})", c.label, b.pointer),
                     b.detail,
@@ -1181,6 +1259,7 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
             for b in breaks {
                 push_finding(
                     &mut result,
+                    c.lifecycle,
                     disp,
                     b.rule,
                     format!("{} {} ({})", c.label, sv.file, show(&b.pointer)),
@@ -1194,6 +1273,7 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
 
 fn push_finding(
     result: &mut EvalResult,
+    lifecycle: Lifecycle,
     disposition: Disposition,
     rule: BreakingRule,
     subject: String,
@@ -1201,6 +1281,7 @@ fn push_finding(
 ) {
     result.any_deny |= disposition == Disposition::Deny;
     result.findings.push(GradedFinding {
+        lifecycle,
         disposition,
         rule,
         subject,
@@ -1213,6 +1294,7 @@ fn push_finding(
 /// base ref 不可解析或 Git 基线命令失败均 fail-closed。
 pub(crate) fn run(against: &str) -> Result<()> {
     let root = crate::workspace_root()?;
+    ensure_review_policy_docs(&root)?;
     match read_ref(&root, against) {
         GitRead::Found(()) => {}
         GitRead::Missing => return unresolved_ref(against),
@@ -1234,7 +1316,108 @@ pub(crate) fn run(against: &str) -> Result<()> {
                 .count()
         );
     }
+    enforce_review_ack(&root, against, &result.findings)?;
     Ok(())
+}
+
+fn ensure_review_policy_docs(root: &Path) -> Result<()> {
+    for relative in REVIEW_POLICY_DOCS {
+        let path = root.join(relative);
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("read contract breaking policy {}", path.display()))?;
+        if !policy_doc_is_aligned(&content) {
+            bail!(
+                "contract breaking policy drift: `{relative}` must reference {REVIEW_POLICY_MARKER} and the three fixed review rules"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn policy_doc_is_aligned(content: &str) -> bool {
+    content.contains(REVIEW_POLICY_MARKER)
+        && content.contains("active 默认 deny")
+        && REVIEW_ONLY_RULES
+            .iter()
+            .all(|rule| content.contains(rule.id()))
+}
+
+fn enforce_review_ack(root: &Path, against: &str, findings: &[GradedFinding]) -> Result<()> {
+    let review_findings: Vec<GradedFinding> = findings
+        .iter()
+        .filter(|finding| {
+            finding.lifecycle == Lifecycle::Active && is_review_only_rule(finding.rule)
+        })
+        .cloned()
+        .collect();
+    if review_findings.is_empty() {
+        return Ok(());
+    }
+
+    let base_oid = git_stdout(
+        root,
+        &["rev-parse", "--verify", &format!("{against}^{{commit}}")],
+    )?;
+    let range = format!("{against}..HEAD");
+    let messages = git_stdout(root, &["log", "--format=%B%x00", &range])?;
+    verify_review_ack(base_oid.trim(), &review_findings, &messages)
+}
+
+fn verify_review_ack(
+    base_oid: &str,
+    findings: &[GradedFinding],
+    commit_messages: &str,
+) -> Result<()> {
+    let fingerprint = review_ack_fingerprint(base_oid, findings);
+    let expected = format!("{REVIEW_ACK_PREFIX}{fingerprint}");
+    if !commit_messages_contain_review_ack(commit_messages, &expected) {
+        bail!(
+            "contract breaking: review-only findings 尚未确认（fingerprint={fingerprint}）。审阅 rule/subject/detail 后，在承载变更或后续 commit body 中加入精确 trailer：\n{expected}"
+        );
+    }
+    Ok(())
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+    let output = git_output(root, args)?;
+    if !output.status.success() {
+        return Err(command_failure(args, &output).into());
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| anyhow::anyhow!("contract breaking: git output is not UTF-8: {error}"))
+}
+
+fn review_ack_fingerprint(base_oid: &str, findings: &[GradedFinding]) -> String {
+    let mut canonical: Vec<(&str, &str, &str)> = findings
+        .iter()
+        .map(|finding| {
+            (
+                finding.rule.id(),
+                finding.subject.as_str(),
+                finding.detail.as_str(),
+            )
+        })
+        .collect();
+    canonical.sort_unstable();
+
+    let mut digest = Sha256::new();
+    digest.update(b"rss-contract-review-ack-v1\0");
+    digest.update(base_oid.as_bytes());
+    digest.update([0]);
+    for (rule, subject, detail) in canonical {
+        for field in [rule, subject, detail] {
+            digest.update(field.as_bytes());
+            digest.update([0]);
+        }
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn commit_messages_contain_review_ack(messages: &str, expected: &str) -> bool {
+    messages
+        .split('\0')
+        .flat_map(str::lines)
+        .any(|line| line.trim() == expected)
 }
 
 /// base ref 不可解析时 fail-closed；无法读基准 wire 就不能判定兼容性。
@@ -1420,6 +1603,8 @@ struct BaseContractManifest {
     method: Option<HttpMethod>,
     #[serde(default, rename = "consistencyLevel")]
     consistency_level: Option<ConsistencyLevel>,
+    #[serde(default, rename = "effectProfile")]
+    effect_profile: Option<EffectProfile>,
     #[serde(default)]
     endpoints: Option<BaseEndpoints>,
     #[serde(default)]
@@ -1565,7 +1750,7 @@ fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String, SchemaDirec
     v
 }
 
-fn manifest_projection(m: &ContractManifest) -> ManifestProjection {
+fn manifest_projection(m: &ContractManifest) -> Result<ManifestProjection> {
     let http = m
         .endpoints
         .as_ref()
@@ -1590,11 +1775,12 @@ fn manifest_projection(m: &ContractManifest) -> ManifestProjection {
                 .to_string(),
             idempotency: Some(idempotency(h.idempotency).to_string()),
         });
-    ManifestProjection {
+    Ok(ManifestProjection {
         http,
         topic: m.topic.clone(),
         delivery: m.delivery.map(delivery).map(str::to_string),
         consistency: Some(consistency(m.consistency_level).to_string()),
+        effects: strict_http_effects(m.kind, m.effect_profile.as_ref(), &m.id)?,
         outbox: m.capabilities.outbox.as_ref().map(|o| OutboxProjection {
             role: outbox_role(o.role).to_string(),
             atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
@@ -1612,10 +1798,10 @@ fn manifest_projection(m: &ContractManifest) -> ManifestProjection {
                 effect: s.effect.map(effect).map(str::to_string),
             })
             .collect(),
-    }
+    })
 }
 
-fn base_manifest_projection(m: &BaseContractManifest) -> ManifestProjection {
+fn base_manifest_projection(m: &BaseContractManifest) -> Result<ManifestProjection> {
     let http = m
         .endpoints
         .as_ref()
@@ -1640,11 +1826,12 @@ fn base_manifest_projection(m: &BaseContractManifest) -> ManifestProjection {
                 .to_string(),
             idempotency: h.idempotency.map(idempotency).map(str::to_string),
         });
-    ManifestProjection {
+    Ok(ManifestProjection {
         http,
         topic: m.topic.clone(),
         delivery: m.delivery.map(delivery).map(str::to_string),
         consistency: m.consistency_level.map(consistency).map(str::to_string),
+        effects: strict_http_effects(m.kind, m.effect_profile.as_ref(), &m.id)?,
         outbox: m.capabilities.outbox.as_ref().map(|o| OutboxProjection {
             role: outbox_role(o.role).to_string(),
             atomicity: o.atomicity.map(outbox_atomicity).map(str::to_string),
@@ -1662,7 +1849,28 @@ fn base_manifest_projection(m: &BaseContractManifest) -> ManifestProjection {
                 effect: s.effect.map(effect).map(str::to_string),
             })
             .collect(),
+    })
+}
+
+fn strict_http_effects(
+    kind: ContractKind,
+    profile: Option<&EffectProfile>,
+    id: &str,
+) -> Result<BTreeSet<EffectKind>> {
+    if kind != ContractKind::Http {
+        return Ok(BTreeSet::new());
     }
+    let effects = &profile
+        .ok_or_else(|| anyhow::anyhow!("HTTP contract `{id}` missing effectProfile"))?
+        .effects;
+    if effects.is_empty() {
+        bail!("HTTP contract `{id}` effectProfile.effects must not be empty");
+    }
+    let unique: BTreeSet<EffectKind> = effects.iter().copied().collect();
+    if unique.len() != effects.len() {
+        bail!("HTTP contract `{id}` effectProfile.effects contains duplicate values");
+    }
+    Ok(unique)
 }
 
 fn consistency(value: ConsistencyLevel) -> &'static str {
@@ -1746,7 +1954,12 @@ fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
             label,
             lifecycle: c.manifest.lifecycle,
             slots,
-            manifest: manifest_projection(&c.manifest),
+            manifest: manifest_projection(&c.manifest).with_context(|| {
+                format!(
+                    "project working contract {}",
+                    c.dir.join("contract.toml").display()
+                )
+            })?,
         });
     }
     Ok(sides)
@@ -1787,7 +2000,8 @@ fn base_sides(root: &Path, against: &str) -> Result<Vec<ContractSide>> {
             label,
             lifecycle: manifest.lifecycle,
             slots,
-            manifest: base_manifest_projection(&manifest),
+            manifest: base_manifest_projection(&manifest)
+                .with_context(|| format!("project base contract {against}:{manifest_rel}"))?,
         });
     }
     Ok(sides)
@@ -2797,6 +3011,10 @@ lifecycle = "active"
             topic: Some("identity.session-created.v1".into()),
             delivery: Some("at-least-once".into()),
             consistency: Some("OutboxFact".into()),
+            effects: BTreeSet::from([
+                crate::contract::manifest::EffectKind::Auth,
+                crate::contract::manifest::EffectKind::Read,
+            ]),
             outbox: Some(OutboxProjection {
                 role: "producer".into(),
                 atomicity: Some("same-transaction".into()),
@@ -2811,6 +3029,407 @@ lifecycle = "active"
                 effect: None,
             }]),
         }
+    }
+
+    fn manifest_diff(
+        lifecycle: Lifecycle,
+        old: ManifestProjection,
+        new: ManifestProjection,
+    ) -> ContractDiff {
+        ContractDiff {
+            label: "http/identity/v1".to_string(),
+            lifecycle,
+            working_lifecycle: Some(lifecycle),
+            schemas: Vec::new(),
+            manifest: ManifestVersions {
+                old: Some(old),
+                new: Some(new),
+            },
+            removed: false,
+        }
+    }
+
+    #[test]
+    fn local_only_boundary_is_review_only_but_non_l0_drift_is_denied() {
+        for non_l0 in ["LocalTx", "OutboxFact", "WorkflowEventual", "DeviceLatent"] {
+            for (old_level, new_level) in [("LocalOnly", non_l0), (non_l0, "LocalOnly")] {
+                for lifecycle in [Lifecycle::Active, Lifecycle::Deprecated] {
+                    let mut old = full_projection();
+                    old.consistency = Some(old_level.to_string());
+                    let mut new = old.clone();
+                    new.consistency = Some(new_level.to_string());
+                    let result = evaluate(&[manifest_diff(lifecycle, old, new)]);
+                    assert_eq!(result.findings.len(), 1);
+                    assert_eq!(
+                        result.findings[0].rule,
+                        BreakingRule::LocalOnlyBoundaryChanged
+                    );
+                    assert_eq!(result.findings[0].disposition, Disposition::Warn);
+                    assert!(!result.any_deny);
+                }
+            }
+        }
+
+        let mut draft_old = full_projection();
+        draft_old.consistency = Some("LocalOnly".to_string());
+        let mut draft_new = draft_old.clone();
+        draft_new.consistency = Some("LocalTx".to_string());
+        assert!(
+            evaluate(&[manifest_diff(Lifecycle::Draft, draft_old, draft_new)])
+                .findings
+                .is_empty()
+        );
+
+        let mut old = full_projection();
+        old.consistency = Some("LocalTx".to_string());
+        let mut new = old.clone();
+        new.consistency = Some("OutboxFact".to_string());
+        let result = evaluate(&[manifest_diff(Lifecycle::Active, old, new)]);
+        assert_eq!(
+            result.findings[0].rule,
+            BreakingRule::ConsistencyLevelChanged
+        );
+        assert_eq!(result.findings[0].disposition, Disposition::Deny);
+        assert!(result.any_deny);
+    }
+
+    #[test]
+    fn effect_set_diff_is_review_only_deterministic_and_lifecycle_aware() {
+        use crate::contract::manifest::EffectKind;
+
+        let old = full_projection();
+        let mut new = old.clone();
+        new.effects = BTreeSet::from([EffectKind::Projection, EffectKind::Write]);
+
+        for lifecycle in [Lifecycle::Active, Lifecycle::Deprecated] {
+            let result = evaluate(&[manifest_diff(lifecycle, old.clone(), new.clone())]);
+            assert_eq!(
+                result
+                    .findings
+                    .iter()
+                    .map(|finding| (finding.rule, finding.detail.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (BreakingRule::EffectRemoved, "HTTP effect `read` 被移除"),
+                    (BreakingRule::EffectRemoved, "HTTP effect `auth` 被移除"),
+                    (BreakingRule::EffectAdded, "HTTP effect `projection` 被新增"),
+                    (BreakingRule::EffectAdded, "HTTP effect `write` 被新增"),
+                ]
+            );
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .all(|finding| finding.disposition == Disposition::Warn)
+            );
+            assert!(!result.any_deny);
+        }
+
+        assert!(
+            evaluate(&[manifest_diff(Lifecycle::Draft, old, new)])
+                .findings
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn effect_reorder_is_clean() {
+        use crate::contract::manifest::EffectKind;
+
+        let mut old = full_projection();
+        old.effects = [EffectKind::Write, EffectKind::Read, EffectKind::Auth]
+            .into_iter()
+            .collect();
+        let mut new = old.clone();
+        new.effects = [EffectKind::Auth, EffectKind::Write, EffectKind::Read]
+            .into_iter()
+            .collect();
+        assert!(compare_manifests(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn review_ack_fingerprint_is_deterministic_and_change_sensitive() {
+        let finding = |detail: &str| GradedFinding {
+            lifecycle: Lifecycle::Active,
+            disposition: Disposition::Warn,
+            rule: BreakingRule::EffectAdded,
+            subject: "http/identity/v1 manifest (effectProfile.effects)".to_string(),
+            detail: detail.to_string(),
+        };
+        let first = review_ack_fingerprint("base-oid", &[finding("write"), finding("publish")]);
+        let reordered = review_ack_fingerprint("base-oid", &[finding("publish"), finding("write")]);
+        assert_eq!(first, reordered);
+        assert_ne!(
+            first,
+            review_ack_fingerprint("other-base", &[finding("write"), finding("publish")])
+        );
+        assert_ne!(
+            first,
+            review_ack_fingerprint("base-oid", &[finding("outbox"), finding("publish")])
+        );
+    }
+
+    #[test]
+    fn review_ack_requires_an_exact_commit_trailer() -> anyhow::Result<()> {
+        let expected = "Contract-Review-Ack: sha256:abc123";
+        assert!(!commit_messages_contain_review_ack("", expected));
+        assert!(commit_messages_contain_review_ack(
+            "subject\n\nContract-Review-Ack: sha256:abc123\n\0",
+            expected
+        ));
+        assert!(!commit_messages_contain_review_ack(
+            "subject\n\nContract-Review-Ack: sha256:abc12\n\0",
+            expected
+        ));
+        assert!(!commit_messages_contain_review_ack(
+            "subject\n\nnot Contract-Review-Ack: sha256:abc123 suffix\n\0",
+            expected
+        ));
+
+        let findings = [GradedFinding {
+            lifecycle: Lifecycle::Active,
+            disposition: Disposition::Warn,
+            rule: BreakingRule::EffectAdded,
+            subject: "http/identity/v1 manifest (effectProfile.effects)".to_string(),
+            detail: "HTTP effect `write` 被新增".to_string(),
+        }];
+        assert!(verify_review_ack("base-oid", &findings, "").is_err());
+        assert!(
+            verify_review_ack("base-oid", &findings, "Contract-Review-Ack: sha256:wrong").is_err()
+        );
+        let fingerprint = review_ack_fingerprint("base-oid", &findings);
+        verify_review_ack(
+            "base-oid",
+            &findings,
+            &format!("subject\n\n{REVIEW_ACK_PREFIX}{fingerprint}\n"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_acknowledgement_preserves_the_lifecycle_boundary() {
+        let review_warning = |lifecycle| GradedFinding {
+            lifecycle,
+            disposition: Disposition::Warn,
+            rule: BreakingRule::EffectAdded,
+            subject: "http/identity/v1 manifest (effectProfile.effects)".to_string(),
+            detail: "HTTP effect `write` 被新增".to_string(),
+        };
+
+        // A deprecated warning must return before touching Git. The deliberately missing
+        // repository makes an accidental acknowledgement requirement fail deterministically.
+        assert!(
+            enforce_review_ack(
+                Path::new("/definitely/missing/rss-contract-breaking-test"),
+                "missing-base",
+                &[review_warning(Lifecycle::Deprecated)],
+            )
+            .is_ok(),
+            "deprecated review warnings must remain non-blocking"
+        );
+
+        assert!(
+            enforce_review_ack(
+                Path::new("/definitely/missing/rss-contract-breaking-test"),
+                "missing-base",
+                &[review_warning(Lifecycle::Active)],
+            )
+            .is_err(),
+            "active review warnings must still enter the fail-closed acknowledgement path"
+        );
+    }
+
+    #[test]
+    fn canonical_policy_docs_must_name_the_fixed_review_rules() {
+        let aligned = "INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01 LOCAL_ONLY_BOUNDARY_CHANGED EFFECT_ADDED EFFECT_REMOVED active 默认 deny";
+        assert!(policy_doc_is_aligned(aligned));
+        assert!(!policy_doc_is_aligned(
+            "active deny、deprecated warn、draft skip"
+        ));
+    }
+
+    #[test]
+    fn effect_diff_is_not_hidden_by_missing_http_endpoint_projection() {
+        use crate::contract::manifest::EffectKind;
+
+        let old = ManifestProjection {
+            consistency: Some("LocalTx".to_string()),
+            effects: BTreeSet::from([EffectKind::Read]),
+            ..ManifestProjection::default()
+        };
+        let mut new = old.clone();
+        new.effects = BTreeSet::from([EffectKind::Write]);
+
+        let result = evaluate(&[manifest_diff(Lifecycle::Deprecated, old, new)]);
+        assert_eq!(
+            rules_of(&result),
+            vec![BreakingRule::EffectRemoved, BreakingRule::EffectAdded]
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|finding| finding.disposition == Disposition::Warn)
+        );
+
+        let non_http = ManifestProjection::default();
+        assert!(compare_manifests(&non_http, &non_http).is_empty());
+    }
+
+    #[test]
+    fn review_warning_does_not_mask_schema_deny() {
+        use crate::contract::manifest::EffectKind;
+
+        let old = full_projection();
+        let mut new = old.clone();
+        new.effects.insert(EffectKind::Write);
+        let mut contract = manifest_diff(Lifecycle::Active, old, new);
+        contract.schemas.push(SchemaVersions {
+            file: "request".to_string(),
+            direction: SchemaDirection::Input,
+            removed: false,
+            old: Some(json!({"properties": {"id": {"type": "string"}}})),
+            new: json!({"properties": {}}),
+        });
+
+        let result = evaluate(&[contract]);
+        assert_eq!(result.findings.len(), 2);
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == BreakingRule::EffectAdded && finding.disposition == Disposition::Warn
+        }));
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == BreakingRule::FieldNoDelete && finding.disposition == Disposition::Deny
+        }));
+        assert!(result.any_deny);
+    }
+
+    #[test]
+    fn http_effect_profile_projection_is_strict_on_both_sides() -> anyhow::Result<()> {
+        let working = |effects: &str| {
+            format!(
+                r#"
+id = "identity.profile"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/identity/profile"
+method = "GET"
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+{effects}
+"#
+            )
+        };
+        let base = |effects: &str| {
+            working(effects)
+                .replace("domain = \"identity\"\n", "")
+                .replace("owner = \"identity\"\n", "")
+        };
+
+        for invalid in [
+            "",
+            "[effectProfile]\neffects = []",
+            "[effectProfile]\neffects = [\"read\", \"read\"]",
+        ] {
+            let current = ContractManifest::from_toml_str(&working(invalid))?;
+            assert!(
+                manifest_projection(&current).is_err(),
+                "working accepted `{invalid}`"
+            );
+            let historical: BaseContractManifest = toml::from_str(&base(invalid))?;
+            assert!(
+                base_manifest_projection(&historical).is_err(),
+                "base accepted `{invalid}`"
+            );
+        }
+
+        assert!(
+            toml::from_str::<BaseContractManifest>(&base(
+                "[effectProfile]\neffects = [\"network\"]"
+            ))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn projection_errors_identify_working_and_base_manifest_sources() -> anyhow::Result<()> {
+        let root = crate::testutil::unique_tmp("breaking-projection-context");
+        let contracts_root = root.join("contracts");
+        let manifest_rel = "contracts/http/identity/v1/contract.toml";
+        let manifest_path = root.join(manifest_rel);
+        std::fs::create_dir_all(
+            manifest_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("fixture manifest missing parent"))?,
+        )?;
+        std::fs::write(
+            &manifest_path,
+            r#"
+id = "identity.profile"
+kind = "http"
+domain = "identity"
+version = "v1"
+owner = "identity"
+consistencyLevel = "LocalTx"
+lifecycle = "active"
+[effectProfile]
+effects = []
+"#,
+        )?;
+
+        let working_error = working_sides(&contracts_root)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("empty working effect profile unexpectedly passed"))?
+            .to_string();
+        assert!(working_error.contains("working"), "{working_error}");
+        assert!(
+            working_error.contains(&manifest_path.display().to_string()),
+            "{working_error}"
+        );
+
+        let run_git = |args: &[&str]| -> anyhow::Result<()> {
+            let output = crate::cmd::external_cmd(
+                crate::cmd::ExternalProgram::SystemGit,
+                args,
+                &[],
+                Some(&root),
+            )
+            .output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "git test setup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(())
+        };
+        run_git(&["init", "--quiet"])?;
+        run_git(&["add", manifest_rel])?;
+        run_git(&[
+            "-c",
+            "user.name=RSS Test",
+            "-c",
+            "user.email=rss-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])?;
+
+        let base_error = base_sides(&root, "HEAD")
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("empty base effect profile unexpectedly passed"))?
+            .to_string();
+        assert!(
+            base_error.contains(&format!("HEAD:{manifest_rel}")),
+            "{base_error}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     type ManifestMutation = Box<dyn Fn(&mut ManifestProjection)>;
@@ -2928,6 +3547,8 @@ idempotency = "idempotent"
 mode = "permission"
 permission = "identity:profile:read"
 {sharing}
+[effectProfile]
+effects = ["read"]
 "#
             )
         };
@@ -2938,7 +3559,7 @@ permission = "identity:profile:read"
             true,
             Some(("tenantScoped", "old prose")),
         ))?;
-        let old = base_manifest_projection(&base);
+        let old = base_manifest_projection(&base)?;
 
         for changed in [
             manifest(
@@ -2979,7 +3600,7 @@ permission = "identity:profile:read"
         ] {
             let changed: BaseContractManifest = toml::from_str(&changed)?;
             assert!(
-                !compare_manifests(&old, &base_manifest_projection(&changed)).is_empty(),
+                !compare_manifests(&old, &base_manifest_projection(&changed)?).is_empty(),
                 "route/scope semantic changes must be breaking"
             );
         }
@@ -2992,7 +3613,7 @@ permission = "identity:profile:read"
             Some(("tenantScoped", "new prose")),
         ))?;
         assert!(
-            compare_manifests(&old, &base_manifest_projection(&reason_only)).is_empty(),
+            compare_manifests(&old, &base_manifest_projection(&reason_only)?).is_empty(),
             "resourceSharing.reason is prose, not wire identity"
         );
         Ok(())
@@ -3084,6 +3705,8 @@ idempotency = "idempotent"
 mode = "permission"
 permission = "identity:profile:read"
 reason = "{reason}"
+[effectProfile]
+effects = ["read"]
 "#
             )
         };
@@ -3091,8 +3714,8 @@ reason = "{reason}"
         let new: BaseContractManifest = toml::from_str(&template("new prose"))?;
         assert!(
             compare_manifests(
-                &base_manifest_projection(&old),
-                &base_manifest_projection(&new)
+                &base_manifest_projection(&old)?,
+                &base_manifest_projection(&new)?
             )
             .is_empty()
         );
@@ -3369,5 +3992,11 @@ reason = "{reason}"
             "ADDITIONAL_PROPS_TIGHTENED"
         );
         assert_eq!(BreakingRule::NullableRemoved.id(), "NULLABLE_REMOVED");
+        assert_eq!(
+            BreakingRule::LocalOnlyBoundaryChanged.id(),
+            "LOCAL_ONLY_BOUNDARY_CHANGED"
+        );
+        assert_eq!(BreakingRule::EffectAdded.id(), "EFFECT_ADDED");
+        assert_eq!(BreakingRule::EffectRemoved.id(), "EFFECT_REMOVED");
     }
 }

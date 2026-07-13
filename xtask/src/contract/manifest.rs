@@ -234,6 +234,26 @@ pub(crate) enum EffectKind {
     CrossTenantAudit,
 }
 
+impl EffectKind {
+    /// Stable `contract.toml` wire name shared by every effect governance consumer.
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Auth => "auth",
+            Self::Projection => "projection",
+            Self::Write => "write",
+            Self::Transaction => "transaction",
+            Self::Outbox => "outbox",
+            Self::Publish => "publish",
+            Self::Workflow => "workflow",
+            Self::Saga => "saga",
+            Self::Reconcile => "reconcile",
+            Self::Worker => "worker",
+            Self::CrossTenantAudit => "cross-tenant-audit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OutboxCapability {
@@ -1079,6 +1099,28 @@ mod tests {
                 EffectKind::Reconcile,
                 EffectKind::Worker,
                 EffectKind::CrossTenantAudit,
+            ]
+        );
+        assert_eq!(
+            profile
+                .effects
+                .iter()
+                .copied()
+                .map(EffectKind::as_wire)
+                .collect::<Vec<_>>(),
+            [
+                "auth",
+                "read",
+                "projection",
+                "write",
+                "transaction",
+                "outbox",
+                "publish",
+                "workflow",
+                "saga",
+                "reconcile",
+                "worker",
+                "cross-tenant-audit",
             ]
         );
         Ok(())

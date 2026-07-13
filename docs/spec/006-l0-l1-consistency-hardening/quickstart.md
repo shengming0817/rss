@@ -63,6 +63,33 @@ After #1688 lands, the natural fan-out is:
 
 Continue according to `tasks.md` dependency stages. Do not start #1707 until #1686..#1706 are complete.
 
+## L0-08 Consistency / Effect Breaking Review
+
+From the #1696 worktree, validate the current manifests and compare against the PR base:
+
+```bash
+cargo run -q -p xtask -- contract validate
+cargo run -q -p xtask -- contract breaking --against origin/develop
+```
+
+Expected review behavior:
+
+- `LOCAL_ONLY_BOUNDARY_CHANGED`, `EFFECT_ADDED`, and `EFFECT_REMOVED` remain deterministic warn findings;
+  active findings fail closed without the exact `Contract-Review-Ack` trailer printed by the command.
+- Review the complete rule/subject/detail set, then place the exact trailer in the change commit or a follow-up
+  commit. A base or finding change invalidates the old fingerprint.
+- A non-L0 consistency drift or any other active breaking rule remains deny; mixed warn + deny output fails.
+- Draft contracts are skipped and deprecated findings remain non-blocking warn without an acknowledgement.
+- Missing, empty, duplicate, or unknown HTTP effect profiles fail before a trustworthy comparison is emitted.
+
+Run the focused regression surface before the full ship funnel:
+
+```bash
+cargo test -p xtask contract::breaking::tests::
+cargo test -p xtask --test consistency_report_cli
+cargo clippy -p xtask --all-targets -- -D warnings
+```
+
 ## Using Another SpecKit Feature
 
 `.specify/feature.json` now points to this feature. For older feature work, use a separate branch or worktree and treat `SPECIFY_FEATURE_DIRECTORY` as a persistent pointer override, not a purely temporary shell override:

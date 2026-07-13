@@ -3,7 +3,8 @@
 ## 何时升级版本
 
 > 轴 B（HTTP / event / command wire）的 `active` 破坏式变更必须新建版本目录和
-> 新 contract ID，并完整保留旧 identity；不存在 pre-GA 时间窗口或原地修改例外。
+> 新 contract ID，并完整保留旧 identity。唯一分期例外是 #1696 的三条 consistency/effect posture drift：
+> deny-mode ratchet 前只作精确确认的 review finding；除此之外不存在 pre-GA 或原地修改例外。
 
 以下变更必须新建版本目录和新 contract ID：
 
@@ -28,9 +29,15 @@ RSS 当前没有外部 Rust API 调用方，因此轴 A（库 crate 公开 API �
 - 完成契约扇出闭环（schema → generated → 域 crate metadata → tests → docs，见
   `contract-fanout.md`）。
 
-`cargo xtask contract breaking` 以 base lifecycle 分级：`active` deny、`deprecated` warn、`draft`
-skip。该分级只定义历史 breaking 检查的处置范围，不授予原地破坏权限；更不得先将
-`active` 降为 `deprecated` / `draft` 再绕过 deny。
+`cargo xtask contract breaking` 以 base lifecycle 分级：`active` 默认 deny、`deprecated` warn、`draft`
+skip。`LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 是 #1696 固定的 pre-ratchet
+review finding，不直接否决 active 变更；但必须用命令给出的精确 `Contract-Review-Ack` commit trailer
+确认后才能通过。trailer fingerprint 绑定 base commit 与排序后的 rule/subject/detail，变更漂移后不可复用。
+该例外不授予其它 active wire 原地破坏权限，更不得先将 `active` 降级绕门。
+
+INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01（Hard 闭枚举/fingerprint 内核 + Medium Git/verify 门；
+carrier 在 `xtask/src/contract/breaking.rs`）。active 默认 deny；固定三条 review rule 只有在精确确认存在时
+保持 warn，未确认 fail-closed；无 flag、环境变量、日期窗口或自由文本豁免。
 
 ## 内部 API
 

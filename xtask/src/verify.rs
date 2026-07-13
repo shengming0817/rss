@@ -96,7 +96,7 @@ enum InternalCheck {
     /// committed runtime assembly Mermaid/JSON graph 漂移与 source closure 门。
     AssemblyGraphCheck,
     /// wire JSON-Schema/manifest 跨版本破坏检测门（ADR-008，WIRE-BREAKING-01）。
-    /// active 契约破坏恒 deny（退出码 1）；deprecated warn；against = origin/develop。
+    /// active 默认 deny；三个固定 review rules 为 warn，但未确认 fail-closed；against = origin/develop。
     ContractBreaking,
     LayerDeps,
     /// server/rss 实际 Cargo feature graph 禁止通过 feature unification 启用 httpserve/test-util。
@@ -1086,7 +1086,7 @@ fn run_internal(check: InternalCheck) -> Result<()> {
         InternalCheck::AssemblyGraphCheck => {
             crate::graph::run(&crate::graph::Options::check_runtime())
         }
-        // wire 破坏门：against=origin/develop；active 恒 deny、deprecated warn、draft skip。
+        // against=origin/develop；active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
         InternalCheck::ContractBreaking => {
             contract::breaking::run(contract::breaking::DEFAULT_AGAINST)
         }
