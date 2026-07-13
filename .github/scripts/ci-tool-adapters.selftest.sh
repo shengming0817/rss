@@ -51,29 +51,32 @@ expect_failure_stderr_contains() {
 }
 
 # The executable catalog is the only source of lane/backend/version policy.
-expect_output 'ci-meta has an empty tool set' '' "$ADAPTER" specs --lane ci-meta --backend all
+expect_output 'ci-meta installs the outer compiler cache' 'sccache@0.15.0' "$ADAPTER" specs --lane ci-meta --backend all
 expect_output 'prerequisites use only binstall tools' \
   'cargo-dylint@6.0.1,dylint-link@6.0.1' \
   "$ADAPTER" specs --lane ci-core-prerequisites --backend binstall
-expect_output 'core tests use nextest' 'cargo-nextest@0.9.137' \
+expect_output 'core tests use nextest and sccache' 'cargo-nextest@0.9.137,sccache@0.15.0' \
   "$ADAPTER" specs --lane ci-core-tests --backend install-action
 expect_output 'security tools have one closed set' \
-  'cargo-deny@0.19.9,cargo-audit@0.22.2' \
+  'cargo-deny@0.19.9,cargo-audit@0.22.2,sccache@0.15.0' \
   "$ADAPTER" specs --lane ci-security --backend install-action
 expect_output 'coverage splits prebuilt tools precisely' \
-  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7' \
+  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,sccache@0.15.0' \
   "$ADAPTER" specs --lane ci-coverage --backend install-action
 expect_output 'coverage assigns public-api to binstall' 'cargo-public-api@0.52.0' \
   "$ADAPTER" specs --lane ci-coverage --backend binstall
-expect_output 'integration uses nextest' 'cargo-nextest@0.9.137' \
+expect_output 'integration uses nextest' 'cargo-nextest@0.9.137,sccache@0.15.0' \
   "$ADAPTER" specs --lane integration --backend all
 expect_output 'audit shares the security set' \
-  'cargo-deny@0.19.9,cargo-audit@0.22.2' "$ADAPTER" specs --lane audit --backend all
+  'cargo-deny@0.19.9,cargo-audit@0.22.2,sccache@0.15.0' "$ADAPTER" specs --lane audit --backend all
 expect_failure 'unknown lane fails closed' "$ADAPTER" specs --lane unknown --backend all
 expect_failure 'unknown backend fails closed' "$ADAPTER" specs --lane audit --backend mystery
 expect_output 'all tools preserve canonical catalog order' \
-  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0' \
+  'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0' \
   "$ADAPTER" specs --lane all --backend all
+expect_output 'sccache spec is derived from the catalog' \
+  'sccache|0.15.0|install-action|.install-action/bin/sccache|sccache' \
+  "$ADAPTER" sccache-spec
 
 # Catalog parsing accepts complete SemVer and rejects numeric prerelease leading zeroes.
 for variant in legal illegal duplicate wrong-backend wrong-path alphanumeric; do
@@ -98,7 +101,7 @@ sed 's#cargo-nextest|0\.9\.137|install-action|\.install-action/bin/#cargo-nextes
 sed 's/0\.9\.137/1.2.3-12alpha/g' "$CATALOG" >"$TMP_ROOT/alphanumeric/ci-tool-catalog.txt"
 chmod +x "$LEGAL" "$ILLEGAL" "$DUPLICATE" "$WRONG_BACKEND" "$WRONG_PATH" "$ALPHANUMERIC"
 expect_output 'complete prerelease and build SemVer is accepted' \
-  'cargo-nextest@1.2.3-alpha.1+build.7' "$LEGAL" specs --lane ci-core-tests --backend all
+  'cargo-nextest@1.2.3-alpha.1+build.7,sccache@0.15.0' "$LEGAL" specs --lane ci-core-tests --backend all
 expect_failure 'numeric prerelease leading zero is rejected' \
   "$ILLEGAL" specs --lane ci-core-tests --backend all
 expect_failure 'duplicate catalog tool is rejected' \
@@ -108,7 +111,7 @@ expect_failure 'catalog tool with unknown backend is rejected' \
 expect_failure 'catalog backend and binary path mismatch is rejected' \
   "$WRONG_PATH" specs --lane ci-core-tests --backend all
 expect_output 'alphanumeric prerelease beginning with digits is accepted' \
-  'cargo-nextest@1.2.3-12alpha' "$ALPHANUMERIC" specs --lane ci-core-tests --backend all
+  'cargo-nextest@1.2.3-12alpha,sccache@0.15.0' "$ALPHANUMERIC" specs --lane ci-core-tests --backend all
 
 make_binary() {
   path=$1 body=$2
@@ -125,7 +128,22 @@ export RSS_TEST_TRACE="$TRACE"
 mkdir -p "$ROOT/.install-action/bin"
 make_binary "$ROOT/.install-action/bin/cargo-nextest" \
   "printf '%s\\n' 'cargo-nextest 1.2.3-alpha.1+build.7 (75ddba7e9 2026-05-26)' 'release: 1.2.3-alpha.1+build.7' 'commit-hash: 75ddba7e911b44c5c0700dac0415d824403de9bd' 'commit-date: 2026-05-26' 'host: x86_64-unknown-linux-gnu'"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
+expect_output 'standalone sccache verification returns the canonical path' \
+  "$ROOT/.install-action/bin/sccache" "$ADAPTER" verify-sccache \
+  --candidate "$ROOT/.install-action/bin/sccache"
+ln -s "$ROOT/.install-action/bin/sccache" "$TMP_ROOT/sccache-link"
+expect_failure 'standalone sccache verification rejects a symlink' \
+  "$ADAPTER" verify-sccache --candidate "$TMP_ROOT/sccache-link"
+expect_failure 'standalone sccache verification rejects a relative path' \
+  "$ADAPTER" verify-sccache --candidate .install-action/bin/sccache
 expect_success 'prerelease and build SemVer passes a literal fresh nextest probe' \
+  "$LEGAL" verify --mode fresh --lane ci-core-tests --root "$ROOT"
+rm -f "$ROOT/.rss-tool-seal-v1"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache v0.15.0'"
+expect_failure 'sccache probe rejects a non-exact version wire shape' \
   "$LEGAL" verify --mode fresh --lane ci-core-tests --root "$ROOT"
 
 rm -rf "$ROOT"; : >"$TRACE"
@@ -134,6 +152,8 @@ make_binary "$ROOT/.install-action/bin/cargo-nextest" \
   "cat '$FIXTURES/cargo-nextest-0.9.137.version.txt'"
 make_binary "$ROOT/.install-action/bin/cargo-llvm-cov" \
   "[ \"\$*\" = 'llvm-cov --version' ]; printf '%s\\n' 'cargo-llvm-cov 0.8.7'"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
 make_binary "$ROOT/bin/cargo-public-api" \
   "[ \"\$*\" = '--version' ]; printf '%s\\n' 'cargo-public-api 0.52.0'"
 
@@ -141,7 +161,8 @@ expect_success 'fresh coverage verifies real protocols and seals atomically' \
   "$ADAPTER" verify --mode fresh --lane ci-coverage --root "$ROOT"
 SEAL="$ROOT/.rss-tool-seal-v1"
 if [ -f "$SEAL" ] && grep -q 'cargo-nextest@0.9.137' "$SEAL" &&
-   grep -q 'cargo-llvm-cov@0.8.7' "$SEAL" && grep -q 'cargo-public-api@0.52.0' "$SEAL"; then
+   grep -q 'cargo-llvm-cov@0.8.7' "$SEAL" && grep -q 'cargo-public-api@0.52.0' "$SEAL" &&
+   grep -q 'sccache@0.15.0' "$SEAL"; then
   pass 'seal records the exact requested set'
 else fail 'seal records the exact requested set'; fi
 if grep -qx -- '--version' "$TRACE" && grep -qx -- 'llvm-cov --version' "$TRACE"; then
@@ -163,6 +184,8 @@ make_binary "$ROOT/.install-action/bin/cargo-nextest" \
   "cat '$FIXTURES/cargo-nextest-0.9.137.version.txt'"
 make_binary "$ROOT/.install-action/bin/cargo-llvm-cov" \
   "[ \"\$*\" = 'llvm-cov --version' ]; printf '%s\\n' 'cargo-llvm-cov 0.8.7'"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
 make_binary "$ROOT/bin/cargo-public-api" \
   "[ \"\$*\" = '--version' ]; printf '%s\\n' 'cargo-public-api 0.52.0'"
 expect_success 'fresh verification reseals an exact restored set' \
@@ -186,6 +209,8 @@ expect_failure_stderr_contains 'cache hit identifies a symlinked executable safe
 rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"; : >"$TRACE"
 make_binary "$ROOT/.install-action/bin/cargo-nextest" \
   "cat '$FIXTURES/cargo-nextest-conflicting.version.txt'"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
 expect_failure 'nextest conflicting release metadata fails closed' \
   "$ADAPTER" verify --mode fresh --lane ci-core-tests --root "$ROOT"
 if [ ! -e "$ROOT/.rss-tool-seal-v1" ]; then pass 'partial fresh verification leaves no seal'; else fail 'partial fresh verification leaves no seal'; fi
@@ -195,7 +220,9 @@ expect_failure 'nextest extra version-bearing output fails closed' \
   "$ADAPTER" verify --mode fresh --lane ci-core-tests --root "$ROOT"
 
 # dylint is a Cargo subcommand; dylint-link is proven only by the cargo receipt.
-rm -rf "$ROOT"; mkdir -p "$ROOT/bin"; : >"$TRACE"
+rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin" "$ROOT/bin"; : >"$TRACE"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
 make_binary "$ROOT/bin/cargo-dylint" \
   "[ \"\$*\" = 'dylint --version' ]; printf '%s\\n' 'cargo-dylint 6.0.1'"
 make_binary "$ROOT/bin/dylint-link" "exit 91"
@@ -226,8 +253,10 @@ expect_failure 'wrong dylint-link receipt binary fails closed' \
   "$ADAPTER" verify --mode fresh --lane ci-core-prerequisites --root "$ROOT"
 
 # Seals bind adapter identity, lane/request set, safe paths, and regular executables.
-rm -rf "$ROOT"; mkdir -p "$ROOT"
-expect_success 'empty lane creates a valid header-only seal' \
+rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
+expect_success 'ci-meta creates a compiler-cache-only seal' \
   "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
 cp "$SEAL" "$TMP_ROOT/empty-seal" 2>/dev/null || true
 printf '\n# identity change\n' >>"$LEGAL"
@@ -239,7 +268,9 @@ mkdir -p "$CATALOG_ADAPTER_DIR"
 cp "$ADAPTER" "$CATALOG_ADAPTER_DIR/ci-tool-adapters.sh"
 cp "$CATALOG" "$CATALOG_ADAPTER_DIR/ci-tool-catalog.txt"
 chmod +x "$CATALOG_ADAPTER_DIR/ci-tool-adapters.sh"
-rm -rf "$ROOT"; mkdir -p "$ROOT"
+rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
+make_binary "$ROOT/.install-action/bin/sccache" \
+  "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
 expect_success 'catalog identity is sealed independently from the adapter' \
   "$CATALOG_ADAPTER_DIR/ci-tool-adapters.sh" verify --mode fresh --lane ci-meta --root "$ROOT"
 sed -i.bak 's/cargo-nextest|0\.9\.137|/cargo-nextest|9.9.9|/' \
@@ -275,7 +306,9 @@ esac
 EOF
 chmod +x "$FAKE_HASH_BIN/sha256sum"
 for mode in fail empty malformed; do
-  rm -rf "$ROOT"; mkdir -p "$ROOT"
+  rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"
+  make_binary "$ROOT/.install-action/bin/sccache" \
+    "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
   expect_failure "hash evidence fails closed: $mode" \
     env PATH="$FAKE_HASH_BIN:$PATH" FAKE_HASH_MODE="$mode" \
     "$ADAPTER" verify --mode fresh --lane ci-meta --root "$ROOT"
@@ -290,6 +323,8 @@ for mode in binary-fail binary-empty binary-malformed; do
   rm -rf "$ROOT"; mkdir -p "$ROOT/.install-action/bin"; : >"$TRACE"
   make_binary "$ROOT/.install-action/bin/cargo-nextest" \
     "cat '$FIXTURES/cargo-nextest-0.9.137.version.txt'"
+  make_binary "$ROOT/.install-action/bin/sccache" \
+    "[ \"\$*\" = '--version' ]; printf '%s\\n' 'sccache 0.15.0'"
   expect_failure "binary hash evidence fails closed: $mode" \
     env PATH="$FAKE_HASH_BIN:$PATH" FAKE_HASH_MODE="$mode" \
     "$ADAPTER" verify --mode fresh --lane ci-core-tests --root "$ROOT"

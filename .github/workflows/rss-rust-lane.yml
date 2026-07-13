@@ -29,9 +29,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
   RSS_NIGHTLY_PINNED: nightly-2026-04-16
   RSS_CI_EVIDENCE_FILE: ci-evidence.json
-  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
+  RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
   lane:
@@ -49,12 +50,14 @@ jobs:
       - name: Capture start evidence
         timeout-minutes: 2
         if: ${{ always() }}
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rss-cargo-target
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/.cache/cargo-target"
+          mkdir -p "$CARGO_TARGET_DIR"
           save_mode=read-only
           if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
-          .github/scripts/ci-evidence.sh snapshot start --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode "$save_mode" --tools-candidate-size-bytes 0 --tools-save-outcome unknown
+          .github/scripts/ci-evidence.sh snapshot start --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --download-restore-result not-attempted --download-restored-footprint-bytes 0 --download-save-mode "$save_mode" --download-candidate-size-bytes 0 --download-save-outcome unknown --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode "$save_mode" --tools-candidate-size-bytes 0 --tools-save-outcome unknown --compiler-cache-enabled false --compiler-cache-version none --compiler-cache-access disabled --compiler-cache-requests 0 --compiler-cache-hits 0 --compiler-cache-misses 0 --compiler-cache-non-cacheable 0 --compiler-cache-error-restore 0 --compiler-cache-error-stats 0 --compiler-cache-error-cache-io 0 --compiler-cache-error-no-requests 0 --compiler-cache-error-measure 0 --compiler-cache-error-save 0 --cpu-time-ms none --peak-rss-bytes none
           .github/scripts/ci-disk-budget.sh --stage start --path "$GITHUB_WORKSPACE"
 
       - name: Validate lane and derive closed policy
@@ -187,6 +190,35 @@ jobs:
           .github/scripts/integration-services.sh bootstrap --scope "$scope" --shard "$RSS_SHARD" --partition "$partition" --log-dir "$log_dir" --evidence "$evidence"
           .github/scripts/integration-services.sh prepare --scope "$scope" --shard "$RSS_SHARD" --partition "$partition" --log-dir "$log_dir" --evidence "$evidence"
 
+      - name: Prove compiler cache warm-hit and failure transparency
+        id: compiler-cache-smoke
+        timeout-minutes: 5
+        if: ${{ inputs.lane == 'ci-core-prerequisites' }}
+        env:
+          RUSTC_WRAPPER: ${{ steps.setup.outputs.compiler-cache-path }}
+          RSS_INTERNAL_SCCACHE_PATH: ${{ steps.setup.outputs.compiler-cache-path }}
+        run: |
+          set -euo pipefail
+          smoke="$RUNNER_TEMP/rss-sccache-smoke"
+          rm -rf "$smoke"
+          mkdir -p "$smoke/src"
+          printf '%s\n' '[package]' 'name = "rss-sccache-smoke"' 'version = "0.0.0"' 'edition = "2024"' > "$smoke/Cargo.toml"
+          printf '%s\n' 'pub fn answer() -> u64 { 42 }' > "$smoke/src/lib.rs"
+          "$RSS_INTERNAL_SCCACHE_PATH" --zero-stats
+          CARGO_TARGET_DIR="$smoke/target" cargo check --manifest-path "$smoke/Cargo.toml"
+          rm -rf "$smoke/target"
+          CARGO_TARGET_DIR="$smoke/target" cargo check --manifest-path "$smoke/Cargo.toml"
+          "$RSS_INTERNAL_SCCACHE_PATH" --show-stats --stats-format json > "$smoke/warm-stats.json"
+          jq -e '.stats.compile_requests > 0 and ([.stats.cache_hits.counts[]] | add // 0) > 0' "$smoke/warm-stats.json" >/dev/null
+          mkdir -p "$smoke/unavailable"
+          printf occupied > "$smoke/unavailable/cache-parent"
+          SCCACHE_DIR="$smoke/unavailable/cache-parent/child" SCCACHE_SERVER_UDS="$smoke/unavailable-success.sock" CARGO_TARGET_DIR="$smoke/fallback-success" cargo check --manifest-path "$smoke/Cargo.toml"
+          printf '%s\n' 'pub fn broken( {' > "$smoke/src/lib.rs"
+          if SCCACHE_DIR="$smoke/unavailable/cache-parent/child" SCCACHE_SERVER_UDS="$smoke/unavailable-failure.sock" CARGO_TARGET_DIR="$smoke/fallback-failure" cargo check --manifest-path "$smoke/Cargo.toml"; then
+            echo 'compiler error was swallowed by unavailable cache backend' >&2
+            exit 1
+          fi
+
       - name: Run closed xtask lane
         id: xtask
         timeout-minutes: 92
@@ -194,6 +226,8 @@ jobs:
           RSS_LANE: ${{ inputs.lane }}
           RSS_SHARD: ${{ inputs.shard }}
           RSS_PARTITION: ${{ inputs.partition }}
+          RSS_INTERNAL_SCCACHE_PATH: ${{ steps.setup.outputs.compiler-cache-path }}
+          RUSTC_WRAPPER: ${{ steps.setup.outputs.compiler-cache-path }}
         run: |
           set -euo pipefail
           case "$RSS_LANE" in
@@ -209,7 +243,13 @@ jobs:
             audit) args=(audit) ;;
             *) exit 64 ;;
           esac
-          timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- "${args[@]}"
+          cargo build --locked -p xtask
+          reset_outcome=success
+          if ! "$RSS_INTERNAL_SCCACHE_PATH" --zero-stats; then
+            reset_outcome=degraded
+          fi
+          echo "compiler-cache-reset=$reset_outcome" >> "$GITHUB_OUTPUT"
+          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" "${args[@]}"
 
       - name: Finalize integration outcome and collect failure logs
         id: integration-services-collect
@@ -235,39 +275,89 @@ jobs:
         run: timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
 
       - name: Capture after-build evidence
+        id: after-build
         timeout-minutes: 3
         if: ${{ always() }}
+        env:
+          COMPILER_ENABLED: ${{ steps.setup.outputs.compiler-cache-enabled || 'false' }}
+          COMPILER_VERSION: ${{ steps.setup.outputs.compiler-cache-version || 'none' }}
+          COMPILER_ACCESS: ${{ steps.setup.outputs.compiler-cache-access || 'disabled' }}
+          COMPILER_RESTORE_OUTCOME: ${{ steps.setup.outputs.compiler-cache-restore-outcome || 'skipped' }}
+          COMPILER_RESET_OUTCOME: ${{ steps.xtask.outputs.compiler-cache-reset || 'skipped' }}
+          RSS_INTERNAL_SCCACHE_PATH: ${{ steps.setup.outputs.compiler-cache-path }}
         run: |
           set -euo pipefail
           save_mode=read-only
           if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
-          .github/scripts/ci-evidence.sh ensure after-cache --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome unknown
-          .github/scripts/ci-evidence.sh snapshot after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome "${{ steps.xtask.outcome || 'skipped' }}" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false
+          error_restore=0 error_stats=0 error_cache_io=0 error_no_requests=0 error_measure=0 error_save=0
+          if [ "$COMPILER_RESTORE_OUTCOME" = failure ]; then error_restore=1; fi
+          if [ "$COMPILER_RESET_OUTCOME" = degraded ]; then error_stats=$((error_stats + 1)); fi
+          if [ "$COMPILER_ENABLED" = true ]; then
+            stats_file="$RUNNER_TEMP/sccache-stats.json"
+            if "$RSS_INTERNAL_SCCACHE_PATH" --show-stats --stats-format json > "$stats_file" 2>/dev/null &&
+              stats_row="$(.github/scripts/ci-sccache-stats.sh parse --input "$stats_file" 2>/dev/null)" &&
+              IFS=$'\t' read -r requests hits misses non_cacheable error_cache_io stats_extra <<< "$stats_row" &&
+              [ -z "$stats_extra" ]; then
+              stats_valid=true
+            else
+              error_stats=$((error_stats + 1))
+            fi
+          fi
+          if [ "$COMPILER_RESET_OUTCOME" = success ] && [ "$stats_valid" = true ] && [ "${{ inputs.lane }}" = ci-core-prerequisites ] && [ "$requests" -le 0 ]; then
+            error_no_requests=$((error_no_requests + 1))
+            anti_vacuity_failure=true
+          fi
+          cpu_time_ms=none peak_rss_bytes=none
+          if [ -f "$RUNNER_TEMP/xtask-resource.txt" ]; then
+            cpu_time_ms="$(awk -F= '/^userSeconds=/{u=$2} /^systemSeconds=/{s=$2} END { if (u ~ /^[0-9]+([.][0-9]+)?$/ && s ~ /^[0-9]+([.][0-9]+)?$/) printf "%.0f", (u+s)*1000 }' "$RUNNER_TEMP/xtask-resource.txt")"
+            peak_rss_bytes="$(awk -F= '/^peakRssKiB=/{ if ($2 ~ /^[0-9]+$/) printf "%.0f", $2*1024 }' "$RUNNER_TEMP/xtask-resource.txt")"
+            [ -n "$cpu_time_ms" ] || cpu_time_ms=none
+            [ -n "$peak_rss_bytes" ] || peak_rss_bytes=none
+          fi
+          {
+            echo "requests=$requests"
+            echo "hits=$hits"
+            echo "misses=$misses"
+            echo "non-cacheable=$non_cacheable"
+            echo "error-restore=$error_restore"
+            echo "error-stats=$error_stats"
+            echo "error-cache-io=$error_cache_io"
+            echo "error-no-requests=$error_no_requests"
+            echo "error-measure=$error_measure"
+            echo "error-save=$error_save"
+            echo "cpu-time-ms=$cpu_time_ms"
+            echo "peak-rss-bytes=$peak_rss_bytes"
+          } >> "$GITHUB_OUTPUT"
+          compiler_args=(--compiler-cache-enabled "$COMPILER_ENABLED" --compiler-cache-version "$COMPILER_VERSION" --compiler-cache-access "$COMPILER_ACCESS" --compiler-cache-requests "$requests" --compiler-cache-hits "$hits" --compiler-cache-misses "$misses" --compiler-cache-non-cacheable "$non_cacheable" --compiler-cache-error-restore "$error_restore" --compiler-cache-error-stats "$error_stats" --compiler-cache-error-cache-io "$error_cache_io" --compiler-cache-error-no-requests "$error_no_requests" --compiler-cache-error-measure "$error_measure" --compiler-cache-error-save "$error_save" --cpu-time-ms "$cpu_time_ms" --peak-rss-bytes "$peak_rss_bytes")
+          .github/scripts/ci-evidence.sh ensure after-cache --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --download-restore-result "${{ steps.setup.outputs.download-restore-result || 'unknown' }}" --download-restored-footprint-bytes "${{ steps.setup.outputs.download-restored-footprint-bytes || 0 }}" --download-save-mode "$save_mode" --download-candidate-size-bytes 0 --download-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome unknown "${compiler_args[@]}"
+          .github/scripts/ci-evidence.sh snapshot after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome "${{ steps.xtask.outcome || 'skipped' }}" --download-restore-result "${{ steps.setup.outputs.download-restore-result || 'unknown' }}" --download-restored-footprint-bytes "${{ steps.setup.outputs.download-restored-footprint-bytes || 0 }}" --download-save-mode "$save_mode" --download-candidate-size-bytes 0 --download-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}" "${compiler_args[@]}"
           .github/scripts/ci-disk-budget.sh --stage after-build --path "$GITHUB_WORKSPACE"
+          [ "$anti_vacuity_failure" = false ]
 
-      - name: Clean build cache candidates
-        id: cleanup
-        timeout-minutes: 10
-        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && (steps.setup.outputs.download-hit != 'true' || steps.setup.outputs.target-hit != 'true') }}
-        run: .github/scripts/ci-cache-maintain.sh cleanup --workspace "$GITHUB_WORKSPACE" --target "$GITHUB_WORKSPACE/.cache/cargo-target"
-
-      - name: Measure build cache candidates
-        id: measure-build
+      - name: Measure download cache candidate
+        id: measure-download
         timeout-minutes: 3
-        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' }}
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}
         run: |
           set -euo pipefail
           registry_cache="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/registry/cache")"
           registry_index="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/registry/index")"
           git_db="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/git/db")"
-          target="$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/cargo-target")"
-          {
-            echo "download-bytes=$((registry_cache + registry_index + git_db))"
-            echo "target-bytes=$target"
-            echo "build-bytes=$((registry_cache + registry_index + git_db + target))"
-          } >> "$GITHUB_OUTPUT"
+          echo "download-bytes=$((registry_cache + registry_index + git_db))" >> "$GITHUB_OUTPUT"
 
-      - name: Capture before-save evidence and enforce build budget
+      - name: Quiesce and measure compiler cache candidate
+        id: measure-compiler-cache
+        timeout-minutes: 3
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' }}
+        env:
+          RSS_INTERNAL_SCCACHE_PATH: ${{ steps.setup.outputs.compiler-cache-path }}
+        run: |
+          set -euo pipefail
+          "$RSS_INTERNAL_SCCACHE_PATH" --stop-server >/dev/null 2>&1 || true
+          echo "bytes=$(.github/scripts/ci-cache-maintain.sh measure --path "$SCCACHE_DIR")" >> "$GITHUB_OUTPUT"
+
+      - name: Capture before-save evidence and enforce cache budget
         id: before-save
         timeout-minutes: 3
         if: ${{ always() }}
@@ -275,20 +365,21 @@ jobs:
           set -euo pipefail
           save_mode=read-only
           if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
-          .github/scripts/ci-evidence.sh ensure after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome skipped --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome unknown
+          compiler_args=(--compiler-cache-enabled "${{ steps.setup.outputs.compiler-cache-enabled || 'false' }}" --compiler-cache-version "${{ steps.setup.outputs.compiler-cache-version || 'none' }}" --compiler-cache-access "${{ steps.setup.outputs.compiler-cache-access || 'disabled' }}" --compiler-cache-requests "${{ steps.after-build.outputs.requests || 0 }}" --compiler-cache-hits "${{ steps.after-build.outputs.hits || 0 }}" --compiler-cache-misses "${{ steps.after-build.outputs.misses || 0 }}" --compiler-cache-non-cacheable "${{ steps.after-build.outputs.non-cacheable || 0 }}" --compiler-cache-error-restore "${{ steps.after-build.outputs.error-restore || 0 }}" --compiler-cache-error-stats "${{ steps.after-build.outputs.error-stats || 0 }}" --compiler-cache-error-cache-io "${{ steps.after-build.outputs.error-cache-io || 0 }}" --compiler-cache-error-no-requests "${{ steps.after-build.outputs.error-no-requests || 0 }}" --compiler-cache-error-measure "${{ steps.after-build.outputs.error-measure || 0 }}" --compiler-cache-error-save "${{ steps.after-build.outputs.error-save || 0 }}" --cpu-time-ms "${{ steps.after-build.outputs.cpu-time-ms || 'none' }}" --peak-rss-bytes "${{ steps.after-build.outputs.peak-rss-bytes || 'none' }}")
+          .github/scripts/ci-evidence.sh ensure after-build --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --outcome skipped --download-restore-result "${{ steps.setup.outputs.download-restore-result || 'unknown' }}" --download-restored-footprint-bytes "${{ steps.setup.outputs.download-restored-footprint-bytes || 0 }}" --download-save-mode "$save_mode" --download-candidate-size-bytes 0 --download-save-outcome unknown --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome unknown "${compiler_args[@]}"
           budget_conclusion=skipped
-          if [ "$RSS_CACHE_WRITER" = true ] && [ "${{ steps.xtask.outcome }}" = success ] && [ "${{ steps.cleanup.outcome }}" = success ] && [ "${{ steps.measure-build.outcome }}" = success ]; then
+          if [ "$RSS_CACHE_WRITER" = true ] && [ "${{ steps.xtask.outcome }}" = success ] && [ "${{ steps.measure-compiler-cache.outcome }}" = success ] && { [ "${{ steps.setup.outputs.download-hit }}" = true ] || [ "${{ steps.measure-download.outcome }}" = success ]; }; then
             if .github/scripts/ci-disk-budget.sh --stage before-save --path "$GITHUB_WORKSPACE"; then budget_conclusion=success; else budget_conclusion=failure; fi
           fi
-          build_save_outcome=ineligible
-          if [ "$budget_conclusion" = success ] && { [ "${{ steps.setup.outputs.download-hit }}" != true ] || [ "${{ steps.setup.outputs.target-hit }}" != true ]; }; then build_save_outcome=eligible; fi
-          .github/scripts/ci-evidence.sh snapshot before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome "$build_save_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+          download_save_outcome=ineligible
+          if [ "$budget_conclusion" = success ] && [ "${{ steps.setup.outputs.download-hit }}" != true ]; then download_save_outcome=eligible; fi
+          .github/scripts/ci-evidence.sh snapshot before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --download-restore-result "${{ steps.setup.outputs.download-restore-result || 'unknown' }}" --download-restored-footprint-bytes "${{ steps.setup.outputs.download-restored-footprint-bytes || 0 }}" --download-save-mode "$save_mode" --download-candidate-size-bytes "${{ steps.measure-download.outputs.download-bytes || 0 }}" --download-save-outcome "$download_save_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}" "${compiler_args[@]}"
           [ "$budget_conclusion" != failure ]
 
       - name: Save Cargo download cache
         id: save-download
         timeout-minutes: 10
-        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.measure-download.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -298,15 +389,15 @@ jobs:
             ~/.cargo/git/db
           key: ${{ steps.setup.outputs.download-primary-key }}
 
-      - name: Save Cargo target cache
-        id: save-target
+      - name: Save compiler cache snapshot
+        id: save-compiler-cache
         timeout-minutes: 10
-        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.target-hit != 'true' }}
+        if: ${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.measure-compiler-cache.outcome == 'success' && steps.before-save.outcome == 'success' }}
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
-          path: .cache/cargo-target
-          key: ${{ steps.setup.outputs.target-primary-key }}
+          path: ${{ runner.temp }}/rss-sccache-cache
+          key: ${{ steps.setup.outputs.compiler-cache-primary-key }}
 
       - name: Capture after-save evidence
         timeout-minutes: 3
@@ -315,10 +406,15 @@ jobs:
           set -euo pipefail
           save_mode=read-only
           if [ "$RSS_CACHE_WRITER" = true ]; then save_mode=writer; fi
-          .github/scripts/ci-evidence.sh ensure before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome ineligible --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
-          build_outcome=skipped
-          if [ "${{ steps.save-download.outcome }}" = failure ] || [ "${{ steps.save-target.outcome }}" = failure ]; then build_outcome=attempted-failure; elif [ "${{ steps.save-download.outcome }}" = success ] || [ "${{ steps.save-target.outcome }}" = success ]; then build_outcome=attempted-success; fi
-          .github/scripts/ci-evidence.sh snapshot after-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "${{ steps.setup.outputs.build-restore-result || 'unknown' }}" --build-restored-footprint-bytes "${{ steps.setup.outputs.build-restored-footprint-bytes || 0 }}" --build-save-mode "$save_mode" --build-candidate-size-bytes "${{ steps.measure-build.outputs.build-bytes || 0 }}" --build-save-outcome "$build_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}"
+          error_measure=${{ steps.after-build.outputs.error-measure || 0 }}
+          error_save=${{ steps.after-build.outputs.error-save || 0 }}
+          if [ "${{ steps.measure-compiler-cache.outcome }}" = failure ]; then error_measure=$((error_measure + 1)); fi
+          if [ "${{ steps.save-compiler-cache.outcome }}" = failure ]; then error_save=$((error_save + 1)); fi
+          compiler_args=(--compiler-cache-enabled "${{ steps.setup.outputs.compiler-cache-enabled || 'false' }}" --compiler-cache-version "${{ steps.setup.outputs.compiler-cache-version || 'none' }}" --compiler-cache-access "${{ steps.setup.outputs.compiler-cache-access || 'disabled' }}" --compiler-cache-requests "${{ steps.after-build.outputs.requests || 0 }}" --compiler-cache-hits "${{ steps.after-build.outputs.hits || 0 }}" --compiler-cache-misses "${{ steps.after-build.outputs.misses || 0 }}" --compiler-cache-non-cacheable "${{ steps.after-build.outputs.non-cacheable || 0 }}" --compiler-cache-error-restore "${{ steps.after-build.outputs.error-restore || 0 }}" --compiler-cache-error-stats "${{ steps.after-build.outputs.error-stats || 0 }}" --compiler-cache-error-cache-io "${{ steps.after-build.outputs.error-cache-io || 0 }}" --compiler-cache-error-no-requests "${{ steps.after-build.outputs.error-no-requests || 0 }}" --compiler-cache-error-measure "$error_measure" --compiler-cache-error-save "$error_save" --cpu-time-ms "${{ steps.after-build.outputs.cpu-time-ms || 'none' }}" --peak-rss-bytes "${{ steps.after-build.outputs.peak-rss-bytes || 'none' }}")
+          .github/scripts/ci-evidence.sh ensure before-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --download-restore-result "${{ steps.setup.outputs.download-restore-result || 'unknown' }}" --download-restored-footprint-bytes "${{ steps.setup.outputs.download-restored-footprint-bytes || 0 }}" --download-save-mode "$save_mode" --download-candidate-size-bytes "${{ steps.measure-download.outputs.download-bytes || 0 }}" --download-save-outcome ineligible --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}" "${compiler_args[@]}"
+          download_outcome=skipped
+          if [ "${{ steps.save-download.outcome }}" = failure ]; then download_outcome=attempted-failure; elif [ "${{ steps.save-download.outcome }}" = success ]; then download_outcome=attempted-success; fi
+          .github/scripts/ci-evidence.sh snapshot after-save --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --download-restore-result "${{ steps.setup.outputs.download-restore-result || 'unknown' }}" --download-restored-footprint-bytes "${{ steps.setup.outputs.download-restored-footprint-bytes || 0 }}" --download-save-mode "$save_mode" --download-candidate-size-bytes "${{ steps.measure-download.outputs.download-bytes || 0 }}" --download-save-outcome "$download_outcome" --tools-restore-result "${{ steps.setup.outputs.tools-restore-result || 'unknown' }}" --tools-restored-footprint-bytes "${{ steps.setup.outputs.tools-restored-footprint-bytes || 0 }}" --tools-save-mode "$save_mode" --tools-candidate-size-bytes "${{ steps.measure-tools.outputs.bytes || 0 }}" --tools-save-outcome "${{ steps.save-tools.outcome == 'success' && 'attempted-success' || steps.save-tools.outcome == 'failure' && 'attempted-failure' || 'skipped' }}" "${compiler_args[@]}"
 
       - name: Stage job evidence
         timeout-minutes: 5

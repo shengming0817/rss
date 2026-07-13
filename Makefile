@@ -1,16 +1,18 @@
-# RSS 治理门聚合入口（薄 alias）。
+# RSS 治理门的受控本地 bootstrap。
 #
-# 逻辑单源在 `cargo xtask`（跨平台、CI-ready、对齐 rust-analyzer xtask 范式）；本 Makefile 只为文档
-# 一直引用的 `make verify` / `make ci` 名字提供入口。
+# typed gate plan 单源在 `cargo xtask`（跨平台、CI-ready、对齐 rust-analyzer xtask 范式）；Make
+# 通过 `hack/cargo.sh` 统一 build-jobs、ambient wrapper 清洗和 compiler-cache policy。直接执行
+# `cargo xtask` 使用同一 gate plan 与 target-dir 默认值，但不具备等价的外层 Cargo bootstrap。
 #
 #   make verify       本地 stable-only 快门：fmt + meta + build + clippy + nextest + deny + dylint。
-#   make verify-fast  verify 的无编译子集（仅 fmt + meta + deny），供快速迭代（= cargo xtask verify --fast）。
+#   make verify-fast  verify 的无编译子集（仅 fmt + meta + deny），供快速迭代。
 #   make ci           本地去重兼容聚合（非 GitHub job）：保留 46 个唯一 gate，Coverage 取代 Core 的
 #                     default-profile nextest；因此不与真实 checks 的执行语义完全等价。复现各 checks
-#                     须分别运行 cargo xtask ci-meta / ci-core-prerequisites /
-#                     cargo xtask ci-core-tests --partition 1/2（及 2/2）/ ci-security / ci-coverage。
+#                     须分别经 `hack/cargo.sh xtask` 运行 ci-meta / ci-core-prerequisites /
+#                     ci-core-tests --partition 1/2（及 2/2）/ ci-security / ci-coverage。
 #                     需全套工具 + nightly。
-#   make audit        供应链漏洞刷新 lane（= GitHub Actions schedule 调的同一条 `cargo xtask audit`，
+#   make cargo-selftest 本地 Cargo 入口的 target 隔离与 override 机器验收。
+#   make audit        供应链漏洞刷新 lane（与 GitHub Actions schedule 使用同一 typed audit plan，
 #                     #1133）：advisory-scoped `deny check advisories` + cargo-audit（皆 no-compile、快）。
 #   make docker-build server 多阶段镜像构建（#1134）：cargo-chef + distroless/cc:nonroot → rss-server:dev。
 #   make docker-smoke 容器冒烟验收（#1134，**docker-gated**）：build → compose up → /readyz 200 → 非 root /
@@ -19,7 +21,7 @@
 # CI lane = GitHub Actions workflows（issue #1132）：PR/push 触发 + GitHub required checks 阻断合入。
 # 门集 / --fast / 缺工具策略见 xtask/src/verify.rs。
 
-.PHONY: verify verify-fast ci audit docker-build docker-smoke
+.PHONY: verify verify-fast ci cargo-selftest audit docker-build docker-smoke
 
 RSS_CARGO ?= ./hack/cargo.sh
 
@@ -31,6 +33,9 @@ verify-fast:
 
 ci:
 	$(RSS_CARGO) xtask ci
+
+cargo-selftest:
+	./hack/cargo.selftest.sh
 
 audit:
 	$(RSS_CARGO) xtask audit

@@ -8,11 +8,28 @@
     "runnerOs": "<string>",
     "workflow": "<string>"
   },
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "snapshots": [
     {
       "cache": {
-        "build": {
+        "compilerCache": {
+          "access": "remote-read-write",
+          "enabled": true,
+          "errors": {
+            "cacheIo": 0,
+            "measure": 0,
+            "noRequests": 0,
+            "restore": 0,
+            "save": 0,
+            "stats": 0
+          },
+          "hits": 4,
+          "misses": 3,
+          "nonCacheable": 2,
+          "requests": 9,
+          "version": "0.15.0"
+        },
+        "download": {
           "candidateSizeBytes": 4096,
           "restoreResult": "miss",
           "restoredFootprintBytes": 0,
@@ -41,6 +58,10 @@
           "sizeBytes": 0
         },
         {
+          "path": "sccache",
+          "sizeBytes": 0
+        },
+        {
           "path": "target",
           "sizeBytes": 0
         },
@@ -63,6 +84,10 @@
       ],
       "outcome": null,
       "recordedAt": "<utc>",
+      "resourceUsage": {
+        "cpuTimeMs": null,
+        "peakRssBytes": null
+      },
       "stage": "start",
       "toolVersions": {
         "cargo": "<string-or-null>",

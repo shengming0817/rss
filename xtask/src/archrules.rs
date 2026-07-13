@@ -695,100 +695,95 @@ fn scan_xtask(root: &Path, index: &mut Index) -> Result<()> {
         if path.ends_with("xtask/src/publicapi.rs") {
             continue;
         }
-        if path.ends_with("xtask/src/ci_lanes.rs") {
-            let found_invariants = extract_invariants(root, &path)?;
-            record_invalid_invariants(index, &found_invariants);
-            validate_closed_invariant_bindings(
-                index,
-                &path,
-                &found_invariants,
-                CI_LANE_INVARIANT_BINDINGS,
-            );
-            for binding in CI_LANE_INVARIANT_BINDINGS {
-                debug_assert_eq!(binding.path, rel(root, &path));
-                scan_extracted_invariant_rules_filtered(
-                    root,
-                    index,
-                    &found_invariants,
-                    binding.carrier,
-                    binding.evidence,
-                    Some(binding.gates),
-                    |rule| binding.matches(rule) && binding.accepts(rule),
-                )?;
-            }
-            continue;
-        }
-        if path.ends_with("xtask/src/integration_shards.rs") {
-            let found_invariants = extract_invariants(root, &path)?;
-            record_invalid_invariants(index, &found_invariants);
-            validate_closed_invariant_bindings(
-                index,
-                &path,
-                &found_invariants,
-                INTEGRATION_SHARD_INVARIANT_BINDINGS,
-            );
-            for binding in INTEGRATION_SHARD_INVARIANT_BINDINGS {
-                debug_assert_eq!(binding.path, rel(root, &path));
-                scan_extracted_invariant_rules_filtered(
-                    root,
-                    index,
-                    &found_invariants,
-                    binding.carrier,
-                    binding.evidence,
-                    Some(binding.gates),
-                    |rule| binding.matches(rule) && binding.accepts(rule),
-                )?;
-            }
-            continue;
-        }
-        if path.ends_with("xtask/src/nextest.rs") {
-            let found_invariants = extract_invariants(root, &path)?;
-            record_invalid_invariants(index, &found_invariants);
-            validate_closed_invariant_bindings(
-                index,
-                &path,
-                &found_invariants,
-                NEXTEST_INVARIANT_BINDINGS,
-            );
-            for binding in NEXTEST_INVARIANT_BINDINGS {
-                scan_extracted_invariant_rules_filtered(
-                    root,
-                    index,
-                    &found_invariants,
-                    binding.carrier,
-                    binding.evidence,
-                    Some(binding.gates),
-                    |rule| binding.matches(rule) && binding.accepts(rule),
-                )?;
-            }
-            continue;
-        }
-        if path.ends_with("xtask/src/ci_slo.rs") {
-            let found_invariants = extract_invariants(root, &path)?;
-            record_invalid_invariants(index, &found_invariants);
-            validate_closed_invariant_bindings(
-                index,
-                &path,
-                &found_invariants,
-                CI_SLO_INVARIANT_BINDINGS,
-            );
-            for binding in CI_SLO_INVARIANT_BINDINGS {
-                scan_extracted_invariant_rules_filtered(
-                    root,
-                    index,
-                    &found_invariants,
-                    binding.carrier,
-                    binding.evidence,
-                    Some(binding.gates),
-                    |rule| binding.matches(rule) && binding.accepts(rule),
-                )?;
-            }
+        if scan_record_granular_xtask_invariants(root, index, &path)? {
             continue;
         }
         let gate = xtask_gate(root, &path);
         scan_invariant_file(root, index, &path, "xtask", xtask_evidence(&path), gate)?;
     }
     Ok(())
+}
+
+fn scan_record_granular_xtask_invariants(
+    root: &Path,
+    index: &mut Index,
+    path: &Path,
+) -> Result<bool> {
+    let relative = rel(root, path);
+    if relative == "xtask/src/cmd.rs" {
+        scan_compiler_cache_invariants(root, index, path)?;
+        return Ok(true);
+    }
+    let bindings = match relative.as_str() {
+        "xtask/src/ci_lanes.rs" => CI_LANE_INVARIANT_BINDINGS,
+        "xtask/src/integration_shards.rs" => INTEGRATION_SHARD_INVARIANT_BINDINGS,
+        "xtask/src/nextest.rs" => NEXTEST_INVARIANT_BINDINGS,
+        "xtask/src/ci_slo.rs" => CI_SLO_INVARIANT_BINDINGS,
+        _ => return Ok(false),
+    };
+    let found_invariants = extract_invariants(root, path)?;
+    record_invalid_invariants(index, &found_invariants);
+    validate_closed_invariant_bindings(index, path, &found_invariants, bindings);
+    for binding in bindings {
+        debug_assert_eq!(binding.path, relative);
+        scan_extracted_invariant_rules_filtered(
+            root,
+            index,
+            &found_invariants,
+            binding.carrier,
+            binding.evidence,
+            Some(binding.gates),
+            |rule| binding.matches(rule) && binding.accepts(rule),
+        )?;
+    }
+    Ok(true)
+}
+
+fn scan_compiler_cache_invariants(root: &Path, index: &mut Index, path: &Path) -> Result<()> {
+    let found_invariants = extract_invariants(root, path)?;
+    record_invalid_invariants(index, &found_invariants);
+    let compiler_cache_invariants = found_invariants
+        .iter()
+        .filter_map(|found| {
+            let rules = found
+                .rules
+                .iter()
+                .filter(|rule| rule.id.starts_with("COMPILER-CACHE-POLICY-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!rules.is_empty()).then(|| FoundInvariant {
+                source: found.source.clone(),
+                rules,
+                invalid: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    validate_closed_invariant_bindings(
+        index,
+        path,
+        &compiler_cache_invariants,
+        COMPILER_CACHE_INVARIANT_BINDINGS,
+    );
+    for binding in COMPILER_CACHE_INVARIANT_BINDINGS {
+        scan_extracted_invariant_rules_filtered(
+            root,
+            index,
+            &compiler_cache_invariants,
+            binding.carrier,
+            binding.evidence,
+            Some(binding.gates),
+            |rule| binding.matches(rule) && binding.accepts(rule),
+        )?;
+    }
+    scan_extracted_invariant_rules_filtered(
+        root,
+        index,
+        &found_invariants,
+        "xtask",
+        xtask_evidence(path),
+        xtask_gate(root, path),
+        |rule| !rule.id.starts_with("COMPILER-CACHE-POLICY-"),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,6 +945,25 @@ const NEXTEST_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "xtask",
         evidence: "direct-call synthetic red and production source anti-vacuity",
         gates: "verify,ci-core,integration",
+    },
+];
+
+const COMPILER_CACHE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/cmd.rs",
+        id: "COMPILER-CACHE-POLICY-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed CompilerCachePolicy enum and private validated constructor",
+        gates: "native-compile",
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/cmd.rs",
+        id: "COMPILER-CACHE-POLICY-02",
+        facet: None,
+        carrier: "xtask",
+        evidence: "canonical-path/version synthetic red and enabled-policy anti-vacuity",
+        gates: "manual/opt-in",
     },
 ];
 
@@ -3669,6 +3683,37 @@ fn unrelated_green_accepted() { assert!(true); }
             finding.rule == Rule::CarrierBindingMismatch
                 && finding.detail.contains("metadata 不兼容")
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_cache_invariants_use_record_granular_carriers() -> Result<()> {
+        let index = build_index(&crate::workspace_root()?)?;
+        let policy = index
+            .records
+            .iter()
+            .find(|record| record.id == "COMPILER-CACHE-POLICY-01")
+            .context("missing COMPILER-CACHE-POLICY-01")?;
+        assert_eq!(policy.level, RuleLevel::Hard);
+        assert_eq!(policy.carrier, "native-hard");
+        assert_eq!(policy.gate, "native-compile");
+
+        let validation = index
+            .records
+            .iter()
+            .find(|record| record.id == "COMPILER-CACHE-POLICY-02")
+            .context("missing COMPILER-CACHE-POLICY-02")?;
+        assert_eq!(validation.level, RuleLevel::Medium);
+        assert_eq!(validation.carrier, "xtask");
+        assert_eq!(validation.gate, "manual/opt-in");
+        assert_eq!(
+            validation.synthetic_red.as_deref(),
+            Some("compiler_cache_validates_canonical_absolute_exact_version")
+        );
+        assert_eq!(
+            validation.anti_vacuity.as_deref(),
+            Some("enabled_policy_overrides_ambient_wrapper_and_incremental")
+        );
         Ok(())
     }
 

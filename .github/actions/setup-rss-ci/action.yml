@@ -1,12 +1,12 @@
 name: Setup RSS Rust CI
-description: Restore isolated exact caches, install the pinned Rust toolchain, and install lane tools.
+description: Restore immutable dependency/tool caches and prepare a job-local Cargo target.
 
 inputs:
   lane:
-    description: Stable cache ownership lane.
+    description: Closed CI lane identifier used to select the exact tool set.
     required: true
   profile:
-    description: Cargo profile and isolated tool-cache namespace.
+    description: Closed tool profile paired with the lane.
     required: true
   toolchain:
     description: Pinned stable Rust toolchain identity used in cache keys.
@@ -35,15 +35,6 @@ outputs:
   download-hit:
     description: Whether the download cache was an exact primary-key hit.
     value: ${{ steps.download-cache.outputs.cache-hit }}
-  target-primary-key:
-    description: Primary target-cache key; evidence must not persist this value.
-    value: ${{ steps.cache-keys.outputs.target-primary-key }}
-  target-matched-key:
-    description: Matched target-cache key; evidence must not persist this value.
-    value: ${{ steps.target-cache.outputs.cache-matched-key }}
-  target-hit:
-    description: Whether the target cache was an exact primary-key hit.
-    value: ${{ steps.target-cache.outputs.cache-hit }}
   tools-primary-key:
     description: Primary tool-cache key; evidence must not persist this value.
     value: ${{ steps.cache-keys.outputs.tools-primary-key }}
@@ -53,14 +44,38 @@ outputs:
   tools-hit:
     description: Whether the tool cache was an exact primary-key hit.
     value: ${{ steps.tools-cache.outputs.cache-hit }}
-  build-restore-result:
-    value: ${{ steps.after-cache.outputs.build-result }}
-  build-restored-footprint-bytes:
-    value: ${{ steps.after-cache.outputs.build-bytes }}
+  compiler-cache-primary-key:
+    description: Unique compiler-cache snapshot key; evidence must not persist this value.
+    value: ${{ steps.cache-keys.outputs.compiler-cache-primary-key }}
+  compiler-cache-matched-key:
+    description: Matched compiler-cache key; evidence must not persist this value.
+    value: ${{ steps.compiler-cache.outputs.cache-matched-key }}
+  compiler-cache-hit:
+    description: Whether the compiler cache was an exact primary-key hit.
+    value: ${{ steps.compiler-cache.outputs.cache-hit }}
+  compiler-cache-restore-outcome:
+    description: Cache transport outcome; failure degrades performance only.
+    value: ${{ steps.compiler-cache.outcome }}
+  download-restore-result:
+    value: ${{ steps.after-cache.outputs.download-result }}
+  download-restored-footprint-bytes:
+    value: ${{ steps.after-cache.outputs.download-bytes }}
   tools-restore-result:
     value: ${{ steps.after-cache.outputs.tools-result }}
   tools-restored-footprint-bytes:
     value: ${{ steps.after-cache.outputs.tools-bytes }}
+  resolved-target-source:
+    value: ci-runner-temp
+  resolved-target-dir:
+    value: ${{ steps.cache-keys.outputs.target-dir }}
+  compiler-cache-enabled:
+    value: ${{ steps.compiler-policy.outputs.enabled }}
+  compiler-cache-version:
+    value: ${{ steps.compiler-policy.outputs.version }}
+  compiler-cache-access:
+    value: ${{ steps.compiler-policy.outputs.access }}
+  compiler-cache-path:
+    value: ${{ steps.compiler-policy.outputs.path }}
 
 runs:
   using: composite
@@ -99,6 +114,7 @@ runs:
         RSS_WRITER_MODE: ${{ inputs.writer-mode }}
         RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
         RSS_FALLBACK_TARGET: ${{ runner.temp }}/rss-tool-build-target
+        RSS_JOB_TARGET: ${{ runner.temp }}/rss-cargo-target
       run: |
         set -euo pipefail
         case "$RSS_LANE" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac
@@ -107,16 +123,19 @@ runs:
         case "$RSS_WRITER_MODE" in true|false) ;; *) exit 64 ;; esac
         RSS_NIGHTLY_ID="${RSS_NIGHTLY:-none}"
         .github/scripts/ci-cache-maintain.sh prepare-roots --workspace "$GITHUB_WORKSPACE" --tool-root "$RSS_TOOL_ROOT" --runner-temp "$RUNNER_TEMP" --fallback-target "$RSS_FALLBACK_TARGET"
+        mkdir -p "$RSS_JOB_TARGET"
         source_hash="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
-        tree_identity="$(.github/scripts/ci-cache-maintain.sh tree-identity --workspace "$GITHUB_WORKSPACE")"
         tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' 'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
-        common="$RSS_LANE-${RUNNER_OS}-${RUNNER_ARCH}-$RSS_TOOLCHAIN-$RSS_NIGHTLY_ID-$RSS_PROFILE"
-        echo "download-primary-key=rss-download-v3-$common-$source_hash" >> "$GITHUB_OUTPUT"
-        echo "target-primary-key=rss-target-v3-$common-$source_hash-$tree_identity" >> "$GITHUB_OUTPUT"
-        echo "tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH-$RSS_LANE-${RUNNER_OS}-${RUNNER_ARCH}-$RSS_TOOLCHAIN-$RSS_PROFILE-$tools_hash" >> "$GITHUB_OUTPUT"
+        common="${RUNNER_OS}-${RUNNER_ARCH}-$RSS_TOOLCHAIN-$RSS_NIGHTLY_ID"
+        echo "download-primary-key=rss-download-v4-$common-$source_hash" >> "$GITHUB_OUTPUT"
+        echo "tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH-$common-$tools_hash" >> "$GITHUB_OUTPUT"
+        echo "compiler-cache-primary-key=rss-sccache-v1-$common-$source_hash-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RSS_LANE" >> "$GITHUB_OUTPUT"
+        echo "target-dir=$RSS_JOB_TARGET" >> "$GITHUB_OUTPUT"
+        echo "CARGO_TARGET_DIR=$RSS_JOB_TARGET" >> "$GITHUB_ENV"
 
     - name: Restore exact Cargo download cache
       id: download-cache
+      continue-on-error: true
       uses: actions/cache/restore@v4
       with:
         path: |
@@ -125,26 +144,29 @@ runs:
           ~/.cargo/git/db
         key: ${{ steps.cache-keys.outputs.download-primary-key }}
 
-    - name: Restore exact target cache
-      id: target-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: .cache/cargo-target
-        key: ${{ steps.cache-keys.outputs.target-primary-key }}
-
     - name: Restore exact tool cache
       id: tools-cache
+      continue-on-error: true
       uses: actions/cache/restore@v4
       with:
         path: .cache/ci-tools/${{ inputs.profile }}
         key: ${{ steps.cache-keys.outputs.tools-primary-key }}
+
+    - name: Restore compiler cache snapshot
+      id: compiler-cache
+      continue-on-error: true
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/rss-sccache-cache
+        key: ${{ steps.cache-keys.outputs.compiler-cache-primary-key }}
+        restore-keys: |
+          rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-
 
     - name: Measure restored cache footprints
       id: restored-footprints
       shell: bash
       env:
         DOWNLOAD_MATCHED: ${{ steps.download-cache.outputs.cache-matched-key }}
-        TARGET_MATCHED: ${{ steps.target-cache.outputs.cache-matched-key }}
         TOOLS_MATCHED: ${{ steps.tools-cache.outputs.cache-matched-key }}
       run: |
         set -euo pipefail
@@ -155,15 +177,11 @@ runs:
           git_db_bytes="$(.github/scripts/ci-cache-maintain.sh measure --path "$HOME/.cargo/git/db")"
           download_bytes="$((registry_cache_bytes + registry_index_bytes + git_db_bytes))"
         fi
-        target_bytes=0
-        if [ -n "$TARGET_MATCHED" ]; then
-          target_bytes="$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/cargo-target")"
-        fi
         tools_bytes=0
         if [ -n "$TOOLS_MATCHED" ]; then
           tools_bytes="$(.github/scripts/ci-cache-maintain.sh measure --path "$GITHUB_WORKSPACE/.cache/ci-tools/${{ inputs.profile }}")"
         fi
-        echo "build-bytes=$((download_bytes + target_bytes))" >> "$GITHUB_OUTPUT"
+        echo "download-bytes=$download_bytes" >> "$GITHUB_OUTPUT"
         echo "tools-bytes=$tools_bytes" >> "$GITHUB_OUTPUT"
 
     - name: Rust toolchain
@@ -200,9 +218,6 @@ runs:
           cargo binstall --locked --no-confirm --disable-strategies quick-install --disable-telemetry --root "$RSS_TOOL_ROOT" "$spec"
         done
 
-    # install-action appends its checksum-verified bin directory to GITHUB_PATH internally.
-    # Keep it as the final installer so no intervening step can consume those binaries before
-    # the repository-owned adapter validates the complete set below.
     - name: Install pinned prebuilt tools
       if: ${{ steps.tool-policy.outputs.install-action-tools != '' && steps.tools-cache.outputs.cache-hit != 'true' }}
       uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
@@ -224,45 +239,83 @@ runs:
         mode=fresh
         if [ "$RSS_TOOLS_HIT" = true ]; then mode=cache; fi
         .github/scripts/ci-tool-adapters.sh verify --mode "$mode" --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
+        compiler_cache_spec="$(.github/scripts/ci-tool-adapters.sh sccache-spec)"
+        IFS='|' read -r compiler_cache_name compiler_cache_version compiler_cache_backend compiler_cache_relative compiler_cache_probe <<< "$compiler_cache_spec"
+        [ "$compiler_cache_name" = sccache ] && [ "$compiler_cache_backend" = install-action ] && [ "$compiler_cache_probe" = sccache ]
+        compiler_cache_path="$(.github/scripts/ci-tool-adapters.sh verify-sccache --candidate "$RSS_TOOL_ROOT/$compiler_cache_relative")"
+        {
+          echo "compiler-cache-path=$compiler_cache_path"
+          echo "compiler-cache-version=$compiler_cache_version"
+        } >> "$GITHUB_OUTPUT"
         echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
         echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
 
-    - name: Capture after-cache evidence
+    - name: Configure verified compiler cache
+      id: compiler-policy
+      shell: bash
+      env:
+        RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.profile }}
+        RSS_WRITER_MODE: ${{ inputs.writer-mode }}
+        RSS_VERIFIED_SCCACHE_PATH: ${{ steps.verify-tools.outputs.compiler-cache-path }}
+        RSS_VERIFIED_SCCACHE_VERSION: ${{ steps.verify-tools.outputs.compiler-cache-version }}
+      run: |
+        set -euo pipefail
+        path=$RSS_VERIFIED_SCCACHE_PATH
+        version=$RSS_VERIFIED_SCCACHE_VERSION
+        [ -n "$path" ] && [ -n "$version" ]
+        mkdir -p "$RUNNER_TEMP/rss-sccache" "$RUNNER_TEMP/rss-sccache-cache"
+        access=remote-read-only
+        if [ "$RSS_WRITER_MODE" = true ]; then access=remote-read-write; fi
+        {
+          echo "RSS_INTERNAL_SCCACHE_PATH=$path"
+          echo "RUSTC_WRAPPER=$path"
+          echo 'CARGO_INCREMENTAL=0'
+          echo 'SCCACHE_IGNORE_SERVER_IO_ERROR=1'
+          echo "SCCACHE_DIR=$RUNNER_TEMP/rss-sccache-cache"
+          echo "SCCACHE_SERVER_UDS=$RUNNER_TEMP/rss-sccache/server.sock"
+        } >> "$GITHUB_ENV"
+        {
+          echo 'enabled=true'
+          echo "version=$version"
+          echo "access=$access"
+          echo "path=$path"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Classify restored cache evidence
       id: after-cache
       if: ${{ always() && inputs.evidence-enabled == 'true' }}
       shell: bash
       env:
         DOWNLOAD_MATCHED: ${{ steps.download-cache.outputs.cache-matched-key }}
         DOWNLOAD_HIT: ${{ steps.download-cache.outputs.cache-hit }}
-        TARGET_MATCHED: ${{ steps.target-cache.outputs.cache-matched-key }}
-        TARGET_HIT: ${{ steps.target-cache.outputs.cache-hit }}
+        DOWNLOAD_RESTORE_OUTCOME: ${{ steps.download-cache.outcome }}
         TOOLS_MATCHED: ${{ steps.tools-cache.outputs.cache-matched-key }}
         TOOLS_HIT: ${{ steps.tools-cache.outputs.cache-hit }}
-        CACHE_KEYS_OUTCOME: ${{ steps.cache-keys.outcome }}
-        DOWNLOAD_CACHE_OUTCOME: ${{ steps.download-cache.outcome }}
-        TARGET_CACHE_OUTCOME: ${{ steps.target-cache.outcome }}
-        TOOLS_CACHE_OUTCOME: ${{ steps.tools-cache.outcome }}
-        RESTORE_FOOTPRINTS_OUTCOME: ${{ steps.restored-footprints.outcome }}
+        TOOLS_RESTORE_OUTCOME: ${{ steps.tools-cache.outcome }}
+        COMPILER_ENABLED: ${{ steps.compiler-policy.outputs.enabled }}
+        COMPILER_VERSION: ${{ steps.compiler-policy.outputs.version }}
+        COMPILER_ACCESS: ${{ steps.compiler-policy.outputs.access }}
+        COMPILER_RESTORE_OUTCOME: ${{ steps.compiler-cache.outcome }}
         WRITER_MODE: ${{ inputs.writer-mode }}
       run: |
         set -euo pipefail
-        build_result=unknown
-        build_bytes=0
-        if [ "$CACHE_KEYS_OUTCOME" = success ] && [ "$DOWNLOAD_CACHE_OUTCOME" = success ] && [ "$TARGET_CACHE_OUTCOME" = success ] && [ "$RESTORE_FOOTPRINTS_OUTCOME" = success ]; then
-          build_result="$(.github/scripts/ci-cache-result.sh aggregate --first-hit "$DOWNLOAD_HIT" --first-matched "$DOWNLOAD_MATCHED" --second-hit "$TARGET_HIT" --second-matched "$TARGET_MATCHED")"
-          build_bytes="${{ steps.restored-footprints.outputs.build-bytes }}"
+        download_result="$(.github/scripts/ci-cache-result.sh classify --outcome "$DOWNLOAD_RESTORE_OUTCOME" --hit "$DOWNLOAD_HIT" --matched "$DOWNLOAD_MATCHED")"
+        download_bytes=0
+        if [ "$DOWNLOAD_RESTORE_OUTCOME" = success ]; then
+          download_bytes="${{ steps.restored-footprints.outputs.download-bytes || 0 }}"
         fi
-        tools_result=unknown
+        tools_result="$(.github/scripts/ci-cache-result.sh classify --outcome "$TOOLS_RESTORE_OUTCOME" --hit "$TOOLS_HIT" --matched "$TOOLS_MATCHED")"
         tools_bytes=0
-        if [ "$CACHE_KEYS_OUTCOME" = success ] && [ "$TOOLS_CACHE_OUTCOME" = success ] && [ "$RESTORE_FOOTPRINTS_OUTCOME" = success ]; then
-          tools_result="$(.github/scripts/ci-cache-result.sh classify --hit "$TOOLS_HIT" --matched "$TOOLS_MATCHED")"
-          tools_bytes="${{ steps.restored-footprints.outputs.tools-bytes }}"
+        if [ "$TOOLS_RESTORE_OUTCOME" = success ]; then
+          tools_bytes="${{ steps.restored-footprints.outputs.tools-bytes || 0 }}"
         fi
+        compiler_error_restore=0
+        if [ "$COMPILER_RESTORE_OUTCOME" = failure ]; then compiler_error_restore=1; fi
         save_mode=read-only
         if [ "$WRITER_MODE" = true ]; then save_mode=writer; fi
-        echo "build-result=$build_result" >> "$GITHUB_OUTPUT"
-        echo "build-bytes=$build_bytes" >> "$GITHUB_OUTPUT"
+        echo "download-result=$download_result" >> "$GITHUB_OUTPUT"
+        echo "download-bytes=$download_bytes" >> "$GITHUB_OUTPUT"
         echo "tools-result=$tools_result" >> "$GITHUB_OUTPUT"
         echo "tools-bytes=$tools_bytes" >> "$GITHUB_OUTPUT"
-        .github/scripts/ci-evidence.sh snapshot after-cache --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --build-restore-result "$build_result" --build-restored-footprint-bytes "$build_bytes" --build-save-mode "$save_mode" --build-candidate-size-bytes 0 --build-save-outcome unknown --tools-restore-result "$tools_result" --tools-restored-footprint-bytes "$tools_bytes" --tools-save-mode "$save_mode" --tools-candidate-size-bytes 0 --tools-save-outcome unknown
+        .github/scripts/ci-evidence.sh snapshot after-cache --output "$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE" --download-restore-result "$download_result" --download-restored-footprint-bytes "$download_bytes" --download-save-mode "$save_mode" --download-candidate-size-bytes 0 --download-save-outcome unknown --tools-restore-result "$tools_result" --tools-restored-footprint-bytes "$tools_bytes" --tools-save-mode "$save_mode" --tools-candidate-size-bytes 0 --tools-save-outcome unknown --compiler-cache-enabled "$COMPILER_ENABLED" --compiler-cache-version "$COMPILER_VERSION" --compiler-cache-access "$COMPILER_ACCESS" --compiler-cache-requests 0 --compiler-cache-hits 0 --compiler-cache-misses 0 --compiler-cache-non-cacheable 0 --compiler-cache-error-restore "$compiler_error_restore" --compiler-cache-error-stats 0 --compiler-cache-error-cache-io 0 --compiler-cache-error-no-requests 0 --compiler-cache-error-measure 0 --compiler-cache-error-save 0 --cpu-time-ms none --peak-rss-bytes none
         .github/scripts/ci-disk-budget.sh --stage after-cache --path "$GITHUB_WORKSPACE"

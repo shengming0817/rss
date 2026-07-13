@@ -15,27 +15,31 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 `ci-security` 并行启动；Core prerequisite 只跑一次，两份 Core tests 在其后按 partition 并行：
 
 ```bash
-make verify              # == cargo xtask verify（薄 alias）
-cargo xtask verify       # fmt + 契约/分层/codegen meta + build + clippy + nextest + deny + dylint，fail-fast
-cargo xtask verify --fast            # 只跑无需编译的步（fmt + meta + deny），快速迭代
-cargo xtask verify --allow-missing-tools   # 缺外部工具时显式宽限（默认 fail-closed）
-cargo xtask ci           # 本地去重兼容聚合：46 个唯一 gate；Coverage 取代 Core 的 default-nextest
+make verify                              # 推荐：受控 bootstrap + 完整 verify gate plan
+./hack/cargo.sh xtask verify             # 与 make verify 相同的受控入口
+./hack/cargo.sh xtask verify --fast      # 只跑无需编译的步（fmt + meta + deny），快速迭代
+./hack/cargo.sh xtask verify --allow-missing-tools  # 缺外部工具时显式宽限（默认 fail-closed）
+./hack/cargo.sh xtask ci                 # 本地去重兼容聚合：46 个唯一 gate；Coverage 取代 Core 的 default-nextest
 ```
 
-`cargo xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现六个真实 check 的完整执行语义：
+Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap。直接运行 `cargo xtask ...`
+仍执行相同 typed gate plan，并与 wrapper 共用 worktree-local target 默认值；但启动 xtask 的外层 Cargo
+不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
+
+`./hack/cargo.sh xtask ci` 覆盖四类 lane 的兼容 gate 联集，但不复现六个真实 check 的完整执行语义：
 它不重复运行 Core 的 `ci-core` profile nextest，而 Coverage 复用同一测试语义。需要本地复现真实 checks 时分别运行：
 
 ```bash
-cargo xtask ci-meta
-cargo xtask ci-core-prerequisites
-cargo xtask ci-core-tests --partition 1/2
-cargo xtask ci-core-tests --partition 2/2
-cargo xtask ci-security
-cargo xtask ci-coverage
+./hack/cargo.sh xtask ci-meta
+./hack/cargo.sh xtask ci-core-prerequisites
+./hack/cargo.sh xtask ci-core-tests --partition 1/2
+./hack/cargo.sh xtask ci-core-tests --partition 2/2
+./hack/cargo.sh xtask ci-security
+./hack/cargo.sh xtask ci-coverage
 ```
 
 以下是常用开发检查，并非 `verify` 内部 typed step 的逐条公开命令；完整本地治理门运行
-`cargo xtask verify`，本地完整 Core 用 `cargo xtask ci-core`，PR 分区测试用 `ci-core-tests`：
+`make verify`，本地完整 Core 用 `./hack/cargo.sh xtask ci-core`，PR 分区测试用 `ci-core-tests`：
 
 ```bash
 cargo fmt --all -- --check                             # 格式
@@ -46,7 +50,7 @@ cargo xtask layer-deps                                 # source-centric 分层�
 cargo xtask codegen --check                            # 契约 codegen 漂移门
 cargo build --workspace                                # 编译全 workspace（分层有环即失败）
 cargo clippy --workspace --all-targets -- -D warnings  # lint（clock 注入 / panic 纪律）
-cargo xtask ci-core                                    # 不分区的完整 Core 测试与证据 typed 漏斗
+./hack/cargo.sh xtask ci-core                          # 不分区的完整 Core 测试与证据 typed 漏斗
 cargo deny check                                       # 分层禁依赖 + license + advisory
 cargo dylint --all                                     # AST 级自写 lint（domain 禁 derive serde 等）
 ```
@@ -57,6 +61,17 @@ cargo dylint --all                                     # AST 级自写 lint（do
 ```bash
 .github/scripts/ci-tool-adapters.sh specs --lane all --backend all
 ```
+
+Cargo 构建产物遵循 worktree/job 隔离：本地默认写当前 worktree 的 `.cache/cargo-target`，CI 写
+`$RUNNER_TEMP/rss-cargo-target`；显式 `CARGO_TARGET_DIR` 仍由 Cargo 原样处理。受控入口默认
+`CARGO_BUILD_JOBS=2`，可由同名环境变量覆盖。完整 target 不跨 worktree 或 CI job 持久化。
+
+`hack/cargo.sh`、Make 及其启动的 xtask 会清除外部 `RUSTC_WRAPPER`。默认 `auto` 会按 PATH
+顺序物理规范化并验证 sccache 候选，跳过无效项，仅在找到首个精确版本 `sccache 0.15.0` 后启用
+compiler cache；无合法候选时使用普通 Cargo，`RSS_COMPILER_CACHE=off` 可显式关闭。启用时强制
+`CARGO_INCREMENTAL=0`。sccache 只在编译输入和逻辑路径对应的 cache key 相同时复用结果；Rust
+hasher 会散列绝对工作目录，因此不承诺 RSS 自有 crate 跨不同绝对路径的 worktree 命中。cache
+backend/server 故障只降低命中收益，不改变编译或测试 verdict。
 
 > dylint 须 nightly：`cargo-dylint` / `dylint-link` 版本与 `lints/rust-toolchain.toml` 的 channel +
 > `clippy_utils` rev **成对**，升级步骤见 `lints/README.md`（勿单独升任一侧，否则 ABI 不齐编译失败）。

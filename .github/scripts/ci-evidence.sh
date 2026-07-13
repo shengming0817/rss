@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  printf 'usage: %s <snapshot|ensure> <start|after-cache|after-build|before-save|after-save> --output <file> [--outcome <success|failure|cancelled|skipped>] <build/tools cache state options>\n' "$0" >&2
+  printf 'usage: %s <snapshot|ensure> <start|after-cache|after-build|before-save|after-save> --output <file> [--outcome <success|failure|cancelled|skipped>] <download/tools/compiler-cache state options>\n' "$0" >&2
   exit 2
 }
 
@@ -25,16 +25,31 @@ esac
 output=
 outcome=
 outcome_set=false
-build_restore_result=
-build_restored_footprint_bytes=
-build_save_mode=
-build_candidate_size_bytes=
-build_save_outcome=
+download_restore_result=
+download_restored_footprint_bytes=
+download_save_mode=
+download_candidate_size_bytes=
+download_save_outcome=
 tools_restore_result=
 tools_restored_footprint_bytes=
 tools_save_mode=
 tools_candidate_size_bytes=
 tools_save_outcome=
+compiler_cache_enabled=
+compiler_cache_version=
+compiler_cache_access=
+compiler_cache_requests=
+compiler_cache_hits=
+compiler_cache_misses=
+compiler_cache_non_cacheable=
+compiler_cache_error_restore=
+compiler_cache_error_stats=
+compiler_cache_error_cache_io=
+compiler_cache_error_no_requests=
+compiler_cache_error_measure=
+compiler_cache_error_save=
+cpu_time_ms=none
+peak_rss_bytes=none
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output)
@@ -48,16 +63,31 @@ while [ "$#" -gt 0 ]; do
       outcome_set=true
       shift 2
       ;;
-    --build-restore-result) [ "$#" -ge 2 ] || usage; build_restore_result=$2; shift 2 ;;
-    --build-restored-footprint-bytes) [ "$#" -ge 2 ] || usage; build_restored_footprint_bytes=$2; shift 2 ;;
-    --build-save-mode) [ "$#" -ge 2 ] || usage; build_save_mode=$2; shift 2 ;;
-    --build-candidate-size-bytes) [ "$#" -ge 2 ] || usage; build_candidate_size_bytes=$2; shift 2 ;;
-    --build-save-outcome) [ "$#" -ge 2 ] || usage; build_save_outcome=$2; shift 2 ;;
+    --download-restore-result) [ "$#" -ge 2 ] || usage; download_restore_result=$2; shift 2 ;;
+    --download-restored-footprint-bytes) [ "$#" -ge 2 ] || usage; download_restored_footprint_bytes=$2; shift 2 ;;
+    --download-save-mode) [ "$#" -ge 2 ] || usage; download_save_mode=$2; shift 2 ;;
+    --download-candidate-size-bytes) [ "$#" -ge 2 ] || usage; download_candidate_size_bytes=$2; shift 2 ;;
+    --download-save-outcome) [ "$#" -ge 2 ] || usage; download_save_outcome=$2; shift 2 ;;
     --tools-restore-result) [ "$#" -ge 2 ] || usage; tools_restore_result=$2; shift 2 ;;
     --tools-restored-footprint-bytes) [ "$#" -ge 2 ] || usage; tools_restored_footprint_bytes=$2; shift 2 ;;
     --tools-save-mode) [ "$#" -ge 2 ] || usage; tools_save_mode=$2; shift 2 ;;
     --tools-candidate-size-bytes) [ "$#" -ge 2 ] || usage; tools_candidate_size_bytes=$2; shift 2 ;;
     --tools-save-outcome) [ "$#" -ge 2 ] || usage; tools_save_outcome=$2; shift 2 ;;
+    --compiler-cache-enabled) [ "$#" -ge 2 ] || usage; compiler_cache_enabled=$2; shift 2 ;;
+    --compiler-cache-version) [ "$#" -ge 2 ] || usage; compiler_cache_version=$2; shift 2 ;;
+    --compiler-cache-access) [ "$#" -ge 2 ] || usage; compiler_cache_access=$2; shift 2 ;;
+    --compiler-cache-requests) [ "$#" -ge 2 ] || usage; compiler_cache_requests=$2; shift 2 ;;
+    --compiler-cache-hits) [ "$#" -ge 2 ] || usage; compiler_cache_hits=$2; shift 2 ;;
+    --compiler-cache-misses) [ "$#" -ge 2 ] || usage; compiler_cache_misses=$2; shift 2 ;;
+    --compiler-cache-non-cacheable) [ "$#" -ge 2 ] || usage; compiler_cache_non_cacheable=$2; shift 2 ;;
+    --compiler-cache-error-restore) [ "$#" -ge 2 ] || usage; compiler_cache_error_restore=$2; shift 2 ;;
+    --compiler-cache-error-stats) [ "$#" -ge 2 ] || usage; compiler_cache_error_stats=$2; shift 2 ;;
+    --compiler-cache-error-cache-io) [ "$#" -ge 2 ] || usage; compiler_cache_error_cache_io=$2; shift 2 ;;
+    --compiler-cache-error-no-requests) [ "$#" -ge 2 ] || usage; compiler_cache_error_no_requests=$2; shift 2 ;;
+    --compiler-cache-error-measure) [ "$#" -ge 2 ] || usage; compiler_cache_error_measure=$2; shift 2 ;;
+    --compiler-cache-error-save) [ "$#" -ge 2 ] || usage; compiler_cache_error_save=$2; shift 2 ;;
+    --cpu-time-ms) [ "$#" -ge 2 ] || usage; cpu_time_ms=$2; shift 2 ;;
+    --peak-rss-bytes) [ "$#" -ge 2 ] || usage; peak_rss_bytes=$2; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -71,21 +101,46 @@ if [ "$outcome_set" = true ]; then
   esac
 fi
 
+if [ "$compiler_cache_version" = none ]; then
+  compiler_cache_version_json=null
+else
+  compiler_cache_version_json=$(jq -Rn --arg value "$compiler_cache_version" '$value')
+fi
+if [ "$cpu_time_ms" = none ]; then cpu_time_ms_json=null; else cpu_time_ms_json=$cpu_time_ms; fi
+if [ "$peak_rss_bytes" = none ]; then peak_rss_bytes_json=null; else peak_rss_bytes_json=$peak_rss_bytes; fi
+
 validate_restore_result() { case "$1" in not-attempted|exact|prefix|miss|unknown) return 0 ;; *) usage ;; esac; }
 validate_save_mode() { case "$1" in writer|read-only) return 0 ;; *) usage ;; esac; }
 validate_save_outcome() { case "$1" in unknown|ineligible|eligible|skipped|attempted-success|attempted-failure) return 0 ;; *) usage ;; esac; }
 validate_bytes() { case "$1" in ''|*[!0-9]*) usage ;; esac; [ "$1" -le 9007199254740991 ] 2>/dev/null || usage; }
 
-validate_restore_result "$build_restore_result"
+validate_restore_result "$download_restore_result"
 validate_restore_result "$tools_restore_result"
-validate_save_mode "$build_save_mode"
+validate_save_mode "$download_save_mode"
 validate_save_mode "$tools_save_mode"
-validate_save_outcome "$build_save_outcome"
+validate_save_outcome "$download_save_outcome"
 validate_save_outcome "$tools_save_outcome"
-validate_bytes "$build_restored_footprint_bytes"
-validate_bytes "$build_candidate_size_bytes"
+validate_bytes "$download_restored_footprint_bytes"
+validate_bytes "$download_candidate_size_bytes"
 validate_bytes "$tools_restored_footprint_bytes"
 validate_bytes "$tools_candidate_size_bytes"
+case "$compiler_cache_enabled:$compiler_cache_version:$compiler_cache_access" in
+  false:none:disabled|true:0.15.0:local|true:0.15.0:remote-read-only|true:0.15.0:remote-read-write) ;;
+  *) usage ;;
+esac
+validate_bytes "$compiler_cache_requests"
+validate_bytes "$compiler_cache_hits"
+validate_bytes "$compiler_cache_misses"
+validate_bytes "$compiler_cache_non_cacheable"
+validate_bytes "$compiler_cache_error_restore"
+validate_bytes "$compiler_cache_error_stats"
+validate_bytes "$compiler_cache_error_cache_io"
+validate_bytes "$compiler_cache_error_no_requests"
+validate_bytes "$compiler_cache_error_measure"
+validate_bytes "$compiler_cache_error_save"
+validate_optional_bytes() { [ "$1" = none ] || validate_bytes "$1"; }
+validate_optional_bytes "$cpu_time_ms"
+validate_optional_bytes "$peak_rss_bytes"
 
 for dependency in jq mktemp mv date df; do
   command -v "$dependency" >/dev/null 2>&1 || die "required command unavailable: $dependency"
@@ -104,26 +159,37 @@ trap cleanup EXIT HUP INT TERM
 validate_document() {
   jq -e '
     keys == ["job","schemaVersion","snapshots"] and
-    .schemaVersion == 2 and
+    .schemaVersion == 3 and
     (.job | type == "object" and keys == ["job","repository","runAttempt","runId","runnerArch","runnerOs","workflow"] and ([.[] | type == "string"] | all)) and
     (.snapshots | type == "array") and
     ([.snapshots[] |
       type == "object" and
-      (keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","stage","toolVersions"]) and
+      (keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","resourceUsage","stage","toolVersions"]) and
       (.stage == "start" or .stage == "after-cache" or .stage == "after-build" or .stage == "before-save" or .stage == "after-save") and
       ((.stage == "after-build" and (.outcome == null or .outcome == "success" or .outcome == "failure" or .outcome == "cancelled" or .outcome == "skipped")) or (.stage != "after-build" and .outcome == null)) and
       (.recordedAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
       (.filesystem | type == "object" and keys == ["availableBytes","capacityBytes","usedBytes"] and ([.[] | type == "number" and . >= 0 and floor == .] | all)) and
-      (.directories | type == "array" and ([.[].path] == ["workspace","target","cargo-registry","cargo-git","rustup"]) and ([.[] | keys == ["path","sizeBytes"] and (.sizeBytes == null or ((.sizeBytes | type == "number") and .sizeBytes >= 0 and (.sizeBytes | floor) == .sizeBytes))] | all)) and
+      (.directories | type == "array" and ([.[].path] == ["workspace","target","sccache","cargo-registry","cargo-git","rustup"]) and ([.[] | keys == ["path","sizeBytes"] and (.sizeBytes == null or ((.sizeBytes | type == "number") and .sizeBytes >= 0 and (.sizeBytes | floor) == .sizeBytes))] | all)) and
       (.largestDirectories | type == "array" and length <= 20 and ([.[] | keys == ["path","sizeBytes"] and (.path | type == "string" and ((startswith("workspace/") and (startswith("workspace//") | not)) or (startswith("target/") and (startswith("target//") | not)))) and (.sizeBytes | type == "number") and .sizeBytes >= 0 and (.sizeBytes | floor) == .sizeBytes] | all)) and
-      (.cache | type == "object" and keys == ["build","tools"] and ([.[] |
+      (.cache | type == "object" and keys == ["compilerCache","download","tools"] and
+        ([.download,.tools | type == "object" and
         type == "object" and keys == ["candidateSizeBytes","restoreResult","restoredFootprintBytes","saveMode","saveOutcome"] and
         (.restoreResult == "not-attempted" or .restoreResult == "exact" or .restoreResult == "prefix" or .restoreResult == "miss" or .restoreResult == "unknown") and
         (.restoredFootprintBytes | type == "number" and . >= 0 and floor == .) and
         (.saveMode == "writer" or .saveMode == "read-only") and
         (.candidateSizeBytes | type == "number" and . >= 0 and floor == .) and
         (.saveOutcome == "unknown" or .saveOutcome == "ineligible" or .saveOutcome == "eligible" or .saveOutcome == "skipped" or .saveOutcome == "attempted-success" or .saveOutcome == "attempted-failure")
-      ] | all)) and
+        ] | all) and
+        (.compilerCache | type == "object" and keys == ["access","enabled","errors","hits","misses","nonCacheable","requests","version"] and
+          (.enabled | type == "boolean") and
+          ((.enabled == false and .version == null and .access == "disabled") or
+           (.enabled == true and .version == "0.15.0" and (.access == "local" or .access == "remote-read-only" or .access == "remote-read-write"))) and
+          ([.requests,.hits,.misses,.nonCacheable | type == "number" and . >= 0 and floor == .] | all) and
+          (.errors | type == "object" and keys == ["cacheIo","measure","noRequests","restore","save","stats"] and
+            ([.[] | type == "number" and . >= 0 and floor == .] | all)) and
+          .hits + .misses <= .requests)) and
+      (.resourceUsage | type == "object" and keys == ["cpuTimeMs","peakRssBytes"] and
+        ([.[] | . == null or (type == "number" and . >= 0 and floor == .)] | all)) and
       (.toolVersions | type == "object" and keys == ["cargo","git","rustc"] and ([.[] | . == null or type == "string"] | all)) and
       (.errors | type == "array" and ([.[] | type == "string"] | all))
     ] | all) and
@@ -157,16 +223,31 @@ if [ "$operation" = ensure ]; then
     missing_stage=${stages[$current_count]}
     snapshot_args=(
       snapshot "$missing_stage" --output "$output"
-      --build-restore-result "$build_restore_result"
-      --build-restored-footprint-bytes "$build_restored_footprint_bytes"
-      --build-save-mode "$build_save_mode"
-      --build-candidate-size-bytes "$build_candidate_size_bytes"
-      --build-save-outcome "$build_save_outcome"
+      --download-restore-result "$download_restore_result"
+      --download-restored-footprint-bytes "$download_restored_footprint_bytes"
+      --download-save-mode "$download_save_mode"
+      --download-candidate-size-bytes "$download_candidate_size_bytes"
+      --download-save-outcome "$download_save_outcome"
       --tools-restore-result "$tools_restore_result"
       --tools-restored-footprint-bytes "$tools_restored_footprint_bytes"
       --tools-save-mode "$tools_save_mode"
       --tools-candidate-size-bytes "$tools_candidate_size_bytes"
       --tools-save-outcome "$tools_save_outcome"
+      --compiler-cache-enabled "$compiler_cache_enabled"
+      --compiler-cache-version "$compiler_cache_version"
+      --compiler-cache-access "$compiler_cache_access"
+      --compiler-cache-requests "$compiler_cache_requests"
+      --compiler-cache-hits "$compiler_cache_hits"
+      --compiler-cache-misses "$compiler_cache_misses"
+      --compiler-cache-non-cacheable "$compiler_cache_non_cacheable"
+      --compiler-cache-error-restore "$compiler_cache_error_restore"
+      --compiler-cache-error-stats "$compiler_cache_error_stats"
+      --compiler-cache-error-cache-io "$compiler_cache_error_cache_io"
+      --compiler-cache-error-no-requests "$compiler_cache_error_no_requests"
+      --compiler-cache-error-measure "$compiler_cache_error_measure"
+      --compiler-cache-error-save "$compiler_cache_error_save"
+      --cpu-time-ms "$cpu_time_ms"
+      --peak-rss-bytes "$peak_rss_bytes"
     )
     if [ "$missing_stage" = after-build ]; then
       snapshot_args+=(--outcome "${outcome:-skipped}")
@@ -237,8 +318,10 @@ EOF
 cargo_home=${CARGO_HOME:-${HOME:-}/.cargo}
 rustup_home=${RUSTUP_HOME:-${HOME:-}/.rustup}
 target_dir=${CARGO_TARGET_DIR:-$workspace/.cache/cargo-target}
+sccache_dir=${SCCACHE_DIR:-${HOME:-}/.cache/sccache}
 append_directory workspace "$workspace"
 append_directory target "$target_dir"
+append_directory sccache "$sccache_dir"
 append_directory cargo-registry "$cargo_home/registry"
 append_directory cargo-git "$cargo_home/git"
 append_directory rustup "$rustup_home"
@@ -326,17 +409,32 @@ snapshot=$(jq -cn \
   --argjson cargo "$cargo_version" \
   --argjson git "$git_version" \
   --argjson errors "$errors" \
-  --arg buildRestoreResult "$build_restore_result" \
-  --argjson buildRestoredFootprintBytes "$build_restored_footprint_bytes" \
-  --arg buildSaveMode "$build_save_mode" \
-  --argjson buildCandidateSizeBytes "$build_candidate_size_bytes" \
-  --arg buildSaveOutcome "$build_save_outcome" \
+  --arg downloadRestoreResult "$download_restore_result" \
+  --argjson downloadRestoredFootprintBytes "$download_restored_footprint_bytes" \
+  --arg downloadSaveMode "$download_save_mode" \
+  --argjson downloadCandidateSizeBytes "$download_candidate_size_bytes" \
+  --arg downloadSaveOutcome "$download_save_outcome" \
   --arg toolsRestoreResult "$tools_restore_result" \
   --argjson toolsRestoredFootprintBytes "$tools_restored_footprint_bytes" \
   --arg toolsSaveMode "$tools_save_mode" \
   --argjson toolsCandidateSizeBytes "$tools_candidate_size_bytes" \
   --arg toolsSaveOutcome "$tools_save_outcome" \
-  '{stage:$stage,outcome:$outcome,recordedAt:$recordedAt,filesystem:{capacityBytes:$capacity,usedBytes:$used,availableBytes:$available},directories:$directories,largestDirectories:$largest,cache:{build:{restoreResult:$buildRestoreResult,restoredFootprintBytes:$buildRestoredFootprintBytes,saveMode:$buildSaveMode,candidateSizeBytes:$buildCandidateSizeBytes,saveOutcome:$buildSaveOutcome},tools:{restoreResult:$toolsRestoreResult,restoredFootprintBytes:$toolsRestoredFootprintBytes,saveMode:$toolsSaveMode,candidateSizeBytes:$toolsCandidateSizeBytes,saveOutcome:$toolsSaveOutcome}},toolVersions:{rustc:$rustc,cargo:$cargo,git:$git},errors:$errors}') || die 'cannot construct snapshot'
+  --argjson compilerCacheEnabled "$compiler_cache_enabled" \
+  --argjson compilerCacheVersion "$compiler_cache_version_json" \
+  --arg compilerCacheAccess "$compiler_cache_access" \
+  --argjson compilerCacheRequests "$compiler_cache_requests" \
+  --argjson compilerCacheHits "$compiler_cache_hits" \
+  --argjson compilerCacheMisses "$compiler_cache_misses" \
+  --argjson compilerCacheNonCacheable "$compiler_cache_non_cacheable" \
+  --argjson compilerCacheErrorRestore "$compiler_cache_error_restore" \
+  --argjson compilerCacheErrorStats "$compiler_cache_error_stats" \
+  --argjson compilerCacheErrorCacheIo "$compiler_cache_error_cache_io" \
+  --argjson compilerCacheErrorNoRequests "$compiler_cache_error_no_requests" \
+  --argjson compilerCacheErrorMeasure "$compiler_cache_error_measure" \
+  --argjson compilerCacheErrorSave "$compiler_cache_error_save" \
+  --argjson cpuTimeMs "$cpu_time_ms_json" \
+  --argjson peakRssBytes "$peak_rss_bytes_json" \
+  '{stage:$stage,outcome:$outcome,recordedAt:$recordedAt,filesystem:{capacityBytes:$capacity,usedBytes:$used,availableBytes:$available},directories:$directories,largestDirectories:$largest,cache:{download:{restoreResult:$downloadRestoreResult,restoredFootprintBytes:$downloadRestoredFootprintBytes,saveMode:$downloadSaveMode,candidateSizeBytes:$downloadCandidateSizeBytes,saveOutcome:$downloadSaveOutcome},tools:{restoreResult:$toolsRestoreResult,restoredFootprintBytes:$toolsRestoredFootprintBytes,saveMode:$toolsSaveMode,candidateSizeBytes:$toolsCandidateSizeBytes,saveOutcome:$toolsSaveOutcome},compilerCache:{enabled:$compilerCacheEnabled,version:$compilerCacheVersion,access:$compilerCacheAccess,requests:$compilerCacheRequests,hits:$compilerCacheHits,misses:$compilerCacheMisses,nonCacheable:$compilerCacheNonCacheable,errors:{restore:$compilerCacheErrorRestore,stats:$compilerCacheErrorStats,cacheIo:$compilerCacheErrorCacheIo,noRequests:$compilerCacheErrorNoRequests,measure:$compilerCacheErrorMeasure,save:$compilerCacheErrorSave}}},resourceUsage:{cpuTimeMs:$cpuTimeMs,peakRssBytes:$peakRssBytes},toolVersions:{rustc:$rustc,cargo:$cargo,git:$git},errors:$errors}') || die 'cannot construct snapshot'
 
 if [ -e "$output" ]; then
   jq --argjson snapshot "$snapshot" '.snapshots += [$snapshot]' "$output" 2>/dev/null >"$tmp" || die 'cannot append snapshot'
@@ -350,7 +448,7 @@ else
     --arg runnerOs "${RUNNER_OS:-}" \
     --arg runnerArch "${RUNNER_ARCH:-}" \
     --argjson snapshot "$snapshot" \
-    '{schemaVersion:2,job:{repository:$repository,workflow:$workflow,job:$job,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
+    '{schemaVersion:3,job:{repository:$repository,workflow:$workflow,job:$job,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
 fi
 
 validate_document "$tmp" || die 'constructed evidence failed validation'

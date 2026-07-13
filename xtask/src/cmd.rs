@@ -4,7 +4,7 @@
 //! codegen 派生**对环境无关**。
 //!
 //! 背景：`cargo xtask …` = `cargo run -p xtask`，子进程会继承父 cargo 设的 toolchain 环境：
-//! - **toolchain 选择**（`RUSTUP_TOOLCHAIN`/`RUSTC`/`RUSTDOC`/`RUSTC_WRAPPER`）会**覆盖** per-dir
+//! - **toolchain 选择**（`RUSTUP_TOOLCHAIN`/`RUSTC`/`RUSTDOC` 及 Cargo 的 rustc wrapper 家族）会**覆盖** per-dir
 //!   `rust-toolchain.toml`（rustup 优先级 `RUSTUP_TOOLCHAIN` > `rust-toolchain.toml`），打破根 stable
 //!   1.96 与 `lints/` nightly 隔离；并污染 `cargo-public-api` 内部 `rustup run nightly cargo rustdoc`
 //!   的 nightly rustdoc-json 生成（其先 `cargo --version` 探测 stable 再强制 nightly，继承的
@@ -37,9 +37,15 @@
 //!   才闭环。dylint 未选用——funnel 是 xtask-local，dylint workspace-wide 会对其它 crate 合法
 //!   `Command::new("cargo")` 误报、须额外 crate 作用域裁剪；AST 扫描天然限定 `xtask/src`，粒度恰好等于
 //!   不变式边界。Hard 不可达（std `Command::new` 无法 seal）。
+//! INVARIANT: COMPILER-CACHE-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "CompilerCachePolicy closed enum excludes unvalidated wrappers" }——Cargo/nextest 只能处于禁用缓存或使用已验证 sccache 两种状态。
+//! INVARIANT: COMPILER-CACHE-POLICY-02 { level = "Medium", exec = "manual/opt-in", source = "code", synthetic_red = "compiler_cache_validates_canonical_absolute_exact_version", anti_vacuity = "enabled_policy_overrides_ambient_wrapper_and_incremental" }——缓存候选须为 canonical absolute executable 且版本精确，启用后统一覆盖 wrapper/incremental/fail-open I/O policy。
 
-use std::path::Path;
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 #[path = "nextest.rs"]
 pub(crate) mod nextest;
@@ -53,6 +59,9 @@ pub(crate) const STRIPPED_ENV: &[&str] = &[
     "RUSTC",
     "RUSTDOC",
     "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
     // 编译器行为：RUSTC_BOOTSTRAP=1 让 stable 解锁 nightly 特性 ⇒ 改变 clippy/build 判定，须清。
     "RUSTC_BOOTSTRAP",
     // 编译 flag（静默改 `-D warnings` 判定 / 经 cfg-gate 改 public-api 符号面）
@@ -87,6 +96,162 @@ fn clean_cmd(program: &str, args: &[&str], env: &[(&str, &str)], cwd: Option<&Pa
         cmd.env(k, v);
     }
     cmd
+}
+
+const COMPILER_CACHE_MODE_ENV: &str = "RSS_COMPILER_CACHE";
+const INTERNAL_SCCACHE_PATH_ENV: &str = "RSS_INTERNAL_SCCACHE_PATH";
+const SCCACHE_VERSION: &str = env!("RSS_TOOL_VERSION_SCCACHE");
+const COMPILER_WRAPPER_ENV: &[&str] = &[
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+];
+
+mod validated_sccache {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct ValidatedSccache(PathBuf);
+
+    impl ValidatedSccache {
+        pub(super) fn validate(candidate: &Path) -> anyhow::Result<Self> {
+            if !candidate.is_absolute() {
+                anyhow::bail!("sccache 路径必须是绝对路径: {}", candidate.display());
+            }
+            let metadata = fs::symlink_metadata(candidate).map_err(|error| {
+                anyhow::anyhow!("读取 sccache 元数据失败 {}: {error}", candidate.display())
+            })?;
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("sccache 路径不得是符号链接: {}", candidate.display());
+            }
+            if !metadata.is_file() || !is_executable(&metadata) {
+                anyhow::bail!("sccache 必须是可执行普通文件: {}", candidate.display());
+            }
+            let canonical = fs::canonicalize(candidate).map_err(|error| {
+                anyhow::anyhow!("sccache 路径不可解析 {}: {error}", candidate.display())
+            })?;
+            if canonical != candidate {
+                anyhow::bail!("sccache 路径必须是 canonical path: {}", candidate.display());
+            }
+            let program = canonical
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("sccache canonical path 必须是 UTF-8"))?;
+            let output = clean_cmd(program, &["--version"], &[], None)
+                .output()
+                .map_err(|error| anyhow::anyhow!("执行 sccache 版本探测失败: {error}"))?;
+            if !output.status.success() {
+                anyhow::bail!("sccache 版本探测失败: exit={}", output.status);
+            }
+            let version = String::from_utf8(output.stdout)
+                .map_err(|_| anyhow::anyhow!("sccache --version 输出必须是 UTF-8"))?;
+            let expected = format!("sccache {SCCACHE_VERSION}");
+            if version != expected && version != format!("{expected}\n") {
+                anyhow::bail!(
+                    "sccache 版本不匹配：要求 {SCCACHE_VERSION}，实际 {:?}",
+                    version
+                );
+            }
+            Ok(Self(canonical))
+        }
+
+        pub(super) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+}
+
+use validated_sccache::ValidatedSccache;
+
+/// xtask 内部 Cargo 的编译缓存状态闭集。`Sccache` 变体仅由 [`Self::resolve`] 在完成路径、权限和
+/// 真实版本探测后构造；调用点无法表达“未经验证的 wrapper”状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompilerCachePolicy {
+    Disabled,
+    Sccache(ValidatedSccache),
+}
+
+impl CompilerCachePolicy {
+    fn from_env() -> anyhow::Result<Self> {
+        Self::resolve(
+            env::var_os(COMPILER_CACHE_MODE_ENV).as_deref(),
+            env::var_os(INTERNAL_SCCACHE_PATH_ENV).as_deref(),
+            env::var_os("PATH").as_deref(),
+        )
+    }
+
+    fn resolve(
+        mode: Option<&OsStr>,
+        internal_candidate: Option<&OsStr>,
+        path: Option<&OsStr>,
+    ) -> anyhow::Result<Self> {
+        match mode.and_then(OsStr::to_str).unwrap_or("auto") {
+            "off" => return Ok(Self::Disabled),
+            "auto" => {}
+            value => anyhow::bail!("{COMPILER_CACHE_MODE_ENV} 仅允许 auto|off，收到 {value:?}"),
+        }
+        if mode.is_some_and(|value| value.to_str().is_none()) {
+            anyhow::bail!("{COMPILER_CACHE_MODE_ENV} 必须是 UTF-8 的 auto|off");
+        }
+
+        if let Some(candidate) = internal_candidate {
+            let candidate = Path::new(candidate);
+            if !candidate.is_absolute() {
+                anyhow::bail!("{INTERNAL_SCCACHE_PATH_ENV} 必须是绝对路径");
+            }
+            return ValidatedSccache::validate(candidate).map(Self::Sccache);
+        }
+
+        Ok(find_valid_sccache_on_path(path).map_or(Self::Disabled, Self::Sccache))
+    }
+
+    fn apply(&self, command: &mut Command) {
+        // 位于 clean_cmd 的 caller 侧，确保任何显式 env 也不能绕过闭合 policy。
+        for variable in COMPILER_WRAPPER_ENV {
+            command.env_remove(variable);
+        }
+        if let Self::Sccache(wrapper) = self {
+            command.env("RUSTC_WRAPPER", wrapper.path());
+            command.env("CARGO_INCREMENTAL", "0");
+            command.env("SCCACHE_IGNORE_SERVER_IO_ERROR", "1");
+        }
+    }
+}
+
+fn find_valid_sccache_on_path(path: Option<&OsStr>) -> Option<ValidatedSccache> {
+    env::split_paths(path?)
+        .filter_map(|directory| fs::canonicalize(directory).ok())
+        .map(|physical_directory| physical_directory.join("sccache"))
+        .find_map(|candidate| ValidatedSccache::validate(&candidate).ok())
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
+fn apply_compiler_cache_policy(command: &mut Command) {
+    static POLICY: OnceLock<Result<CompilerCachePolicy, String>> = OnceLock::new();
+    match POLICY.get_or_init(|| CompilerCachePolicy::from_env().map_err(|error| error.to_string()))
+    {
+        Ok(policy) => policy.apply(command),
+        Err(error) => {
+            eprintln!("compiler-cache policy 配置错误: {error}");
+            std::process::exit(78);
+        }
+    }
+}
+
+fn cargo_clean_cmd(args: &[&str], env: &[(&str, &str)], cwd: Option<&Path>) -> Command {
+    let mut command = clean_cmd("cargo", args, env, cwd);
+    apply_compiler_cache_policy(&mut command);
+    command
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +355,7 @@ pub(crate) fn cargo_cmd(
         argv.push("report");
     }
     argv.extend_from_slice(args);
-    clean_cmd("cargo", &argv, env, cwd)
+    cargo_clean_cmd(&argv, env, cwd)
 }
 
 /// 该 capability 与 spawn API 均为 cmd carrier 私有；仅子模块 `nextest` 可使用。
@@ -216,12 +381,12 @@ fn nextest_cmd(
     let mut argv = Vec::with_capacity(prefix.len() + args.len());
     argv.extend_from_slice(prefix);
     argv.extend_from_slice(args);
-    clean_cmd("cargo", &argv, env, cwd)
+    cargo_clean_cmd(&argv, env, cwd)
 }
 
 /// 探测闭合的第三方 cargo 子命令（静默，经 [`clean_cmd`] 清洗环境）。
 pub(crate) fn tool_available(tool: CargoSubcommand) -> bool {
-    clean_cmd("cargo", &[tool.as_str(), "--version"], &[], None)
+    cargo_clean_cmd(&[tool.as_str(), "--version"], &[], None)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -230,7 +395,7 @@ pub(crate) fn tool_available(tool: CargoSubcommand) -> bool {
 }
 
 fn nextest_available(_capability: NextestCapability) -> bool {
-    clean_cmd("cargo", &["nextest", "--version"], &[], None)
+    cargo_clean_cmd(&["nextest", "--version"], &[], None)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -244,6 +409,193 @@ mod tests {
     use rstest::rstest;
     use std::ffi::OsStr;
     use std::path::PathBuf;
+
+    // ---- COMPILER-CACHE-POLICY-01：闭合 policy + exact executable validation ----
+
+    #[test]
+    fn compiler_cache_mode_is_closed_and_auto_without_candidate_is_disabled() -> anyhow::Result<()>
+    {
+        assert_eq!(
+            CompilerCachePolicy::resolve(None, None, None)?,
+            CompilerCachePolicy::Disabled
+        );
+        assert_eq!(
+            CompilerCachePolicy::resolve(
+                Some(OsStr::new("off")),
+                Some(OsStr::new("forged/relative")),
+                None,
+            )?,
+            CompilerCachePolicy::Disabled
+        );
+        let Err(error) = CompilerCachePolicy::resolve(Some(OsStr::new("on")), None, None) else {
+            anyhow::bail!("未知 compiler-cache mode 应失败");
+        };
+        assert!(error.to_string().contains("RSS_COMPILER_CACHE"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_cache_validates_canonical_absolute_exact_version() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = crate::testutil::unique_tmp("compiler-cache-policy");
+        let fixture_name = unique
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("临时 sccache fixture 缺少目录名"))?;
+        let relative_root = PathBuf::from(".cache").join(fixture_name);
+        std::fs::create_dir_all(&relative_root)?;
+        let root = std::fs::canonicalize(&relative_root)?;
+        let exact = root.join("sccache");
+        std::fs::write(&exact, "#!/bin/sh\nprintf 'sccache 0.15.0\\n'\n")?;
+        let mut permissions = std::fs::metadata(&exact)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&exact, permissions)?;
+
+        let policy =
+            CompilerCachePolicy::resolve(Some(OsStr::new("auto")), Some(exact.as_os_str()), None)?;
+        let CompilerCachePolicy::Sccache(validated) = &policy else {
+            anyhow::bail!("合法 sccache 应产生 enabled policy");
+        };
+        assert_eq!(validated.path(), std::fs::canonicalize(&exact)?);
+        assert_eq!(
+            CompilerCachePolicy::resolve(None, None, Some(root.as_os_str()))?,
+            policy
+        );
+
+        let normalization_child = root.join("normalization-child");
+        std::fs::create_dir_all(&normalization_child)?;
+        let noncanonical_root = normalization_child.join("..");
+        let relative_link =
+            relative_root.with_file_name(format!("{}-link", fixture_name.to_string_lossy()));
+        std::os::unix::fs::symlink(&root, &relative_link)?;
+        for (label, directory) in [
+            ("relative", relative_root.as_path()),
+            ("noncanonical", noncanonical_root.as_path()),
+            ("directory-symlink", relative_link.as_path()),
+        ] {
+            let candidate_path = env::join_paths([directory])?;
+            assert_eq!(
+                CompilerCachePolicy::resolve(None, None, Some(candidate_path.as_os_str()))?,
+                policy,
+                "auto 须将 {label} PATH 目录规范化到同一物理 executable"
+            );
+        }
+
+        let invalid_dir = root.join("invalid-first");
+        std::fs::create_dir_all(&invalid_dir)?;
+        let invalid = invalid_dir.join("sccache");
+        std::fs::write(&invalid, "#!/bin/sh\nprintf 'sccache 0.14.0\\n'\n")?;
+        permissions = std::fs::metadata(&invalid)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&invalid, permissions)?;
+        let invalid_then_valid = env::join_paths([invalid_dir.as_path(), root.as_path()])?;
+        assert_eq!(
+            CompilerCachePolicy::resolve(None, None, Some(invalid_then_valid.as_os_str()))?,
+            policy,
+            "auto 须跳过 PATH 中的坏候选并继续查找"
+        );
+        let invalid_only = env::join_paths([invalid_dir.as_path()])?;
+        assert_eq!(
+            CompilerCachePolicy::resolve(None, None, Some(invalid_only.as_os_str()))?,
+            CompilerCachePolicy::Disabled,
+            "auto 无合法 PATH 候选时须安全禁用"
+        );
+
+        let relative = Path::new("relative/sccache");
+        assert!(CompilerCachePolicy::resolve(None, Some(relative.as_os_str()), None).is_err());
+
+        let symlink = root.join("sccache-link");
+        std::os::unix::fs::symlink(&exact, &symlink)?;
+        assert!(CompilerCachePolicy::resolve(None, Some(symlink.as_os_str()), None).is_err());
+
+        std::fs::write(&exact, "#!/bin/sh\nprintf 'sccache 0.14.0\\n'\n")?;
+        assert!(CompilerCachePolicy::resolve(None, Some(exact.as_os_str()), None).is_err());
+
+        permissions = std::fs::metadata(&exact)?.permissions();
+        permissions.set_mode(0o644);
+        std::fs::set_permissions(&exact, permissions)?;
+        assert!(CompilerCachePolicy::resolve(None, Some(exact.as_os_str()), None).is_err());
+        std::fs::remove_file(relative_link)?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enabled_policy_overrides_ambient_wrapper_and_incremental() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::testutil::unique_tmp("compiler-cache-apply");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        let wrapper = root.join("sccache");
+        std::fs::write(&wrapper, "#!/bin/sh\nprintf 'sccache 0.15.0\\n'\n")?;
+        let mut permissions = std::fs::metadata(&wrapper)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions)?;
+        let policy = CompilerCachePolicy::resolve(
+            Some(OsStr::new("auto")),
+            Some(wrapper.as_os_str()),
+            None,
+        )?;
+        let explicit_wrappers = [
+            ("RUSTC_WRAPPER", "/tmp/forged"),
+            ("RUSTC_WORKSPACE_WRAPPER", "/tmp/forged-workspace"),
+            ("CARGO_BUILD_RUSTC_WRAPPER", "/tmp/forged-config"),
+            (
+                "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+                "/tmp/forged-config-workspace",
+            ),
+        ];
+        let mut command = clean_cmd(
+            "cargo",
+            &["check"],
+            &[
+                explicit_wrappers[0],
+                explicit_wrappers[1],
+                explicit_wrappers[2],
+                explicit_wrappers[3],
+                ("CARGO_INCREMENTAL", "1"),
+                ("SCCACHE_IGNORE_SERVER_IO_ERROR", "0"),
+            ],
+            None,
+        );
+        policy.apply(&mut command);
+        let envs = command.get_envs().collect::<Vec<_>>();
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new("RUSTC_WRAPPER") && *value == Some(wrapper.as_os_str())
+        }));
+        for stripped in [
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        ] {
+            assert!(
+                envs.iter()
+                    .any(|(key, value)| { *key == OsStr::new(stripped) && value.is_none() })
+            );
+        }
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new("CARGO_INCREMENTAL") && *value == Some(OsStr::new("0"))
+        }));
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new("SCCACHE_IGNORE_SERVER_IO_ERROR") && *value == Some(OsStr::new("1"))
+        }));
+
+        let mut disabled = clean_cmd("cargo", &["check"], &explicit_wrappers, None);
+        CompilerCachePolicy::Disabled.apply(&mut disabled);
+        let disabled_envs = disabled.get_envs().collect::<Vec<_>>();
+        for stripped in COMPILER_WRAPPER_ENV {
+            assert!(
+                disabled_envs
+                    .iter()
+                    .any(|(key, value)| { *key == OsStr::new(stripped) && value.is_none() })
+            );
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     // ---- CMD-ENV-CLEAN-01：clean_cmd 清洗 ambient + 显式 env 重设 ----
 

@@ -10,6 +10,8 @@ CATALOG=$SCRIPT_DIR/ci-tool-catalog.txt
 usage() {
   printf '%s\n' \
     "usage: $0 specs --lane <lane|all> --backend <install-action|binstall|all>" \
+    "       $0 sccache-spec" \
+    "       $0 verify-sccache --candidate <absolute-sccache-path>" \
     "       $0 verify --mode <fresh|cache> --lane <lane> --root <absolute-profile-tool-root>" >&2
   exit 2
 }
@@ -68,6 +70,7 @@ lane_has_tool() {
   lane=$1 name=$2
   case "$lane:$name" in
     all:* | \
+    *:sccache | \
     ci-core-prerequisites:cargo-dylint | ci-core-prerequisites:dylint-link | \
     ci-core-tests:cargo-nextest | \
     ci-security:cargo-deny | ci-security:cargo-audit | \
@@ -91,7 +94,7 @@ validate_catalog() {
       *) die 'catalog backend and binary path disagree' ;;
     esac
     case "$relative" in *//*|*/./*|*/../*|*/..|/*) die 'invalid catalog binary path' ;; esac
-    case "$probe" in nextest|llvm-cov|dylint|direct|receipt) ;; *) die 'invalid catalog probe' ;; esac
+    case "$probe" in nextest|llvm-cov|dylint|direct|receipt|sccache) ;; *) die 'invalid catalog probe' ;; esac
     case "$seen" in *"|$name|"*) die 'duplicate catalog tool' ;; esac
     seen="$seen$name|"
   done <<EOF
@@ -108,6 +111,24 @@ selected_rows() {
   done <<EOF
 $(catalog)
 EOF
+}
+
+sccache_row() {
+  row=''
+  while IFS='|' read -r name version backend relative probe; do
+    [ "$name" = sccache ] || continue
+    [ "$probe" = sccache ] || die 'sccache catalog row must use the sccache probe'
+    row="$name|$version|$backend|$relative|$probe"
+  done <<EOF
+$(catalog)
+EOF
+  [ -n "$row" ] || die 'sccache is missing from the tool catalog'
+  printf '%s\n' "$row"
+}
+
+emit_sccache_spec() {
+  [ "$#" -eq 0 ] || usage
+  sccache_row
 }
 
 emit_specs() {
@@ -203,6 +224,47 @@ capture_probe() {
   printf '%s\n' "$output"
 }
 
+verify_sccache_version() {
+  binary=$1 name=$2 version=$3
+  output=$(capture_probe "$binary" "$name@$version" --version)
+  [ "$output" = "sccache $version" ] || die "tool version mismatch: $name@$version"
+}
+
+verify_sccache_candidate() {
+  candidate=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --candidate) [ "$#" -ge 2 ] || usage; candidate=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  case "$candidate" in /*) ;; *) die 'sccache candidate must be an absolute path' ;; esac
+  case "$candidate" in *//*|*/./*|*/.|*/../*|*/..) die 'sccache candidate is not normalized' ;; esac
+  [ -e "$candidate" ] || [ -L "$candidate" ] || die 'sccache candidate is unavailable'
+  [ ! -L "$candidate" ] || die 'sccache candidate must not be a symlink'
+  [ -f "$candidate" ] || die 'sccache candidate is not a regular file'
+  [ -x "$candidate" ] || die 'sccache candidate is not executable'
+
+  directory=${candidate%/*}
+  [ -n "$directory" ] || directory=/
+  basename=${candidate##*/}
+  physical_directory=$(CDPATH='' cd -- "$directory" 2>/dev/null && pwd -P) ||
+    die 'sccache candidate directory cannot be resolved'
+  if [ "$physical_directory" = / ]; then
+    canonical=/$basename
+  else
+    canonical=$physical_directory/$basename
+  fi
+  [ "$candidate" = "$canonical" ] || die 'sccache candidate is not canonical'
+
+  row=$(sccache_row)
+  IFS='|' read -r name version backend relative probe <<EOF
+$row
+EOF
+  verify_sccache_version "$canonical" "$name" "$version"
+  printf '%s\n' "$canonical"
+}
+
 verify_nextest_output() {
   version=$1 output=$2
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 5 ] || return 1
@@ -258,6 +320,9 @@ fresh_probe() {
     direct)
       output=$(capture_probe "$binary" "$spec" --version)
       verify_direct_output "$name" "$version" "$output" || die "tool version mismatch: $spec"
+      ;;
+    sccache)
+      verify_sccache_version "$binary" "$name" "$version"
       ;;
     receipt)
       verify_receipt "$root" "$name" "$version" || die "tool install receipt mismatch: $spec"
@@ -362,6 +427,8 @@ command_name=$1
 shift
 case "$command_name" in
   specs) emit_specs "$@" ;;
+  sccache-spec) emit_sccache_spec "$@" ;;
+  verify-sccache) verify_sccache_candidate "$@" ;;
   verify) verify_set "$@" ;;
   *) usage ;;
 esac

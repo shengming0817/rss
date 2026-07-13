@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "job": {
     "repository": "rss",
     "workflow": "CI",
@@ -18,15 +18,18 @@
       "directories": [
         { "path": "workspace", "sizeBytes": 100 },
         { "path": "target", "sizeBytes": 0 },
+        { "path": "sccache", "sizeBytes": 0 },
         { "path": "cargo-registry", "sizeBytes": 0 },
         { "path": "cargo-git", "sizeBytes": 0 },
         { "path": "rustup", "sizeBytes": 0 }
       ],
       "largestDirectories": [],
       "cache": {
-        "build": { "restoreResult": "not-attempted", "restoredFootprintBytes": 0, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" },
+        "compilerCache": { "enabled": true, "version": "0.15.0", "access": "remote-read-only", "requests": 0, "hits": 0, "misses": 0, "nonCacheable": 0, "errors": { "restore": 0, "stats": 0, "cacheIo": 0, "noRequests": 0, "measure": 0, "save": 0 } },
+        "download": { "restoreResult": "not-attempted", "restoredFootprintBytes": 0, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" },
         "tools": { "restoreResult": "not-attempted", "restoredFootprintBytes": 0, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" }
       },
+      "resourceUsage": { "cpuTimeMs": null, "peakRssBytes": null },
       "toolVersions": { "rustc": "rustc", "cargo": "cargo", "git": "git" },
       "errors": []
     },
@@ -38,15 +41,18 @@
       "directories": [
         { "path": "workspace", "sizeBytes": 100 },
         { "path": "target", "sizeBytes": 50 },
+        { "path": "sccache", "sizeBytes": 1000 },
         { "path": "cargo-registry", "sizeBytes": 0 },
         { "path": "cargo-git", "sizeBytes": 0 },
         { "path": "rustup", "sizeBytes": 0 }
       ],
       "largestDirectories": [],
       "cache": {
-        "build": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" },
+        "compilerCache": { "enabled": true, "version": "0.15.0", "access": "remote-read-only", "requests": 5, "hits": 1, "misses": 3, "nonCacheable": 1, "errors": { "restore": 0, "stats": 0, "cacheIo": 0, "noRequests": 0, "measure": 0, "save": 0 } },
+        "download": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" },
         "tools": { "restoreResult": "exact", "restoredFootprintBytes": 500, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" }
       },
+      "resourceUsage": { "cpuTimeMs": null, "peakRssBytes": null },
       "toolVersions": { "rustc": "rustc", "cargo": "cargo", "git": "git" },
       "errors": []
     },
@@ -58,15 +64,18 @@
       "directories": [
         { "path": "workspace", "sizeBytes": 100 },
         { "path": "target", "sizeBytes": 100 },
+        { "path": "sccache", "sizeBytes": 2000 },
         { "path": "cargo-registry", "sizeBytes": 0 },
         { "path": "cargo-git", "sizeBytes": 0 },
         { "path": "rustup", "sizeBytes": 0 }
       ],
       "largestDirectories": [],
       "cache": {
-        "build": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" },
+        "compilerCache": { "enabled": true, "version": "0.15.0", "access": "remote-read-only", "requests": 12, "hits": 6, "misses": 4, "nonCacheable": 2, "errors": { "restore": 0, "stats": 0, "cacheIo": 0, "noRequests": 0, "measure": 0, "save": 0 } },
+        "download": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" },
         "tools": { "restoreResult": "exact", "restoredFootprintBytes": 500, "saveMode": "read-only", "candidateSizeBytes": 0, "saveOutcome": "unknown" }
       },
+      "resourceUsage": { "cpuTimeMs": 20000, "peakRssBytes": 104857600 },
       "toolVersions": { "rustc": "rustc", "cargo": "cargo", "git": "git" },
       "errors": []
     },
@@ -78,15 +87,18 @@
       "directories": [
         { "path": "workspace", "sizeBytes": 100 },
         { "path": "target", "sizeBytes": 100 },
+        { "path": "sccache", "sizeBytes": 2000 },
         { "path": "cargo-registry", "sizeBytes": 0 },
         { "path": "cargo-git", "sizeBytes": 0 },
         { "path": "rustup", "sizeBytes": 0 }
       ],
       "largestDirectories": [],
       "cache": {
-        "build": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 1000, "saveOutcome": "ineligible" },
+        "compilerCache": { "enabled": true, "version": "0.15.0", "access": "remote-read-only", "requests": 12, "hits": 6, "misses": 4, "nonCacheable": 2, "errors": { "restore": 0, "stats": 0, "cacheIo": 0, "noRequests": 0, "measure": 0, "save": 0 } },
+        "download": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 1000, "saveOutcome": "ineligible" },
         "tools": { "restoreResult": "exact", "restoredFootprintBytes": 500, "saveMode": "read-only", "candidateSizeBytes": 500, "saveOutcome": "skipped" }
       },
+      "resourceUsage": { "cpuTimeMs": 20000, "peakRssBytes": 104857600 },
       "toolVersions": { "rustc": "rustc", "cargo": "cargo", "git": "git" },
       "errors": []
     },
@@ -98,15 +110,18 @@
       "directories": [
         { "path": "workspace", "sizeBytes": 100 },
         { "path": "target", "sizeBytes": 100 },
+        { "path": "sccache", "sizeBytes": 2000 },
         { "path": "cargo-registry", "sizeBytes": 0 },
         { "path": "cargo-git", "sizeBytes": 0 },
         { "path": "rustup", "sizeBytes": 0 }
       ],
       "largestDirectories": [],
       "cache": {
-        "build": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 1000, "saveOutcome": "skipped" },
+        "compilerCache": { "enabled": true, "version": "0.15.0", "access": "remote-read-only", "requests": 12, "hits": 6, "misses": 4, "nonCacheable": 2, "errors": { "restore": 0, "stats": 0, "cacheIo": 0, "noRequests": 0, "measure": 0, "save": 0 } },
+        "download": { "restoreResult": "exact", "restoredFootprintBytes": 1000, "saveMode": "read-only", "candidateSizeBytes": 1000, "saveOutcome": "skipped" },
         "tools": { "restoreResult": "exact", "restoredFootprintBytes": 500, "saveMode": "read-only", "candidateSizeBytes": 500, "saveOutcome": "skipped" }
       },
+      "resourceUsage": { "cpuTimeMs": 20000, "peakRssBytes": 104857600 },
       "toolVersions": { "rustc": "rustc", "cargo": "cargo", "git": "git" },
       "errors": []
     }

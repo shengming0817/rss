@@ -13,8 +13,8 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-const CONFIG_SCHEMA_VERSION: u8 = 1;
-const EVIDENCE_SCHEMA_VERSION: u8 = 2;
+const CONFIG_SCHEMA_VERSION: u8 = 2;
+const EVIDENCE_SCHEMA_VERSION: u8 = 3;
 const GIB: u64 = 1024 * 1024 * 1024;
 const MAX_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
 const MAX_ARTIFACT_FILES: usize = 512;
@@ -117,7 +117,7 @@ impl OperationalErrorKind {
     pub(crate) const fn action(self) -> &'static str {
         match self {
             Self::Identity => "Check the evaluator run ID and attempt arguments.",
-            Self::Config => "Restore .config/ci-slo.toml schema v1 and rerun.",
+            Self::Config => "Restore .config/ci-slo.toml schema v2 and rerun.",
             Self::Evidence => "Inspect the uploaded evidence artifact and rerun the producer.",
             Self::Artifact => "Inspect target/job-evidence for the closed regular-file layout.",
             Self::Summary => "Restore the GitHub Job Summary file channel and rerun.",
@@ -154,7 +154,7 @@ enum Metric {
     Duration,
     DiskFree,
     Target,
-    BuildCache,
+    DownloadCache,
     ToolCache,
     Artifact,
 }
@@ -164,7 +164,7 @@ impl Metric {
         Self::Duration,
         Self::DiskFree,
         Self::Target,
-        Self::BuildCache,
+        Self::DownloadCache,
         Self::ToolCache,
         Self::Artifact,
     ];
@@ -174,7 +174,7 @@ impl Metric {
             Self::Duration => "duration",
             Self::DiskFree => "disk-free",
             Self::Target => "target",
-            Self::BuildCache => "build-cache",
+            Self::DownloadCache => "download-cache",
             Self::ToolCache => "tool-cache",
             Self::Artifact => "artifact",
         }
@@ -214,7 +214,7 @@ struct ConfigWire {
 struct LimitsWire {
     min_disk_free_gib: PositiveBudget,
     max_target_gib: PositiveBudget,
-    max_build_cache_gib: PositiveBudget,
+    max_download_cache_gib: PositiveBudget,
     max_tool_cache_gib: PositiveBudget,
     max_artifact_gib: PositiveBudget,
 }
@@ -236,7 +236,7 @@ pub(crate) struct Config {
 struct Limits {
     min_disk_free_bytes: u64,
     max_target_bytes: u64,
-    max_build_cache_bytes: u64,
+    max_download_cache_bytes: u64,
     max_tool_cache_bytes: u64,
     max_artifact_bytes: u64,
 }
@@ -254,9 +254,11 @@ impl Config {
                 wire.limits.max_target_gib.get("max_target_gib")?,
                 "max_target_gib",
             )?,
-            max_build_cache_bytes: gib_to_bytes(
-                wire.limits.max_build_cache_gib.get("max_build_cache_gib")?,
-                "max_build_cache_gib",
+            max_download_cache_bytes: gib_to_bytes(
+                wire.limits
+                    .max_download_cache_gib
+                    .get("max_download_cache_gib")?,
+                "max_download_cache_gib",
             )?,
             max_tool_cache_bytes: gib_to_bytes(
                 wire.limits.max_tool_cache_gib.get("max_tool_cache_gib")?,
@@ -295,7 +297,7 @@ impl Config {
         [
             self.limits.min_disk_free_bytes / GIB,
             self.limits.max_target_bytes / GIB,
-            self.limits.max_build_cache_bytes / GIB,
+            self.limits.max_download_cache_bytes / GIB,
             self.limits.max_tool_cache_bytes / GIB,
             self.limits.max_artifact_bytes / GIB,
         ]
@@ -363,6 +365,7 @@ struct Snapshot {
     directories: Vec<DirectorySize>,
     largest_directories: Vec<LargestDirectory>,
     cache: CacheEvidence,
+    resource_usage: ResourceUsage,
     tool_versions: ToolVersions,
     errors: Vec<String>,
 }
@@ -389,6 +392,7 @@ struct Filesystem {
 enum DirectoryKind {
     Workspace,
     Target,
+    Sccache,
     CargoRegistry,
     CargoGit,
     Rustup,
@@ -409,10 +413,113 @@ struct LargestDirectory {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CacheEvidence {
-    build: CacheSize,
+    compiler_cache: CompilerCache,
+    download: CacheSize,
     tools: CacheSize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompilerCache {
+    enabled: bool,
+    version: Option<String>,
+    access: CompilerCacheAccess,
+    requests: u64,
+    hits: u64,
+    misses: u64,
+    non_cacheable: u64,
+    errors: CompilerCacheErrors,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompilerCacheErrors {
+    restore: u64,
+    stats: u64,
+    cache_io: u64,
+    no_requests: u64,
+    measure: u64,
+    save: u64,
+}
+
+impl CompilerCacheErrors {
+    const fn total(self) -> u64 {
+        self.restore + self.stats + self.cache_io + self.no_requests + self.measure + self.save
+    }
+
+    fn merge_max(self, other: Self) -> Self {
+        Self {
+            restore: self.restore.max(other.restore),
+            stats: self.stats.max(other.stats),
+            cache_io: self.cache_io.max(other.cache_io),
+            no_requests: self.no_requests.max(other.no_requests),
+            measure: self.measure.max(other.measure),
+            save: self.save.max(other.save),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CompilerCacheAccess {
+    Disabled,
+    Local,
+    RemoteReadOnly,
+    RemoteReadWrite,
+}
+
+impl CompilerCacheAccess {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Local => "local",
+            Self::RemoteReadOnly => "remote-read-only",
+            Self::RemoteReadWrite => "remote-read-write",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResourceUsage {
+    cpu_time_ms: Option<u64>,
+    peak_rss_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompilerCacheDiagnostics {
+    enabled: bool,
+    access: CompilerCacheAccess,
+    requests: u64,
+    hits: u64,
+    misses: u64,
+    non_cacheable: u64,
+    errors: CompilerCacheErrors,
+}
+
+impl CompilerCacheDiagnostics {
+    const DISABLED: Self = Self {
+        enabled: false,
+        access: CompilerCacheAccess::Disabled,
+        requests: 0,
+        hits: 0,
+        misses: 0,
+        non_cacheable: 0,
+        errors: CompilerCacheErrors {
+            restore: 0,
+            stats: 0,
+            cache_io: 0,
+            no_requests: 0,
+            measure: 0,
+            save: 0,
+        },
+    };
+
+    const fn degraded(self) -> bool {
+        self.errors.total() > 0
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -467,8 +574,10 @@ pub(crate) struct Evidence {
     duration_seconds: u64,
     disk_free_bytes: u64,
     target_bytes: u64,
-    build_cache_bytes: u64,
+    download_cache_bytes: u64,
     tool_cache_bytes: u64,
+    compiler_cache: CompilerCacheDiagnostics,
+    resource_usage: ResourceUsage,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -514,8 +623,9 @@ impl Evidence {
         let mut times = Vec::with_capacity(wire.snapshots.len());
         let mut disk_free_bytes = u64::MAX;
         let mut target_bytes = 0;
-        let mut build_cache_bytes = 0;
+        let mut download_cache_bytes = 0;
         let mut tool_cache_bytes = 0;
+        let mut compiler_cache_errors = CompilerCacheErrors::default();
         for (snapshot, expected_stage) in wire.snapshots.iter().zip(EvidenceStage::ALL) {
             if snapshot.stage != expected_stage {
                 bail!("CI evidence stages are incomplete or out of order");
@@ -535,19 +645,37 @@ impl Evidence {
                 .size_bytes
                 .context("CI evidence target measurement unavailable")?;
             target_bytes = target_bytes.max(target);
-            build_cache_bytes = build_cache_bytes.max(cache_actual(&snapshot.cache.build)?);
+            download_cache_bytes =
+                download_cache_bytes.max(cache_actual(&snapshot.cache.download)?);
             tool_cache_bytes = tool_cache_bytes.max(cache_actual(&snapshot.cache.tools)?);
+            compiler_cache_errors =
+                compiler_cache_errors.merge_max(snapshot.cache.compiler_cache.errors);
         }
         let duration = times[4] - times[0];
         let duration_seconds =
             u64::try_from(duration.whole_seconds()).context("CI evidence duration is negative")?;
+        let final_snapshot = wire
+            .snapshots
+            .last()
+            .context("CI evidence final snapshot missing")?;
+        let final_cache = &final_snapshot.cache.compiler_cache;
         Ok(Self {
             identity,
             duration_seconds,
             disk_free_bytes,
             target_bytes,
-            build_cache_bytes,
+            download_cache_bytes,
             tool_cache_bytes,
+            compiler_cache: CompilerCacheDiagnostics {
+                enabled: final_cache.enabled,
+                access: final_cache.access,
+                requests: final_cache.requests,
+                hits: final_cache.hits,
+                misses: final_cache.misses,
+                non_cacheable: final_cache.non_cacheable,
+                errors: compiler_cache_errors,
+            },
+            resource_usage: final_snapshot.resource_usage,
         })
     }
 }
@@ -622,6 +750,7 @@ fn validate_snapshot_shape(snapshot: &Snapshot) -> Result<()> {
     let expected = [
         DirectoryKind::Workspace,
         DirectoryKind::Target,
+        DirectoryKind::Sccache,
         DirectoryKind::CargoRegistry,
         DirectoryKind::CargoGit,
         DirectoryKind::Rustup,
@@ -652,6 +781,16 @@ fn validate_snapshot_shape(snapshot: &Snapshot) -> Result<()> {
             bail!("CI evidence largest directory path is invalid");
         }
     }
+    validate_compiler_cache(&snapshot.cache.compiler_cache)?;
+    for value in [
+        snapshot.resource_usage.cpu_time_ms,
+        snapshot.resource_usage.peak_rss_bytes,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_safe_integer(value)?;
+    }
     if !snapshot.errors.is_empty() {
         bail!("CI evidence contains collection errors");
     }
@@ -671,6 +810,38 @@ fn validate_snapshot_shape(snapshot: &Snapshot) -> Result<()> {
         if version.len() > 1024 || version.chars().any(char::is_control) {
             bail!("CI evidence tool version is invalid");
         }
+    }
+    Ok(())
+}
+
+fn validate_compiler_cache(cache: &CompilerCache) -> Result<()> {
+    for value in [
+        cache.requests,
+        cache.hits,
+        cache.misses,
+        cache.non_cacheable,
+        cache.errors.restore,
+        cache.errors.stats,
+        cache.errors.cache_io,
+        cache.errors.no_requests,
+        cache.errors.measure,
+        cache.errors.save,
+    ] {
+        validate_safe_integer(value)?;
+    }
+    if cache.hits.saturating_add(cache.misses) > cache.requests {
+        bail!("CI evidence compiler cache counts exceed requests");
+    }
+    match (cache.enabled, cache.version.as_deref(), cache.access) {
+        (false, None, CompilerCacheAccess::Disabled) => {}
+        (
+            true,
+            Some("0.15.0"),
+            CompilerCacheAccess::Local
+            | CompilerCacheAccess::RemoteReadOnly
+            | CompilerCacheAccess::RemoteReadWrite,
+        ) => {}
+        _ => bail!("CI evidence compiler cache identity is invalid"),
     }
     Ok(())
 }
@@ -704,6 +875,8 @@ pub(crate) struct Evaluation {
     job: CiJobKey,
     identity: RunIdentity,
     metrics: Vec<MetricResult>,
+    compiler_cache: CompilerCacheDiagnostics,
+    resource_usage: ResourceUsage,
     verdict: Verdict,
 }
 
@@ -727,7 +900,7 @@ pub(crate) fn evaluate(
                 Metric::Duration => evidence.duration_seconds,
                 Metric::DiskFree => evidence.disk_free_bytes,
                 Metric::Target => evidence.target_bytes,
-                Metric::BuildCache => evidence.build_cache_bytes,
+                Metric::DownloadCache => evidence.download_cache_bytes,
                 Metric::ToolCache => evidence.tool_cache_bytes,
                 Metric::Artifact => artifact_bytes,
             };
@@ -735,7 +908,7 @@ pub(crate) fn evaluate(
                 Metric::Duration => config.duration_seconds(job),
                 Metric::DiskFree => config.limits.min_disk_free_bytes,
                 Metric::Target => config.limits.max_target_bytes,
-                Metric::BuildCache => config.limits.max_build_cache_bytes,
+                Metric::DownloadCache => config.limits.max_download_cache_bytes,
                 Metric::ToolCache => config.limits.max_tool_cache_bytes,
                 Metric::Artifact => config.limits.max_artifact_bytes,
             };
@@ -758,15 +931,20 @@ pub(crate) fn evaluate(
             }
         })
         .collect::<Vec<_>>();
-    let verdict = metrics
+    let mut verdict = metrics
         .iter()
         .map(|result| result.verdict)
         .max_by_key(|verdict| verdict.rank())
         .unwrap_or(Verdict::Fail);
+    if evidence.compiler_cache.degraded() && verdict.rank() < Verdict::Warn.rank() {
+        verdict = Verdict::Warn;
+    }
     Ok(Evaluation {
         job,
         identity: evidence.identity,
         metrics,
+        compiler_cache: evidence.compiler_cache,
+        resource_usage: evidence.resource_usage,
         verdict,
     })
 }
@@ -857,11 +1035,41 @@ pub(crate) fn render_markdown(evaluation: &Evaluation, upload: UploadOutcome) ->
             result.verdict.label()
         ));
     }
+    let cache = evaluation.compiler_cache;
+    let cache_status = if !cache.enabled {
+        "DISABLED"
+    } else if cache.degraded() {
+        "DEGRADED"
+    } else {
+        "HEALTHY"
+    };
+    let optional = |value: Option<u64>, unit: &str| {
+        value.map_or_else(
+            || "unavailable".to_owned(),
+            |value| format!("{value} {unit}"),
+        )
+    };
+    output.push_str(&format!(
+        "\n### Compiler cache: {cache_status}\n\nAccess: `{}`\n\nRequests: {}; hits: {}; misses: {}; non-cacheable: {}.\n\nErrors: restore={}; stats={}; cache-io={}; no-requests={}; measure={}; save={}.\n\nCPU time: {}; peak RSS: {}.\n",
+        cache.access.label(),
+        cache.requests,
+        cache.hits,
+        cache.misses,
+        cache.non_cacheable,
+        cache.errors.restore,
+        cache.errors.stats,
+        cache.errors.cache_io,
+        cache.errors.no_requests,
+        cache.errors.measure,
+        cache.errors.save,
+        optional(evaluation.resource_usage.cpu_time_ms, "ms"),
+        optional(evaluation.resource_usage.peak_rss_bytes, "bytes"),
+    ));
     output
 }
 
 pub(crate) fn render_workflow_annotations(evaluation: &Evaluation) -> String {
-    evaluation
+    let mut output: String = evaluation
         .metrics
         .iter()
         .filter(|result| result.verdict == Verdict::Warn)
@@ -874,7 +1082,20 @@ pub(crate) fn render_workflow_annotations(evaluation: &Evaluation) -> String {
                 result.metric.unit()
             )
         })
-        .collect()
+        .collect();
+    let errors = evaluation.compiler_cache.errors;
+    if evaluation.compiler_cache.degraded() {
+        output.push_str(&format!(
+            "::warning title=CI compiler cache degraded::restore={} stats={} cacheIo={} noRequests={} measure={} save={}\n",
+            errors.restore,
+            errors.stats,
+            errors.cache_io,
+            errors.no_requests,
+            errors.measure,
+            errors.save,
+        ));
+    }
+    output
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -957,6 +1178,11 @@ pub(crate) fn render_operational_error(
                     job,
                     identity,
                     metrics: Vec::new(),
+                    compiler_cache: CompilerCacheDiagnostics::DISABLED,
+                    resource_usage: ResourceUsage {
+                        cpu_time_ms: None,
+                        peak_rss_bytes: None,
+                    },
                     verdict: Verdict::Fail,
                 })
             })
@@ -1128,9 +1354,40 @@ mod tests {
     }
 
     #[test]
+    fn compiler_cache_degradation_warns_and_remains_diagnostic() -> Result<()> {
+        let mut source: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/ci_slo/pass.json"))?;
+        source["snapshots"][1]["cache"]["compilerCache"]["errors"]["restore"] = 2.into();
+        source["snapshots"][4]["cache"]["compilerCache"]["errors"]["stats"] = 1.into();
+        let evidence = Evidence::parse(&serde_json::to_string(&source)?, "42", "3")?;
+        let config = Config::parse(CONFIG)?;
+        let root = tempfile_dir("compiler-cache-degraded");
+        fs::create_dir_all(root.join("ci"))?;
+        fs::write(root.join("ci/evidence.json"), b"evidence")?;
+
+        let evaluation = evaluate(&config, CiJobKey::CiMeta, &evidence, &root)?;
+        assert_eq!(evaluation.verdict(), Verdict::Warn);
+        let summary = render_markdown(&evaluation, UploadOutcome::Success);
+        for expected in [
+            "### Compiler cache: DEGRADED",
+            "Requests: 12; hits: 6; misses: 4; non-cacheable: 2.",
+            "Errors: restore=2; stats=1; cache-io=0; no-requests=0; measure=0; save=0.",
+            "CPU time: 20000 ms; peak RSS: 104857600 bytes.",
+        ] {
+            assert!(summary.contains(expected), "missing diagnostic: {expected}");
+        }
+        assert_eq!(
+            render_workflow_annotations(&evaluation),
+            "::warning title=CI compiler cache degraded::restore=2 stats=1 cacheIo=0 noRequests=0 measure=0 save=0\n"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn config_rejects_schema_drift_and_incomplete_catalog() {
         for invalid in [
-            CONFIG.replacen("schema_version = 1", "schema_version = 2", 1),
+            CONFIG.replacen("schema_version = 2", "schema_version = 3", 1),
             CONFIG.replacen("min_disk_free_gib = 5", "min_disk_free_gib = 0", 1),
             CONFIG.replacen("max_target_gib = 6", "max_target_gib = -1", 1),
             CONFIG.replacen("max_target_gib = 6", "max_target_gib = 1.5", 1),
@@ -1167,7 +1424,7 @@ mod tests {
         equal.duration_seconds = 90;
         equal.disk_free_bytes = 5 * GIB;
         equal.target_bytes = 6 * GIB;
-        equal.build_cache_bytes = 8 * GIB;
+        equal.download_cache_bytes = 8 * GIB;
         equal.tool_cache_bytes = 2 * GIB;
         assert_eq!(
             evaluate(&config, CiJobKey::CiMeta, &equal, &root)?.verdict(),
@@ -1177,14 +1434,14 @@ mod tests {
         for metric in [
             Metric::Duration,
             Metric::Target,
-            Metric::BuildCache,
+            Metric::DownloadCache,
             Metric::ToolCache,
         ] {
             let mut evidence = Evidence { ..equal };
             match metric {
                 Metric::Duration => evidence.duration_seconds += 1,
                 Metric::Target => evidence.target_bytes += 1,
-                Metric::BuildCache => evidence.build_cache_bytes += 1,
+                Metric::DownloadCache => evidence.download_cache_bytes += 1,
                 Metric::ToolCache => evidence.tool_cache_bytes += 1,
                 Metric::DiskFree | Metric::Artifact => continue,
             }
@@ -1228,7 +1485,7 @@ mod tests {
                     verdict: Verdict::Warn,
                 },
                 MetricResult {
-                    metric: Metric::BuildCache,
+                    metric: Metric::DownloadCache,
                     actual: 9,
                     budget: 8,
                     verdict: Verdict::Warn,
@@ -1246,6 +1503,11 @@ mod tests {
                     verdict: Verdict::Warn,
                 },
             ],
+            compiler_cache: CompilerCacheDiagnostics::DISABLED,
+            resource_usage: ResourceUsage {
+                cpu_time_ms: None,
+                peak_rss_bytes: None,
+            },
             verdict: Verdict::Warn,
         };
         assert_eq!(
@@ -1253,7 +1515,7 @@ mod tests {
             concat!(
                 "::warning title=CI SLO budget::metric=duration actual=91 budget=90 unit=seconds\n",
                 "::warning title=CI SLO budget::metric=target actual=7 budget=6 unit=bytes\n",
-                "::warning title=CI SLO budget::metric=build-cache actual=9 budget=8 unit=bytes\n",
+                "::warning title=CI SLO budget::metric=download-cache actual=9 budget=8 unit=bytes\n",
                 "::warning title=CI SLO budget::metric=tool-cache actual=3 budget=2 unit=bytes\n",
                 "::warning title=CI SLO budget::metric=artifact actual=2 budget=1 unit=bytes\n",
             )
@@ -1328,7 +1590,7 @@ mod tests {
             Ok(serde_json::to_string(&value)?)
         };
         let invalid = [
-            mutate(|value| value["schemaVersion"] = 1.into())?,
+            mutate(|value| value["schemaVersion"] = 2.into())?,
             mutate(|value| value["extra"] = true.into())?,
             mutate(|value| {
                 let _ = value["snapshots"].as_array_mut().and_then(Vec::pop);
@@ -1348,9 +1610,49 @@ mod tests {
             mutate(|value| {
                 value["snapshots"][0]["toolVersions"]["cargo"] = "cargo\nsecret".into()
             })?,
+            mutate(|value| value["snapshots"][1]["cache"]["compilerCache"]["hits"] = 6.into())?,
+            mutate(|value| {
+                value["snapshots"][1]["cache"]["compilerCache"]["version"] = "0.14.0".into()
+            })?,
+            mutate(|value| {
+                value["snapshots"][2]["resourceUsage"]["peakRssBytes"] =
+                    (MAX_JSON_INTEGER + 1).into()
+            })?,
         ];
         for source in invalid {
             assert!(Evidence::parse(&source, "42", "3").is_err());
+        }
+        for error_class in [
+            "restore",
+            "stats",
+            "cacheIo",
+            "noRequests",
+            "measure",
+            "save",
+        ] {
+            let mut value: Value = serde_json::from_str(source)?;
+            value["snapshots"][4]["cache"]["compilerCache"]["errors"][error_class] =
+                (MAX_JSON_INTEGER + 1).into();
+            assert!(
+                Evidence::parse(&serde_json::to_string(&value)?, "42", "3").is_err(),
+                "compiler cache error class must reject unsafe integer: {error_class}"
+            );
+        }
+        for invalid_errors in [
+            serde_json::json!(1),
+            serde_json::json!({
+                "restore": 0,
+                "stats": 0,
+                "cacheIo": 0,
+                "noRequests": 0,
+                "measure": 0,
+                "save": 0,
+                "unknown": 0
+            }),
+        ] {
+            let mut value: Value = serde_json::from_str(source)?;
+            value["snapshots"][4]["cache"]["compilerCache"]["errors"] = invalid_errors;
+            assert!(Evidence::parse(&serde_json::to_string(&value)?, "42", "3").is_err());
         }
         assert!(Evidence::parse(source, "41", "3").is_err());
         assert!(Evidence::parse(source, "42", "x").is_err());
@@ -1491,6 +1793,11 @@ mod tests {
                 run_attempt: 3,
             },
             metrics: Vec::new(),
+            compiler_cache: CompilerCacheDiagnostics::DISABLED,
+            resource_usage: ResourceUsage {
+                cpu_time_ms: None,
+                peak_rss_bytes: None,
+            },
             verdict: Verdict::Warn,
         };
         let success = render_markdown(&evaluation, UploadOutcome::Success);

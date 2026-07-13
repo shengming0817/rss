@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 EVIDENCE="$SCRIPT_DIR/ci-evidence.sh"
 BUDGET="$SCRIPT_DIR/ci-disk-budget.sh"
-GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v2.golden.json"
+GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v3.golden.json"
 TMP_ROOT=${TMPDIR:-/tmp}/ci-evidence-selftest.$$
 FAILURES=0
 
@@ -71,12 +71,23 @@ run_evidence() {
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
     SECRET_CANARY='must-not-leak-7f3a' \
     "$EVIDENCE" "$@" \
-    --build-restore-result "${TEST_BUILD_RESTORE_RESULT:-miss}" --build-restored-footprint-bytes "${TEST_BUILD_RESTORED_BYTES:-0}" \
-    --build-save-mode writer --build-candidate-size-bytes 4096 \
-    --build-save-outcome "${TEST_BUILD_SAVE_OUTCOME:-eligible}" \
+    --download-restore-result "${TEST_DOWNLOAD_RESTORE_RESULT:-miss}" --download-restored-footprint-bytes "${TEST_DOWNLOAD_RESTORED_BYTES:-0}" \
+    --download-save-mode writer --download-candidate-size-bytes 4096 \
+    --download-save-outcome "${TEST_DOWNLOAD_SAVE_OUTCOME:-eligible}" \
     --tools-restore-result exact --tools-restored-footprint-bytes 2048 \
     --tools-save-mode read-only --tools-candidate-size-bytes 2048 \
-    --tools-save-outcome "${TEST_TOOLS_SAVE_OUTCOME:-skipped}"
+    --tools-save-outcome "${TEST_TOOLS_SAVE_OUTCOME:-skipped}" \
+    --compiler-cache-enabled true --compiler-cache-version 0.15.0 \
+    --compiler-cache-access remote-read-write --compiler-cache-requests "${TEST_COMPILER_REQUESTS:-9}" \
+    --compiler-cache-hits "${TEST_COMPILER_HITS:-4}" --compiler-cache-misses "${TEST_COMPILER_MISSES:-3}" \
+    --compiler-cache-non-cacheable 2 \
+    --compiler-cache-error-restore "${TEST_ERROR_RESTORE:-0}" \
+    --compiler-cache-error-stats "${TEST_ERROR_STATS:-0}" \
+    --compiler-cache-error-cache-io "${TEST_ERROR_CACHE_IO:-0}" \
+    --compiler-cache-error-no-requests "${TEST_ERROR_NO_REQUESTS:-0}" \
+    --compiler-cache-error-measure "${TEST_ERROR_MEASURE:-0}" \
+    --compiler-cache-error-save "${TEST_ERROR_SAVE:-0}" \
+    --cpu-time-ms "${TEST_CPU_TIME_MS:-none}" --peak-rss-bytes "${TEST_PEAK_RSS_BYTES:-none}"
 }
 
 run_evidence_with_path() {
@@ -88,22 +99,53 @@ run_evidence_with_path() {
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
     SECRET_CANARY='must-not-leak-7f3a' \
     "$EVIDENCE" "$@" \
-    --build-restore-result "${TEST_BUILD_RESTORE_RESULT:-miss}" --build-restored-footprint-bytes "${TEST_BUILD_RESTORED_BYTES:-0}" \
-    --build-save-mode writer --build-candidate-size-bytes 4096 \
-    --build-save-outcome "${TEST_BUILD_SAVE_OUTCOME:-eligible}" \
+    --download-restore-result "${TEST_DOWNLOAD_RESTORE_RESULT:-miss}" --download-restored-footprint-bytes "${TEST_DOWNLOAD_RESTORED_BYTES:-0}" \
+    --download-save-mode writer --download-candidate-size-bytes 4096 \
+    --download-save-outcome "${TEST_DOWNLOAD_SAVE_OUTCOME:-eligible}" \
     --tools-restore-result exact --tools-restored-footprint-bytes 2048 \
     --tools-save-mode read-only --tools-candidate-size-bytes 2048 \
-    --tools-save-outcome "${TEST_TOOLS_SAVE_OUTCOME:-skipped}"
+    --tools-save-outcome "${TEST_TOOLS_SAVE_OUTCOME:-skipped}" \
+    --compiler-cache-enabled true --compiler-cache-version 0.15.0 \
+    --compiler-cache-access remote-read-write --compiler-cache-requests "${TEST_COMPILER_REQUESTS:-9}" \
+    --compiler-cache-hits "${TEST_COMPILER_HITS:-4}" --compiler-cache-misses "${TEST_COMPILER_MISSES:-3}" \
+    --compiler-cache-non-cacheable 2 \
+    --compiler-cache-error-restore "${TEST_ERROR_RESTORE:-0}" \
+    --compiler-cache-error-stats "${TEST_ERROR_STATS:-0}" \
+    --compiler-cache-error-cache-io "${TEST_ERROR_CACHE_IO:-0}" \
+    --compiler-cache-error-no-requests "${TEST_ERROR_NO_REQUESTS:-0}" \
+    --compiler-cache-error-measure "${TEST_ERROR_MEASURE:-0}" \
+    --compiler-cache-error-save "${TEST_ERROR_SAVE:-0}" \
+    --cpu-time-ms "${TEST_CPU_TIME_MS:-none}" --peak-rss-bytes "${TEST_PEAK_RSS_BYTES:-none}"
+}
+
+run_disabled_evidence() {
+  evidence_path=$1 home_dir=$2 workspace=$3 output=$4
+  env -i PATH="$evidence_path" HOME="$home_dir" CARGO_HOME="$home_dir/.cargo" \
+    RUSTUP_HOME="$home_dir/.rustup" GITHUB_WORKSPACE="$workspace" \
+    "$EVIDENCE" snapshot start --output "$output" \
+    --download-restore-result not-attempted --download-restored-footprint-bytes 0 \
+    --download-save-mode read-only --download-candidate-size-bytes 0 --download-save-outcome skipped \
+    --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 \
+    --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped \
+    --compiler-cache-enabled false --compiler-cache-version none \
+    --compiler-cache-access disabled --compiler-cache-requests 0 \
+    --compiler-cache-hits 0 --compiler-cache-misses 0 --compiler-cache-non-cacheable 0 \
+    --compiler-cache-error-restore 0 --compiler-cache-error-stats 0 \
+    --compiler-cache-error-cache-io 0 --compiler-cache-error-no-requests 0 \
+    --compiler-cache-error-measure 0 --compiler-cache-error-save 0
 }
 
 expect_success 'start snapshot is created' run_evidence snapshot start --output "$OUTPUT"
 assert_jq 'start snapshot is valid and closed' "$OUTPUT" '
   keys == ["job","schemaVersion","snapshots"] and
-  .schemaVersion == 2 and
+  .schemaVersion == 3 and
   (.job | keys == ["job","repository","runAttempt","runId","runnerArch","runnerOs","workflow"]) and
-  (.snapshots[0] | keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","stage","toolVersions"]) and
-  (.snapshots[0].cache | keys == ["build","tools"]) and
-  ([.snapshots[0].cache[] | keys == ["candidateSizeBytes","restoreResult","restoredFootprintBytes","saveMode","saveOutcome"]] | all) and
+  (.snapshots[0] | keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","resourceUsage","stage","toolVersions"]) and
+  (.snapshots[0].cache | keys == ["compilerCache","download","tools"]) and
+  ([.snapshots[0].cache.download,.snapshots[0].cache.tools | keys == ["candidateSizeBytes","restoreResult","restoredFootprintBytes","saveMode","saveOutcome"]] | all) and
+  (.snapshots[0].cache.compilerCache | keys == ["access","enabled","errors","hits","misses","nonCacheable","requests","version"]) and
+  (.snapshots[0].cache.compilerCache.errors | keys == ["cacheIo","measure","noRequests","restore","save","stats"]) and
+  (.snapshots[0].resourceUsage | keys == ["cpuTimeMs","peakRssBytes"]) and
   (.snapshots[0].filesystem | keys == ["availableBytes","capacityBytes","usedBytes"]) and
   (.snapshots[0].toolVersions | keys == ["cargo","git","rustc"])'
 
@@ -122,10 +164,17 @@ else
 fi
 
 expect_success 'after-cache appends atomically' run_evidence snapshot after-cache --output "$OUTPUT"
-expect_success 'after-build appends outcome' run_evidence snapshot after-build --output "$OUTPUT" --outcome success
+run_after_build_with_resources() {
+  TEST_CPU_TIME_MS=1234 TEST_PEAK_RSS_BYTES=5678 \
+    run_evidence snapshot after-build --output "$OUTPUT" --outcome success
+}
+expect_success 'after-build appends outcome and resource usage' run_after_build_with_resources
 expect_success 'before-save completes four stages' run_evidence snapshot before-save --output "$OUTPUT"
 expect_success 'after-save completes five stages' run_evidence snapshot after-save --output "$OUTPUT"
-assert_jq 'five stages retain order and outcome' "$OUTPUT" '[.snapshots[].stage] == ["start","after-cache","after-build","before-save","after-save"] and .snapshots[2].outcome == "success"'
+assert_jq 'five stages retain order, outcome, and resource usage' "$OUTPUT" '
+  [.snapshots[].stage] == ["start","after-cache","after-build","before-save","after-save"] and
+  .snapshots[2].outcome == "success" and
+  .snapshots[2].resourceUsage == {"cpuTimeMs":1234,"peakRssBytes":5678}'
 
 EARLY_FAILURE_OUTPUT="$TMP_ROOT/early-failure.json"
 expect_success 'ensure closes phases through after-cache when setup is skipped' run_evidence ensure after-cache --output "$EARLY_FAILURE_OUTPUT"
@@ -146,14 +195,14 @@ record_budget_failure() {
     budget_conclusion=failure
   fi
   set_disk_budget 5
-  TEST_BUILD_SAVE_OUTCOME=ineligible TEST_TOOLS_SAVE_OUTCOME=ineligible \
+  TEST_DOWNLOAD_SAVE_OUTCOME=ineligible TEST_TOOLS_SAVE_OUTCOME=ineligible \
     run_evidence snapshot before-save --output "$BUDGET_FAILURE_OUTPUT"
   [ "$budget_conclusion" = success ]
 }
 expect_failure 'budget failure returns nonzero only after evidence is recorded' record_budget_failure
 assert_jq 'budget failure makes both cache candidates ineligible' "$BUDGET_FAILURE_OUTPUT" '
   .snapshots[-1].stage == "before-save" and
-  .snapshots[-1].cache.build.saveOutcome == "ineligible" and
+  .snapshots[-1].cache.download.saveOutcome == "ineligible" and
   .snapshots[-1].cache.tools.saveOutcome == "ineligible"'
 
 cp "$OUTPUT" "$TMP_ROOT/before-failure.json"
@@ -162,13 +211,45 @@ if cmp -s "$OUTPUT" "$TMP_ROOT/before-failure.json"; then pass 'failed append pr
 expect_failure 'unknown stage is rejected' run_evidence snapshot mystery --output "$OUTPUT"
 expect_failure 'out-of-order initial stage is rejected' run_evidence snapshot after-cache --output "$TMP_ROOT/out-of-order.json"
 expect_failure 'outcome outside after-build is rejected' run_evidence snapshot start --output "$TMP_ROOT/bad-outcome.json" --outcome failure
-run_bad_restore_result() { TEST_BUILD_RESTORE_RESULT=hit run_evidence snapshot start --output "$TMP_ROOT/bad-restore.json"; }
-run_bad_byte_count() { TEST_BUILD_RESTORED_BYTES=-1 run_evidence snapshot start --output "$TMP_ROOT/bad-bytes.json"; }
+run_bad_restore_result() { TEST_DOWNLOAD_RESTORE_RESULT=hit run_evidence snapshot start --output "$TMP_ROOT/bad-restore.json"; }
+run_bad_byte_count() { TEST_DOWNLOAD_RESTORED_BYTES=-1 run_evidence snapshot start --output "$TMP_ROOT/bad-bytes.json"; }
 expect_failure 'unknown restore result is rejected' run_bad_restore_result
 expect_failure 'negative cache byte count is rejected' run_bad_byte_count
 
-jq '.schemaVersion = 1 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v1.json"
-expect_failure 'schema v1 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v1.json"
+jq '.schemaVersion = 2 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v2.json"
+expect_failure 'schema v2 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v2.json"
+expect_failure 'scalar compiler cache errors flag has no compatibility shim' \
+  run_evidence snapshot start --output "$TMP_ROOT/legacy-errors.json" --compiler-cache-errors 1
+
+run_bad_compiler_counts() {
+  TEST_COMPILER_REQUESTS=1 TEST_COMPILER_HITS=1 TEST_COMPILER_MISSES=1 \
+    run_evidence snapshot start --output "$TMP_ROOT/bad-compiler-counts.json"
+}
+expect_failure 'compiler cache hits and misses cannot exceed requests' run_bad_compiler_counts
+DEGRADED_OUTPUT="$TMP_ROOT/degraded-compiler-cache.json"
+run_degraded_compiler_cache() { TEST_ERROR_STATS=1 run_evidence snapshot start --output "$DEGRADED_OUTPUT"; }
+expect_success 'compiler cache stats failure is recorded without invalidating evidence' run_degraded_compiler_cache
+assert_jq 'compiler cache degradation uses a closed classified object' "$DEGRADED_OUTPUT" '
+  .snapshots[0].cache.compilerCache.errors ==
+    {"cacheIo":0,"measure":0,"noRequests":0,"restore":0,"save":0,"stats":1} and
+  .snapshots[0].errors == []'
+run_bad_compiler_error() {
+  error_class=$1
+  output="$TMP_ROOT/bad-error-$error_class.json"
+  case "$error_class" in
+    RESTORE) TEST_ERROR_RESTORE=-1 run_evidence snapshot start --output "$output" ;;
+    STATS) TEST_ERROR_STATS=-1 run_evidence snapshot start --output "$output" ;;
+    CACHE_IO) TEST_ERROR_CACHE_IO=-1 run_evidence snapshot start --output "$output" ;;
+    NO_REQUESTS) TEST_ERROR_NO_REQUESTS=-1 run_evidence snapshot start --output "$output" ;;
+    MEASURE) TEST_ERROR_MEASURE=-1 run_evidence snapshot start --output "$output" ;;
+    SAVE) TEST_ERROR_SAVE=-1 run_evidence snapshot start --output "$output" ;;
+    *) return 2 ;;
+  esac
+}
+for error_class in RESTORE STATS CACHE_IO NO_REQUESTS MEASURE SAVE; do
+  expect_failure "compiler cache $error_class error count rejects negative values" \
+    run_bad_compiler_error "$error_class"
+done
 
 printf '{broken' >"$TMP_ROOT/corrupt.json"
 cp "$TMP_ROOT/corrupt.json" "$TMP_ROOT/corrupt.before"
@@ -232,31 +313,34 @@ mkdir "$NO_DU_BIN"
 for command_name in bash dirname jq mktemp mv rm date find git cargo rustc df; do
   ln -s "$TOOL_BIN/$command_name" "$NO_DU_BIN/$command_name"
 done
-expect_success 'missing du degrades to recorded errors' env -i PATH="$NO_DU_BIN" HOME="$HOME_DIR" CARGO_HOME="$HOME_DIR/.cargo" RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/no-du.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
-assert_jq 'du degradation remains schema-valid' "$TMP_ROOT/no-du.json" '(.snapshots[0].errors | length) >= 5 and ([.snapshots[0].directories[].sizeBytes] | all(. == null))'
+expect_success 'missing du degrades to recorded errors' run_disabled_evidence "$NO_DU_BIN" "$HOME_DIR" "$WORKSPACE" "$TMP_ROOT/no-du.json"
+assert_jq 'du degradation remains schema-valid' "$TMP_ROOT/no-du.json" '
+  (.snapshots[0].errors | length) >= 5 and
+  ([.snapshots[0].directories[] | select(.path != "sccache") | .sizeBytes] | all(. == null)) and
+  (.snapshots[0].directories[] | select(.path == "sccache") | .sizeBytes) == 0'
 
 CLEAN_HOME="$TMP_ROOT/clean-home"
 CLEAN_WORKSPACE="$TMP_ROOT/clean-workspace"
 mkdir -p "$CLEAN_HOME" "$CLEAN_WORKSPACE/.cache/cargo-target"
-expect_success 'controlled clean start measures canonical target' env -i PATH="$TOOL_BIN" HOME="$CLEAN_HOME" CARGO_HOME="$CLEAN_HOME/.cargo" RUSTUP_HOME="$CLEAN_HOME/.rustup" GITHUB_WORKSPACE="$CLEAN_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/clean-start.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
+expect_success 'controlled clean start measures canonical target' run_disabled_evidence "$TOOL_BIN" "$CLEAN_HOME" "$CLEAN_WORKSPACE" "$TMP_ROOT/clean-start.json"
 assert_jq 'controlled clean start has complete measurements' "$TMP_ROOT/clean-start.json" '
   ([.snapshots[0].directories[].sizeBytes] | all(. != null)) and
-  ([.snapshots[0].directories[] | select(.path == "cargo-registry" or .path == "cargo-git" or .path == "rustup") | .sizeBytes] | all(. == 0)) and
+  ([.snapshots[0].directories[] | select(.path == "sccache" or .path == "cargo-registry" or .path == "cargo-git" or .path == "rustup") | .sizeBytes] | all(. == 0)) and
   (.snapshots[0].errors | length) == 0'
 
 EMPTY_HOME="$TMP_ROOT/empty-home"
 EMPTY_WORKSPACE="$TMP_ROOT/empty-workspace"
 mkdir "$EMPTY_HOME" "$EMPTY_WORKSPACE"
-expect_success 'missing logical directories are measured as zero' env -i PATH="$TOOL_BIN" HOME="$EMPTY_HOME" GITHUB_WORKSPACE="$EMPTY_WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/missing-dirs.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
+expect_success 'missing logical directories are measured as zero' run_disabled_evidence "$TOOL_BIN" "$EMPTY_HOME" "$EMPTY_WORKSPACE" "$TMP_ROOT/missing-dirs.json"
 assert_jq 'missing directories retain fixed zero-valued logical entries' "$TMP_ROOT/missing-dirs.json" '
-  ([.snapshots[0].directories[] | select(.path == "target" or .path == "cargo-registry" or .path == "cargo-git" or .path == "rustup") | .sizeBytes] | all(. == 0)) and
+  ([.snapshots[0].directories[] | select(.path == "target" or .path == "sccache" or .path == "cargo-registry" or .path == "cargo-git" or .path == "rustup") | .sizeBytes] | all(. == 0)) and
   (.snapshots[0].errors | length) == 0'
 
 INVALID_HOME="$TMP_ROOT/invalid-home"
 mkdir -p "$INVALID_HOME/.cargo"
 printf 'not a directory\n' >"$INVALID_HOME/.cargo/registry"
 ln -s "$WORKSPACE" "$INVALID_HOME/.cargo/git"
-expect_success 'invalid logical directories remain recorded errors' env -i PATH="$TOOL_BIN" HOME="$INVALID_HOME" CARGO_HOME="$INVALID_HOME/.cargo" RUSTUP_HOME="$INVALID_HOME/.rustup" GITHUB_WORKSPACE="$WORKSPACE" "$EVIDENCE" snapshot start --output "$TMP_ROOT/invalid-dirs.json" --build-restore-result not-attempted --build-restored-footprint-bytes 0 --build-save-mode read-only --build-candidate-size-bytes 0 --build-save-outcome skipped --tools-restore-result not-attempted --tools-restored-footprint-bytes 0 --tools-save-mode read-only --tools-candidate-size-bytes 0 --tools-save-outcome skipped
+expect_success 'invalid logical directories remain recorded errors' run_disabled_evidence "$TOOL_BIN" "$INVALID_HOME" "$WORKSPACE" "$TMP_ROOT/invalid-dirs.json"
 assert_jq 'non-directory and symlink inputs fail loud while absence remains zero' "$TMP_ROOT/invalid-dirs.json" '
   [.snapshots[0].directories[] | select(.sizeBytes == null) | .path] == ["cargo-registry","cargo-git"] and
   (.snapshots[0].directories[] | select(.path == "rustup") | .sizeBytes) == 0 and

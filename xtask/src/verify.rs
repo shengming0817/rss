@@ -2607,6 +2607,13 @@ mod tests {
                     .eq(expected.iter().copied())
             })
         }
+
+        fn run_exact(&self, expected: &[&str]) -> bool {
+            self.run
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        }
     }
 
     fn yaml_typed_steps(yaml: &str) -> Vec<TypedStep> {
@@ -3018,12 +3025,39 @@ mod tests {
             }
     }
 
+    fn workflow_has_pr_only_concurrency(yaml: &str) -> bool {
+        let lines = yaml_indented_code_lines(yaml);
+        let Some(start) = lines
+            .iter()
+            .position(|(indent, line)| *indent == 0 && *line == "concurrency:")
+        else {
+            return false;
+        };
+        let fields = lines[start + 1..]
+            .iter()
+            .take_while(|(indent, _)| *indent > 0)
+            .copied()
+            .collect::<Vec<_>>();
+        fields
+            == [
+                (
+                    2,
+                    "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+                ),
+                (
+                    2,
+                    "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+                ),
+            ]
+    }
+
     /// CI caller 的结构化闭集谓词：四个 literal job 直接调唯一 reusable workflow，
     /// Core/Coverage 仅依赖 Meta，Meta/Security 无依赖，不允许额外 job/field 或宽权限。
     fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
         let jobs = reusable_caller_jobs(yaml);
         workflow_has_only_safe_ci_events(yaml)
             && workflow_has_exact_read_permissions(yaml)
+            && workflow_has_pr_only_concurrency(yaml)
             && jobs.len() == 5
             && yaml.contains("partition: ${{ matrix.partition }}")
             && yaml.contains("partition-label: ${{ matrix.partition-label }}")
@@ -3367,6 +3401,21 @@ mod tests {
     }
 
     #[test]
+    fn ci_sccache_stats_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
+            &[".github/scripts/ci-sccache-stats.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 ci-sccache-stats shell selftest 失败: {e}"))?;
+        assert!(status.success(), "ci-sccache-stats shell selftest 必须通过");
+        Ok(())
+    }
+
+    #[test]
     fn ci_cache_maintenance_shell_selftest_passes() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let status = crate::cmd::external_cmd(
@@ -3380,6 +3429,24 @@ mod tests {
         assert!(
             status.success(),
             "ci-cache-maintain shell selftest 必须通过"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_target_isolation_shell_selftest_passes() -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::Bash,
+            &["hack/cargo.selftest.sh"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .map_err(|e| anyhow::anyhow!("启动 cargo target isolation shell selftest 失败: {e}"))?;
+        assert!(
+            status.success(),
+            "cargo target isolation shell selftest 必须通过"
         );
         Ok(())
     }
@@ -3446,6 +3513,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   ci-meta:
     uses: ./.github/workflows/rss-rust-lane.yml
@@ -3502,6 +3572,9 @@ jobs:
             ("inline-run", green.replacen("    uses: ./.github/workflows/rss-rust-lane.yml", "    run: cargo build --workspace\n    uses: ./.github/workflows/rss-rust-lane.yml", 1)),
             ("always", green.replacen("    needs: ci-meta", "    needs: ci-meta\n    if: ${{ always() }}", 1)),
             ("permission", green.replacen("contents: read", "contents: write", 1)),
+            ("missing-concurrency", green.replacen("concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n", "", 1)),
+            ("branch-cancellation", green.replacen("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "cancel-in-progress: true", 1)),
+            ("unstable-concurrency-key", green.replacen("github.event.pull_request.number || github.ref", "github.run_id", 1)),
             ("unsafe-trigger", green.replacen("  workflow_dispatch:", "  pull_request_target:\n  workflow_dispatch:", 1)),
             ("pr-activity-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    types: [closed]", 1)),
             ("pr-path-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    paths: [\"src/**\"]", 1)),
@@ -3968,6 +4041,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             .collect::<Vec<_>>();
         workflow_has_only_safe_ci_events(yaml)
             && workflow_has_exact_read_permissions(yaml)
+            && workflow_has_pr_only_concurrency(yaml)
             && jobs == ["integration"]
             && top_fields == ["name", "strategy", "uses", "with"]
             && lines.contains(&(
@@ -4053,6 +4127,14 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             green.replacen("          - { shard: postgres-domain, partition: \"\", partition-label: unpartitioned }\n", "", 1),
             green.replace("fail-fast: false", "fail-fast: true"),
             green.replace("shard: ${{ matrix.shard }}", "shard: fromJSON(env.SHARDS)"),
+            green.replace(
+                "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+                "cancel-in-progress: true",
+            ),
+            green.replace(
+                "github.event.pull_request.number || github.ref",
+                "github.run_id",
+            ),
             format!("{green}    continue-on-error: true\n"),
             format!("{green}    run: cargo nextest run\n"),
         ] {
@@ -4119,6 +4201,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 .filter_map(|(index, step)| {
                     (step.id.as_deref() == Some(id)
                         && step.uses.as_deref() == Some("actions/cache/restore@v4")
+                        && step.continue_on_error.as_deref() == Some("true")
                         && step.with_exact("path", paths)
                         && step.with_exact("key", &[key])
                         && !step.with.iter().any(|(name, _)| name == "restore-keys"))
@@ -4136,16 +4219,26 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ],
             "${{ steps.cache-keys.outputs.download-primary-key }}",
         );
-        let target = restore(
-            "target-cache",
-            &[".cache/cargo-target"],
-            "${{ steps.cache-keys.outputs.target-primary-key }}",
-        );
         let tools = restore(
             "tools-cache",
             &[".cache/ci-tools/${{ inputs.profile }}"],
             "${{ steps.cache-keys.outputs.tools-primary-key }}",
         );
+        let compiler = steps.iter().enumerate().find_map(|(index, step)| {
+            (step.id.as_deref() == Some("compiler-cache")
+                && step.uses.as_deref() == Some("actions/cache/restore@v4")
+                && step.continue_on_error.as_deref() == Some("true")
+                && step.with_exact("path", &["${{ runner.temp }}/rss-sccache-cache"])
+                && step.with_exact(
+                    "key",
+                    &["${{ steps.cache-keys.outputs.compiler-cache-primary-key }}"],
+                )
+                && step.with_exact(
+                    "restore-keys",
+                    &["rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-"],
+                ))
+            .then_some(index)
+        });
         [
             "lane",
             "profile",
@@ -4170,15 +4263,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "${{ steps.download-cache.outputs.cache-hit }}",
                 ),
                 (
-                    "target-primary-key",
-                    "${{ steps.cache-keys.outputs.target-primary-key }}",
-                ),
-                (
-                    "target-matched-key",
-                    "${{ steps.target-cache.outputs.cache-matched-key }}",
-                ),
-                ("target-hit", "${{ steps.target-cache.outputs.cache-hit }}"),
-                (
                     "tools-primary-key",
                     "${{ steps.cache-keys.outputs.tools-primary-key }}",
                 ),
@@ -4188,12 +4272,28 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 ),
                 ("tools-hit", "${{ steps.tools-cache.outputs.cache-hit }}"),
                 (
-                    "build-restore-result",
-                    "${{ steps.after-cache.outputs.build-result }}",
+                    "compiler-cache-primary-key",
+                    "${{ steps.cache-keys.outputs.compiler-cache-primary-key }}",
                 ),
                 (
-                    "build-restored-footprint-bytes",
-                    "${{ steps.after-cache.outputs.build-bytes }}",
+                    "compiler-cache-matched-key",
+                    "${{ steps.compiler-cache.outputs.cache-matched-key }}",
+                ),
+                (
+                    "compiler-cache-hit",
+                    "${{ steps.compiler-cache.outputs.cache-hit }}",
+                ),
+                (
+                    "compiler-cache-restore-outcome",
+                    "${{ steps.compiler-cache.outcome }}",
+                ),
+                (
+                    "download-restore-result",
+                    "${{ steps.after-cache.outputs.download-result }}",
+                ),
+                (
+                    "download-restored-footprint-bytes",
+                    "${{ steps.after-cache.outputs.download-bytes }}",
                 ),
                 (
                     "tools-restore-result",
@@ -4202,6 +4302,27 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 (
                     "tools-restored-footprint-bytes",
                     "${{ steps.after-cache.outputs.tools-bytes }}",
+                ),
+                ("resolved-target-source", "ci-runner-temp"),
+                (
+                    "resolved-target-dir",
+                    "${{ steps.cache-keys.outputs.target-dir }}",
+                ),
+                (
+                    "compiler-cache-enabled",
+                    "${{ steps.compiler-policy.outputs.enabled }}",
+                ),
+                (
+                    "compiler-cache-version",
+                    "${{ steps.compiler-policy.outputs.version }}",
+                ),
+                (
+                    "compiler-cache-access",
+                    "${{ steps.compiler-policy.outputs.access }}",
+                ),
+                (
+                    "compiler-cache-path",
+                    "${{ steps.compiler-policy.outputs.path }}",
                 ),
             ]
             .iter()
@@ -4212,22 +4333,46 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "build-primary-key:" | "build-matched-key:" | "build-hit:"
                 )
             })
+            && ![
+                "target-primary-key",
+                "target-matched-key",
+                "target-hit",
+                "target-cache",
+                "rss-target",
+                "tree-identity",
+                ".cache/cargo-target",
+                "ci-cache-result.sh aggregate",
+                "SCCACHE_GHA_ENABLED",
+                "SCCACHE_GHA_VERSION",
+            ]
+            .iter()
+            .any(|forbidden| yaml.contains(forbidden))
             && steps
                 .iter()
                 .filter(|step| step.uses.as_deref() == Some("actions/cache/restore@v4"))
                 .count()
                 == 3
-            && matches!((download, target, tools), (Some(a), Some(b), Some(c)) if a < b && b < c)
-            && !lines
+            && matches!((download, tools, compiler), (Some(a), Some(b), Some(c)) if a < b && b < c)
+            && lines
                 .iter()
-                .any(|(_, line)| line.starts_with("restore-keys:"))
+                .filter(|(_, line)| line.starts_with("restore-keys:"))
+                .count()
+                == 1
             && steps.iter().any(|step| {
                 step.id.as_deref() == Some("cache-keys")
-                    && step.run_contains("tree-identity --workspace")
                     && step.run_contains(
-                        "target-primary-key=rss-target-v3-$common-$source_hash-$tree_identity",
+                        "download-primary-key=rss-download-v4-$common-$source_hash",
                     )
                     && step.run_contains("tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH")
+                    && step.run_contains(
+                        "compiler-cache-primary-key=rss-sccache-v1-$common-$source_hash-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RSS_LANE",
+                    )
+                    && !step.run_contains("$GITHUB_JOB")
+                    && step.run_has_line("mkdir -p \"$RSS_JOB_TARGET\"")
+                    && step.run_has_line(
+                        "echo \"CARGO_TARGET_DIR=$RSS_JOB_TARGET\" >> \"$GITHUB_ENV\"",
+                    )
+                    && step.env_exact("RSS_JOB_TARGET", &["${{ runner.temp }}/rss-cargo-target"])
                     && step.run_has_line(
                         "case \"$RSS_LANE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
                     )
@@ -4237,10 +4382,78 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     && step.run_contains("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]")
             })
             && steps.iter().any(|step| {
+                step.id.as_deref() == Some("verify-tools")
+                    && step.run_has_line(
+                        ".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"",
+                    )
+                    && step.run_has_line(
+                        "compiler_cache_spec=\"$(.github/scripts/ci-tool-adapters.sh sccache-spec)\"",
+                    )
+                    && step.run_has_line(
+                        "compiler_cache_path=\"$(.github/scripts/ci-tool-adapters.sh verify-sccache --candidate \"$RSS_TOOL_ROOT/$compiler_cache_relative\")\"",
+                    )
+                    && step.run_contains("compiler-cache-path=$compiler_cache_path")
+                    && step.run_contains("compiler-cache-version=$compiler_cache_version")
+            })
+            && steps.iter().any(|step| {
+                step.id.as_deref() == Some("compiler-policy")
+                    && step.env_exact(
+                        "RSS_VERIFIED_SCCACHE_PATH",
+                        &["${{ steps.verify-tools.outputs.compiler-cache-path }}"],
+                    )
+                    && step.env_exact(
+                        "RSS_VERIFIED_SCCACHE_VERSION",
+                        &["${{ steps.verify-tools.outputs.compiler-cache-version }}"],
+                    )
+                    && !step.run_contains("ci-tool-catalog.txt")
+                    && !step.run_contains("[ -f \"$path\" ]")
+                    && step.run_contains("access=remote-read-only")
+                    && step.run_contains("access=remote-read-write")
+                    && step.run_contains("RSS_INTERNAL_SCCACHE_PATH=$path")
+                    && step.run_contains("RUSTC_WRAPPER=$path")
+                    && step.run_contains("SCCACHE_DIR=$RUNNER_TEMP/rss-sccache-cache")
+                    && step.run_contains("SCCACHE_SERVER_UDS=$RUNNER_TEMP/rss-sccache/server.sock")
+            })
+            && steps.iter().any(|step| {
                 step.id.as_deref() == Some("after-cache")
                     && step.if_expr.as_deref()
                         == Some("${{ always() && inputs.evidence-enabled == 'true' }}")
-                    && step.run_contains("ci-cache-result.sh aggregate")
+                    && step.env_exact(
+                        "DOWNLOAD_RESTORE_OUTCOME",
+                        &["${{ steps.download-cache.outcome }}"],
+                    )
+                    && step.env_exact(
+                        "TOOLS_RESTORE_OUTCOME",
+                        &["${{ steps.tools-cache.outcome }}"],
+                    )
+                    && step.env_exact(
+                        "COMPILER_RESTORE_OUTCOME",
+                        &["${{ steps.compiler-cache.outcome }}"],
+                    )
+                    && step.run_has_sequence(&[
+                        "download_result=\"$(.github/scripts/ci-cache-result.sh classify --outcome \"$DOWNLOAD_RESTORE_OUTCOME\" --hit \"$DOWNLOAD_HIT\" --matched \"$DOWNLOAD_MATCHED\")\"",
+                        "download_bytes=0",
+                        "if [ \"$DOWNLOAD_RESTORE_OUTCOME\" = success ]; then",
+                        "download_bytes=\"${{ steps.restored-footprints.outputs.download-bytes || 0 }}\"",
+                        "fi",
+                        "tools_result=\"$(.github/scripts/ci-cache-result.sh classify --outcome \"$TOOLS_RESTORE_OUTCOME\" --hit \"$TOOLS_HIT\" --matched \"$TOOLS_MATCHED\")\"",
+                        "tools_bytes=0",
+                        "if [ \"$TOOLS_RESTORE_OUTCOME\" = success ]; then",
+                        "tools_bytes=\"${{ steps.restored-footprints.outputs.tools-bytes || 0 }}\"",
+                        "fi",
+                    ])
+                    && !step.run_contains("compiler_result")
+                    && step.run_has_line(
+                        "if [ \"$COMPILER_RESTORE_OUTCOME\" = failure ]; then compiler_error_restore=1; fi",
+                    )
+                    && step.run_contains(
+                        "--compiler-cache-error-restore \"$compiler_error_restore\"",
+                    )
+                    && step.run_contains("--compiler-cache-error-stats 0")
+                    && step.run_contains("--compiler-cache-error-cache-io 0")
+                    && step.run_contains("--compiler-cache-error-no-requests 0")
+                    && step.run_contains("--compiler-cache-error-measure 0")
+                    && step.run_contains("--compiler-cache-error-save 0")
                     && step.run_contains("snapshot after-cache")
             })
     }
@@ -4833,7 +5046,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             step.name.as_deref() == Some("Run closed xtask lane")
                 && step.timeout_minutes.as_deref() == Some("92")
                 && step.run_has_line(
-                    "timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"",
+                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
                 )
         });
         let snapshot_ok = snapshot.is_some_and(|index| {
@@ -4918,7 +5131,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
 
         prepare_ok
             && yaml.matches("timeout-minutes: 240").count() == 1
-            && total_step_budget == Some(223)
+            && total_step_budget == Some(221)
             && xtask_ok
             && collect_ok
             && snapshot_ok
@@ -4940,7 +5153,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
-        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage') && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
+        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
         let lines = yaml_indented_code_lines(yaml);
         let steps = yaml_typed_steps(yaml);
         let index = |id: &str| {
@@ -4966,12 +5179,13 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let measure_tools = index("measure-tools");
         let tools_budget = index("tools-budget");
         let save_tools = index("save-tools");
+        let compiler_smoke = index("compiler-cache-smoke");
         let xtask = index("xtask");
-        let cleanup = index("cleanup");
-        let measure_build = index("measure-build");
+        let measure_download = index("measure-download");
+        let measure_compiler_cache = index("measure-compiler-cache");
         let before_save = index("before-save");
         let save_download = index("save-download");
-        let save_target = index("save-target");
+        let save_compiler_cache = index("save-compiler-cache");
         let checkout_ok = checkout.is_some_and(|i| {
             steps[i].uses.as_deref() == Some("actions/checkout@v4")
                 && steps[i].with_exact("persist-credentials", &["false"])
@@ -5009,19 +5223,19 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     &["${{ steps.setup.outputs.download-primary-key }}"],
                 )
                 && step.if_expr.as_deref()
-                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}")
+                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.measure-download.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}")
         });
-        let target_save_ok = save_target.is_some_and(|i| {
+        let compiler_save_ok = save_compiler_cache.is_some_and(|i| {
             let step = &steps[i];
             step.uses.as_deref() == Some("actions/cache/save@v4")
                 && step.continue_on_error.as_deref() == Some("true")
-                && step.with_exact("path", &[".cache/cargo-target"])
+                && step.with_exact("path", &["${{ runner.temp }}/rss-sccache-cache"])
                 && step.with_exact(
                     "key",
-                    &["${{ steps.setup.outputs.target-primary-key }}"],
+                    &["${{ steps.setup.outputs.compiler-cache-primary-key }}"],
                 )
                 && step.if_expr.as_deref()
-                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' && steps.measure-build.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.target-hit != 'true' }}")
+                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.measure-compiler-cache.outcome == 'success' && steps.before-save.outcome == 'success' }}")
         });
         let setup_ok = setup.is_some_and(|i| {
             let step = &steps[i];
@@ -5107,8 +5321,121 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 && step.run_has_line("integration)")
                 && step.run_contains("args=(ci-integration --shard \"$RSS_SHARD\")")
                 && step.run_contains("args+=(--partition \"$RSS_PARTITION\")")
-                && step.run_has_line("timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"")
+                && step.env_exact(
+                    "RSS_INTERNAL_SCCACHE_PATH",
+                    &["${{ steps.setup.outputs.compiler-cache-path }}"],
+                )
+                && step.env_exact(
+                    "RUSTC_WRAPPER",
+                    &["${{ steps.setup.outputs.compiler-cache-path }}"],
+                )
+                && step.run_has_sequence(&[
+                    "cargo build --locked -p xtask",
+                    "reset_outcome=success",
+                    "if ! \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats; then",
+                    "reset_outcome=degraded",
+                    "fi",
+                    "echo \"compiler-cache-reset=$reset_outcome\" >> \"$GITHUB_OUTPUT\"",
+                    "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
+                ])
                 && step.run_has_line("*) exit 64 ;;")
+        });
+        let compiler_smoke_ok = compiler_smoke.is_some_and(|i| {
+            let step = &steps[i];
+            step.if_expr.as_deref() == Some("${{ inputs.lane == 'ci-core-prerequisites' }}")
+                && step.timeout_minutes.as_deref() == Some("5")
+                && step.run_exact(&[
+                    "set -euo pipefail",
+                    "smoke=\"$RUNNER_TEMP/rss-sccache-smoke\"",
+                    "rm -rf \"$smoke\"",
+                    "mkdir -p \"$smoke/src\"",
+                    "printf '%s\\n' '[package]' 'name = \"rss-sccache-smoke\"' 'version = \"0.0.0\"' 'edition = \"2024\"' > \"$smoke/Cargo.toml\"",
+                    "printf '%s\\n' 'pub fn answer() -> u64 { 42 }' > \"$smoke/src/lib.rs\"",
+                    "\"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats",
+                    "CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
+                    "rm -rf \"$smoke/target\"",
+                    "CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
+                    "\"$RSS_INTERNAL_SCCACHE_PATH\" --show-stats --stats-format json > \"$smoke/warm-stats.json\"",
+                    "jq -e '.stats.compile_requests > 0 and ([.stats.cache_hits.counts[]] | add // 0) > 0' \"$smoke/warm-stats.json\" >/dev/null",
+                    "mkdir -p \"$smoke/unavailable\"",
+                    "printf occupied > \"$smoke/unavailable/cache-parent\"",
+                    "SCCACHE_DIR=\"$smoke/unavailable/cache-parent/child\" SCCACHE_SERVER_UDS=\"$smoke/unavailable-success.sock\" CARGO_TARGET_DIR=\"$smoke/fallback-success\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
+                    "printf '%s\\n' 'pub fn broken( {' > \"$smoke/src/lib.rs\"",
+                    "if SCCACHE_DIR=\"$smoke/unavailable/cache-parent/child\" SCCACHE_SERVER_UDS=\"$smoke/unavailable-failure.sock\" CARGO_TARGET_DIR=\"$smoke/fallback-failure\" cargo check --manifest-path \"$smoke/Cargo.toml\"; then",
+                    "echo 'compiler error was swallowed by unavailable cache backend' >&2",
+                    "exit 1",
+                    "fi",
+                ])
+        });
+        let after_build_stats_ok = index("after-build").is_some_and(|i| {
+            let step = &steps[i];
+            step.if_expr.as_deref() == Some("${{ always() }}")
+                && step.run_has_line(
+                    "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                )
+                && step.run_has_line(
+                    "error_restore=0 error_stats=0 error_cache_io=0 error_no_requests=0 error_measure=0 error_save=0",
+                )
+                && step.env_exact(
+                    "COMPILER_RESTORE_OUTCOME",
+                    &["${{ steps.setup.outputs.compiler-cache-restore-outcome || 'skipped' }}"],
+                )
+                && step.env_exact(
+                    "COMPILER_RESET_OUTCOME",
+                    &["${{ steps.xtask.outputs.compiler-cache-reset || 'skipped' }}"],
+                )
+                && step.run_has_line(
+                    "if [ \"$COMPILER_RESTORE_OUTCOME\" = failure ]; then error_restore=1; fi",
+                )
+                && step.run_has_line(
+                    "if [ \"$COMPILER_RESET_OUTCOME\" = degraded ]; then error_stats=$((error_stats + 1)); fi",
+                )
+                && step.run_has_sequence(&[
+                    "if \"$RSS_INTERNAL_SCCACHE_PATH\" --show-stats --stats-format json > \"$stats_file\" 2>/dev/null &&",
+                    "stats_row=\"$(.github/scripts/ci-sccache-stats.sh parse --input \"$stats_file\" 2>/dev/null)\" &&",
+                    "IFS=$'\\t' read -r requests hits misses non_cacheable error_cache_io stats_extra <<< \"$stats_row\" &&",
+                    "[ -z \"$stats_extra\" ]; then",
+                    "stats_valid=true",
+                    "else",
+                    "error_stats=$((error_stats + 1))",
+                    "fi",
+                ])
+                && step.run_has_line(
+                    "if [ \"$COMPILER_RESET_OUTCOME\" = success ] && [ \"$stats_valid\" = true ] && [ \"${{ inputs.lane }}\" = ci-core-prerequisites ] && [ \"$requests\" -le 0 ]; then",
+                )
+                && step.run_has_sequence(&[
+                    "error_no_requests=$((error_no_requests + 1))",
+                    "anti_vacuity_failure=true",
+                    "fi",
+                ])
+                && step.run_contains("--compiler-cache-error-restore \"$error_restore\"")
+                && step.run_contains("--compiler-cache-error-stats \"$error_stats\"")
+                && step.run_contains("--compiler-cache-error-cache-io \"$error_cache_io\"")
+                && step.run_contains(
+                    "--compiler-cache-error-no-requests \"$error_no_requests\"",
+                )
+                && step.run_contains("--compiler-cache-error-measure \"$error_measure\"")
+                && step.run_contains("--compiler-cache-error-save \"$error_save\"")
+                && matches!(
+                    (
+                        step.run.iter().position(|line| line.contains("snapshot after-build")),
+                        step.run.iter().position(|line| line.contains("ci-disk-budget.sh --stage after-build")),
+                        step.run.iter().position(|line| line == "[ \"$anti_vacuity_failure\" = false ]"),
+                    ),
+                    (Some(snapshot), Some(budget), Some(gate)) if snapshot < budget && budget < gate
+                )
+        });
+        let after_save_errors_ok = name_index("Capture after-save evidence").is_some_and(|i| {
+            let step = &steps[i];
+            step.if_expr.as_deref() == Some("${{ always() }}")
+                && step.run_has_line(
+                    "if [ \"${{ steps.measure-compiler-cache.outcome }}\" = failure ]; then error_measure=$((error_measure + 1)); fi",
+                )
+                && step.run_has_line(
+                    "if [ \"${{ steps.save-compiler-cache.outcome }}\" = failure ]; then error_save=$((error_save + 1)); fi",
+                )
+                && step.run_contains("--compiler-cache-error-measure \"$error_measure\"")
+                && step.run_contains("--compiler-cache-error-save \"$error_save\"")
         });
         let evidence_step = |name: &str, commands: &[&str]| {
             let matches = steps
@@ -5132,7 +5459,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
             ],
         ) && evidence_step(
-            "Capture before-save evidence and enforce build budget",
+            "Capture before-save evidence and enforce cache budget",
             &[
                 "ensure after-build",
                 "snapshot before-save",
@@ -5184,12 +5511,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         }) && tools_budget.is_some_and(|i| {
             steps[i].if_expr.as_deref()
                 == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.measure-tools.outcome == 'success' }}")
-        }) && cleanup.is_some_and(|i| {
+        }) && measure_download.is_some_and(|i| {
             steps[i].if_expr.as_deref()
-                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && (steps.setup.outputs.download-hit != 'true' || steps.setup.outputs.target-hit != 'true') }}")
-        }) && measure_build.is_some_and(|i| {
+                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}")
+        }) && measure_compiler_cache.is_some_and(|i| {
             steps[i].if_expr.as_deref()
-                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.cleanup.outcome == 'success' }}")
+                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' }}")
         }) && before_save.is_some_and(|i| {
             steps[i].if_expr.as_deref() == Some("${{ always() }}")
         });
@@ -5210,6 +5537,12 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 .any(|(indent, line)| *indent == 2 && *line == "CARGO_INCREMENTAL: 0")
             && lines
                 .iter()
+                .any(|(indent, line)| *indent == 2 && *line == "CARGO_BUILD_JOBS: 2")
+            && start.is_some_and(|i| {
+                steps[i].env_exact("CARGO_TARGET_DIR", &["${{ runner.temp }}/rss-cargo-target"])
+            })
+            && lines
+                .iter()
                 .filter(|(indent, line)| *indent == 2 && *line == WRITER)
                 .count()
                 == 1
@@ -5218,8 +5551,11 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             && setup_ok
             && tool_save_ok
             && download_save_ok
-            && target_save_ok
+            && compiler_save_ok
             && xtask_ok
+            && compiler_smoke_ok
+            && after_build_stats_ok
+            && after_save_errors_ok
             && evidence_ok
             && intermediate_conditions_ok
             && steps
@@ -5227,9 +5563,22 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 .filter(|step| step.uses.as_deref() == Some("actions/cache/save@v4"))
                 .count()
                 == 3
-            && matches!((checkout, start, policy, setup, measure_tools, tools_budget, save_tools, xtask, cleanup, measure_build, before_save, save_download, save_target),
-                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l), Some(m))
-                    if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && g < h && h < i && i < j && j < k && k < l && l < m)
+            && ![
+                "target-primary-key",
+                "target-cache",
+                "save-target",
+                "rss-target",
+                ".cache/cargo-target",
+                "ci-cache-maintain.sh cleanup --workspace",
+                "measure-build",
+                "SCCACHE_GHA_ENABLED",
+                "SCCACHE_GHA_VERSION",
+            ]
+            .iter()
+            .any(|forbidden| yaml.contains(forbidden))
+            && matches!((checkout, start, policy, setup, measure_tools, tools_budget, save_tools, compiler_smoke, xtask, measure_download, measure_compiler_cache, before_save, save_download, save_compiler_cache),
+                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l), Some(m), Some(n))
+                    if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && g < h && h < i && i < j && j < k && k < l && l < m && m < n)
     }
 
     fn reusable_rust_lane_slo_contract(yaml: &str) -> bool {
@@ -5301,7 +5650,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     fn reusable_rust_lane_prepares_target_before_start_snapshot(yaml: &str) -> bool {
-        const PREPARE_TARGET: &str = "mkdir -p \"$GITHUB_WORKSPACE/.cache/cargo-target\"";
+        const PREPARE_TARGET: &str = "mkdir -p \"$CARGO_TARGET_DIR\"";
         const SNAPSHOT_PREFIX: &str = ".github/scripts/ci-evidence.sh snapshot start ";
         let steps = yaml_typed_steps(yaml);
         let starts = steps
@@ -5311,7 +5660,11 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         if starts.len() != 1 {
             return false;
         }
-        let run = &starts[0].run;
+        let step = starts[0];
+        if !step.env_exact("CARGO_TARGET_DIR", &["${{ runner.temp }}/rss-cargo-target"]) {
+            return false;
+        }
+        let run = &step.run;
         let positions = |matches: &dyn Fn(&str) -> bool| {
             run.iter()
                 .enumerate()
@@ -5486,13 +5839,22 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
 
     #[test]
     fn reusable_rust_lane_prepares_canonical_target_before_start_snapshot() -> anyhow::Result<()> {
-        const PREPARE_TARGET: &str = "          mkdir -p \"$GITHUB_WORKSPACE/.cache/cargo-target\"";
+        const PREPARE_TARGET: &str = "          mkdir -p \"$CARGO_TARGET_DIR\"";
         let green =
             std::fs::read_to_string(workspace_root()?.join(".github/workflows/rss-rust-lane.yml"))?;
         assert!(
             reusable_rust_lane_prepares_target_before_start_snapshot(&green),
             "clean runner must create the canonical target before its start snapshot"
         );
+
+        let workspace_target = green.replacen(
+            "          CARGO_TARGET_DIR: ${{ runner.temp }}/rss-cargo-target",
+            "          CARGO_TARGET_DIR: ${{ github.workspace }}/.cache/cargo-target",
+            1,
+        );
+        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
+            &workspace_target
+        ));
 
         let removed = green.replacen(&format!("{PREPARE_TARGET}\n"), "", 1);
         assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
@@ -5677,6 +6039,24 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         Ok(())
     }
 
+    fn assert_reusable_step_camouflage_rejected(green: &str) -> anyhow::Result<()> {
+        for id in ["policy", "compiler-cache-smoke", "xtask", "before-save"] {
+            for field in ["name", "env"] {
+                assert!(!reusable_rust_lane_is_hardened(&camouflage_step_run(
+                    green, id, field
+                )?));
+            }
+        }
+        for id in ["save-tools", "compiler-cache-smoke", "before-save"] {
+            for field in ["name", "env"] {
+                assert!(!reusable_rust_lane_is_hardened(&camouflage_step_if(
+                    green, id, field
+                )?));
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn reusable_rust_lane_guard_rejects_semantic_weakening() -> anyhow::Result<()> {
         let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
@@ -5701,12 +6081,16 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "ci-core-tests)\n              echo 'profile=ci-core-tests'",
                 "ci-core-tests)\n              echo 'profile=ci-core'",
             ),
+            ("continue-on-error: true", "continue-on-error: false"),
             ("tool-cache-epoch: v4", "tool-cache-epoch: v3"),
             (
                 "steps.setup.outputs.tools-primary-key",
                 "steps.setup.outputs.target-primary-key",
             ),
-            ("path: .cache/cargo-target", "path: .cache/ci-tools/ci"),
+            (
+                "CARGO_TARGET_DIR: ${{ runner.temp }}/rss-cargo-target",
+                "CARGO_TARGET_DIR: ${{ github.workspace }}/.cache/cargo-target",
+            ),
             ("~/.cargo/registry/cache", "~/.cargo/registry"),
             ("evidence-enabled: true", "evidence-enabled: false"),
             ("retention-days: 7", "retention-days: 8"),
@@ -5722,11 +6106,89 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "|cdc-projection-saga:) ;;",
                 "|future-shard:|cdc-projection-saga:) ;;",
             ),
+            (
+                "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
+                "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false",
+            ),
+            (
+                "if [ \"$COMPILER_RESTORE_OUTCOME\" = failure ]; then error_restore=1; fi",
+                "true",
+            ),
+            (
+                "if [ \"$COMPILER_RESET_OUTCOME\" = success ] && [ \"$stats_valid\" = true ] && [ \"${{ inputs.lane }}\" = ci-core-prerequisites ]",
+                "if [ \"$stats_valid\" = true ] && [ \"${{ inputs.lane }}\" = ci-core-prerequisites ]",
+            ),
+            (
+                "if [ \"$COMPILER_RESET_OUTCOME\" = degraded ]; then error_stats=$((error_stats + 1)); fi",
+                "true",
+            ),
+            (
+                "stats_row=\"$(.github/scripts/ci-sccache-stats.sh parse --input \"$stats_file\" 2>/dev/null)\" &&",
+                "stats_row='0 0 0 0 0' &&",
+            ),
+            ("[ -z \"$stats_extra\" ]; then", "true; then"),
+            ("anti_vacuity_failure=true", "anti_vacuity_failure=false"),
+            ("[ \"$anti_vacuity_failure\" = false ]", "true"),
+            (
+                "if [ \"${{ steps.measure-compiler-cache.outcome }}\" = failure ]; then error_measure=$((error_measure + 1)); fi",
+                "true",
+            ),
+            (
+                "if [ \"${{ steps.save-compiler-cache.outcome }}\" = failure ]; then error_save=$((error_save + 1)); fi",
+                "true",
+            ),
         ] {
             let red = green.replacen(needle, replacement, 1);
             assert!(
                 !reusable_rust_lane_is_hardened(&red),
                 "weakening `{needle}` must fail closed"
+            );
+        }
+        for (label, red) in [
+            (
+                "smoke-delete",
+                green.replacen("          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats\n", "", 1),
+            ),
+            (
+                "smoke-reorder",
+                green.replacen(
+                    "          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"\n          rm -rf \"$smoke/target\"",
+                    "          rm -rf \"$smoke/target\"\n          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
+                    1,
+                ),
+            ),
+            (
+                "smoke-no-op",
+                green.replacen(
+                    "          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
+                    "          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\" || true",
+                    1,
+                ),
+            ),
+            (
+                "smoke-unreachable",
+                green.replacen(
+                    "          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats",
+                    "          exit 0\n          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats",
+                    1,
+                ),
+            ),
+        ] {
+            assert!(
+                !reusable_rust_lane_is_hardened(&red),
+                "{label} must fail closed"
+            );
+        }
+        for forbidden in [
+            "target-primary-key: stale",
+            "id: target-cache",
+            "id: save-target",
+            "run: ci-cache-maintain.sh cleanup --workspace /tmp --target /tmp/target",
+            "path: .cache/cargo-target",
+        ] {
+            assert!(
+                !reusable_rust_lane_is_hardened(&format!("{green}\n{forbidden}\n")),
+                "removed target cache lifecycle `{forbidden}` must remain rejected"
             );
         }
         let post_execution_tools = green.replacen(
@@ -5738,22 +6200,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             !reusable_rust_lane_is_hardened(&post_execution_tools),
             "arbitrary repository execution before tool save must be rejected"
         );
-        for id in ["policy", "xtask", "before-save"] {
-            for field in ["name", "env"] {
-                assert!(
-                    !reusable_rust_lane_is_hardened(&camouflage_step_run(&green, id, field)?),
-                    "{id} commands in {field} with run:true must fail closed"
-                );
-            }
-        }
-        for id in ["save-tools", "before-save"] {
-            for field in ["name", "env"] {
-                assert!(
-                    !reusable_rust_lane_is_hardened(&camouflage_step_if(&green, id, field)?),
-                    "{id} if expression in {field} must fail closed"
-                );
-            }
-        }
+        assert_reusable_step_camouflage_rejected(&green)?;
         for (index, camouflage) in [
             green.replace("id: save-tools", "name: save-tools"),
             green.replace("uses: actions/cache/save@v4", "name: actions/cache/save@v4"),
@@ -6123,7 +6570,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 1,
             ),
             green.replacen(
-                "timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"",
+                "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
                 "cargo run --locked -p xtask -- \"${args[@]}\"",
                 1,
             ),
@@ -6206,7 +6653,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             "timeout-minutes: 240",
             "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
             "id: xtask\n        timeout-minutes: 92",
-            "timeout --signal=TERM --kill-after=30s 90m cargo run --locked -p xtask -- \"${args[@]}\"",
+            "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" \"${args[@]}\"",
             "RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}",
             "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
             "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect",
@@ -6309,6 +6756,27 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         Ok(())
     }
 
+    fn assert_action_step_camouflage_rejected(green: &str) -> anyhow::Result<()> {
+        for id in [
+            "cache-keys",
+            "verify-tools",
+            "compiler-policy",
+            "after-cache",
+        ] {
+            for field in ["name", "env"] {
+                assert!(!setup_action_has_exact_split_cache_contract(
+                    &camouflage_step_run(green, id, field)?
+                ));
+            }
+        }
+        for field in ["name", "env"] {
+            assert!(!setup_action_has_exact_split_cache_contract(
+                &camouflage_step_if(green, "after-cache", field)?
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     fn split_cache_action_guard_rejects_field_camouflage_and_prefix_restore() -> anyhow::Result<()>
     {
@@ -6321,12 +6789,49 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "value: ${{ steps.download-cache.outputs.cache-hit }}",
                 "value: false",
             ),
-            ("path: .cache/cargo-target", "path: .cache/ci-tools/ci"),
             (
-                "key: ${{ steps.cache-keys.outputs.target-primary-key }}",
+                "key: ${{ steps.cache-keys.outputs.download-primary-key }}",
                 "key: wrong",
             ),
+            (
+                "RSS_JOB_TARGET: ${{ runner.temp }}/rss-cargo-target",
+                "RSS_JOB_TARGET: ${{ github.workspace }}/.cache/cargo-target",
+            ),
+            (
+                "COMPILER_RESTORE_OUTCOME: ${{ steps.compiler-cache.outcome }}",
+                "COMPILER_RESTORE_OUTCOME: success",
+            ),
+            (
+                "DOWNLOAD_RESTORE_OUTCOME: ${{ steps.download-cache.outcome }}",
+                "DOWNLOAD_RESTORE_OUTCOME: success",
+            ),
+            (
+                "TOOLS_RESTORE_OUTCOME: ${{ steps.tools-cache.outcome }}",
+                "TOOLS_RESTORE_OUTCOME: success",
+            ),
+            ("--outcome \"$DOWNLOAD_RESTORE_OUTCOME\" --hit", "--hit"),
+            ("--outcome \"$TOOLS_RESTORE_OUTCOME\" --hit", "--hit"),
+            (
+                "if [ \"$DOWNLOAD_RESTORE_OUTCOME\" = success ]; then",
+                "if true; then",
+            ),
+            (
+                "if [ \"$TOOLS_RESTORE_OUTCOME\" = success ]; then",
+                "if true; then",
+            ),
             ("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]", "true"),
+            (
+                "$GITHUB_RUN_ATTEMPT-$RSS_LANE",
+                "$GITHUB_RUN_ATTEMPT-$GITHUB_JOB",
+            ),
+            (
+                "RSS_VERIFIED_SCCACHE_PATH: ${{ steps.verify-tools.outputs.compiler-cache-path }}",
+                "RSS_VERIFIED_SCCACHE_PATH: /usr/bin/sccache",
+            ),
+            (
+                ".github/scripts/ci-tool-adapters.sh verify-sccache --candidate",
+                "printf '%s'",
+            ),
             (
                 "ci-meta|ci-core-prerequisites|ci-core-tests|ci-security|ci-coverage|integration|audit",
                 "ci|integration|audit",
@@ -6341,18 +6846,41 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "action weakening `{needle}` must fail closed"
             );
         }
-        let target_prefix = green.replacen(
-            "        key: ${{ steps.cache-keys.outputs.target-primary-key }}",
-            "        key: ${{ steps.cache-keys.outputs.target-primary-key }}\n        restore-keys: rss-target-v3-",
+        let download_prefix = green.replacen(
+            "        key: ${{ steps.cache-keys.outputs.download-primary-key }}",
+            "        key: ${{ steps.cache-keys.outputs.download-primary-key }}\n        restore-keys: rss-download-v4-",
             1,
         );
-        assert!(!setup_action_has_exact_split_cache_contract(&target_prefix));
+        assert!(!setup_action_has_exact_split_cache_contract(
+            &download_prefix
+        ));
         let tools_prefix = green.replacen(
             "        key: ${{ steps.cache-keys.outputs.tools-primary-key }}",
             "        key: ${{ steps.cache-keys.outputs.tools-primary-key }}\n        restore-keys: rss-tools-v3-",
             1,
         );
         assert!(!setup_action_has_exact_split_cache_contract(&tools_prefix));
+        let compiler_lane_prefix = green.replacen(
+            "rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-",
+            "rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-${{ inputs.lane }}-",
+            1,
+        );
+        assert!(
+            !setup_action_has_exact_split_cache_contract(&compiler_lane_prefix),
+            "compiler restore prefix must remain lane-agnostic"
+        );
+        for forbidden in [
+            "target-primary-key: stale",
+            "id: target-cache",
+            "run: ci-cache-result.sh aggregate",
+            "run: ci-cache-maintain.sh tree-identity",
+            "path: .cache/cargo-target",
+        ] {
+            assert!(
+                !setup_action_has_exact_split_cache_contract(&format!("{green}\n{forbidden}\n")),
+                "removed target-cache contract `{forbidden}` must remain rejected"
+            );
+        }
         for invalid_download_paths in [
             green.replacen("          ~/.cargo/registry/index\n", "", 1),
             green.replacen(
@@ -6371,28 +6899,9 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "download restore path set must be exact"
             );
         }
-        for id in ["cache-keys", "after-cache"] {
-            for field in ["name", "env"] {
-                assert!(
-                    !setup_action_has_exact_split_cache_contract(&camouflage_step_run(
-                        &green, id, field
-                    )?),
-                    "action {id} commands in {field} with run:true must fail closed"
-                );
-            }
-        }
-        for field in ["name", "env"] {
-            assert!(
-                !setup_action_has_exact_split_cache_contract(&camouflage_step_if(
-                    &green,
-                    "after-cache",
-                    field,
-                )?),
-                "after-cache if expression in {field} must fail closed"
-            );
-        }
+        assert_action_step_camouflage_rejected(&green)?;
         for camouflage in [
-            green.replace("id: target-cache", "name: target-cache"),
+            green.replace("id: tools-cache", "name: tools-cache"),
             green.replace(
                 "uses: actions/cache/restore@v4",
                 "name: actions/cache/restore@v4",

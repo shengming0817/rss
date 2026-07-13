@@ -1,6 +1,6 @@
 # Cargo 仓库级配置。
-# build.target-dir：给直接执行 `cargo ...` 的场景提供 CI-safe 默认值。
-# 本机多 worktree 共享 target 由 `hack/cargo.sh` 通过 CARGO_TARGET_DIR 覆盖，避免每个 worktree 一份 target。
+# build.target-dir：direct Cargo 与 `hack/cargo.sh` 共用的 worktree-local 默认值。
+# linked worktree 各自解析到自己的 `.cache/cargo-target`，不共享可变构建产物。
 # ref: https://doc.rust-lang.org/cargo/reference/config.html#buildtarget-dir
 [build]
 target-dir = ".cache/cargo-target"

@@ -59,7 +59,13 @@
 9. **`cargo-semver-checks` + `cargo-public-api`** — 公共 API SemVer（轴 A）
 10. **examples-smoke**（启 server + /readyz）、**SAST**（Semgrep + CodeQL-Rust preview，弱化）、**release**
 
-> 聚合入口 `cargo xtask verify`（`make verify` 薄 alias）**已落地（#1023）**：串 fmt + meta（contract validate / layer-deps / codegen --check）+ build + clippy + nextest（含 insta 快照测试）+ deny + dylint（`-D warnings` fail-closed），本地与 CI 同源——对应 gocell 的 `make verify`，契合 azure `no-ci` 降级本地跑。coverage(llvm-cov) 阈值（per-PR-diff 语义）与 `public-api` baseline 冻结门语义不同、不入 verify；bash automation selftest 折入仍 backlog。
+> 聚合 typed gate plan `cargo xtask verify` **已落地（#1023）**：串 fmt + meta（contract validate /
+> layer-deps / codegen --check）+ build + clippy + nextest（含 insta 快照测试）+ deny + dylint
+>（`-D warnings` fail-closed）。`make verify` 经 `hack/cargo.sh` 提供受控 bootstrap，与 direct
+> `cargo xtask verify` 共用 gate plan 和 target-dir 默认值，但额外统一 build-jobs、ambient wrapper
+> 清洗和 compiler-cache policy，并非简单命令转发。本地与 CI 同源——对应 gocell 的 `make verify`，
+> 契合 azure `no-ci` 降级本地跑。coverage（llvm-cov）阈值（per-PR-diff 语义）与 `public-api`
+> baseline 冻结门语义不同、不入 verify；Cargo 入口 shell selftest 已纳入 #1764。
 
 ## 四、三处最大变化
 
